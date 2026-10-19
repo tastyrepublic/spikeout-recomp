@@ -73,7 +73,8 @@ void Mpc106::write_data(uint32_t offset, uint8_t value) {
 }
 
 Bus::Bus(const RomSet& roms)
-    : roms_(roms), ram_(kWorkRamSize, 0), tile_ram_(kTileRamSize, 0), backup_ram_(kBackupRamSize, 0) {}
+    : roms_(roms), ram_(kWorkRamSize, 0), netboard_(std::make_unique<SimNetBoard>()),
+      tile_ram_(kTileRamSize, 0), backup_ram_(kBackupRamSize, 0) {}
 
 void Bus::count(const Region* region, uint32_t addr, bool write) {
     Unhandled& u = unhandled_[region ? region->name : std::string_view("unmapped")];
@@ -106,7 +107,7 @@ uint8_t Bus::device_read(const Region& region, uint32_t addr) const {
     case Device::BackupRam:
         return backup_ram_[region.offset(addr) % kBackupRamSize];
     case Device::NetBoard:
-        return netboard_.read8(addr);
+        return net()->read8(addr);
     case Device::Real3dDma:
         return dma_read8(addr & 0xFF);
     default:
@@ -213,7 +214,7 @@ uint8_t Bus::read_byte(uint32_t addr) {
 uint16_t Bus::read_slow16(uint32_t addr) {
     if (addr >= kWorkRamSize) {
         const Region* region = find_region(addr);
-        if (region && region->device == Device::NetBoard) return netboard_.read16(addr);
+        if (region && region->device == Device::NetBoard) return net()->read16(addr);
     }
     return static_cast<uint16_t>(read_byte(addr) << 8 | read_byte(addr + 1));
 }
@@ -230,7 +231,7 @@ uint32_t Bus::read_slow32(uint32_t addr) {
         return 0xFFFFFFFF;
     }
     if (region->device == Device::TileRegs) return bswap32(tile_reg(region->offset(addr)));
-    if (region->device == Device::NetBoard) return netboard_.read32(addr);
+    if (region->device == Device::NetBoard) return net()->read32(addr);
     if (region->device == Device::Real3dDma) return bswap32(dma_read32(addr & 0xFF));
     if (region->device == Device::Real3dStatus) return bswap32(real3d_register(addr & 0x3F));
     uint32_t v = 0;
@@ -289,9 +290,9 @@ void Bus::write_slow(uint32_t addr, uint32_t value, uint32_t size) {
         else count(region, addr, true);
         return;
     case Device::NetBoard: // the board answers each width differently
-        if (size == 1) netboard_.write8(addr, static_cast<uint8_t>(value));
-        else if (size == 2) netboard_.write16(addr, static_cast<uint16_t>(value));
-        else netboard_.write32(addr, value);
+        if (size == 1) net()->write8(addr, static_cast<uint8_t>(value));
+        else if (size == 2) net()->write16(addr, static_cast<uint16_t>(value));
+        else net()->write32(addr, value);
         return;
     default:
         count(region, addr, true);

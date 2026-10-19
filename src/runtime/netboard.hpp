@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace m3 {
@@ -55,19 +56,47 @@ private:
     std::deque<std::vector<uint8_t>> queue_;
 };
 
-class NetBoard {
+// The network board as the main board's bus sees it, whichever way it is
+// emulated (SimNetBoard: a behavioral simulation; CommBoard: the board's own
+// 68000 running the firmware the game uploads).
+class NetBoardDevice {
+public:
+    virtual ~NetBoardDevice() = default;
+
+    // CPU accesses to 0xC0000000-0xC003FFFF, by width (64-bit ones are two
+    // 32-bit ones). Not const: a board with its own CPU catches up first.
+    virtual uint8_t read8(uint32_t addr) = 0;
+    virtual uint16_t read16(uint32_t addr) = 0;
+    virtual uint32_t read32(uint32_t addr) = 0;
+    virtual void write8(uint32_t addr, uint8_t data) = 0;
+    virtual void write16(uint32_t addr, uint16_t data) = 0;
+    virtual void write32(uint32_t addr, uint32_t data) = 0;
+
+    // The main board's time, in its CPU cycles: a board with its own CPU
+    // runs up to it. Called before every access and at the end of a frame.
+    virtual void sync(uint64_t /*main_cycles*/) {}
+    // End of a main board frame (after sync).
+    virtual void end_frame() {}
+
+    // One line for run reports.
+    virtual std::string describe() const = 0;
+};
+
+class SimNetBoard : public NetBoardDevice {
 public:
     // Without a link the board is a lone cabinet (loopback).
-    explicit NetBoard(std::unique_ptr<NetLink> link = nullptr);
+    explicit SimNetBoard(std::unique_ptr<NetLink> link = nullptr);
 
-    // CPU accesses, by width (Model3.cpp's Read8/16/32 and Write8/16/32
-    // for 0xC0000000-0xC003FFFF; 64-bit ones are two 32-bit ones).
-    uint8_t read8(uint32_t addr) const;
-    uint16_t read16(uint32_t addr) const;
-    uint32_t read32(uint32_t addr) const;
-    void write8(uint32_t addr, uint8_t data);
-    void write16(uint32_t addr, uint16_t data);
-    void write32(uint32_t addr, uint32_t data);
+    // CPU accesses (Model3.cpp's Read8/16/32 and Write8/16/32).
+    uint8_t read8(uint32_t addr) override;
+    uint16_t read16(uint32_t addr) override;
+    uint32_t read32(uint32_t addr) override;
+    void write8(uint32_t addr, uint8_t data) override;
+    void write16(uint32_t addr, uint16_t data) override;
+    void write32(uint32_t addr, uint32_t data) override;
+
+    void end_frame() override { run_frame(); }
+    std::string describe() const override;
 
     // Once a frame, after the main board's frame.
     void run_frame();

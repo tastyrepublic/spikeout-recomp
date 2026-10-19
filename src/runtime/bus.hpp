@@ -15,6 +15,7 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -138,7 +139,18 @@ public:
     std::span<const uint8_t> ram() const { return ram_; }
     Mpc106& pci() { return pci_; }
     Irq& irq() { return irq_; }
-    NetBoard& netboard() { return netboard_; }
+    NetBoardDevice& netboard() { return *netboard_; }
+    // Swap in another network board (a CommBoard runs the real firmware;
+    // the default is the SimNetBoard simulation).
+    void use_netboard(std::unique_ptr<NetBoardDevice> board) { netboard_ = std::move(board); }
+
+    // The main CPU's time in cycles, for devices with their own clock to
+    // catch up to before an access (set by the runtime).
+    void set_clock(uint64_t (*fn)(const void*), const void* user) {
+        clock_fn_ = fn;
+        clock_user_ = user;
+    }
+    uint64_t now() const { return clock_fn_ ? clock_fn_(clock_user_) : 0; }
 
     // Real3D status registers (0x84000000, also read through the DMA
     // device's command 0x80000000 | reg). Register 0 holds the ping-pong
@@ -212,7 +224,13 @@ private:
 
     Mpc106 pci_;
     Irq irq_;
-    NetBoard netboard_;
+    std::unique_ptr<NetBoardDevice> netboard_;
+    NetBoardDevice* net() const { // the board, caught up to now
+        netboard_->sync(now());
+        return netboard_.get();
+    }
+    uint64_t (*clock_fn_)(const void*) = nullptr;
+    const void* clock_user_ = nullptr;
     bool ping_pong_ = false;
     Jtag jtag_;
     std::array<uint32_t, 64> tile_regs_{};

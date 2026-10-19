@@ -27,9 +27,10 @@ Each milestone ends with something you can run and check.
 - [x] Frame timing: 57.524 Hz, 424 lines, IRQ 0x02/0x0D as in [hardware-notes.md](hardware-notes.md) (`recomp::FrameTiming`; not yet: MIDI IRQ 0x40, waiting for the IRQ 0x02 acknowledge)
 - [x] Backup RAM (the game's RAM test passes)
 - [ ] RTC (read ~12,000 times during start-up)
-- [x] Network board present (simulated, loopback ring of one); the game uploads to it and starts it
+- [x] Network board: its own 68000 runs the firmware the game uploads (`m3::CommBoard`, Moira core; the simulation stays as `--netboard sim`); with the link set to master it brings the ring of one up (status 1 `0x2021`) and the game goes on to its ROM check
+- [ ] Security board check: the game shows ILLEGAL ROM once the link is up (as master)
 - [x] JTAG scan chain of the Real3D chips; Real3D PCI ID, DMA device and ping-pong bit: the game runs its main loop and sends the Real3D real frames
-- [ ] Settings EEPROM (93C46 on the I/O board): the game reads garbage settings and sets the cabinet up as a link slave, so the network board waits for a master
+- [ ] Settings EEPROM (93C46 on the I/O board): the game reads garbage settings and sets the cabinet up as a link slave; the real firmware then reports NO CARRIER, as a lone slave should (`gamerun --net-force-master` works around it for testing)
 - [ ] Reference interpreter for code that the static pass misses, with logging so it can be added to the recompiled set
 - [ ] **Goal:** reaches the attract loop, verified against Supermodel's behavior
 

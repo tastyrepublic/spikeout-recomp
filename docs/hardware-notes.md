@@ -133,6 +133,27 @@ cabinets, one player each — not several players on one board.
   return decrypted words in the high half.
 - Key for Spikeout Final Edition: `0x29236FC8` (`Crypto.cpp` implements it).
 
+## Network board firmware (uploaded by the game)
+
+The game writes the board's firmware into net RAM (`0xC0020000`, the
+68000's RAM at 0) and starts the 68000 through I/O register `0xC0`
+(`0xC0010180`). Facts from Spikeout's firmware:
+
+- Vectors: SSP `0xFF00`, PC `0x800`; IRQ 2 `0x22AA` (command from the main
+  board), IRQ 4 `0x2260` (transmit complete), IRQ 5 `0x2056` (periodic
+  tick: acknowledges and toggles the LEDs), IRQ 6 `0x20C0` (receive
+  complete; sets a "frame received" flag at `$611`).
+- Main loop `0x834`: waits for a command (set by the IRQ 2 handler from
+  status 0), runs it from a table, writes the result to status 0 with bit
+  15 cleared. Command 1 is the comm RAM test the game also does.
+- Link role: 68000 word `0x400` (written by the game at `0xC0020800`):
+  0 master, anything else slave. Spikeout derives it from a setting; with
+  the EEPROM unemulated it reads `0x0020`.
+- Status 1 as the game reads it: bits 13-15 link state (non-zero: still
+  checking; `0xE000` at start), bit 11 "no carrier"; `0x2021 + 0x20 * n +
+  index` when the ring is up. A slave arms its receiver and waits for a
+  master's frame without sending; with none it reports no carrier.
+
 ## Network board (`0xC0000000`)
 
 Present on Spikeout (`<netboard>true</netboard>`). Layout as seen by the

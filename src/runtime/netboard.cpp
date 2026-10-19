@@ -4,6 +4,7 @@
 #include "runtime/netboard.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 namespace m3 {
@@ -23,6 +24,15 @@ uint32_t region_of(uint32_t addr) { return (addr & 0x3FFFF) >> 16; } // 2 and 3:
 
 } // namespace
 
+std::string SimNetBoard::describe() const {
+    static const char* const kStates[] = {"start", "init", "testing", "ready", "error"};
+    char buf[160];
+    std::snprintf(buf, sizeof buf, "simulated, %s, state %s, status0 %04x, status1 %04x, set up as %s",
+                  running_ ? "running" : "stopped", kStates[static_cast<int>(state_)], status0_, status1_,
+                  net_ram16(0x400) == 0 ? "master" : "slave");
+    return buf;
+}
+
 std::vector<uint8_t> LoopbackLink::receive() {
     if (queue_.empty()) return {};
     std::vector<uint8_t> packet = std::move(queue_.front());
@@ -30,12 +40,12 @@ std::vector<uint8_t> LoopbackLink::receive() {
     return packet;
 }
 
-NetBoard::NetBoard(std::unique_ptr<NetLink> link)
+SimNetBoard::SimNetBoard(std::unique_ptr<NetLink> link)
     : link_(link ? std::move(link) : std::make_unique<LoopbackLink>()), net_ram_(0x10000, 0), buffer_(0x20000, 0) {}
 
 // ---- CPU side (Model3.cpp) ----
 
-uint8_t NetBoard::read8(uint32_t addr) const {
+uint8_t SimNetBoard::read8(uint32_t addr) {
     switch (region_of(addr)) {
     case kComm: return external()[(addr & 0xFFFF) ^ 2];
     case kIo:   return static_cast<uint8_t>(read_io((addr & 0x1FF) / 2));
@@ -43,12 +53,12 @@ uint8_t NetBoard::read8(uint32_t addr) const {
     }
 }
 
-uint16_t NetBoard::read16(uint32_t addr) const {
+uint16_t SimNetBoard::read16(uint32_t addr) {
     if (region_of(addr) != kComm) return 0xFFFF; // only comm RAM answers 16-bit reads
     return flip16(le16(&external()[(addr & 0xFFFF) ^ 2]));
 }
 
-uint32_t NetBoard::read32(uint32_t addr) const {
+uint32_t SimNetBoard::read32(uint32_t addr) {
     switch (region_of(addr)) {
     case kComm: {
         const uint32_t v = flip32(le32(&external()[addr & 0xFFFC]));
@@ -59,7 +69,7 @@ uint32_t NetBoard::read32(uint32_t addr) const {
     }
 }
 
-void NetBoard::write8(uint32_t addr, uint8_t data) {
+void SimNetBoard::write8(uint32_t addr, uint8_t data) {
     switch (region_of(addr)) {
     case kComm: external()[(addr & 0xFFFF) ^ 2] = data; break;
     case kIo:   write_io((addr & 0x1FF) / 2, data); break;
@@ -67,11 +77,11 @@ void NetBoard::write8(uint32_t addr, uint8_t data) {
     }
 }
 
-void NetBoard::write16(uint32_t addr, uint16_t data) {
+void SimNetBoard::write16(uint32_t addr, uint16_t data) {
     if (region_of(addr) == kComm) put16(&external()[(addr & 0xFFFF) ^ 2], flip16(data));
 }
 
-void NetBoard::write32(uint32_t addr, uint32_t data) {
+void SimNetBoard::write32(uint32_t addr, uint32_t data) {
     switch (region_of(addr)) {
     case kComm: {
         const uint32_t v = flip32(data);
@@ -83,7 +93,7 @@ void NetBoard::write32(uint32_t addr, uint32_t data) {
     }
 }
 
-uint16_t NetBoard::read_io(uint32_t reg) const {
+uint16_t SimNetBoard::read_io(uint32_t reg) const {
     if (!running_) return 0;
     switch (reg) {
     case 0x00: return irq2ack_;
@@ -93,7 +103,7 @@ uint16_t NetBoard::read_io(uint32_t reg) const {
     }
 }
 
-void NetBoard::write_io(uint32_t reg, uint16_t data) {
+void SimNetBoard::write_io(uint32_t reg, uint16_t data) {
     switch (reg) {
     case 0x00: irq2ack_ = data; break;
     case 0x88: status0_ = data; break;
@@ -108,7 +118,7 @@ void NetBoard::write_io(uint32_t reg, uint16_t data) {
 
 // ---- The board's side (SimNetBoard::RunFrame, type one games) ----
 
-void NetBoard::reset() {
+void SimNetBoard::reset() {
     if (state_ == State::Ready) { // let the other cabinets know
         link_->send(nullptr, 0);
         link_->receive();
@@ -117,7 +127,7 @@ void NetBoard::reset() {
     state_ = State::Start;
 }
 
-void NetBoard::run_frame() {
+void SimNetBoard::run_frame() {
     if (!running_) return;
     uint8_t* comm_ram = comm();
     auto ram16 = [&](uint32_t byte) { return le16(&net_ram_[byte]); };

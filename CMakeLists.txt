@@ -42,12 +42,27 @@ add_library(m3runtime
     src/runtime/bus.cpp
     src/runtime/netboard.cpp
     src/runtime/jtag.cpp
+    src/runtime/commboard.cpp
     src/runtime/memory_map.cpp
     src/runtime/rom.cpp
     src/games/games.cpp
     src/games/spikeofe.cpp)
 target_include_directories(m3runtime PUBLIC src)
-target_link_libraries(m3runtime PUBLIC ppc PRIVATE spikeout_warnings)
+target_link_libraries(m3runtime PUBLIC ppc PRIVATE moira spikeout_warnings)
+
+# Moira 68000 core (MIT, Dirk W. Hoffmann, v3.0; third_party/moira) for the
+# network board's 68000. Musashi was rejected: its bundled SoftFloat 2b
+# license has a disputed indemnity clause.
+add_library(moira STATIC third_party/moira/Moira.cpp third_party/moira/MoiraDebugger.cpp)
+target_include_directories(moira SYSTEM PUBLIC third_party/moira)
+if(MSVC)
+    target_compile_options(moira PRIVATE /bigobj /w)
+else()
+    target_compile_options(moira PRIVATE -w)
+    if(MINGW)
+        target_compile_options(moira PRIVATE -Wa,-mbig-obj)
+    endif()
+endif()
 
 # Static analysis: control flow (functions, blocks, jump tables).
 add_library(analysis

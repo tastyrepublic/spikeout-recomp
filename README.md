@@ -106,6 +106,7 @@ Details in [docs/netplay.md](docs/netplay.md).
 - [Supermodel](https://github.com/trzy/Supermodel) — the primary Model 3 hardware reference (ROM layout, address map, Real3D, network board).
 - [MAME](https://github.com/mamedev/mame) (`src/mame/sega/model3.cpp`) — secondary reference for cross-checking and ROM set naming.
 - Motorola/IBM *PowerPC 603e RISC Microprocessor User's Manual* and *Programming Environments Manual*.
+- [Moira](https://github.com/dirkwhoffmann/Moira) by Dirk W. Hoffmann (MIT, vendored in `third_party/moira`) — the 68000 core that runs the network board's firmware.
 
 See [docs/REFERENCES.md](docs/REFERENCES.md) for how sources are used.
 

@@ -1,6 +1,7 @@
 #include "test.hpp"
 
 #include "runtime/bus.hpp"
+#include "runtime/commboard.hpp"
 #include "runtime/jtag.hpp"
 #include "runtime/netboard.hpp"
 #include "runtime/rom.hpp"
@@ -83,7 +84,7 @@ TEST_CASE("jtag: a mode word written to Mercury is kept") {
 }
 
 TEST_CASE("netboard: a lone cabinet's handshake and its segment going round the ring") {
-    NetBoard nb;
+    SimNetBoard nb;
     const uint32_t io = 0xC0010000, ram = 0xC0020000;
     CHECK_EQ(nb.read32(0xC0000000), nb.read32(0xC0000000)); // comm RAM answers
     nb.write32(0xC0000000, 0x55555555);
@@ -95,21 +96,58 @@ TEST_CASE("netboard: a lone cabinet's handshake and its segment going round the 
     CHECK_EQ(brx(nb.read32(io + 0x114)), 0xE000u); // status 1, read with lwbrx
     nb.write32(io + 0x110, brx(0xF000)); // status 0: the main board's last init step
     nb.run_frame();                      // init
-    CHECK(nb.state() == NetBoard::State::Testing);
+    CHECK(nb.state() == SimNetBoard::State::Testing);
     CHECK_EQ(brx(nb.read32(io + 0x000)) & 1, 1u); // "IRQ 2 acknowledged"
 
     nb.write32(ram + 0x800, brx(0));      // master
     nb.write32(ram + 0x804, brx(0x3C00)); // total size
     nb.write32(ram + 0x808, brx(0x0C00)); // segment size
     nb.run_frame();                       // testing: the ring is this cabinet alone
-    CHECK(nb.state() == NetBoard::State::Ready);
+    CHECK(nb.state() == SimNetBoard::State::Ready);
     CHECK_EQ(nb.status1(), 0x2021u);      // one machine, index 0
 
     nb.write32(0xC0000100, 0xCAFEF00D);  // this cabinet's segment
     nb.run_frame();                      // the board takes the CPU's bank...
     nb.run_frame();                      // ...sends it round, and hands it back
     CHECK_EQ(nb.read32(0xC0000100 + 0x0C00), 0xCAFEF00Du);
-    CHECK(nb.state() == NetBoard::State::Ready);
+    CHECK(nb.state() == SimNetBoard::State::Ready);
+}
+
+TEST_CASE("commboard: uploaded 68000 firmware answers a command through IRQ 2") {
+    // A tiny firmware: SSP 0xFF00, start at 0x100 (enable interrupts, loop);
+    // IRQ 2 (autovector, 0x68 -> 0x200) copies status 0 to status 1 and acks.
+    std::vector<uint16_t> rom(0x110, 0x4E71); // nop
+    auto put32 = [&](uint32_t addr, uint32_t v) {
+        rom[addr / 2] = static_cast<uint16_t>(v >> 16);
+        rom[addr / 2 + 1] = static_cast<uint16_t>(v);
+    };
+    put32(0x00, 0x0000FF00);
+    put32(0x04, 0x00000100);
+    put32(0x68, 0x00000200);
+    const uint16_t main_loop[] = {0x46FC, 0x2000, 0x60FE}; // move.w #$2000,sr; bra.s *
+    const uint16_t handler[] = {
+        0x3039, 0x000C, 0x0088, // move.w $c0088,d0   status 0
+        0x33C0, 0x000C, 0x008A, // move.w d0,$c008a   status 1
+        0x33FC, 0xFFFF, 0x0004, 0x00A0, // move.w #$ffff,$400a0   IRQ 2 ack
+        0x4E73,                 // rte
+    };
+    for (size_t i = 0; i < 3; ++i) rom[0x100 / 2 + i] = main_loop[i];
+    for (size_t i = 0; i < 11; ++i) rom[0x200 / 2 + i] = handler[i];
+
+    CommBoard board;
+    // Upload as the game does: stwbrx of each 68000 word, one per 32-bit word.
+    for (uint32_t i = 0; i < rom.size(); ++i) board.write32(0xC0020000 + 4 * i, brx(rom[i]));
+    CHECK(board.in_reset());
+    board.write32(0xC0010180, brx(1)); // run
+    CHECK(!board.in_reset());
+    board.sync(1'000'000);               // let it start (main board cycles)
+    CHECK_EQ(board.pc() & ~0xFu, 0x100u); // in its main loop
+
+    board.write32(0xC0010110, brx(0x1234)); // a command: status 0, raises IRQ 2
+    board.sync(2'000'000);
+    CHECK_EQ(board.irqs_taken[2], 1u);
+    CHECK_EQ(brx(board.read32(0xC0010114)), 0x1234u); // the firmware's answer
+    CHECK_EQ(brx(board.read32(0xC0010000)) & 1, 1u);   // "IRQ 2 acknowledged"
 }
 
 TEST_CASE("bus: Real3D on the PCI bus, DMA ID command and ping-pong bit") {

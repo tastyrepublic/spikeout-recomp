@@ -124,18 +124,29 @@ program ROMs, the MPC106 PCI bridge's configuration ports (with the
 Real3D's PCI ID at device 13), the system registers (CROM bank select,
 IRQ enable/pending/acknowledge, LEDs, JTAG), the interrupt controller
 (`m3::Irq`), the Tilegen registers and RAM (stored, not drawn yet), the
-128 KB backup RAM, the network board (`m3::NetBoard`), the JTAG scan chain
-of the Real3D chips (`m3::Jtag`), and the Real3D's DMA device and status
-registers (with the per-frame ping-pong bit). Everything else is open bus
-(reads all ones, writes dropped) and counted per region, so a run reports
-which devices the game used that aren't emulated yet.
+128 KB backup RAM, the network board (`m3::NetBoardDevice`), the JTAG
+scan chain of the Real3D chips (`m3::Jtag`), and the Real3D's DMA device
+and status registers (with the per-frame ping-pong bit). Everything else is
+open bus (reads all ones, writes dropped) and counted per region, so a run
+reports which devices the game used that aren't emulated yet.
 
-The network board, JTAG chain and Real3D DMA/status registers are adapted
-from Supermodel (`SimNetBoard.cpp`, `JTAG.cpp`, `Real3D.cpp`, and the
-matching cases of `Model3.cpp`), keeping its byte-order behavior exactly.
-The network board is the high-level simulation: no 68000, a once-a-frame
-state machine, and a `NetLink` to send segments round the ring (a
-`LoopbackLink` for a lone cabinet: a ring of one).
+The JTAG chain and Real3D DMA/status registers are adapted from Supermodel
+(`JTAG.cpp`, `Real3D.cpp`, and the matching cases of `Model3.cpp`),
+keeping its byte-order behavior exactly.
+
+The network board comes in two forms behind `m3::NetBoardDevice`, both
+sending frames round the ring over a `NetLink` (a `LoopbackLink` for a lone
+cabinet: a ring of one):
+
+- `m3::CommBoard` (what `gamerun` uses): the board's own 68000 (the Moira
+  core, `third_party/moira`, MIT) runs the firmware the game uploads,
+  against the board's memory, control and I/O registers and link chips as
+  MAME and Supermodel describe them. It runs at its own clock and catches
+  up to the main CPU before every access and at the end of each frame. The
+  parts nobody knows for sure are options (`m3::CommBoardOptions`), see
+  [fidelity.md](fidelity.md).
+- `m3::SimNetBoard`: Supermodel's high-level simulation, a once-a-frame
+  state machine that fakes the firmware's results (`--netboard sim`).
 
 Tilegen registers are 32-bit only and byte-swapped on the bus (the tile
 generator is little-endian), as in Supermodel; register `0x10`
@@ -190,12 +201,18 @@ game checks:
 
 It now shows "TWO PROCESSORS DETECTED / COMMUNICATION BOARD : DOWNLOADED",
 runs its main loop, and sends the Real3D real frames (display lists,
-polygon RAM, textures), which nothing draws yet. The network board stays
-in its start-up test: the game set this cabinet up as a link **slave**
-(net RAM `0x400` = 1), and a lone slave waits for a master. That setting
-comes from the game's settings EEPROM (a 93C46 on the I/O board, read
-through ~19,000 accesses to `0xF0040000`), which isn't emulated yet, so
-the game reads garbage settings.
+polygon RAM, textures), which nothing draws yet.
+
+The network board's firmware then runs on its own 68000. The game set this
+cabinet up as a link **slave** (`0x0020` in the role word): a setting from
+its settings EEPROM (a 93C46 on the I/O board, read through ~19,000
+accesses to `0xF0040000`), which isn't emulated yet, so the setting is
+garbage. A lone slave waits for a master that never comes, and the firmware
+reports it: the game shows NO CARRIER! CHECK NETWORK CABLE, which is what
+a real lone slave cabinet would do. With `--net-force-master` the firmware
+brings the ring of one up (status 1 `0x2021`, frames going round each
+transfer) and the game moves on to show ILLEGAL ROM: the security board
+check, next.
 
 The game's PCI configuration routines jump into stub tables
 (`base + size * 12`) that the analysis can't follow; their addresses are

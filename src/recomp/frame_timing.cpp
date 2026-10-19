@@ -35,7 +35,8 @@ uint64_t FrameTiming::update(Context& c) {
             next_ = Next::FrameEnd;
             break;
         case Next::FrameEnd:
-            c.bus.netboard().run_frame(); // after the main board's frame, as Supermodel does
+            c.bus.netboard().sync(c.cycles());
+            c.bus.netboard().end_frame(); // after the main board's frame, as Supermodel does
             frame_start_ += frame_cycles_;
             ++frames_;
             next_ = Next::VBlankEnd;
