@@ -9,8 +9,8 @@ Each milestone ends with something you can run and check.
 - [x] CPU state struct
 - [x] Model 3 Step 2.1 memory map
 - [x] ROM set definition for `spikeofe` and a verifying loader
-- [ ] Confirm program ROM byte order against a real dump (`romcheck`)
-- [ ] Control-flow analysis: find functions and jump tables starting from the reset vector and exception vectors
+- [x] Confirm program ROM byte order against a real dump (`romcheck`): as-is
+- [x] Control-flow analysis: find functions and jump tables starting from the reset vector and exception vectors (`codemap`, [notes](control-flow.md))
 - [ ] Lifter: emit C++ for each function (integer, branch, load/store first, then FPU)
 - [ ] Runtime bus: dispatch loads/stores to RAM, ROM and device stubs
 - [ ] **Goal:** the recompiled boot code runs through the ROM/RAM self-test

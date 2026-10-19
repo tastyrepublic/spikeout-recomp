@@ -96,6 +96,13 @@ constexpr std::array kRegions = {
     RomRegionSpec{RomRegionId::MpegMusic,    0x1000000, 1,  1, false, kMpegMusic},
 };
 
+// The boot code at 0xFFF03090 copies 1 MB of the fixed CROM to the bottom of
+// RAM (with a running checksum, routine at 0xFFF033FC) and jumps to 0x100;
+// the game runs from that copy with the low exception vectors.
+constexpr std::array kBootCopies = {
+    CodeCopy{0x00000000, 0xFFE00000, 0x00100000},
+};
+
 } // namespace
 
 const GameSpec kSpikeoutFinalEdition{
@@ -103,6 +110,7 @@ const GameSpec kSpikeoutFinalEdition{
     "Spikeout: Final Edition",
     0x29236FC8,
     kRegions,
+    kBootCopies,
 };
 
 } // namespace m3::games

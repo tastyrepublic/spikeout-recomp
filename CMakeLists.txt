@@ -46,18 +46,30 @@ add_library(m3runtime
 target_include_directories(m3runtime PUBLIC src)
 target_link_libraries(m3runtime PUBLIC ppc PRIVATE spikeout_warnings)
 
+# Static analysis: control flow (functions, blocks, jump tables).
+add_library(analysis
+    src/analysis/code_image.cpp
+    src/analysis/control_flow.cpp
+    src/analysis/boot_image.cpp)
+target_include_directories(analysis PUBLIC src)
+target_link_libraries(analysis PUBLIC ppc m3runtime PRIVATE spikeout_warnings)
+
 add_executable(ppcdis tools/ppcdis.cpp)
 target_link_libraries(ppcdis PRIVATE ppc spikeout_warnings)
 
 add_executable(romcheck tools/romcheck.cpp)
 target_link_libraries(romcheck PRIVATE m3runtime spikeout_warnings)
 
+add_executable(codemap tools/codemap.cpp)
+target_link_libraries(codemap PRIVATE analysis spikeout_warnings)
+
 if(SPIKEOUT_BUILD_TESTS)
     enable_testing()
     add_executable(spikeout_tests
         tests/test_main.cpp
         tests/test_ppc.cpp
-        tests/test_runtime.cpp)
-    target_link_libraries(spikeout_tests PRIVATE m3runtime spikeout_warnings)
+        tests/test_runtime.cpp
+        tests/test_analysis.cpp)
+    target_link_libraries(spikeout_tests PRIVATE analysis m3runtime spikeout_warnings)
     add_test(NAME spikeout_tests COMMAND spikeout_tests)
 endif()

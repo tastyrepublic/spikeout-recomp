@@ -28,7 +28,8 @@ Please don't open issues or PRs containing ROM data or links to it.
 | CPU state | `src/ppc/cpu_state.hpp` | Registers as a plain struct, ready for fast save states |
 | Memory map | `src/runtime/memory_map.*` | Step 2.1 address map ([docs](docs/memory-map.md), [hardware notes](docs/hardware-notes.md)) |
 | ROM loader | `src/runtime/rom.*`, `src/games/` | Verifies sizes/CRC32s, interleaves chips, normalizes byte order |
-| Tools | `tools/` | `romcheck` (verify a set, show boot code) and `ppcdis` (disassemble) |
+| Control-flow analysis | `src/analysis/` | Functions, basic blocks and jump tables reachable from the vectors, through the boot ROM's copy into RAM ([notes](docs/control-flow.md)) |
+| Tools | `tools/` | `romcheck` (verify a set, show boot code), `ppcdis` (disassemble) and `codemap` (map the code) |
 
 ## Building
 
@@ -57,6 +58,16 @@ reset vector (`0xFFF00100`). To dig further:
 ./build/romcheck path/to/spikeofe --dump-crom crom.bin
 ./build/ppcdis crom.bin --base 0xff800000 --offset 0x700100 --count 64
 ```
+
+To map the game's code (functions, blocks, jump tables, and what couldn't
+be followed):
+
+```sh
+./build/codemap path/to/spikeofe --scan-pointers --disasm code.txt
+```
+
+`--disasm` writes an annotated listing of everything found. Like the dumps
+above it comes from your ROMs, so keep it out of the repository.
 
 ## Online play
 

@@ -44,11 +44,20 @@ struct RomRegionSpec {
     std::span<const RomFile> files;
 };
 
+// A block of program ROM that the boot code copies into RAM and then runs
+// from there.
+struct CodeCopy {
+    uint32_t dst;  // RAM address
+    uint32_t src;  // CPU address in the program ROMs
+    uint32_t size; // bytes
+};
+
 struct GameSpec {
     std::string_view id;    // MAME / Supermodel set name
     std::string_view title;
     uint32_t security_key;  // 315-5881 key
     std::span<const RomRegionSpec> regions;
+    std::span<const CodeCopy> boot_copies = {};
 };
 
 // Places one file's data into a region buffer according to `spec`.
