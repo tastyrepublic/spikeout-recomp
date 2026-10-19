@@ -71,9 +71,9 @@ its state is small, which makes this practical. Details in
 
 - [Supermodel](https://github.com/trzy/Supermodel) — the primary Model 3 hardware reference (ROM layout, address map, Real3D, network board).
 - [MAME](https://github.com/mamedev/mame) (`src/mame/sega/model3.cpp`) — secondary reference for cross-checking and ROM set naming.
+- Motorola/IBM *PowerPC 603e RISC Microprocessor User's Manual* and *Programming Environments Manual*.
 
 See [docs/REFERENCES.md](docs/REFERENCES.md) for how sources are used.
-- Motorola/IBM *PowerPC 603e RISC Microprocessor User's Manual* and *Programming Environments Manual*.
 
 ## License
 
