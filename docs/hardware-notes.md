@@ -60,6 +60,20 @@ Per frame, Supermodel does:
 Known IRQ bits: `0x01`, `0x04`, `0x08` (end of VBlank group), `0x02`
 (display/Tilegen), `0x40` (sound board MIDI).
 
+IRQs are acknowledged by writing the bit to Tilegen register `0x10`
+(`0xF1180010`, 32-bit, byte-reversed: Spikeout uses `stwbrx`), not through
+`0xF0100018`; Spikeout's handlers then poll `0xFE100018` until the bit
+clears. Only 32-bit accesses reach the Tilegen registers (Supermodel's
+`Model3.cpp` byte-swaps them; 8/16-bit accesses are dropped).
+
+## Tilegen text
+
+Name tables at `0xF10F8000`, one per layer, `0x2000` bytes apart: 64 × 64
+entries of 16 bits, little-endian on the tile generator side, so each CPU
+word holds two entries in swapped order. Spikeout's font puts ASCII at
+tile numbers `0x20`–`0x7E`, which makes its messages readable straight
+from the name table (`gamerun --text`).
+
 ## Sound board link (`0xF0080000`)
 
 `+0` MIDI data (write: send byte to the sound board, clears IRQ `0x40`),

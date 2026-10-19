@@ -391,7 +391,7 @@ private:
 
         // Processor control
         case Op::Mfmsr:  return D + " = s.msr;";
-        case Op::Mtmsr:  return "s.msr = " + S + ";";
+        case Op::Mtmsr:  return "s.msr = " + S + "; c.msr_changed();";
         case Op::Mfsr:   return D + " = s.sr[" + std::to_string(in.sr()) + "];";
         case Op::Mtsr:   return "s.sr[" + std::to_string(in.sr()) + "] = " + S + ";";
         case Op::Mfsrin: return D + " = s.sr[" + B + " >> 28];";
@@ -400,6 +400,7 @@ private:
         case Op::Mfspr: {
             const uint32_t spr = in.spr();
             if (spr == 268) return D + " = c.read_tbl();";
+            if (spr == 22 && in.op == Op::Mfspr) return D + " = c.read_dec();";
             if (spr == 269) return D + " = c.read_tbu();";
             const std::string field = in.op == Op::Mfspr ? spr_field(spr) : std::string();
             if (field.empty()) return "c.unknown_spr(" + hex(pc) + ", " + std::to_string(spr) + ");";
@@ -408,6 +409,7 @@ private:
         case Op::Mtspr: {
             const uint32_t spr = in.spr();
             if (spr == 268 || spr == 284) return "c.write_tbl(" + S + ");";
+            if (spr == 22) return "c.write_dec(" + S + ");";
             if (spr == 269 || spr == 285) return "c.write_tbu(" + S + ");";
             if (spr == 287) return ";"; // PVR is read-only
             const std::string field = spr_field(spr);

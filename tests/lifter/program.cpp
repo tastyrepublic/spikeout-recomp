@@ -99,9 +99,25 @@ private:
 Program build() {
     Assembler a;
 
-    // Exception vectors (MSR[IP] = 0 in the tests that use them).
+    // Exception vectors (MSR[IP] = 0 in the tests that use them). Counters
+    // live at kBuffer + 0x100 (external interrupts) and + 0x108 (decrementer).
+    // 0x500 external interrupt: acknowledge everything pending, count it.
+    a.entry("ext_vector");
+    a.emit(lis(10, 0xFE10));
+    a.emit(D(34, 11, 10, 0x18));     // lbz    r11, 0x18(r10)   pending
+    a.emit(D(38, 11, 10, 0x18));     // stb    r11, 0x18(r10)   acknowledge
+    a.emit(lis(12, kBuffer >> 16));
+    a.emit(D(32, 13, 12, 0x100));    // lwz    r13, 0x100(r12)
+    a.emit(addi(13, 13, 1));
+    a.emit(D(36, 13, 12, 0x100));    // stw    r13, 0x100(r12)
+    a.emit(D(38, 11, 12, 0x104));    // stb    r11, 0x104(r12)  what was pending
+    a.emit(mfspr(13, 26));
+    a.emit(D(36, 13, 12, 0x10C));    // stw    SRR0, 0x10C(r12) where it was taken
+    a.emit(0x4C000064);              // rfi
+
     // 0x700 program exception: step SRR0 past the trap, note it, and return
     // through rfi from a called function (the rfi can be calls deep).
+    a.org(0x700);
     a.entry("trap_vector");
     a.emit(mflr(9));
     a.emit(mfspr(4, 26));            // mfsrr0 r4
@@ -113,6 +129,17 @@ Program build() {
     a.emit(kBlr);                    // never reached
     a.entry("trap_exit");
     a.emit(mtlr(9));
+    a.emit(0x4C000064);              // rfi
+
+    // 0x900 decrementer: count it, push the next one far away
+    a.org(0x900);
+    a.entry("dec_vector");
+    a.emit(lis(12, kBuffer >> 16));
+    a.emit(D(32, 13, 12, 0x108));    // lwz    r13, 0x108(r12)
+    a.emit(addi(13, 13, 1));
+    a.emit(D(36, 13, 12, 0x108));    // stw    r13, 0x108(r12)
+    a.emit(lis(13, 0x7FFF));
+    a.emit(mtspr(22, 13));           // mtdec  r13
     a.emit(0x4C000064);              // rfi
 
     // 0xC00 system call: r3 += 1000, report SRR0/SRR1/MSR, return
@@ -349,6 +376,50 @@ Program build() {
     a.emit(D(48, 20, 3, 56));             // lfs    f20, 56(r3)   a signaling NaN
     a.emit(D(52, 20, 3, 60));             // stfs   f20, 60(r3)   stays signaling
     a.emit(X(19, 5, 0, 0));               // mfcr   r5
+    a.emit(kBlr);
+
+    // Interrupt tests: each waits until a counter written by a handler moves.
+    const uint32_t mtmsr3 = X(146, 3, 0, 0);
+    const uint32_t ee_on[] = {X(83, 3, 0, 0), D(24, 3, 3, 0x8000), mtmsr3}; // mfmsr; ori 0x8000; mtmsr
+
+    a.entry("irqwait");              // until one external interrupt was taken
+    a.emit(lis(12, kBuffer >> 16));
+    a.label("irqwait.loop");
+    a.emit(D(32, 5, 12, 0x100));
+    a.emit(D(11, 0, 5, 0));          // cmpwi  r5, 0
+    a.bc(12, 2, "irqwait.loop");     // beq
+    a.emit(kBlr);
+
+    a.entry("irqlater");             // EE turned on here, with an IRQ already pending
+    a.emit(lis(12, kBuffer >> 16));
+    for (uint32_t w : ee_on) a.emit(w);
+    a.label("irqlater.loop");
+    a.emit(D(32, 5, 12, 0x100));
+    a.emit(D(11, 0, 5, 0));
+    a.bc(12, 2, "irqlater.loop");
+    a.emit(kBlr);
+
+    a.entry("decwait");              // DEC = 100, EE on, wait for the decrementer
+    a.emit(li(3, 100));
+    a.emit(mtspr(22, 3));            // mtdec  r3
+    for (uint32_t w : ee_on) a.emit(w);
+    a.emit(lis(12, kBuffer >> 16));
+    a.label("decwait.loop");
+    a.emit(D(32, 5, 12, 0x108));
+    a.emit(D(11, 0, 5, 0));
+    a.bc(12, 2, "decwait.loop");
+    a.emit(kBlr);
+
+    a.entry("frames");               // enable IRQ 0x02, wait for three of them
+    a.emit(lis(10, 0xFE10));
+    a.emit(li(3, 2));
+    a.emit(D(38, 3, 10, 0x14));      // stb    r3, 0x14(r10)   IRQ enable
+    for (uint32_t w : ee_on) a.emit(w);
+    a.emit(lis(12, kBuffer >> 16));
+    a.label("frames.loop");
+    a.emit(D(32, 5, 12, 0x100));
+    a.emit(D(11, 0, 5, 3));          // cmpwi  r5, 3
+    a.bc(12, 0, "frames.loop");      // blt
     a.emit(kBlr);
 
     a.label("fnptr");

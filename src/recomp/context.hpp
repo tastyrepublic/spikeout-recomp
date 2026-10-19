@@ -22,6 +22,7 @@
 namespace recomp {
 
 class Context;
+class Scheduler;
 using GuestFunction = void (*)(Context&);
 
 struct FunctionEntry {
@@ -41,7 +42,7 @@ struct GuestError : std::runtime_error {
     uint32_t pc;
 };
 
-// The block budget ran out (an endless loop, or a test's limit).
+// The block limit was reached (an endless loop, or a run's limit).
 struct OutOfBudget : GuestError {
     explicit OutOfBudget(uint32_t at);
 };
@@ -56,11 +57,45 @@ public:
 
     // Where the last `blr` returned to; checked after every call.
     uint32_t returned_to = 0;
-    // Basic blocks left to run before OutOfBudget is thrown.
-    int64_t budget = INT64_MAX;
-    // How far the time base moves on each read of TBL. Recompiled code
-    // doesn't count cycles; this keeps delay loops finite and deterministic.
-    uint32_t tb_step = 64;
+
+    // ---- Clock ----
+    // Recompiled code doesn't count cycles: time is the number of basic
+    // blocks run, times `cycles_per_block` CPU cycles. That keeps every run
+    // with the same inputs exactly the same (save states, rollback netplay).
+    uint64_t blocks = 0;
+    uint32_t cycles_per_block = 8;
+    uint64_t cycles() const { return blocks * cycles_per_block; }
+    // Stop with OutOfBudget after `n` more blocks.
+    void limit_blocks(uint64_t n) {
+        block_limit_ = blocks + n;
+        recheck();
+    }
+    // Board timing (frames, interrupts): called whenever it's due.
+    void set_scheduler(Scheduler* s) {
+        scheduler_ = s;
+        scheduler_due_ = 0;
+        recheck();
+    }
+
+    // Time base and decrementer, at the bus clock / 4 (16.5 MHz with a
+    // 166 MHz core). Each TBL read also moves the time base on by `tb_step`,
+    // so back-to-back reads differ.
+    uint32_t tb_step = 1;
+    uint64_t time_base();
+    uint32_t read_tbl();
+    uint32_t read_tbu() { return static_cast<uint32_t>(time_base() >> 32); }
+    void write_tbl(uint32_t v);
+    void write_tbu(uint32_t v);
+    uint32_t read_dec();
+    void write_dec(uint32_t v);
+
+    // Something changed that may let an interrupt in (MSR, the IRQ line):
+    // look again at the start of the next block.
+    void recheck() { next_check_ = blocks + 1; }
+    void msr_changed() { recheck(); }
+
+    uint64_t external_interrupts = 0;    // taken
+    uint64_t decrementer_interrupts = 0; // taken
 
     uint8_t read8(uint32_t addr) { return bus.read8(addr); }
     uint16_t read16(uint32_t addr) { return bus.read16(addr); }
@@ -71,11 +106,12 @@ public:
     void write32(uint32_t addr, uint32_t v) { bus.write32(addr, v); }
     void write64(uint32_t addr, uint64_t v) { bus.write64(addr, v); }
 
-    // Start of every basic block.
+    // Start of every basic block: one compare unless something is due
+    // (an event, an interrupt to deliver, the block limit).
     void tick(uint32_t pc) {
         cpu.pc = pc;
         recent[recent_pos++ & (recent.size() - 1)] = pc;
-        if (--budget < 0) throw OutOfBudget(pc);
+        if (++blocks >= next_check_) slow_tick(pc);
     }
 
     // The last blocks run, oldest first: where a stopped run came from.
@@ -96,11 +132,6 @@ public:
 
     // The callee's blr went somewhere other than the instruction after the call.
     [[noreturn]] void bad_return(uint32_t expected);
-
-    uint32_t read_tbl();
-    uint32_t read_tbu() { return static_cast<uint32_t>(cpu.tb >> 32); }
-    void write_tbl(uint32_t v) { cpu.tb = (cpu.tb & 0xFFFFFFFF00000000u) | v; }
-    void write_tbu(uint32_t v) { cpu.tb = (cpu.tb & 0xFFFFFFFFu) | uint64_t{v} << 32; }
 
     void dcbz(uint32_t ea);
     void load_string(uint32_t rd, uint32_t ea, uint32_t nb);  // lswi/lswx
@@ -127,10 +158,35 @@ public:
     [[noreturn]] void unknown_spr(uint32_t pc, uint32_t spr);
 
     static constexpr uint32_t kSrr1Trap = 1u << 17; // SRR1 bit 14
+    static constexpr uint32_t kMsrEE = 1u << 15;
 
 private:
+    void slow_tick(uint32_t pc);
+    uint64_t block_of_cycle(uint64_t cycle) const { return (cycle + cycles_per_block - 1) / cycles_per_block; }
+    uint64_t cycle_of_tb(uint64_t tb) const;
+
     std::span<const FunctionEntry> functions_;
     std::vector<uint32_t> resume_;
+
+    uint64_t next_check_ = 1;
+    uint64_t block_limit_ = UINT64_MAX - 1;
+    Scheduler* scheduler_ = nullptr;
+    uint64_t scheduler_due_ = UINT64_MAX; // cycle
+
+    uint64_t tb_offset_ = 0; // time base = tb_offset_ + cycles * 33 / 332
+    uint32_t dec_ = 0;       // DEC as written ...
+    uint64_t dec_tb_ = 0;    // ... at this time base
+    uint64_t dec_due_tb_ = 1; // when it next goes from 0 to -1 (it is 0 at reset)
+    bool dec_pending_ = false;
+};
+
+// Board timing: raises interrupts and ends frames at the right times.
+class Scheduler {
+public:
+    virtual ~Scheduler() = default;
+    // Called once the clock reaches the cycle it last returned (0 at first):
+    // does what's due and returns the cycle of its next event.
+    virtual uint64_t update(Context& c) = 0;
 };
 
 } // namespace recomp

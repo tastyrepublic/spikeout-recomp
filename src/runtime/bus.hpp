@@ -53,6 +53,41 @@ private:
     std::array<uint8_t, 256> regs_{};
 };
 
+// Interrupt controller in the system registers (Supermodel's IRQ.cpp):
+// pending bits and an enable mask; the CPU's external interrupt line is up
+// while a pending bit is enabled. Bits above 0xFF can't be masked.
+// Known sources: 0x02 display (line 383), 0x0D end of VBlank (0x01, 0x04,
+// 0x08 together), 0x40 sound board MIDI.
+class Irq {
+public:
+    void assert_irq(uint32_t bits) {
+        state_ |= bits;
+        notify();
+    }
+    void deassert(uint32_t bits) {
+        state_ &= ~bits;
+        notify();
+    }
+    void set_enable(uint32_t mask) {
+        enable_ = mask;
+        notify();
+    }
+    uint32_t state() const { return state_; }
+    uint32_t enable() const { return enable_; }
+    bool line() const { return (state_ & enable_ & 0xFF) != 0 || state_ > 0xFF; }
+
+    // Called whenever the line may have changed (the runtime rechecks it).
+    void (*on_change)(void* user) = nullptr;
+    void* on_change_user = nullptr;
+
+private:
+    void notify() {
+        if (on_change) on_change(on_change_user);
+    }
+    uint32_t state_ = 0;
+    uint32_t enable_ = 0;
+};
+
 class Bus {
 public:
     // `roms` must outlive the bus. Without program ROMs (tests) the ROM
@@ -97,6 +132,20 @@ public:
     std::span<uint8_t> ram() { return ram_; }
     std::span<const uint8_t> ram() const { return ram_; }
     Mpc106& pci() { return pci_; }
+    Irq& irq() { return irq_; }
+    // Tilegen registers (0xF1180000, 32-bit only), as the tile generator
+    // sees them (little-endian: the bus byte-swaps, as Supermodel does).
+    // Register 0x10 acknowledges IRQs: writing a bit clears it.
+    uint32_t tile_reg(uint32_t reg) const { return tile_regs_[(reg & 0xFF) / 4]; }
+    // Tilegen RAM 0xF1000000-0xF111FFFF (characters, name tables, palette),
+    // in CPU byte order: byte i is what the CPU reads at 0xF1000000 + i.
+    std::span<const uint8_t> tile_ram() const { return tile_ram_; }
+    // Battery-backed SRAM (0xF00C0000, 128 KB). Starts zeroed; saving and
+    // loading it across runs is up to the frontend.
+    std::span<uint8_t> backup_ram() { return backup_ram_; }
+    static constexpr uint32_t kBackupRamSize = 0x20000;
+    static constexpr uint32_t kTileRamBase = 0xF1000000;
+    static constexpr uint32_t kTileRamSize = 0x120000;
     uint32_t crom_bank() const { return crom_bank_; }
 
     // Accesses to regions that aren't emulated yet, by region name
@@ -128,7 +177,14 @@ private:
 
     const RomSet& roms_;
     std::vector<uint8_t> ram_;
+    uint8_t system_read(uint32_t reg) const;
+    void system_write(uint32_t reg, uint8_t value);
+
     Mpc106 pci_;
+    Irq irq_;
+    std::array<uint32_t, 64> tile_regs_{};
+    std::vector<uint8_t> tile_ram_;
+    std::vector<uint8_t> backup_ram_;
     uint32_t crom_bank_ = 0;
     uint32_t crom_bank_reg_ = 0xFF;
     std::map<std::string_view, Unhandled> unhandled_;

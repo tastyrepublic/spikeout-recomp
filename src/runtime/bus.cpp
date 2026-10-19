@@ -4,23 +4,31 @@ namespace m3 {
 
 namespace {
 
-// System register: CROM bank select (bank = ~value & 0xF; reset writes 0xFF).
-constexpr uint32_t kSysCromBank = 0x08;
+// System registers (Supermodel's Model3.cpp, Read/WriteSystemRegister).
+constexpr uint32_t kSysCromBank = 0x08;  // CROM bank select: bank = ~value & 0xF (reset writes 0xFF)
+constexpr uint32_t kSysIrqEnable = 0x14;
+constexpr uint32_t kSysIrqState = 0x18;  // read: pending; write: acknowledge the written bits
 
 // Whether `addr` in `region` is emulated (anything else is open bus).
-bool emulated(const Region& region, uint32_t addr) {
+bool emulated(const Region& region, uint32_t) {
     switch (region.device) {
     case Device::FixedCrom:
     case Device::BankedCrom:
     case Device::PciConfigAddr:
     case Device::PciConfigData:
-        return true;
     case Device::System:
-        return region.offset(addr) == kSysCromBank;
+    case Device::TileRegs:
+    case Device::TileChar:
+    case Device::TileMap:
+    case Device::Palette:
+    case Device::BackupRam:
+        return true;
     default:
         return false;
     }
 }
+
+constexpr uint32_t kTileIrqAck = 0x10;
 
 } // namespace
 
@@ -56,7 +64,8 @@ void Mpc106::write_data(uint32_t offset, uint8_t value) {
     if (bridge_selected()) regs_[((addr_ & 0xFC) + offset) & 0xFF] = value;
 }
 
-Bus::Bus(const RomSet& roms) : roms_(roms), ram_(kWorkRamSize, 0) {}
+Bus::Bus(const RomSet& roms)
+    : roms_(roms), ram_(kWorkRamSize, 0), tile_ram_(kTileRamSize, 0), backup_ram_(kBackupRamSize, 0) {}
 
 void Bus::count(const Region* region, uint32_t addr, bool write) {
     Unhandled& u = unhandled_[region ? region->name : std::string_view("unmapped")];
@@ -81,9 +90,37 @@ uint8_t Bus::device_read(const Region& region, uint32_t addr) const {
     case Device::PciConfigData:
         return pci_.read_data(addr & 3);
     case Device::System:
-        return static_cast<uint8_t>(crom_bank_reg_);
+        return system_read(region.offset(addr));
+    case Device::TileChar:
+    case Device::TileMap:
+    case Device::Palette:
+        return tile_ram_[addr - kTileRamBase];
+    case Device::BackupRam:
+        return backup_ram_[region.offset(addr) % kBackupRamSize];
     default:
-        return 0xFF;
+        return 0xFF; // Tilegen registers: only 32-bit reads reach them
+    }
+}
+
+uint8_t Bus::system_read(uint32_t reg) const {
+    switch (reg) {
+    case kSysCromBank:  return static_cast<uint8_t>(crom_bank_reg_);
+    case 0x10:          return 0; // JTAG TDO (bit 5): no JTAG chain emulated yet
+    case kSysIrqEnable: return static_cast<uint8_t>(irq_.enable());
+    case kSysIrqState:  return static_cast<uint8_t>(irq_.state());
+    default:            return 0xFF; // 0x1C: games expect bits set
+    }
+}
+
+void Bus::system_write(uint32_t reg, uint8_t value) {
+    switch (reg) {
+    case kSysCromBank:
+        crom_bank_reg_ = value;
+        crom_bank_ = ~crom_bank_reg_ & 0xF;
+        break;
+    case kSysIrqEnable: irq_.set_enable(value); break;
+    case kSysIrqState:  irq_.deassert(value); break;
+    default: break; // 0x0C JTAG (Real3D configuration), 0x0D-0x0F and 0x1C LEDs
     }
 }
 
@@ -108,6 +145,7 @@ uint32_t Bus::read_slow32(uint32_t addr) {
         count(region, addr, false);
         return 0xFFFFFFFF;
     }
+    if (region->device == Device::TileRegs) return bswap32(tile_reg(region->offset(addr)));
     uint32_t v = 0;
     for (uint32_t i = 0; i < 4; ++i) v = v << 8 | device_read(*region, addr + i);
     return v;
@@ -133,9 +171,30 @@ void Bus::write_slow(uint32_t addr, uint32_t value, uint32_t size) {
         for (uint32_t i = 0; i < size; ++i)
             pci_.write_data(((addr & 3) + i) & 3, static_cast<uint8_t>(value >> (8 * (size - 1 - i))));
         return;
-    case Device::System: // CROM bank select: the byte at 0xF0100008
-        crom_bank_reg_ = (value >> (8 * (size - 1))) & 0xFF;
-        crom_bank_ = ~crom_bank_reg_ & 0xF;
+    case Device::TileChar:
+    case Device::TileMap:
+    case Device::Palette:
+        for (uint32_t i = 0; i < size; ++i)
+            if (addr + i - kTileRamBase < kTileRamSize)
+                tile_ram_[addr + i - kTileRamBase] = static_cast<uint8_t>(value >> (8 * (size - 1 - i)));
+        return;
+    case Device::BackupRam:
+        for (uint32_t i = 0; i < size; ++i)
+            backup_ram_[(region->offset(addr) + i) % kBackupRamSize] = static_cast<uint8_t>(value >> (8 * (size - 1 - i)));
+        return;
+    case Device::TileRegs: { // 32-bit only; narrower writes don't reach the registers
+        if (size != 4) {
+            count(region, addr, true);
+            return;
+        }
+        const uint32_t reg = region->offset(addr) & 0xFC, v = bswap32(value);
+        tile_regs_[reg / 4] = v;
+        if (reg == kTileIrqAck) irq_.deassert(v & 0xFF);
+        return;
+    }
+    case Device::System: // byte registers; wider writes reach several of them
+        for (uint32_t i = 0; i < size; ++i)
+            system_write(region->offset(addr) + i, static_cast<uint8_t>(value >> (8 * (size - 1 - i))));
         return;
     default:
         count(region, addr, true);

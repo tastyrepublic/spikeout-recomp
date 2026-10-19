@@ -61,8 +61,36 @@ game). A handler that returns without `rfi` is an error.
 - `sc`: vector `0xC00`, resumes after the `sc`.
 - Traps (`tw`/`twi`): vector `0x700` with SRR1's trap bit; SRR0 points at
   the trap and the code resumes after it (handlers step SRR0 past it).
-- Interrupts (next): the same entry at the start of a block, resuming at
-  that block.
+- Interrupts: the same entry at the start of a block, resuming at that
+  block (see below).
+
+### Clock and interrupts
+
+Recompiled code doesn't count cycles. Time is `Context::blocks`, the
+number of basic blocks run, times `cycles_per_block` (8 by default) CPU
+cycles at 166 MHz: every run with the same inputs is exactly the same,
+which save states and rollback netplay need. The time base and the
+decrementer run at 16.5 MHz (bus clock / 4) on that clock; DEC going from
+0 to -1 raises the decrementer exception (`0x900`).
+
+`Context::tick()` is one compare per block. It falls into the slow path
+only when something is due: a `Scheduler` event, the decrementer, the
+block limit, or an interrupt that may now be taken, because the IRQ line,
+MSR (`mtmsr`, `rfi`) or the decrementer changed. External interrupts
+(`0x500`) are taken at a block start when the IRQ controller's line is up
+and MSR[EE] is set.
+
+`recomp::FrameTiming` is the board's `Scheduler`: Supermodel's frame at
+57.524 Hz, 424 lines, with 40 lines of VBlank ending in IRQ `0x0D` and
+IRQ `0x02` at display line 383. Not modelled yet: running VBlank until
+IRQ `0x02` is acknowledged, the MIDI IRQ (`0x40`), the Real3D ping-pong
+bit.
+
+Spikeout's game logic runs inside its interrupt handlers: `main` sets up
+and idles in `b .`, and the external interrupt handler (`0x41DC`) saves
+everything, calls a sub-handler for each pending IRQ (each acknowledges
+through Tilegen register `0x10` and polls `0xFE100018` until the bit
+clears) and returns with `rfi` to the idle loop.
 
 Spikeout's `sc` handler (`0x2428`) is a small dispatcher, not a task
 switcher: it calls a service from a table the game builds at
@@ -92,10 +120,16 @@ matter:
 ## Bus
 
 `m3::Bus` (`src/runtime/bus.*`): 8 MB of work RAM, the fixed and banked
-program ROMs (with the bank select at `0xF0100008`), and the MPC106 PCI
-bridge's configuration ports. Everything else is open bus (reads all
-ones, writes dropped) and counted per region, so a run reports which
-devices the game used that aren't emulated yet.
+program ROMs, the MPC106 PCI bridge's configuration ports, the system
+registers (CROM bank select, IRQ enable/pending/acknowledge, LEDs), the
+interrupt controller (`m3::Irq`), the Tilegen registers and RAM (stored,
+not drawn yet) and the 128 KB backup RAM. Everything else is open bus
+(reads all ones, writes dropped) and counted per region, so a run reports
+which devices the game used that aren't emulated yet.
+
+Tilegen registers are 32-bit only and byte-swapped on the bus (the tile
+generator is little-endian), as in Supermodel; register `0x10`
+acknowledges IRQs, and that is the one Spikeout uses.
 
 The MPC106 (`m3::Mpc106`) follows Supermodel's `MPC10x.cpp`: registers
 little-endian as on PCI, reset values from `CMPC10x::Reset()`, the bridge
@@ -117,8 +151,9 @@ itself at bus 0 / device 0 and nothing else on the bus yet.
 
 - `gamerun` (also with `SPIKEOUT_ROM_DIR`): runs the recompiled boot ROM
   into the recompiled game and reports where and why it stopped, the last
-  blocks it ran and the devices it used that aren't emulated. Not a pass/
-  fail test: it shows what to work on next.
+  blocks it ran and the devices it used that aren't emulated. `--text`
+  prints the text the game has put on the tile layers (which screen it is
+  on). Not a pass/fail test: it shows what to work on next.
 
 On `spikeofe`: the boot ROM is 29 functions and 396 instructions. It runs
 about 2.9 million blocks (most of them clearing 8 MB of RAM and copying
@@ -128,12 +163,19 @@ its register tables, and touches no other device.
 The game's RAM program lifts to 2,175 functions and about 124,000
 instructions with nothing left unimplemented, and is compiled as the
 `game_ram` library (split over 8 files: about 100 s on 12 threads, 166 s
-as one file). `gamerun` runs its whole
-initialization (PCI setup, a backup RAM test, system calls, I/O board,
-network board, sound board UART, tilegen registers and character RAM) in
-a few hundredths of a second, and ends up in `b 0x12320`, a branch to
-itself with interrupts enabled (MSR `0xF032`): the game waiting for an
-interrupt (vblank). Interrupts are next (roadmap milestone 2).
+as one file). With frame timing and interrupts, `gamerun` runs it frame
+by frame (two external interrupts and one decrementer interrupt a frame;
+about 550 frames, 9.6 s of game time, in 200 million blocks). It passes
+its backup RAM test and then shows
+
+```
+INVALID CONFIG DETECTED
+COMMUNICATION BOARD : NO DEVICE
+```
+
+because the network board, which every Spikeout cabinet has, isn't
+emulated yet. It also reads the RTC (not emulated) and probes memory above
+8 MB.
 
 The game's PCI configuration routines jump into stub tables
 (`base + size * 12`) that the analysis can't follow; their addresses are

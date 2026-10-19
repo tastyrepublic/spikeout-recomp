@@ -4,6 +4,7 @@
 
 #include "lifter/program.hpp"
 #include "recomp/context.hpp"
+#include "recomp/frame_timing.hpp"
 #include "runtime/bus.hpp"
 #include "runtime/rom.hpp"
 
@@ -268,10 +269,60 @@ TEST_CASE("lifter: trap enters 0x700, handler steps past it, rfi from a called f
     CHECK_EQ(m.c.exception_depth(), size_t{0});
 }
 
+TEST_CASE("interrupts: a pending IRQ is taken at the first block, then acknowledged") {
+    Machine m;
+    m.s.msr = 0x9000; // EE, ME
+    m.bus.irq().set_enable(0x02);
+    m.bus.irq().assert_irq(0x02);
+    m.c.limit_blocks(1000);
+    CHECK_EQ(m.run("irqwait"), kReturnAddr);
+    CHECK_EQ(m.bus.read32(kBuffer + 0x100), 1u);
+    CHECK_EQ(m.bus.read8(kBuffer + 0x104), 0x02u); // the handler saw IRQ 0x02 pending
+    CHECK_EQ(m.bus.irq().state(), 0u);             // and acknowledged it
+    CHECK_EQ(m.bus.read32(kBuffer + 0x10C), addr_of("irqwait")); // taken before the first block ran
+    CHECK_EQ(m.c.external_interrupts, 1u);
+}
+
+TEST_CASE("interrupts: a pending IRQ waits for MSR[EE], then is taken at the next block") {
+    Machine m;
+    m.s.msr = 0x1000; // EE off
+    m.bus.irq().set_enable(0x0D);
+    m.bus.irq().assert_irq(0x0D);
+    m.c.limit_blocks(1000);
+    CHECK_EQ(m.run("irqlater"), kReturnAddr);
+    CHECK_EQ(m.bus.read32(kBuffer + 0x100), 1u);
+    CHECK_EQ(m.bus.read32(kBuffer + 0x10C), addr_of("irqlater.loop")); // the first block after mtmsr
+}
+
+TEST_CASE("interrupts: decrementer") {
+    Machine m;
+    m.s.msr = 0x1000;
+    m.c.limit_blocks(100000);
+    CHECK_EQ(m.run("decwait"), kReturnAddr);
+    CHECK_EQ(m.bus.read32(kBuffer + 0x108), 1u);
+    CHECK_EQ(m.c.decrementer_interrupts, 1u);
+    // DEC was 100: it fires after 101 time base ticks, about 1000 CPU cycles.
+    CHECK(m.c.cycles() * 33 / 332 >= 101);
+}
+
+TEST_CASE("interrupts: frame timing raises IRQ 0x02 once a frame") {
+    Machine m;
+    recomp::FrameTiming timing;
+    m.c.set_scheduler(&timing);
+    m.s.msr = 0x1000;
+    m.c.limit_blocks(10'000'000);
+    CHECK_EQ(m.run("frames"), kReturnAddr);
+    CHECK_EQ(m.bus.read32(kBuffer + 0x100), 3u);
+    CHECK_EQ(timing.frames(), 2u); // the third IRQ 0x02 comes near the end of the third frame
+    CHECK_EQ(m.bus.irq().enable(), 0x02u);
+    const uint64_t irq_cycle = 2 * timing.frame_cycles() + (40 + 383) * timing.line_cycles();
+    CHECK(m.c.cycles() >= irq_cycle && m.c.cycles() < irq_cycle + timing.line_cycles());
+}
+
 TEST_CASE("lifter: runs stop on loops, missing code and bad returns") {
     {
         Machine m;
-        m.c.budget = 100;
+        m.c.limit_blocks(100);
         bool stopped = false;
         try {
             m.run("spin");

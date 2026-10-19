@@ -2,7 +2,7 @@
 
 Each milestone ends with something you can run and check.
 
-## 1. Foundation — *in progress*
+## 1. Foundation — *done*
 
 - [x] CMake/C++20 project, CI on Windows, macOS and Linux
 - [x] PowerPC 603e decoder and disassembler
@@ -15,17 +15,19 @@ Each milestone ends with something you can run and check.
 - [x] Lifter: floating point (13% of the game's instructions); the whole game compiles (`game_ram`) and runs into its startup (`gamerun`)
 - [x] Runtime bus: dispatch loads/stores to RAM, ROM and device stubs; MPC106 PCI bridge
 - [x] The recompiled boot ROM runs from reset to the jump into RAM: bridge setup, RAM clear, 1 MB copy with checksum (`boottest`)
-- [ ] **Goal:** the recompiled boot code runs through the ROM/RAM self-test
+- [x] **Goal:** the recompiled boot code runs through the ROM/RAM self-test (and on into the game's own startup and its backup RAM test)
 
-## 2. Getting to the attract mode
+## 2. Getting to the attract mode — *in progress*
 
 - [x] Exceptions: `sc`, traps, and returning from a handler with `rfi` ([notes](recompiler.md#exceptions)); the game now initializes and waits for an interrupt
-- [ ] Interrupt controller and decrementer
+- [x] Interrupt controller and decrementer; the game runs frame by frame in its interrupt handlers
 - [x] Banked CROM switching (bank select at `0xF0100008`, in `m3::Bus`)
 - [ ] 315-5881 security board decryption (key `0x29236FC8`)
 - [x] Open-bus reads return all ones (Spikeout's ROM check needs it)
-- [ ] Frame timing: 57.524 Hz, 424 lines, IRQ 0x02/0x0D/0x40 as in [hardware-notes.md](hardware-notes.md)
-- [ ] EEPROM, RTC and backup RAM
+- [x] Frame timing: 57.524 Hz, 424 lines, IRQ 0x02/0x0D as in [hardware-notes.md](hardware-notes.md) (`recomp::FrameTiming`; not yet: MIDI IRQ 0x40, waiting for the IRQ 0x02 acknowledge)
+- [x] Backup RAM (the game's RAM test passes)
+- [ ] EEPROM and RTC
+- [ ] Network board present enough for single-cabinet boot (the game stops at "COMMUNICATION BOARD : NO DEVICE")
 - [ ] Reference interpreter for code that the static pass misses, with logging so it can be added to the recompiled set
 - [ ] **Goal:** reaches the attract loop, verified against Supermodel's behavior
 

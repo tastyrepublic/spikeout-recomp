@@ -26,6 +26,85 @@ OutOfBudget::OutOfBudget(uint32_t at) : GuestError(at, "block budget used up") {
 
 Context::Context(m3::Bus& b, std::span<const FunctionEntry> functions) : bus(b), functions_(functions) {
     cpu.reset();
+    bus.irq().on_change_user = this;
+    bus.irq().on_change = [](void* self) { static_cast<Context*>(self)->recheck(); };
+}
+
+// ---- Time base and decrementer ----
+// TB ticks at the bus clock / 4: 16.5 MHz against a 166 MHz core, 33/332 of
+// the CPU clock.
+constexpr uint64_t kTbNum = 33, kTbDen = 332;
+
+uint64_t Context::time_base() {
+    cpu.tb = tb_offset_ + cycles() * kTbNum / kTbDen;
+    return cpu.tb;
+}
+
+uint32_t Context::read_tbl() {
+    tb_offset_ += tb_step;
+    return static_cast<uint32_t>(time_base());
+}
+
+void Context::write_tbl(uint32_t v) {
+    const uint64_t now = time_base();
+    tb_offset_ += ((now & 0xFFFFFFFF00000000u) | v) - now;
+}
+
+void Context::write_tbu(uint32_t v) {
+    const uint64_t now = time_base();
+    tb_offset_ += ((now & 0xFFFFFFFFu) | uint64_t{v} << 32) - now;
+}
+
+uint32_t Context::read_dec() { return dec_ - static_cast<uint32_t>(time_base() - dec_tb_); }
+
+// DEC counts down with the time base; going from 0 to -1 (bit 0 turning on)
+// requests a decrementer exception, and so does writing a negative value
+// over a positive one.
+void Context::write_dec(uint32_t v) {
+    const uint32_t old = read_dec();
+    dec_ = v;
+    dec_tb_ = time_base();
+    if (!(old >> 31) && (v >> 31)) dec_pending_ = true;
+    dec_due_tb_ = dec_tb_ + uint64_t{v} + 1; // reaches -1 (v + 1 ticks; for a negative v, after wrapping)
+    if (v >> 31) dec_due_tb_ += uint64_t{1} << 32;
+    recheck();
+}
+
+uint64_t Context::cycle_of_tb(uint64_t tb) const {
+    if (tb <= tb_offset_) return 0;
+    return ((tb - tb_offset_) * kTbDen + kTbNum - 1) / kTbNum;
+}
+
+// ---- Events and interrupts ----
+
+void Context::slow_tick(uint32_t pc) {
+    if (blocks > block_limit_) throw OutOfBudget(pc);
+
+    if (scheduler_ && cycles() >= scheduler_due_) scheduler_due_ = scheduler_->update(*this);
+    const uint64_t tb = time_base();
+    if (tb >= dec_due_tb_) {
+        dec_pending_ = true;
+        dec_due_tb_ += uint64_t{1} << 32; // the next time it passes 0
+    }
+
+    // Interrupts are taken at the start of a block, which is then run once
+    // the handler's rfi comes back to it.
+    if (cpu.msr & kMsrEE) {
+        if (bus.irq().line()) {
+            ++external_interrupts;
+            exception(0x500, pc, 0, pc);
+        } else if (dec_pending_) {
+            dec_pending_ = false;
+            ++decrementer_interrupts;
+            exception(0x900, pc, 0, pc);
+        }
+    }
+
+    uint64_t next = block_limit_ + 1;
+    if (scheduler_) next = std::min(next, block_of_cycle(scheduler_due_));
+    next = std::min(next, block_of_cycle(cycle_of_tb(dec_due_tb_)));
+    if ((cpu.msr & kMsrEE) && (bus.irq().line() || dec_pending_)) next = blocks + 1;
+    next_check_ = std::max(next, blocks + 1);
 }
 
 GuestFunction Context::find(uint32_t addr) const {
@@ -42,11 +121,6 @@ void Context::call(uint32_t addr) {
 
 void Context::bad_return(uint32_t expected) {
     throw GuestError(cpu.pc, "returned to " + hex(returned_to) + ", expected " + hex(expected));
-}
-
-uint32_t Context::read_tbl() {
-    cpu.tb += tb_step;
-    return static_cast<uint32_t>(cpu.tb);
 }
 
 void Context::dcbz(uint32_t ea) {
@@ -118,6 +192,7 @@ void Context::exception(uint32_t offset, uint32_t srr0, uint32_t cause, uint32_t
 void Context::rfi() {
     // 603e: MSR[16-23, 25-27, 30-31] = SRR1.
     cpu.msr = (cpu.msr & ~0xFF73u) | (cpu.srr1 & 0xFF73u);
+    msr_changed();
     const uint32_t target = cpu.srr0 & ~3u;
     for (size_t i = resume_.size(); i-- > 0;)
         if (resume_[i] == target) throw ExceptionReturn{i + 1};

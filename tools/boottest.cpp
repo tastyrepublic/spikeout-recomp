@@ -40,7 +40,7 @@ int main(int argc, char** argv) {
     for (uint8_t& b : bus.ram()) b = 0xA5;
     recomp::Context c(bus, generated::boot_rom_functions());
     constexpr int64_t kBudget = 100'000'000; // blocks
-    c.budget = kBudget;
+    c.limit_blocks(kBudget);
     std::printf("Recompiled boot ROM: %zu functions\n", generated::boot_rom_functions().size());
 
     uint32_t stopped_at = 0;
@@ -55,7 +55,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::printf("Ran %lld blocks, stopped at %08x (no recompiled code there)\n",
-                static_cast<long long>(kBudget - c.budget), stopped_at);
+                static_cast<long long>(c.blocks), stopped_at);
 
     int failures = 0;
     auto check = [&](bool ok, const char* what) {
