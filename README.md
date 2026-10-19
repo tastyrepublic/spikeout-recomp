@@ -69,8 +69,10 @@ its state is small, which makes this practical. Details in
 
 ## Credits and references
 
-- [MAME](https://github.com/mamedev/mame) (`src/mame/sega/model3.cpp`) — ROM set definition and address map.
-- [Supermodel](https://github.com/trzy/Supermodel) — Model 3 hardware research and ROM interleave layout.
+- [Supermodel](https://github.com/trzy/Supermodel) — the primary Model 3 hardware reference (ROM layout, address map, Real3D, network board).
+- [MAME](https://github.com/mamedev/mame) (`src/mame/sega/model3.cpp`) — secondary reference for cross-checking and ROM set naming.
+
+See [docs/REFERENCES.md](docs/REFERENCES.md) for how sources are used.
 - Motorola/IBM *PowerPC 603e RISC Microprocessor User's Manual* and *Programming Environments Manual*.
 
 ## License

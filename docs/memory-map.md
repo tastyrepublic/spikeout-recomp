@@ -1,10 +1,9 @@
 # Model 3 Step 2.1 memory map (main CPU)
 
-As used by Spikeout / Spikeout: Final Edition. Taken from MAME's
-`sega/model3.cpp` (`model3_10_mem`, `model3_mem`, `model3_5881_mem`,
-`init_model3_20`), cross-checked against Supermodel's `Src/Model3/Model3.cpp`,
-which also supplies the Real3D regions marked (S). The code version is
-`src/runtime/memory_map.cpp`.
+As used by Spikeout / Spikeout: Final Edition. Supermodel's
+`Src/Model3/Model3.cpp` is authoritative (see [REFERENCES.md](REFERENCES.md));
+MAME's `sega/model3.cpp` was used to cross-check. Regions marked (S) are only
+mapped by Supermodel. The code version is `src/runtime/memory_map.cpp`.
 
 Regions marked *mirrored* also respond with address bits 25–27 set
 (`0xF2xxxxxx` … `0xFExxxxxx`) in MAME; Supermodel only implements the
