@@ -50,6 +50,7 @@ uint64_t FrameTiming::update(Context& c) {
             midi_irqs_ = 0;
             next_ = Next::Midi;
             if (on_frame_end) on_frame_end();
+            c.bus.real3d().begin_vblank(); // after the frame is drawn: buffered updates land now
             break;
         }
     }

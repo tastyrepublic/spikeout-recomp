@@ -85,6 +85,33 @@ clears. Only 32-bit accesses reach the Tilegen registers (Supermodel's
   display line in Tilegen register `0x08`; Spikeout waits for it every
   frame.
 
+## Real3D memory and scene
+
+The CPU writes 32-bit words, which the Real3D sees byte-swapped (a
+little-endian read of the CPU's bytes, as for Tilegen RAM). VROM, as the
+ROM set is laid out, is little-endian words too (checked by decoding
+Spikeout's models: the other order gives a fraction of the polygons).
+
+| Address | |
+|---|---|
+| `0x88000000` | command port: a write ends the frame's uploads (flushes the texture FIFO) |
+| `0x8C000000` | low culling RAM, 4 MB (matrices, nodes, LOD tables) |
+| `0x8E000000` | high culling RAM, 1 MB (the viewport list starts at word `0x800000`) |
+| `0x94000000` | texture FIFO: length word, header, 16-bit texels in 8x8 tiles |
+| `0x98000000` | polygon RAM, 4 MB (models built at run time, colour tables) |
+| `0x9C000000` | configuration registers (ping-pong buffer sizes) |
+
+Word addresses in the scene: below `0x100000` low culling RAM or polygon
+RAM, `0x800000`-`0x83FFFF` high culling RAM, models from `0x100000` up in
+VROM. Texture RAM is two 2048x1024 pages of 16-bit texels; mipmap level
+*i* of a texture at (x, y) is at (2048 - 2048 >> i + x >> i, 1024 - 1024 >>
+i + y >> i). Formats of the viewport, culling node, polygon and texel are
+summarized in `src/runtime/real3d_render.hpp` and `real3d.hpp`.
+
+In Spikeout's attract mode a frame has about 10 viewports, 1,000 nodes, 600
+models and 11,000 polygons; it uploaded 700 textures in the first 5,000
+frames.
+
 ## JTAG (Real3D chips)
 
 Step 2.1 chain, first to last: Jupiter, Mercury, Venus, Earth, 3D-RAM,

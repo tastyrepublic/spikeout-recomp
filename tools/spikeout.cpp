@@ -3,7 +3,8 @@
 //   spikeout <rom_dir> [--scale N] [--netboard sim] [--frames N]
 //
 // The game runs on its own thread, paced to the Model 3's 57.524 Hz; the
-// window shows the tile generator's 2D layers (no 3D yet) and passes the
+// window shows the tile generator's 2D layers and the Real3D's picture
+// (drawn in software for now) and passes the
 // keyboard to the I/O board:
 //
 //   5 coin      1 start      F2 test      F1 service
@@ -24,6 +25,7 @@
 #include "runtime/bus.hpp"
 #include "runtime/commboard.hpp"
 #include "runtime/rom.hpp"
+#include "runtime/real3d_render.hpp"
 #include "runtime/tilegen.hpp"
 #include "game_setup.hpp"
 #include "png_write.hpp"
@@ -88,6 +90,7 @@ void run_game(const m3::RomSet& roms, bool real_netboard, Shared& shared) {
     recomp::FrameTiming timing;
     c.set_scheduler(&timing);
     m3::TilegenRenderer tilegen;
+    m3::Real3dRenderer real3d;
     std::vector<uint32_t> screen(kWidth * kHeight);
 
     using clock = std::chrono::steady_clock;
@@ -98,7 +101,8 @@ void run_game(const m3::RomSet& roms, bool real_netboard, Shared& shared) {
         tilegen.draw_line(bus, static_cast<int>(line));
     };
     timing.on_frame_end = [&] {
-        tilegen.composite(screen);
+        real3d.render(bus.real3d());
+        tilegen.composite(screen, real3d.image());
         {
             std::lock_guard<std::mutex> guard(shared.lock);
             shared.frame.swap(screen);

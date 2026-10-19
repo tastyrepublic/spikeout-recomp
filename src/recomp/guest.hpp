@@ -10,6 +10,13 @@
 #include <cmath>
 #include <cstdint>
 
+// After each FP result: report NaNs to the context (SPIKEOUT_FP_TRAP builds only).
+#ifdef SPIKEOUT_FP_TRAP
+#define RECOMP_FP_CHECK(pc, d) c.fp_check(pc, s.fpr[d])
+#else
+#define RECOMP_FP_CHECK(pc, d) ((void)0)
+#endif
+
 namespace recomp::ops {
 
 using ppc::CpuState;
@@ -116,11 +123,27 @@ inline bool trap_if(uint32_t to, uint32_t a, uint32_t b) {
 // FPRs hold raw IEEE-754 double bits. Arithmetic runs on the host's doubles
 // (generated code is built without FMA contraction, so results don't depend
 // on the compiler); single-precision instructions round the double result to
-// single. Not modelled yet: FPSCR exception bits and FPRF, and the 603e's
-// exact results for estimates (fres, frsqrte return exact values).
+// single. Arithmetic sets FPSCR[FPRF] (the result's class), which games
+// test with mcrfs (Spikeout checks a vector's length was zero that way
+// before normalizing it). Not modelled yet: FPSCR exception bits, and the
+// 603e's exact results for estimates (fres, frsqrte return exact values).
 
 inline double f64(uint64_t bits) { return std::bit_cast<double>(bits); }
 inline uint64_t bits(double d) { return std::bit_cast<uint64_t>(d); }
+
+// FPSCR[FPRF] (C, FL, FG, FE, FU at FPSCR bits 16-12) for an arithmetic
+// result; a single-precision result is denormal below single's normal range.
+inline void set_fprf(CpuState& s, uint64_t result, bool single) {
+    const double d = f64(result);
+    const bool neg = result >> 63;
+    uint32_t c;
+    if (d != d) c = 0x11; // quiet NaN
+    else if (d == 0) c = neg ? 0x12 : 0x02;
+    else if (std::isinf(d)) c = neg ? 0x09 : 0x05;
+    else if (std::fabs(d) < (single ? 1.17549435e-38 : 2.2250738585072014e-308)) c = neg ? 0x18 : 0x14; // denormal
+    else c = neg ? 0x08 : 0x04;
+    s.fpscr = (s.fpscr & ~0x1F000u) | c << 12;
+}
 
 // Result of a single-precision instruction: rounded to single, kept as a double.
 inline uint64_t round_single(double d) { return bits(static_cast<double>(static_cast<float>(d))); }

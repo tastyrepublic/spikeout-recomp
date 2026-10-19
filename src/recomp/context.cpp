@@ -121,11 +121,15 @@ void Context::call(uint32_t addr) {
     e->fn(*this);
 }
 
-void Context::follow_return(uint32_t next) {
+bool Context::follow_return(uint32_t next) {
     for (int hops = 0; returned_to != next; ++hops) {
+        // An outer call waits for this address: unwind to it.
+        for (size_t i = std::min(return_depth_, return_stack_.size()); i-- > 0;)
+            if (return_stack_[i] == returned_to) return true;
         if (hops == 64) bad_return(next);
         jump(returned_to); // that code's blr sets returned_to again
     }
+    return false;
 }
 
 void Context::bad_return(uint32_t expected) {
@@ -184,11 +188,16 @@ void Context::exception(uint32_t offset, uint32_t srr0, uint32_t cause, uint32_t
 
     resume_.push_back(resume);
     const size_t depth = resume_.size();
-    struct Pop {
+    struct Pop { // also puts the return stack back when an rfi unwinds through calls
         std::vector<uint32_t>& stack;
         size_t depth;
-        ~Pop() { stack.resize(depth - 1); }
-    } pop{resume_, depth};
+        size_t& return_depth;
+        size_t saved_return_depth;
+        ~Pop() {
+            stack.resize(depth - 1);
+            return_depth = saved_return_depth;
+        }
+    } pop{resume_, depth, return_depth_, return_depth_};
     try {
         call(vector);
     } catch (const ExceptionReturn& r) {

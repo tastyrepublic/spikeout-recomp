@@ -30,6 +30,12 @@ bool emulated(const Region& region, uint32_t) {
     case Device::SecurityCrypt:
     case Device::Rtc:
     case Device::SoundUart:
+    case Device::Real3dCommand:
+    case Device::Real3dCullingLow:
+    case Device::Real3dCullingHigh:
+    case Device::Real3dTextureFifo:
+    case Device::Real3dPolygonRam:
+    case Device::Real3dConfig:
         return true;
     default:
         return false;
@@ -79,7 +85,7 @@ void Mpc106::write_data(uint32_t offset, uint8_t value) {
 
 Bus::Bus(const RomSet& roms)
     : roms_(roms), ram_(kWorkRamSize, 0), netboard_(std::make_unique<SimNetBoard>()),
-      security_ram_(kSecurityRamSize, 0), tile_ram_(kTileRamSize, 0), backup_ram_(kBackupRamSize, 0) {
+      real3d_(roms.region(RomRegionId::Vrom)), security_ram_(kSecurityRamSize, 0), tile_ram_(kTileRamSize, 0), backup_ram_(kBackupRamSize, 0) {
     crypt_.set_reader([this](uint32_t word) -> uint16_t { // the top half of the RAM's 32-bit word `word`
         return word < kSecurityRamSize / 4 ? static_cast<uint16_t>(load_be32(&security_ram_[word * 4]) >> 16) : 0;
     });
@@ -398,6 +404,28 @@ void Bus::write_slow(uint32_t addr, uint32_t value, uint32_t size) {
         for (uint32_t i = 0; i < size; ++i)
             io_write(region->offset(addr) + i, static_cast<uint8_t>(value >> (8 * (size - 1 - i))));
         return;
+    case Device::Real3dCommand:
+        real3d_.write_command();
+        return;
+    case Device::Real3dCullingLow:
+    case Device::Real3dCullingHigh:
+    case Device::Real3dTextureFifo:
+    case Device::Real3dPolygonRam:
+    case Device::Real3dConfig: { // 32-bit only
+        if (size != 4) {
+            count(region, addr, true);
+            return;
+        }
+        const uint32_t off = region->offset(addr);
+        switch (region->device) {
+        case Device::Real3dCullingLow:  real3d_.write_culling_low(off, value); break;
+        case Device::Real3dCullingHigh: real3d_.write_culling_high(off, value); break;
+        case Device::Real3dTextureFifo: real3d_.write_texture_fifo(value); break;
+        case Device::Real3dPolygonRam:  real3d_.write_polygon(off, value); break;
+        default:                        real3d_.write_config(off, value); break;
+        }
+        return;
+    }
     case Device::Real3dDma: // 8-bit status/config registers, 32-bit byte-swapped address/length/command
         if (size == 1) dma_write8(addr & 0xFF, static_cast<uint8_t>(value));
         else if (size == 4) dma_write32(addr & 0xFF, bswap32(value));

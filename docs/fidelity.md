@@ -60,6 +60,23 @@ board), and keep the old behavior selectable while it is being tested.
   both emulators. Composite is 2D only: black, the layers below the 3D,
   the layers above.
 
+## Real3D (3D)
+
+The first renderer (`m3::Real3dRenderer`, software) draws the scene in
+memory at the end of each frame, with fog (per viewport, by each
+polygon's fog intensity). Not modelled yet, roughly in order of what
+you'd notice: the spotlight, specular highlights, blending between LOD
+levels (the nearer level is drawn whole), frustum culling (the rasterizer
+clips instead, which only costs time), translucency order (drawn in scene
+order, not sorted), texture filtering (nearest texel), fixed shading and
+the Step 1.5 luminous rules.
+
+Timing: writes to high culling RAM and polygon RAM after the ping-pong
+flip go into the update buffers in low culling RAM and are applied at
+VBlank, after the frame is drawn, as Supermodel does (`m3::Real3d`).
+Supermodel also waits for both the command port and the tile generator to
+say a frame is ready before drawing; we draw every frame.
+
 ## Settings EEPROM and security board
 
 - **Done (datasheet):** the 93C46's dummy 0 bit before READ data. Supermodel

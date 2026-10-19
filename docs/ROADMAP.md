@@ -35,6 +35,7 @@ Each milestone ends with something you can run and check.
 - [x] Sound board link: MIDI port and IRQ 0x40 in VBlank (the game queues its sound commands and waits on them); the bytes are kept for a sound board
 - [x] Return sites: a resumed task can return into a function it called from before it yielded (`resume_at`, about 7,000 sites)
 - [x] The attract mode runs: logo, title, INSERT COIN, BASIC OPERATION (16,633 frames with no missing code)
+- [x] Gameplay: coin, start, fighter select and the first stage with the fighters in 3D (`gamerun --press`), 11,000 frames with no missing code. Fixed on the way: FPSCR[FPRF] after FP arithmetic (the fighters were NaN), returns past several calls (the scheduler nested until the stack overflowed)
 - [ ] Reference interpreter for code that the static pass misses, with logging so it can be added to the recompiled set
 - [ ] **Goal:** reaches the attract loop, verified against Supermodel's behavior
 
@@ -42,8 +43,11 @@ Each milestone ends with something you can run and check.
 
 - [x] SDL3 window and frontend (`spikeout`: the game on its own thread at 57.524 Hz, keyboard to the I/O board)
 - [x] Tilegen 2D layers (`m3::TilegenRenderer`, drawn a line at a time): boot text, logos, attract screens
-- [ ] Real3D Pro-1000: display list / culling node walker
-- [ ] Polygon and texture decoding, native renderer (Vulkan/Metal via SDL GPU)
+- [x] Real3D Pro-1000: memory, texture uploads, the viewport and culling-node walker, model decoding (`m3::Real3d`, `m3::Real3dRenderer`)
+- [x] Software rasterizer (depth buffer, perspective-correct textures, sun and ambient light; bands of lines on several threads): the attract mode in 3D at about real time
+- [x] Fog and the ping-pong update buffers
+- [ ] Still missing from the 3D: spotlight, specular, LOD blending, frustum culling, translucency sorting
+- [ ] Native renderer (Vulkan/Metal via SDL GPU)
 - [ ] Widescreen and high resolution
 - [ ] **Goal:** attract mode and gameplay render correctly
 

@@ -171,10 +171,16 @@ private:
         return "c.jump(" + hex(target) + "); return;";
     }
 
+    // After a call: if the callee returned elsewhere, follow it there, or
+    // return at once when an outer call waits for that address.
+    static std::string after_call(uint32_t next) {
+        return "if (c.returned_to != " + hex(next) + " && c.follow_return(" + hex(next) + ")) return;";
+    }
+
     std::string call(uint32_t target, uint32_t next) const {
         const std::string invoke =
             compiled_.contains(target) ? function_name(target) + "(c);" : "c.call(" + hex(target) + ");";
-        return invoke + " if (c.returned_to != " + hex(next) + ") c.follow_return(" + hex(next) + ");";
+        return "c.push_return(" + hex(next) + "); " + invoke + " c.pop_return(); " + after_call(next);
     }
 
     // Branch condition of a bc-type instruction, "" when it always branches.
@@ -214,7 +220,7 @@ private:
         // bclr / bcctr
         const std::string reg = in.op == Op::Bclr ? "s.lr" : "s.ctr";
         if (in.lk()) {
-            const std::string body = "c.call(t); if (c.returned_to != " + hex(next) + ") c.follow_return(" + hex(next) + ");";
+            const std::string body = "c.push_return(" + hex(next) + "); c.call(t); c.pop_return(); " + after_call(next);
             return "{ const uint32_t t = " + reg + " & ~3u; " + set_lr + " " + guarded(cond, body) + " }";
         }
         std::string act;
@@ -478,8 +484,15 @@ private:
         auto mem = [&](bool indexed, const std::string& action, bool update) {
             return "{ " + (indexed ? ea_x : ea_d) + action + (update ? " " + A + " = ea;" : "") + " }";
         };
-        auto dbl = [&](const std::string& expr) { return FD + " = ops::bits(" + expr + ");" + cr1; };
-        auto sgl = [&](const std::string& expr) { return FD + " = ops::round_single(" + expr + ");" + cr1; };
+        // RECOMP_FP_CHECK: nothing unless built with SPIKEOUT_FP_TRAP (finds where NaNs start).
+        const std::string check = " RECOMP_FP_CHECK(" + hex(pc) + ", " + std::to_string(in.rd()) + ");";
+        // Arithmetic results set FPSCR[FPRF].
+        auto dbl = [&](const std::string& expr) {
+            return FD + " = ops::bits(" + expr + "); ops::set_fprf(s, " + FD + ", false);" + check + cr1;
+        };
+        auto sgl = [&](const std::string& expr) {
+            return FD + " = ops::round_single(" + expr + "); ops::set_fprf(s, " + FD + ", true);" + check + cr1;
+        };
         auto raw = [&](const std::string& expr) { return FD + " = " + expr + ";" + cr1; };
         const std::string lfs = FD + " = ops::single_to_double(c.read32(ea));";
         const std::string lfd = FD + " = c.read64(ea);";

@@ -63,6 +63,18 @@ public:
     // Where the last `blr` returned to; checked after every call.
     uint32_t returned_to = 0;
 
+    // Built with SPIKEOUT_FP_TRAP, the recompiled code reports every FP
+    // result here: the first NaN found (address and bits) is kept, to find
+    // where one starts.
+    void fp_check(uint32_t pc, uint64_t bits) {
+        if (first_nan_pc == 0 && (bits & 0x7FF0000000000000u) == 0x7FF0000000000000u && (bits & 0x000FFFFFFFFFFFFFu)) {
+            first_nan_pc = pc;
+            first_nan_bits = bits;
+        }
+    }
+    uint32_t first_nan_pc = 0;
+    uint64_t first_nan_bits = 0;
+
     // ---- Clock ----
     // Recompiled code doesn't count cycles: time is the number of basic
     // blocks run, times `cycles_per_block` CPU cycles. That keeps every run
@@ -140,11 +152,24 @@ public:
     void jump(uint32_t addr) { call(addr); }
 
     // After a call, the callee's blr went somewhere other than `next`, the
-    // instruction after the call. Hand-written code does that on purpose:
-    // Spikeout's printf sets LR to its own epilogue and branches to handlers
-    // that end in blr. So carry on where it went, as the CPU would, until
-    // execution comes back to `next`.
-    void follow_return(uint32_t next);
+    // instruction after the call. If an outer call is waiting for that
+    // address, returns true: the caller returns at once, and so do the
+    // frames above it, until the one that waits for it (a task that yields
+    // by switching back to its scheduler's stack returns that way). Otherwise
+    // the code went somewhere new on purpose (Spikeout's printf sets LR to
+    // its own epilogue and branches to handlers that end in blr), so carry on
+    // there, as the CPU would, until execution comes back to `next`.
+    bool follow_return(uint32_t next);
+
+    // The return addresses outer calls wait for (generated code pushes one
+    // around each call), so follow_return can tell a return to an outer
+    // caller from a jump.
+    void push_return(uint32_t next) {
+        if (return_depth_ < return_stack_.size()) return_stack_[return_depth_] = next;
+        ++return_depth_;
+    }
+    void pop_return() { --return_depth_; }
+    size_t return_depth() const { return return_depth_; }
     // follow_return() gave up: the code never came back.
     [[noreturn]] void bad_return(uint32_t expected);
 
@@ -182,6 +207,8 @@ private:
 
     std::span<const FunctionEntry> functions_;
     std::vector<uint32_t> resume_;
+    std::array<uint32_t, 4096> return_stack_{};
+    size_t return_depth_ = 0;
 
     uint64_t next_check_ = 1;
     uint64_t block_limit_ = UINT64_MAX - 1;

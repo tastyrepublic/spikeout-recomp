@@ -347,6 +347,37 @@ Program build() {
     auto A = [](uint32_t op, uint32_t xo, uint32_t d, uint32_t fa, uint32_t fb, uint32_t fc) {
         return op << 26 | d << 21 | fa << 16 | fb << 11 | fc << 6 | xo << 1;
     };
+    // unwind: inner returns straight to the instruction after outer's call (r5
+    // holds it), as a task does when it yields to its scheduler: middle must
+    // not carry on. r4 counts what ran: outer adds 1, middle 100.
+    a.entry("unwind_outer");
+    a.emit(mflr(31));
+    a.emit(li(4, 0));
+    a.bl("unwind_middle");
+    a.label("unwind_outer.after");
+    a.emit(addi(4, 4, 1));
+    a.emit(mtlr(31));
+    a.emit(kBlr);
+    a.entry("unwind_middle");
+    a.emit(mflr(30));
+    a.bl("unwind_inner");
+    a.emit(addi(4, 4, 100));
+    a.emit(mtlr(30));
+    a.emit(kBlr);
+    a.entry("unwind_inner");
+    a.emit(mtlr(5));
+    a.emit(kBlr);
+
+    // fprf: CR0 from FPSCR[FPCC] after a zero result, CR1 after a negative one (mfcr r5).
+    a.entry("fprf");
+    a.emit(D(48, 1, 3, 0));                               // lfs    f1, 0(r3)  1.5
+    a.emit(A(59, 20, 2, 1, 1, 0));                        // fsubs  f2, f1, f1 -> +0
+    a.emit(63u << 26 | 0u << 23 | 4u << 18 | 64u << 1);    // mcrfs  cr0, cr4
+    a.emit(A(59, 20, 3, 2, 1, 0));                        // fsubs  f3, f2, f1 -> -1.5
+    a.emit(63u << 26 | 1u << 23 | 4u << 18 | 64u << 1);    // mcrfs  cr1, cr4
+    a.emit(X(19, 5, 0, 0));                               // mfcr   r5
+    a.emit(kBlr);
+
     a.entry("fp");
     a.emit(D(48, 1, 3, 0));               // lfs    f1, 0(r3)     1.5
     a.emit(D(48, 2, 3, 4));               // lfs    f2, 4(r3)     2.25

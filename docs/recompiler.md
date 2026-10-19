@@ -39,6 +39,14 @@ site}`: `Context::call()` sets `c.resume_at`, and the function's first
 lines `goto` that site's label. All state is in `c.cpu`, so starting a
 function in the middle is just a jump (about 7,000 sites in the game).
 
+**Returns past several calls.** A task yields by switching back to its
+scheduler's stack and returning to the scheduler's call: past every
+function it was called through. Each call pushes its return address on
+`Context`'s return stack; when a callee returns somewhere else and an
+outer call waits for that address, the frames in between return at once
+(`follow_return` says so) instead of running it as new code, which nested
+the scheduler one level deeper each time until the C++ stack ran out.
+
 Register state lives in `ppc::CpuState` (`s.gpr[n]`, `s.cr`, `s.xer`, ...);
 flags are computed by the small inline helpers in `recomp/guest.hpp`.
 Every instruction's disassembly is kept as a comment.
@@ -120,11 +128,15 @@ matter:
   never fuses a separate multiply and add: results are the same on every
   machine, which save states and rollback netplay depend on.
 - FPSCR: the rounding mode is honored (`fctiw`, and the host's rounding
-  mode follows writes to FPSCR), compares set FPCC, `mcrfs` clears the
-  exception bits it reads. Not modelled: exception bits and FPRF after
-  arithmetic, double rounding in single-precision results (computed in
-  double, then rounded), and `fres`/`frsqrte` return exact values rather
-  than the 603e's estimates.
+  mode follows writes to FPSCR), compares set FPCC, arithmetic sets FPRF
+  (the result's class), `mcrfs` clears the exception bits it reads.
+  Spikeout tests FPRF: it checks a vector's length was zero with `mcrfs`
+  before normalizing it, and without FPRF its characters' matrices came
+  out NaN (the fighters didn't show). Not modelled: exception bits,
+  double rounding in single-precision results (computed in double, then
+  rounded), and `fres`/`frsqrte` return exact values rather than the
+  603e's estimates. Built with `-DSPIKEOUT_FP_TRAP=ON`, the game reports
+  the first instruction whose result is a NaN (`gamerun` prints it).
 
 ## Bus
 
@@ -242,9 +254,16 @@ With the RTC emulated too, the game now runs its attract mode with
 nothing missing: 6 billion blocks, 16,633 frames (almost 5 minutes of game
 time). The 2D layers (`m3::TilegenRenderer`) show the boot text, the
 logo, the title, "INSERT COIN(S)" and the "BASIC OPERATION" screens over
-their backgrounds; the 3D in between isn't drawn yet. Drawing costs:
+their backgrounds. Drawing costs:
 `gamerun` runs about 35 million blocks per second with it, close to twice
 real time.
+
+The Real3D's memory is now kept (`m3::Real3d`) and its scene drawn in
+software (`m3::Real3dRenderer`, see [hardware-notes.md](hardware-notes.md)
+and [fidelity.md](fidelity.md) for what's left): the attract mode's
+stages, title and demo screens show in 3D between the 2D layers. With
+the 3D the window runs at about real time; `gamerun` draws it only when
+it writes screenshots.
 
 The game's PCI configuration routines jump into stub tables
 (`base + size * 12`) that the analysis can't follow; their addresses are

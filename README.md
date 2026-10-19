@@ -86,8 +86,10 @@ The build also recompiles the whole game (`game_ram`, a few minutes the
 first time). `boottest` runs the recompiled boot code from the reset vector to the
 jump into RAM and checks what it did; `gamerun` keeps going into the game
 and reports where it stops (`--screenshot`, `--shot-every N` save the
-screen as PNG). Generated code is derived from your
-ROMs: it stays in the build directory and is never committed.
+screen as PNG; `--press coin@1200 --press start@1300` presses inputs at
+given frames, to play through menus without a window). Generated code is
+derived from your ROMs: it stays in the build directory and is never
+committed.
 
 `spikeout` runs the game in a window (SDL3: CMake uses an installed one,
 or downloads and builds SDL 3.4 with the project; `-DSPIKEOUT_FRONTEND=OFF`
@@ -97,8 +99,8 @@ leaves it out):
 build/spikeout path/to/spikeofe
 ```
 
-It shows the 2D layers only so far (boot text, logos, the attract
-screens; the 3D isn't drawn yet). Keys: `5` coin, `1` start, `F2` test,
+It shows the 2D layers and the 3D (drawn in software for now, without the spotlight
+and a few other effects). Keys: `5` coin, `1` start, `F2` test,
 `F1` service, arrows, `Z` beat, `X` charge, `C` jump, `V` shift; hold
 `Tab` to run as fast as possible, `F12` for a screenshot, `Esc` to quit.
 

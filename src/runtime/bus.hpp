@@ -9,6 +9,7 @@
 
 #include "ppc/cpu_state.hpp"
 #include "runtime/crypt315_5881.hpp"
+#include "runtime/real3d.hpp"
 #include "runtime/rtc.hpp"
 #include "runtime/eeprom.hpp"
 #include "runtime/jtag.hpp"
@@ -162,7 +163,10 @@ public:
     // with it; games pace their rendering on it (Supermodel's
     // CReal3D::ReadRegister / FlipPingPongBit).
     uint32_t real3d_register(uint32_t reg) const;
-    void flip_ping_pong() { ping_pong_ = !ping_pong_; }
+    void flip_ping_pong() {
+        ping_pong_ = !ping_pong_;
+        real3d_.ping_pong_flipped();
+    }
     bool ping_pong() const { return ping_pong_; }
     const Jtag& jtag() const { return jtag_; }
     // Tilegen registers (0xF1180000, 32-bit only), as the tile generator
@@ -201,6 +205,10 @@ public:
     // 1970-01-01 00:00; a frontend sets it (rtc().set_time) from the host's
     // clock or a fixed time for reproducible runs.
     Rtc72421& rtc() { return rtc_; }
+
+    // Real3D memory (scene, models, textures), for the renderer.
+    const Real3d& real3d() const { return real3d_; }
+    Real3d& real3d() { return real3d_; }
 
     // Security board (315-5881). The game writes encrypted data into the
     // board's RAM (0xF0180000, 128 KB), sets a sequence key and reads the
@@ -283,6 +291,7 @@ private:
     uint8_t io_bank_ = 0;
     uint8_t io_read(uint32_t reg);
     void io_write(uint32_t reg, uint8_t value);
+    Real3d real3d_;
     Rtc72421 rtc_{ppc::CpuState::kCoreClockHz};
     uint8_t midi_ctrl_ = 0;
     std::vector<uint8_t> midi_out_;

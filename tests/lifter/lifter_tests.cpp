@@ -243,7 +243,7 @@ TEST_CASE("lifter: floating point") {
     CHECK_EQ(m.s.fpr[20], 0x7FF0000020000000u);               // lfs keeps the NaN signaling
     CHECK_EQ(m.bus.read32(kBuffer + 60), 0x7F800001u);        // and stfs gives it back unchanged
     CHECK_EQ(m.s.gpr[5] & 0x0F000000u, 0x08000000u);          // fcmpu cr1: 1.5 < 2.25
-    CHECK_EQ(m.s.fpscr & 0xF000u, 0x8000u);                   // FPCC: FL
+    CHECK_EQ((m.s.fpscr >> 12) & 0x1Fu, 0x04u);               // FPRF: the last arithmetic (fadds f19), + normal
 }
 
 TEST_CASE("lifter: sc enters the 0xC00 handler and its rfi returns after the sc") {
@@ -407,4 +407,26 @@ TEST_CASE("frame timing: display line and frame hooks, MIDI IRQs in VBlank") {
     CHECK_EQ(lines, 384u);
     CHECK_EQ(last_line, 383u);
     CHECK_EQ(frames, 1u);
+}
+
+TEST_CASE("lifter: FP arithmetic sets FPSCR[FPRF], which mcrfs reads") {
+    // Spikeout checks a vector's length was zero this way before normalizing it.
+    Machine m;
+    m.bus.write32(kBuffer, std::bit_cast<uint32_t>(1.5f));
+    m.s.gpr[3] = kBuffer;
+    CHECK_EQ(m.run("fprf"), kReturnAddr);
+    CHECK_EQ(m.s.gpr[5] >> 28, 0x2u);         // +0: FE (equal)
+    CHECK_EQ((m.s.gpr[5] >> 24) & 0xF, 0x8u); // -1.5: FL (less)
+    CHECK_EQ((m.s.fpscr >> 12) & 0x1F, 0x08u); // FPRF of -1.5: negative normal
+}
+
+TEST_CASE("lifter: a return to an outer caller unwinds the calls in between") {
+    // A task yielding to its scheduler returns past the functions it was
+    // called through: they must not carry on, nor be run again as new code.
+    Machine m;
+    m.s.gpr[5] = addr_of("unwind_outer.after");
+    const size_t depth = m.c.return_depth();
+    CHECK_EQ(m.run("unwind_outer"), kReturnAddr);
+    CHECK_EQ(m.s.gpr[4], 1u); // outer's add only, not middle's
+    CHECK_EQ(m.c.return_depth(), depth);
 }

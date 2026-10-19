@@ -46,6 +46,8 @@ add_library(m3runtime
     src/runtime/eeprom.cpp
     src/runtime/rtc.cpp
     src/runtime/tilegen.cpp
+    src/runtime/real3d.cpp
+    src/runtime/real3d_render.cpp
     src/runtime/crypt315_5881.cpp
     src/runtime/memory_map.cpp
     src/runtime/rom.cpp
@@ -145,6 +147,11 @@ if(SPIKEOUT_ROM_DIR)
         COMMENT "Recompiling the game"
         VERBATIM)
     add_library(game_ram STATIC ${game_ram_files})
+    # Report where FP NaNs start (Context::first_nan_pc); slows the game down.
+    option(SPIKEOUT_FP_TRAP "Check every FP result of the recompiled game for NaN" OFF)
+    if(SPIKEOUT_FP_TRAP)
+        target_compile_definitions(game_ram PRIVATE SPIKEOUT_FP_TRAP)
+    endif()
     target_link_libraries(game_ram PUBLIC recomp_runtime PRIVATE spikeout_warnings)
     if(MSVC)
         target_compile_options(game_ram PRIVATE /bigobj)

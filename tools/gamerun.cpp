@@ -3,7 +3,7 @@
 //
 //   gamerun <rom_dir> [--blocks N] [--text] [--dump-tile FILE]
 //           [--netboard sim|real] [--net-trace N] [--net-disasm FILE]
-//           [--screenshot FILE.png] [--shot-every N] [--coin FRAME]
+//           [--screenshot FILE.png] [--shot-every N] [--press NAME@FRAME[:N]]...
 //
 // Built only when CMake's SPIKEOUT_ROM_DIR is set. A run ends at the first
 // thing the runtime can't do yet (code that wasn't found, an exception, a
@@ -18,9 +18,14 @@
 // prints its first N accesses to the board's registers, --net-disasm writes
 // a disassembly of its RAM (the firmware; derived from the ROMs).
 //
-// The tile generator draws a line at a time as the frame runs (no 3D yet).
+// The tile generator draws a line at a time as the frame runs; the 3D is
+// drawn at the end of a frame, only when screenshots are being written.
 // --screenshot writes the last finished frame as a PNG; with --shot-every N
 // also FILE-<frame>.png every N frames.
+//
+// --press NAME@FRAME[:N] holds an input for N frames (default 6) from FRAME:
+// coin, start, test, service, beat, charge, shift, jump, up, down, left,
+// right. Repeat it for more presses.
 #include "games/games.hpp"
 #include "ppc/disasm.hpp"
 #include "ppc/instruction.hpp"
@@ -29,6 +34,7 @@
 #include "runtime/bus.hpp"
 #include "runtime/commboard.hpp"
 #include "runtime/rom.hpp"
+#include "runtime/real3d_render.hpp"
 #include "runtime/tilegen.hpp"
 #include "game_setup.hpp"
 #include "png_write.hpp"
@@ -42,12 +48,41 @@
 #include <string>
 #include <vector>
 
+namespace {
+
+struct Press {
+    std::string name;
+    uint64_t frame = 0, frames = 6;
+    int bank = 0; // 0: input bank 0 (coin, start...), 1: the controls byte
+    int bit = 0;
+};
+
+// Where each input is, active low (hardware-notes.md, Inputs).
+bool input_bit(const std::string& name, int& bank, int& bit) {
+    static const struct {
+        const char* name;
+        int bank, bit;
+    } kInputs[] = {{"coin", 0, 0},  {"test", 0, 2},  {"service", 0, 3}, {"start", 0, 4},
+                   {"beat", 1, 0},  {"charge", 1, 1}, {"shift", 1, 2},  {"jump", 1, 3},
+                   {"down", 1, 4},  {"up", 1, 5},     {"right", 1, 6},  {"left", 1, 7}};
+    for (const auto& i : kInputs)
+        if (name == i.name) {
+            bank = i.bank;
+            bit = i.bit;
+            return true;
+        }
+    return false;
+}
+
+} // namespace
+
 int main(int argc, char** argv) {
     const char* dir = nullptr;
     const char* dump_tile = nullptr;
     const char* net_disasm = nullptr;
     const char* screenshot = nullptr;
-    uint64_t shot_every = 0, tilegen_trace = 0, coin_frame = 0;
+    uint64_t shot_every = 0, tilegen_trace = 0;
+    std::vector<Press> presses;
     bool show_text = false, real_netboard = true, force_master = false;
     std::size_t net_trace = 0;
     int64_t blocks = 200'000'000;
@@ -63,7 +98,20 @@ int main(int argc, char** argv) {
         else if (arg == "--screenshot" && i + 1 < argc) screenshot = argv[++i];
         else if (arg == "--shot-every" && i + 1 < argc) shot_every = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--tilegen-trace" && i + 1 < argc) tilegen_trace = std::strtoull(argv[++i], nullptr, 0);
-        else if (arg == "--coin" && i + 1 < argc) coin_frame = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--press" && i + 1 < argc) {
+            // NAME@FRAME[:N]: hold NAME for N frames (default 6) from FRAME.
+            const std::string spec = argv[++i];
+            const size_t at = spec.find('@'), colon = spec.find(':', at == std::string::npos ? 0 : at);
+            Press p;
+            p.name = spec.substr(0, at);
+            if (at != std::string::npos) p.frame = std::strtoull(spec.c_str() + at + 1, nullptr, 0);
+            if (colon != std::string::npos) p.frames = std::strtoull(spec.c_str() + colon + 1, nullptr, 0);
+            if (!input_bit(p.name, p.bank, p.bit)) {
+                std::fprintf(stderr, "gamerun: unknown input '%s'\n", p.name.c_str());
+                return 2;
+            }
+            presses.push_back(p);
+        }
         else if (!dir) dir = argv[i];
         else dir = nullptr, i = argc;
     }
@@ -100,17 +148,23 @@ int main(int argc, char** argv) {
     c.set_scheduler(&timing);
     // The 2D layers, a line at a time; each finished frame is kept for --screenshot.
     m3::TilegenRenderer tilegen;
+    m3::Real3dRenderer real3d;
     std::vector<uint32_t> screen(m3::TilegenRenderer::kWidth * m3::TilegenRenderer::kHeight);
     timing.on_display_line = [&](uint32_t line) {
         if (line == 0) tilegen.begin_frame();
         tilegen.draw_line(bus, static_cast<int>(line));
     };
     timing.on_frame_end = [&] {
-        tilegen.composite(screen);
+        if (screenshot) real3d.render(bus.real3d()); // the 3D is drawn in software: only when it will be seen
+        tilegen.composite(screen, real3d.image());
         bus.midi_out().clear(); // no sound board yet
-        // --coin: hold coin 1 (bank 0 bit 0, active low) for 6 frames.
-        const bool coin = coin_frame && timing.frames() >= coin_frame && timing.frames() < coin_frame + 6;
-        bus.inputs.bank0 = static_cast<uint8_t>(coin ? 0xFE : 0xFF);
+        // --press: inputs held for the coming frame (active low).
+        uint8_t in[2] = {0xFF, 0xFF};
+        for (const Press& p : presses)
+            if (timing.frames() >= p.frame && timing.frames() < p.frame + p.frames)
+                in[p.bank] = static_cast<uint8_t>(in[p.bank] & ~(1u << p.bit));
+        bus.inputs.bank0 = in[0];
+        bus.inputs.controls = in[1];
         if (tilegen_trace && timing.frames() % tilegen_trace == 0) {
             std::printf("frame %6llu tilegen", static_cast<unsigned long long>(timing.frames()));
             for (uint32_t reg : {0x20u, 0x40u, 0x44u, 0x60u, 0x64u, 0x68u, 0x6Cu}) std::printf(" %02x=%08x", reg, bus.tile_reg(reg));
@@ -152,6 +206,23 @@ int main(int argc, char** argv) {
 
     std::printf("Network board: %s\n", bus.netboard().describe().c_str());
     std::printf("Sound board: %llu MIDI bytes sent (not emulated yet)\n", static_cast<unsigned long long>(bus.midi_bytes()));
+    if (c.first_nan_pc) // SPIKEOUT_FP_TRAP builds
+        std::printf("First FP NaN: at %08x (%016llx)\n", c.first_nan_pc, static_cast<unsigned long long>(c.first_nan_bits));
+    if (screenshot) {
+        const auto& st = real3d.stats();
+        std::printf("Real3D (last frame): %u viewports, %u nodes, %u models, %u polygons, %u triangles drawn; "
+                    "%llu textures uploaded\n",
+                    st.viewports, st.nodes, st.models, st.polygons, st.triangles_drawn,
+                    static_cast<unsigned long long>(bus.real3d().textures_uploaded()));
+        std::printf("  %u models in polygon RAM, %u hidden nodes, %u nodes too far (LOD)\n", st.models_in_polygon_ram,
+                    st.hidden_nodes, st.lod_rejected);
+        std::printf("  configuration registers: %08x %08x %08x %08x\n", bus.real3d().config(0), bus.real3d().config(1),
+                    bus.real3d().config(2), bus.real3d().config(3));
+        for (const auto& v : real3d.viewport_info())
+            std::printf("  viewport %06x: priority %d, %gx%g at (%g, %g), eye matrix %u, %u models%s\n", v.addr,
+                        v.priority, static_cast<double>(v.width), static_cast<double>(v.height),
+                        static_cast<double>(v.x), static_cast<double>(v.y), v.eye, v.models, v.disabled ? ", off" : "");
+    }
     std::printf("EEPROM:");
     for (uint32_t i = 0; i < 64; ++i) std::printf("%s%04x", i % 16 == 0 ? "\n  " : " ", bus.eeprom().words()[i]);
     std::printf("\n");

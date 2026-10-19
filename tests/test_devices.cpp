@@ -5,8 +5,10 @@
 #include "runtime/jtag.hpp"
 #include "runtime/netboard.hpp"
 #include "runtime/rom.hpp"
+#include "runtime/real3d_render.hpp"
 #include "runtime/tilegen.hpp"
 
+#include <bit>
 #include <vector>
 
 using namespace m3;
@@ -371,4 +373,94 @@ TEST_CASE("sound: MIDI port bytes, control and IRQ 0x40") {
     CHECK_EQ(bus.irq().state() & 0x40, 0u);
     CHECK((bus.midi_out() == std::vector<uint8_t>{0xAE}));
     CHECK_EQ(bus.midi_bytes(), uint64_t{1});
+}
+
+TEST_CASE("real3d: textures through the FIFO land in 8x8 tiles, pairs swapped") {
+    RomSet roms;
+    Bus bus(roms);
+    // A 32x32 16-bit texture without mipmaps at (64, 32): texel value = its
+    // index in the upload order.
+    const uint32_t header = 0x01000000u | 1u << 23 | (32 / 32) << 7 | (64 / 32);
+    const uint32_t texels = 32 * 32;
+    auto fifo = [&](uint32_t word) { bus.write32(0x94000000, bswap32(word)); }; // the Real3D sees it byte-swapped
+    fifo((texels * 2 + 8) * 2 - 2); // length word: (2 + w / 2) / 4 words in all
+    fifo(header);
+    for (uint32_t i = 0; i < texels; i += 2) fifo(i | (i + 1) << 16);
+    bus.write32(0x88000000, 0);
+    const Real3d& r = bus.real3d();
+    CHECK_EQ(r.textures_uploaded(), uint64_t{1});
+    CHECK_EQ(r.texel(64, 32), 1u);  // the first tile's order: 1, 0, 5, 4, ...
+    CHECK_EQ(r.texel(65, 32), 0u);
+    CHECK_EQ(r.texel(66, 32), 5u);
+    CHECK_EQ(r.texel(64, 33), 3u);  // second row: 3, 2, 7, 6, ...
+    CHECK_EQ(r.texel(64, 34), 17u); // third: 17, 16, ...
+    CHECK_EQ(r.texel(72, 32), 65u); // the next tile starts at 64
+}
+
+TEST_CASE("real3d: VROM words are little-endian, polygon RAM takes the CPU's bytes swapped") {
+    const std::vector<uint8_t> vrom(0x400010, 0x00);
+    std::vector<uint8_t> v = vrom;
+    v[0x400000] = 0x11;
+    v[0x400001] = 0x22;
+    v[0x400002] = 0x33;
+    v[0x400003] = 0x44;
+    Real3d r(v);
+    CHECK_EQ(r.model(0x100000), 0x44332211u);
+    r.write_polygon(8, 0xAABBCCDD);
+    CHECK_EQ(r.model(2), 0xDDCCBBAAu);
+}
+
+namespace {
+
+uint32_t fbits(float f) { return std::bit_cast<uint32_t>(f); }
+
+// One viewport over the whole screen and a red quad 5 units in front.
+void build_scene(Real3d& r) {
+    auto cull = [&](uint32_t word_addr, uint32_t value) { // as the Real3D sees it
+        if (word_addr >= 0x800000) r.write_culling_high((word_addr - 0x800000) * 4, bswap32(value));
+        else r.write_culling_low(word_addr * 4, bswap32(value));
+    };
+    auto poly = [&](uint32_t word_addr, uint32_t value) { r.write_polygon(word_addr * 4, bswap32(value)); };
+    cull(0x800000 + 0x00, 0);                  // enabled, priority 0
+    cull(0x800000 + 0x01, 0x01000000);         // the last viewport
+    cull(0x800000 + 0x02, 0x01000100);         // root: the model at polygon RAM 0x100
+    for (uint32_t w : {0x8u, 0x9u, 0xAu, 0xBu}) cull(0x800000 + w, fbits(0.5f)); // frustum -1..1
+    cull(0x800000 + 0x14, (384u * 4) << 16 | 496u * 4); // 496 x 384
+    cull(0x800000 + 0x15, 0);                  // eye matrix 0
+    cull(0x800000 + 0x16, 0x1000);             // matrix base in low culling RAM
+    cull(0x800000 + 0x17, 0x2000);             // LOD table (unused)
+    const float identity[12] = {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1};
+    for (uint32_t i = 0; i < 12; ++i) cull(0x1000 + i, fbits(identity[i]));
+    // The quad: 7 header words, then 4 vertices of x, y, z, uv.
+    const uint32_t header[7] = {0x40, 0x06, 0, 0, 0xFF000000u, 0, 0x810000};
+    for (uint32_t i = 0; i < 7; ++i) poly(0x100 + i, header[i]);
+    auto fixed = [](float f) { return static_cast<uint32_t>(static_cast<int32_t>(f * 2048.0f) << 8); };
+    const float corners[4][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
+    for (uint32_t k = 0; k < 4; ++k) { // x = 5 is ahead of the eye (GL: -z)
+        poly(0x107 + k * 4, fixed(5));
+        poly(0x108 + k * 4, fixed(corners[k][0]));
+        poly(0x109 + k * 4, fixed(corners[k][1]));
+        poly(0x10A + k * 4, 0);
+    }
+}
+
+} // namespace
+
+TEST_CASE("real3d: a viewport and a red quad, drawn the same with one thread or four") {
+    Real3d mem;
+    build_scene(mem);
+    Real3dRenderer one(1), four(4);
+    one.render(mem);
+    four.render(mem);
+    CHECK_EQ(one.stats().viewports, 1u);
+    CHECK_EQ(one.stats().models, 1u);
+    CHECK_EQ(one.stats().polygons, 1u);
+    const size_t centre = 192 * 496 + 248;
+    CHECK_EQ(one.image()[centre], 0xFFFF0000u); // red, lighting off
+    CHECK_EQ(one.image()[0], 0u);               // nothing at the corner
+    // The quad spans y and z of +-1 at distance 5: a fifth of the half-width.
+    CHECK_EQ(one.image()[192 * 496 + 248 + 40], 0xFFFF0000u);
+    CHECK_EQ(one.image()[192 * 496 + 248 + 60], 0u);
+    CHECK((std::vector<uint32_t>(one.image().begin(), one.image().end()) ==
+           std::vector<uint32_t>(four.image().begin(), four.image().end())));
 }

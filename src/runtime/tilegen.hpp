@@ -43,8 +43,9 @@ public:
     // Pixels as 0xAARRGGBB; alpha 0 where nothing was drawn.
     std::span<const uint32_t> bottom() const { return bottom_; }
     std::span<const uint32_t> top() const { return top_; }
-    // Black, then the layers below the 3D, then those above (no 3D yet).
-    void composite(std::span<uint32_t> out) const;
+    // Black, then the layers below the 3D, the 3D picture (`three_d`, same
+    // size, alpha 0 where empty; may be empty), then the layers above.
+    void composite(std::span<uint32_t> out, std::span<const uint32_t> three_d = {}) const;
 
 private:
     std::vector<uint32_t> bottom_, top_;
