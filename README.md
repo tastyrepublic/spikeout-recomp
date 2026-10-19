@@ -26,7 +26,7 @@ Please don't open issues or PRs containing ROM data or links to it.
 | PowerPC 603e decoder | `src/ppc/instruction.hpp`, `decoder.cpp` | Decodes every 603e instruction, including the 603-only `tlbld`/`tlbli` |
 | Disassembler | `src/ppc/disasm.cpp` | Text output with simplified mnemonics (`li`, `mr`, `beq`, `blr`, ...) |
 | CPU state | `src/ppc/cpu_state.hpp` | Registers as a plain struct, ready for fast save states |
-| Memory map | `src/runtime/memory_map.*` | Step 2.1 address map ([docs](docs/memory-map.md)) |
+| Memory map | `src/runtime/memory_map.*` | Step 2.1 address map ([docs](docs/memory-map.md), [hardware notes](docs/hardware-notes.md)) |
 | ROM loader | `src/runtime/rom.*`, `src/games/` | Verifies sizes/CRC32s, interleaves chips, normalizes byte order |
 | Tools | `tools/` | `romcheck` (verify a set, show boot code) and `ppcdis` (disassemble) |
 
@@ -60,12 +60,16 @@ reset vector (`0xFFF00100`). To dig further:
 
 ## Online play
 
-Spikeout supports up to four players, originally over linked cabinets.
-The plan is **rollback netcode**: every player runs the full game locally,
-only controller inputs travel over the network, and late inputs are fixed by
-quickly rewinding and replaying a few frames. Recompiled code is deterministic and
-its state is small, which makes this practical. Details in
-[docs/netplay.md](docs/netplay.md).
+Each Spikeout cabinet is one player; co-op means up to four cabinets
+linked through their network boards. The plan has two stages:
+
+1. **Link mode:** each PC runs one board and the cabinet link goes over the
+   network, the way Supermodel does it. Best on LAN.
+2. **Rollback:** each PC runs all the linked boards, only controller inputs
+   travel over the network, and late inputs are fixed by rewinding and
+   replaying a few frames. The same code gives local co-op on one PC.
+
+Details in [docs/netplay.md](docs/netplay.md).
 
 ## Credits and references
 

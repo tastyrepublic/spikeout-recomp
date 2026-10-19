@@ -23,7 +23,8 @@ enum class Device : uint8_t {
     Real3dPolygonRam, // Real3D polygon RAM (write)
     Real3dConfig,     // Real3D configuration registers (write)
     Real3dDma,        // Real3D DMA controller (Step 2.x)
-    NetBoard,         // Model 3 comm/network board (cabinet link)
+    NetBoard,         // network board (cabinet link): +0x00000 comm RAM (64 KB),
+                      // +0x10000 I/O registers, +0x20000 net RAM (128 KB)
     Io,               // Sega 315-5649 I/O: inputs, EEPROM, outputs
     SoundUart,        // i8251 UART to the sound board (MIDI-style link)
     BackupRam,        // battery-backed SRAM
@@ -76,5 +77,10 @@ inline constexpr uint32_t kFixedCromBase = 0xFF800000;
 inline constexpr uint32_t kBankedCromBase = 0xFF000000;
 inline constexpr uint32_t kCromWindowSize = 0x00800000;
 inline constexpr uint32_t kResetVector = 0xFFF00100; // MSR[IP]=1 system reset
+
+// Reads from unmapped addresses return all ones. Spikeout depends on this:
+// its security check prints "ILLEGAL ROM" if certain unhandled reads give 0
+// (Supermodel, Model3.cpp, "Model 3 Security Device").
+inline constexpr uint32_t kOpenBus32 = 0xFFFFFFFF;
 
 } // namespace m3

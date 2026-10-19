@@ -9,6 +9,8 @@ Regions marked *mirrored* also respond with address bits 25–27 set
 (`0xF2xxxxxx` … `0xFExxxxxx`) in MAME; Supermodel only implements the
 `0xFExxxxxx` mirror, which is the one games are known to use.
 
+Reads from addresses not listed here return all ones.
+
 | Start | End | Device | Notes |
 |---|---|---|---|
 | `0x00000000` | `0x007FFFFF` | Work RAM | 8 MB |
@@ -20,7 +22,7 @@ Regions marked *mirrored* also respond with address bits 25–27 set
 | `0x94000000` | `0x940FFFFF` | Real3D texture FIFO | write (S) |
 | `0x98000000` | `0x983FFFFF` | Real3D polygon RAM | write; 4 MB per Supermodel, MAME maps 1 MB |
 | `0x9C000000` | `0x9CFFFFFF` | Real3D configuration registers | write (S) |
-| `0xC0000000` | `0xC003FFFF` | Network board | cabinet link |
+| `0xC0000000` | `0xC003FFFF` | Network board | comm RAM / I/O regs / net RAM, see [hardware notes](hardware-notes.md#network-board-0xc0000000) |
 | `0xC2000000` | `0xC20000FF` | Real3D DMA | Step 2.x |
 | `0xF0040000` | `0xF004003F` | 315-5649 I/O (inputs, EEPROM) | mirrored |
 | `0xF0080000` | `0xF008FFFF` | Sound board UART | mirrored |

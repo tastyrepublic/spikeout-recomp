@@ -17,9 +17,11 @@ Each milestone ends with something you can run and check.
 
 ## 2. Getting to the attract mode
 
-- [ ] Interrupt controller, decrementer and VBlank timing
+- [ ] Interrupt controller and decrementer
 - [ ] Banked CROM switching
 - [ ] 315-5881 security board decryption (key `0x29236FC8`)
+- [ ] Open-bus reads return all ones (Spikeout's ROM check needs it)
+- [ ] Frame timing: 57.524 Hz, 424 lines, IRQ 0x02/0x0D/0x40 as in [hardware-notes.md](hardware-notes.md)
 - [ ] EEPROM, RTC and backup RAM
 - [ ] Reference interpreter for code that the static pass misses, with logging so it can be added to the recompiled set
 - [ ] **Goal:** reaches the attract loop, verified against Supermodel's behavior
@@ -41,18 +43,23 @@ Each milestone ends with something you can run and check.
 
 ## 5. Local multiplayer
 
-- [ ] Four players on one PC in single-cabinet mode
+Spikeout is one player per cabinet; multiplayer means linked boards.
+
+- [ ] Network board emulation (Supermodel `Src/Network/` as reference)
+- [ ] Run 2–4 boards in one process with a virtual link → local co-op on one PC
 
 ## 6. Save states
 
-- [ ] Complete serializable machine state (CPU, RAM, video, sound, I/O)
+- [ ] Complete serializable machine state per board (CPU, RAM, video, sound, I/O, network board)
 - [ ] Save/load in under a millisecond; determinism tests (same inputs → same state hash)
 
 ## 7. Online play
 
-- [ ] Rollback netcode for 2–4 players, with spectators — see [netplay.md](netplay.md)
+See [netplay.md](netplay.md).
+
+- [ ] Mode A: one board per PC, cabinet link over the network (LAN first)
+- [ ] Mode B: rollback, every PC simulates all linked boards; 2–4 players plus spectators
 - [ ] Lobby / matchmaking; Steam networking as an optional backend
-- [ ] LAN mode that emulates the original cabinet link board
 
 ## 8. Release
 

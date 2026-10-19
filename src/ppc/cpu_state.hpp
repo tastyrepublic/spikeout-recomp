@@ -36,6 +36,8 @@ struct CpuState {
     std::array<uint32_t, 8> ibat{}; // ibat0u, ibat0l, ibat1u, ...
     std::array<uint32_t, 8> dbat{};
 
+    uint32_t pvr = 0; // read-only processor version
+
     // 603-specific
     uint32_t hid0 = 0;
     uint32_t hid1 = 0;
@@ -66,9 +68,16 @@ struct CpuState {
 
     static constexpr uint32_t kMsrIP = 1u << 6; // exception prefix (0xFFF00000 when set)
 
+    // Step 2.x boards: PowerPC 603e "Goldeneye" (603R/603ev) v2.1 at 166 MHz,
+    // 66 MHz bus x 2.5 (Supermodel's Model3.cpp / ppc.h).
+    static constexpr uint32_t kPvr603r = 0x00071202;
+    static constexpr uint32_t kBusClockHz = 66'000'000;
+    static constexpr uint32_t kCoreClockHz = 166'000'000;
+
     // Power-on state: MSR[IP] set, execution starts at the system reset vector.
     void reset() {
         *this = CpuState{};
+        pvr = kPvr603r;
         msr = kMsrIP;
         pc = 0xFFF00100;
     }

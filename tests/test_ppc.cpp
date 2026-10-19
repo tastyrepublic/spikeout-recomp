@@ -148,5 +148,6 @@ TEST_CASE("cpu state: CR helpers and reset") {
 
     s.reset();
     CHECK_EQ(s.pc, 0xFFF00100u);
+    CHECK_EQ(s.pvr, 0x00071202u);
     CHECK(s.msr & ppc::CpuState::kMsrIP);
 }
