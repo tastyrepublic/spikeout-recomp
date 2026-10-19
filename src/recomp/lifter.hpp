@@ -8,10 +8,10 @@
 // call), and jump tables are switches. Anything only known at run time goes
 // through Context::call()/jump().
 //
-// The generated file defines
+// The generated code defines
 //     std::span<const recomp::FunctionEntry> generated::<name>_functions();
-// listing every function it contains, sorted by address. It is derived from
-// the ROM, so it is written into the build directory, never the source tree.
+// listing every function in it, sorted by address. It is derived from the
+// ROM, so it is written into the build directory, never the source tree.
 #pragma once
 
 #include "analysis/code_image.hpp"
@@ -21,6 +21,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <vector>
 
 namespace recomp {
 
@@ -28,6 +29,7 @@ struct LiftOptions {
     std::string name = "guest";   // prefix of the generated table function
     std::set<uint32_t> functions; // entries to recompile; empty: every function found
     std::string source;           // where the code came from, for the header comment
+    uint32_t files = 1;           // spread the functions over this many files (parallel builds)
 };
 
 struct LiftStats {
@@ -37,7 +39,10 @@ struct LiftStats {
     std::map<std::string, uint32_t> unimplemented; // mnemonic -> count (they throw at run time)
 };
 
-std::string lift(const analysis::CodeImage& image, const analysis::Analysis& analysis, const LiftOptions& options,
-                 LiftStats* stats = nullptr);
+// Returns the generated files: the function table first, then
+// `options.files` files of functions (with files == 1, a single file holding
+// both).
+std::vector<std::string> lift(const analysis::CodeImage& image, const analysis::Analysis& analysis,
+                              const LiftOptions& options, LiftStats* stats = nullptr);
 
 } // namespace recomp

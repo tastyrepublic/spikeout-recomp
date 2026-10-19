@@ -5,6 +5,9 @@
 
 #include "recomp/context.hpp"
 
+#include <bit>
+#include <cfenv>
+#include <cmath>
 #include <cstdint>
 
 namespace recomp::ops {
@@ -106,6 +109,84 @@ inline bool trap_if(uint32_t to, uint32_t a, uint32_t b) {
     const int32_t x = static_cast<int32_t>(a), y = static_cast<int32_t>(b);
     return ((to & 16) && x < y) || ((to & 8) && x > y) || ((to & 4) && a == b) || ((to & 2) && a < b) ||
            ((to & 1) && a > b);
+}
+
+// ---- Floating point ----
+//
+// FPRs hold raw IEEE-754 double bits. Arithmetic runs on the host's doubles
+// (generated code is built without FMA contraction, so results don't depend
+// on the compiler); single-precision instructions round the double result to
+// single. Not modelled yet: FPSCR exception bits and FPRF, and the 603e's
+// exact results for estimates (fres, frsqrte return exact values).
+
+inline double f64(uint64_t bits) { return std::bit_cast<double>(bits); }
+inline uint64_t bits(double d) { return std::bit_cast<uint64_t>(d); }
+
+// Result of a single-precision instruction: rounded to single, kept as a double.
+inline uint64_t round_single(double d) { return bits(static_cast<double>(static_cast<float>(d))); }
+
+// lfs: single to double, exactly as the hardware does it (a format change:
+// NaNs keep their payload and stay signaling, unlike a host conversion).
+inline uint64_t single_to_double(uint32_t w) {
+    const uint64_t sign = uint64_t{w >> 31} << 63;
+    const uint32_t exp = (w >> 23) & 0xFF, frac = w & 0x7FFFFF;
+    if (exp == 0xFF) return sign | 0x7FF0000000000000u | uint64_t{frac} << 29;
+    return bits(static_cast<double>(std::bit_cast<float>(w))); // zero, normal and denormal are exact
+}
+
+// stfs: double to single by selecting bits, without rounding (PowerPC
+// Programming Environments manual, "Floating-Point Store Instructions").
+inline uint32_t double_to_single(uint64_t d) {
+    const uint32_t exp = static_cast<uint32_t>(d >> 52) & 0x7FF;
+    const uint32_t sign = static_cast<uint32_t>(d >> 32) & 0x80000000u;
+    if (exp > 896 || (d & 0x7FFFFFFFFFFFFFFFu) == 0) // single's normal range, infinities, NaNs, zero
+        return (static_cast<uint32_t>(d >> 32) & 0xC0000000u) | (static_cast<uint32_t>(d >> 29) & 0x3FFFFFFFu);
+    if (exp >= 874) { // becomes a single denormal
+        const uint64_t mantissa = 0x0010000000000000u | (d & 0x000FFFFFFFFFFFFFu);
+        return sign | static_cast<uint32_t>(mantissa >> (29 + 897 - exp));
+    }
+    return sign; // too small for a single: undefined in the manual, zero here
+}
+
+// fcmpu/fcmpo: CR field and FPSCR[FPCC] = FL FG FE FU.
+inline void fcmp(CpuState& s, uint32_t field, uint64_t a, uint64_t b) {
+    const double x = f64(a), y = f64(b);
+    const uint32_t c = (x != x || y != y) ? 1u : x < y ? 8u : x > y ? 4u : 2u;
+    s.set_crf(field, c);
+    s.fpscr = (s.fpscr & ~0xF000u) | c << 12;
+}
+
+// fctiw/fctiwz: to a 32-bit integer, rounding by FPSCR[RN] (or toward zero),
+// saturating; NaN gives 0x80000000. The upper word is undefined on the 603e;
+// 0xFFF80000 here, which is what stfiwx ignores anyway.
+inline uint64_t fctiw(const CpuState& s, uint64_t b, bool toward_zero) {
+    const double x = f64(b);
+    double r;
+    switch (toward_zero ? 1u : s.fpscr & 3) {
+    case 0:  r = std::nearbyint(x); break; // host default mode: nearest, ties to even
+    case 1:  r = std::trunc(x); break;
+    case 2:  r = std::ceil(x); break;
+    default: r = std::floor(x); break;
+    }
+    uint32_t v;
+    if (x != x || r < -2147483648.0) v = 0x80000000u;
+    else if (r > 2147483647.0) v = 0x7FFFFFFFu;
+    else v = static_cast<uint32_t>(static_cast<int32_t>(r));
+    return 0xFFF8000000000000u | v;
+}
+
+// After a write to FPSCR: follow its rounding mode on the host.
+inline void fpscr_written(const CpuState& s) {
+    static constexpr int kModes[4] = {FE_TONEAREST, FE_TOWARDZERO, FE_UPWARD, FE_DOWNWARD};
+    std::fesetround(kModes[s.fpscr & 3]);
+}
+
+// mcrfs: copy an FPSCR field to CR and clear the exception bits in it
+// (FX, OX, UX, ZX, XX and the VX causes).
+inline void mcrfs(CpuState& s, uint32_t crfd, uint32_t crfs) {
+    const uint32_t shift = 28 - 4 * crfs;
+    s.set_crf(crfd, (s.fpscr >> shift) & 0xF);
+    s.fpscr &= ~(0x9FF80700u & (0xFu << shift));
 }
 
 } // namespace recomp::ops

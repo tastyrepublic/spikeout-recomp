@@ -3,6 +3,7 @@
 #include "ppc/disasm.hpp"
 #include "ppc/instruction.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <string_view>
 
@@ -423,7 +424,109 @@ private:
 
         case Op::Invalid: return "c.invalid(" + hex(pc) + ", " + hex(in.raw) + ");";
 
-        // Floating point and the rest: not lifted yet.
+        default:
+            return floating_point(in, pc);
+        }
+    }
+
+    std::string floating_point(const Instruction& in, uint32_t pc) const {
+        auto fpr = [](uint32_t r) { return "s.fpr[" + std::to_string(r) + "]"; };
+        const std::string FD = fpr(in.rd()), FA = fpr(in.ra()), FB = fpr(in.rb()), FC = fpr(in.rc());
+        const std::string FS = FD; // frS of stores is in the same field
+        const std::string A = gpr(in.ra()), B = gpr(in.rb());
+        const std::string A0 = in.ra() == 0 ? std::string("0u") : A;
+        const std::string ea_d = "const uint32_t ea = " + A0 + " + " + hex(static_cast<uint32_t>(in.simm())) + "; ";
+        const std::string ea_x = "const uint32_t ea = " + A0 + " + " + B + "; ";
+        const std::string cr1 = in.record() ? " s.set_crf(1, s.fpscr >> 28);" : "";
+        const std::string a = "ops::f64(" + FA + ")", b = "ops::f64(" + FB + ")", cc = "ops::f64(" + FC + ")";
+        auto mem = [&](bool indexed, const std::string& action, bool update) {
+            return "{ " + (indexed ? ea_x : ea_d) + action + (update ? " " + A + " = ea;" : "") + " }";
+        };
+        auto dbl = [&](const std::string& expr) { return FD + " = ops::bits(" + expr + ");" + cr1; };
+        auto sgl = [&](const std::string& expr) { return FD + " = ops::round_single(" + expr + ");" + cr1; };
+        auto raw = [&](const std::string& expr) { return FD + " = " + expr + ";" + cr1; };
+        const std::string lfs = FD + " = ops::single_to_double(c.read32(ea));";
+        const std::string lfd = FD + " = c.read64(ea);";
+        const std::string stfs = "c.write32(ea, ops::double_to_single(" + FS + "));";
+        const std::string stfd = "c.write64(ea, " + FS + ");";
+
+        switch (in.op) {
+        // Loads and stores
+        case Op::Lfs:    return mem(false, lfs, false);
+        case Op::Lfsu:   return mem(false, lfs, true);
+        case Op::Lfsx:   return mem(true, lfs, false);
+        case Op::Lfsux:  return mem(true, lfs, true);
+        case Op::Lfd:    return mem(false, lfd, false);
+        case Op::Lfdu:   return mem(false, lfd, true);
+        case Op::Lfdx:   return mem(true, lfd, false);
+        case Op::Lfdux:  return mem(true, lfd, true);
+        case Op::Stfs:   return mem(false, stfs, false);
+        case Op::Stfsu:  return mem(false, stfs, true);
+        case Op::Stfsx:  return mem(true, stfs, false);
+        case Op::Stfsux: return mem(true, stfs, true);
+        case Op::Stfd:   return mem(false, stfd, false);
+        case Op::Stfdu:  return mem(false, stfd, true);
+        case Op::Stfdx:  return mem(true, stfd, false);
+        case Op::Stfdux: return mem(true, stfd, true);
+        case Op::Stfiwx: return mem(true, "c.write32(ea, static_cast<uint32_t>(" + FS + "));", false);
+
+        // Arithmetic (fmul and the multiply-adds take frC as the multiplier)
+        case Op::Fadd:    return dbl(a + " + " + b);
+        case Op::Fadds:   return sgl(a + " + " + b);
+        case Op::Fsub:    return dbl(a + " - " + b);
+        case Op::Fsubs:   return sgl(a + " - " + b);
+        case Op::Fmul:    return dbl(a + " * " + cc);
+        case Op::Fmuls:   return sgl(a + " * " + cc);
+        case Op::Fdiv:    return dbl(a + " / " + b);
+        case Op::Fdivs:   return sgl(a + " / " + b);
+        case Op::Fmadd:   return dbl("std::fma(" + a + ", " + cc + ", " + b + ")");
+        case Op::Fmadds:  return sgl("std::fma(" + a + ", " + cc + ", " + b + ")");
+        case Op::Fmsub:   return dbl("std::fma(" + a + ", " + cc + ", -" + b + ")");
+        case Op::Fmsubs:  return sgl("std::fma(" + a + ", " + cc + ", -" + b + ")");
+        case Op::Fnmadd:  return dbl("-std::fma(" + a + ", " + cc + ", " + b + ")");
+        case Op::Fnmadds: return sgl("-std::fma(" + a + ", " + cc + ", " + b + ")");
+        case Op::Fnmsub:  return dbl("-std::fma(" + a + ", " + cc + ", -" + b + ")");
+        case Op::Fnmsubs: return sgl("-std::fma(" + a + ", " + cc + ", -" + b + ")");
+        case Op::Fsqrt:   return dbl("std::sqrt(" + b + ")");
+        case Op::Fsqrts:  return sgl("std::sqrt(" + b + ")");
+        case Op::Fres:    return sgl("1.0 / " + b);
+        case Op::Frsqrte: return dbl("1.0 / std::sqrt(" + b + ")");
+        case Op::Fsel:    return raw(a + " >= 0.0 ? " + FC + " : " + FB);
+
+        // Moves and sign changes work on the bits (NaNs pass through unchanged)
+        case Op::Fmr:   return raw(FB);
+        case Op::Fneg:  return raw(FB + " ^ 0x8000000000000000u");
+        case Op::Fabs:  return raw(FB + " & 0x7FFFFFFFFFFFFFFFu");
+        case Op::Fnabs: return raw(FB + " | 0x8000000000000000u");
+
+        // Conversion and compare
+        case Op::Frsp:   return sgl(b);
+        case Op::Fctiw:  return raw("ops::fctiw(s, " + FB + ", false)");
+        case Op::Fctiwz: return raw("ops::fctiw(s, " + FB + ", true)");
+        case Op::Fcmpu:
+        case Op::Fcmpo:  return "ops::fcmp(s, " + std::to_string(in.crfd()) + ", " + FA + ", " + FB + ");";
+
+        // FPSCR
+        case Op::Mffs:   return raw("0xFFF8000000000000u | s.fpscr");
+        case Op::Mcrfs:  return "ops::mcrfs(s, " + std::to_string(in.crfd()) + ", " + std::to_string(in.crfs()) + ");";
+        case Op::Mtfsf: {
+            uint32_t mask = 0;
+            for (uint32_t f = 0; f < 8; ++f)
+                if (in.fm() & (0x80u >> f)) mask |= 0xF0000000u >> (4 * f);
+            return "s.fpscr = (s.fpscr & " + hex(~mask) + ") | (static_cast<uint32_t>(" + FB + ") & " + hex(mask) +
+                   "); ops::fpscr_written(s);" + cr1;
+        }
+        case Op::Mtfsfi: {
+            const uint32_t shift = 28 - 4 * in.crfd();
+            return "s.fpscr = (s.fpscr & " + hex(~(0xFu << shift)) + ") | " + hex(in.fpimm() << shift) +
+                   "; ops::fpscr_written(s);" + cr1;
+        }
+        case Op::Mtfsb0:
+            return "s.fpscr &= " + hex(~(0x80000000u >> in.rd())) + "; ops::fpscr_written(s);" + cr1;
+        case Op::Mtfsb1:
+            return "s.fpscr |= " + hex(0x80000000u >> in.rd()) + "; ops::fpscr_written(s);" + cr1;
+
+        // External control (eciwx/ecowx): not used by Model 3 games.
         default:
             return unimplemented(in, pc);
         }
@@ -439,33 +542,54 @@ private:
 
 } // namespace
 
-std::string lift(const analysis::CodeImage& image, const analysis::Analysis& an, const LiftOptions& options,
-                 LiftStats* stats_out) {
+std::vector<std::string> lift(const analysis::CodeImage& image, const analysis::Analysis& an,
+                              const LiftOptions& options, LiftStats* stats_out) {
     std::set<uint32_t> compiled;
     for (const auto& [entry, fn] : an.functions)
         if (!fn.blocks.empty() && (options.functions.empty() || options.functions.contains(entry)))
             compiled.insert(entry);
 
+    // Functions have external linkage in their own namespace so the files
+    // can call each other; every file declares all of them.
+    const std::string ns = "generated::" + options.name;
+    std::string head = "// Generated by spikeout-recomp's lifter";
+    if (!options.source.empty()) head += " from " + options.source;
+    head += ".\n// Derived from ROM data: do not edit, do not commit.\n";
+    head += "#include \"recomp/guest.hpp\"\n\n#include <span>\n\n";
+    head += "#if defined(__GNUC__)\n#pragma GCC diagnostic ignored \"-Wunused-label\"\n#endif\n";
+    head += "#if defined(_MSC_VER)\n#pragma warning(disable : 4102) // unreferenced label\n#endif\n\n";
+    head += "namespace " + ns + " {\n\nusing recomp::Context;\nnamespace ops = recomp::ops;\n\n";
+    for (uint32_t entry : compiled) head += "void " + function_name(entry) + "(Context& c);\n";
+    const std::string tail = "\n} // namespace " + ns + "\n";
+
+    // Split the functions over the files by instruction count.
+    const uint32_t parts = std::max(1u, options.files);
+    uint64_t total = 0;
+    for (uint32_t entry : compiled) total += an.functions.at(entry).instructions;
+    std::vector<std::vector<uint32_t>> groups(parts);
+    uint64_t done = 0;
+    for (uint32_t entry : compiled) {
+        const size_t part = total ? std::min<size_t>(parts - 1, static_cast<size_t>(done * parts / total)) : 0;
+        groups[part].push_back(entry);
+        done += an.functions.at(entry).instructions;
+    }
+
     LiftStats stats;
-    Emitter emitter(image, an, compiled, stats);
-    std::string out;
-    out += "// Generated by spikeout-recomp's lifter";
-    if (!options.source.empty()) out += " from " + options.source;
-    out += ".\n// Derived from ROM data: do not edit, do not commit.\n";
-    out += "#include \"recomp/guest.hpp\"\n\n#include <span>\n\n";
-    out += "#if defined(__GNUC__)\n#pragma GCC diagnostic ignored \"-Wunused-label\"\n#endif\n";
-    out += "#if defined(_MSC_VER)\n#pragma warning(disable : 4102) // unreferenced label\n#endif\n\n";
-    out += "namespace generated {\n\nnamespace {\n\nusing recomp::Context;\nnamespace ops = recomp::ops;\n\n";
-    for (uint32_t entry : compiled) out += "void " + function_name(entry) + "(Context& c);\n";
-    for (uint32_t entry : compiled) emitter.function(an.functions.at(entry));
-    out += emitter.take();
-    out += "\nconst recomp::FunctionEntry kFunctions[] = {\n";
-    for (uint32_t entry : compiled) out += "    {" + hex(entry) + ", " + function_name(entry) + "},\n";
-    out += "};\n\n} // namespace\n\n";
-    out += "std::span<const recomp::FunctionEntry> " + options.name + "_functions() { return kFunctions; }\n\n";
-    out += "} // namespace generated\n";
+    std::vector<std::string> files;
+    std::string table = head + "\nconst recomp::FunctionEntry kFunctions[] = {\n";
+    for (uint32_t entry : compiled) table += "    {" + hex(entry) + ", " + function_name(entry) + "},\n";
+    table += "};\n" + tail;
+    table += "\nnamespace generated {\nstd::span<const recomp::FunctionEntry> " + options.name +
+             "_functions() { return " + options.name + "::kFunctions; }\n} // namespace generated\n";
+    files.push_back(std::move(table));
+    for (const auto& group : groups) {
+        Emitter emitter(image, an, compiled, stats);
+        for (uint32_t entry : group) emitter.function(an.functions.at(entry));
+        if (parts == 1) files[0].insert(files[0].find("\nconst recomp::FunctionEntry"), emitter.take());
+        else files.push_back(head + emitter.take() + tail);
+    }
     if (stats_out) *stats_out = std::move(stats);
-    return out;
+    return files;
 }
 
 } // namespace recomp

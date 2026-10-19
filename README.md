@@ -29,9 +29,9 @@ Please don't open issues or PRs containing ROM data or links to it.
 | Memory map | `src/runtime/memory_map.*` | Step 2.1 address map ([docs](docs/memory-map.md), [hardware notes](docs/hardware-notes.md)) |
 | ROM loader | `src/runtime/rom.*`, `src/games/` | Verifies sizes/CRC32s, interleaves chips, normalizes byte order |
 | Control-flow analysis | `src/analysis/` | Functions, basic blocks and jump tables reachable from the vectors, through the boot ROM's copy into RAM ([notes](docs/control-flow.md)) |
-| Lifter | `src/recomp/lifter.*` | PowerPC functions to C++ (integer, branch, load/store; floating point next) ([notes](docs/recompiler.md)) |
+| Lifter | `src/recomp/lifter.*` | PowerPC functions to C++: every instruction the game uses, floating point included ([notes](docs/recompiler.md)) |
 | Runtime | `src/recomp/context.*`, `src/runtime/bus.*` | What recompiled code runs against: CPU state, function table, bus with RAM, ROM and the MPC106 PCI bridge |
-| Tools | `tools/` | `romcheck` (verify a set, show boot code), `ppcdis` (disassemble), `codemap` (map the code), `ppcrecomp` (recompile) and `boottest` (run the recompiled boot ROM) |
+| Tools | `tools/` | `romcheck` (verify a set, show boot code), `ppcdis` (disassemble), `codemap` (map the code), `ppcrecomp` (recompile), `boottest` (run the recompiled boot ROM) and `gamerun` (run it into the recompiled game) |
 
 ## Building
 
@@ -82,8 +82,10 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-`boottest` runs the recompiled boot code from the reset vector to the
-jump into RAM and checks what it did. Generated code is derived from your
+The build also recompiles the whole game (`game_ram`, a few minutes the
+first time). `boottest` runs the recompiled boot code from the reset vector to the
+jump into RAM and checks what it did; `gamerun` keeps going into the game
+and reports where it stops. Generated code is derived from your
 ROMs: it stays in the build directory and is never committed.
 
 ## Online play

@@ -282,6 +282,42 @@ Program build() {
     a.emit(X(4, 4, 3, 3));           // tw     4, r3, r3 (trap if equal)
     a.emit(kBlr);
 
+    // fp(r3 = buffer of inputs, see lifter_tests.cpp; results stored after them)
+    auto A = [](uint32_t op, uint32_t xo, uint32_t d, uint32_t fa, uint32_t fb, uint32_t fc) {
+        return op << 26 | d << 21 | fa << 16 | fb << 11 | fc << 6 | xo << 1;
+    };
+    a.entry("fp");
+    a.emit(D(48, 1, 3, 0));               // lfs    f1, 0(r3)     1.5
+    a.emit(D(48, 2, 3, 4));               // lfs    f2, 4(r3)     2.25
+    a.emit(A(59, 21, 3, 1, 2, 0));        // fadds  f3, f1, f2
+    a.emit(A(59, 25, 4, 1, 0, 2));        // fmuls  f4, f1, f2
+    a.emit(A(59, 18, 5, 2, 1, 0));        // fdivs  f5, f2, f1
+    a.emit(A(59, 20, 6, 1, 2, 0));        // fsubs  f6, f1, f2
+    a.emit(A(59, 29, 7, 1, 1, 2));        // fmadds f7, f1, f2, f1   (f1 * f2 + f1)
+    a.emit(A(63, 40, 8, 0, 1, 0));        // fneg   f8, f1
+    a.emit(A(63, 264, 9, 0, 8, 0));       // fabs   f9, f8
+    a.emit(A(63, 23, 10, 6, 2, 1));       // fsel   f10, f6, f1, f2  (f6 >= 0 ? f1 : f2)
+    a.emit(63u << 26 | 1u << 23 | 1u << 16 | 2u << 11); // fcmpu cr1, f1, f2
+    a.emit(D(50, 11, 3, 8));              // lfd    f11, 8(r3)    1e300
+    a.emit(A(63, 25, 12, 11, 0, 11));     // fmul   f12, f11, f11 -> inf
+    a.emit(A(63, 12, 13, 0, 11, 0));      // frsp   f13, f11      -> inf
+    a.emit(D(48, 15, 3, 16));             // lfs    f15, 16(r3)   -2.7
+    a.emit(A(63, 15, 14, 0, 15, 0));      // fctiwz f14, f15      -> -2
+    a.emit(X(983, 14, 0, 21));            // stfiwx f14, 0, r21   (r21 = result address)
+    a.emit(A(63, 14, 16, 0, 15, 0));      // fctiw  f16, f15      -> -3 (nearest)
+    a.emit(63u << 26 | 7u << 23 | 1u << 12 | 134u << 1); // mtfsfi 7, 1 (RN: toward zero)
+    a.emit(A(63, 14, 17, 0, 15, 0));      // fctiw  f17, f15      -> -2
+    a.emit(63u << 26 | 7u << 23 | 0u << 12 | 134u << 1); // mtfsfi 7, 0 (back to nearest)
+    a.emit(D(50, 18, 3, 24));             // lfd    f18, 24(r3)   1 + 0.75 * 2^-23
+    a.emit(D(52, 18, 3, 32));             // stfs   f18, 32(r3)   truncates
+    a.emit(A(59, 21, 19, 18, 18, 0) );    // fadds  f19, f18, f18 rounds to nearest single
+    a.emit(D(52, 3, 3, 40));              // stfs   f3, 40(r3)
+    a.emit(D(54, 12, 3, 48));             // stfd   f12, 48(r3)
+    a.emit(D(48, 20, 3, 56));             // lfs    f20, 56(r3)   a signaling NaN
+    a.emit(D(52, 20, 3, 60));             // stfs   f20, 60(r3)   stays signaling
+    a.emit(X(19, 5, 0, 0));               // mfcr   r5
+    a.emit(kBlr);
+
     a.label("fnptr");
     a.word("double");
     return a.finish();

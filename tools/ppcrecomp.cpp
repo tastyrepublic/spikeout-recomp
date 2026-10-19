@@ -1,6 +1,6 @@
 // ppcrecomp: recompile PowerPC code to C++.
 //
-//   ppcrecomp --rom DIR [--game ID] [--segment NAME]... [--scan-pointers] [--name NAME] -o FILE
+//   ppcrecomp --rom DIR [--game ID] [--segment NAME]... [--scan-pointers] [--name NAME] [--split N] -o FILE
 //   ppcrecomp --image FILE --base ADDR --entry ADDR... [--name NAME] -o FILE
 //
 // --rom      a ROM set folder: code is found from the game's vectors, through
@@ -8,7 +8,9 @@
 // --segment  only recompile functions whose entry is in this segment
 //            ("crom" = the boot ROM, "ram" = the game's RAM copy)
 // --image    a raw big-endian binary loaded at --base (tests)
-// --name     the generated file defines generated::<NAME>_functions()
+// --name     the generated code defines generated::<NAME>_functions()
+// --split    write the table to FILE and the functions to FILE_0.cpp ...
+//            FILE_<N-1>.cpp, so a build can compile them in parallel
 //
 // The output is derived from the ROM: it belongs in the build directory.
 #include "analysis/boot_image.hpp"
@@ -29,7 +31,8 @@ namespace {
 
 int usage() {
     std::fprintf(stderr,
-                 "usage: ppcrecomp --rom DIR [--game ID] [--segment NAME]... [--scan-pointers] [--name NAME] -o FILE\n"
+                 "usage: ppcrecomp --rom DIR [--game ID] [--segment NAME]... [--scan-pointers] [--name NAME] [--split N]\n"
+                 "                 -o FILE\n"
                  "       ppcrecomp --image FILE --base ADDR --entry ADDR... [--name NAME] -o FILE\n");
     return 2;
 }
@@ -38,7 +41,7 @@ int usage() {
 
 int main(int argc, char** argv) {
     std::string rom_dir, image_path, out_path, game_id = "spikeofe", name = "guest";
-    uint32_t base = 0;
+    uint32_t base = 0, split = 1;
     std::vector<uint32_t> entries;
     std::vector<std::string> segments;
     analysis::Options options;
@@ -57,6 +60,7 @@ int main(int argc, char** argv) {
         else if (arg == "--segment") segments.push_back(next());
         else if (arg == "--scan-pointers") options.scan_pointers = true;
         else if (arg == "--name") name = next();
+        else if (arg == "--split") split = number();
         else if (arg == "-o") out_path = next();
         else return usage();
     }
@@ -98,6 +102,7 @@ int main(int argc, char** argv) {
     recomp::LiftOptions lift;
     lift.name = name;
     lift.source = source;
+    lift.files = split;
     for (const auto& [entry, fn] : an.functions) {
         const analysis::Segment* seg = boot.image.segment_at(entry);
         bool wanted = segments.empty();
@@ -105,16 +110,25 @@ int main(int argc, char** argv) {
         if (wanted) lift.functions.insert(entry);
     }
     recomp::LiftStats stats;
-    const std::string code = recomp::lift(boot.image, an, lift, &stats);
+    const std::vector<std::string> files = recomp::lift(boot.image, an, lift, &stats);
 
-    std::ofstream out(out_path, std::ios::binary);
-    out << code;
-    if (!out) {
-        std::fprintf(stderr, "ppcrecomp: cannot write %s\n", out_path.c_str());
-        return 1;
+    // FILE.cpp holds the table (and everything, without --split);
+    // FILE_0.cpp ... FILE_<N-1>.cpp the functions.
+    const std::string stem = out_path.size() > 4 && out_path.ends_with(".cpp") ? out_path.substr(0, out_path.size() - 4)
+                                                                              : out_path;
+    for (size_t i = 0; i < files.size(); ++i) {
+        const std::string path = i == 0 ? out_path : stem + "_" + std::to_string(i - 1) + ".cpp";
+        std::ofstream out(path, std::ios::binary);
+        out << files[i];
+        if (!out) {
+            std::fprintf(stderr, "ppcrecomp: cannot write %s\n", path.c_str());
+            return 1;
+        }
     }
-    std::printf("ppcrecomp: %u functions, %u blocks, %u instructions -> %s\n", stats.functions, stats.blocks,
+    std::printf("ppcrecomp: %u functions, %u blocks, %u instructions -> %s", stats.functions, stats.blocks,
                 stats.instructions, out_path.c_str());
+    if (files.size() > 1) std::printf(" + %zu files", files.size() - 1);
+    std::printf("\n");
     if (!stats.unimplemented.empty()) {
         uint32_t total = 0;
         for (const auto& [mnem, n] : stats.unimplemented) total += n;

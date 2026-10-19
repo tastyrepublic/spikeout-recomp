@@ -34,17 +34,37 @@ Register state lives in `ppc::CpuState` (`s.gpr[n]`, `s.cr`, `s.xer`, ...);
 flags are computed by the small inline helpers in `recomp/guest.hpp`.
 Every instruction's disassembly is kept as a comment.
 
-What isn't lifted yet throws when reached instead of guessing:
-floating point (`c.unimplemented`), and the system call and trap
-exceptions. Running into code that wasn't recompiled throws
+What isn't handled yet throws when reached instead of guessing: the
+system call and trap exceptions (and `eciwx`/`ecowx`, which Model 3 games
+don't use). Running into code that wasn't recompiled throws
 `recomp::MissingCode`; a callee returning somewhere other than the
 instruction after its call throws (`bad_return`), so a wrong assumption
 stops the run where it happens.
 
-Integer, branch, load/store, CR, SPR and time base instructions are all
-lifted. The time base advances by `Context::tb_step` on each TBL read: the
-recompiled code doesn't count cycles, and this keeps delay loops finite and
-repeatable.
+Every instruction the game uses is lifted: integer, branch, load/store,
+CR, SPR, time base and floating point. The time base advances by
+`Context::tb_step` on each TBL read: the recompiled code doesn't count
+cycles, and this keeps delay loops finite and repeatable.
+
+### Floating point
+
+FPRs hold raw double bits; arithmetic runs on the host's doubles and
+single-precision instructions round the result to single. Details that
+matter:
+
+- `lfs`/`stfs` are format conversions done bit by bit, as the hardware
+  does: `stfs` truncates instead of rounding, and NaNs (signaling ones too)
+  pass through unchanged, which a C++ cast would not do.
+- The multiply-adds use `std::fma`. Generated code is built with
+  `-ffp-contract=off` (the `spikeout_fp` CMake target), so the compiler
+  never fuses a separate multiply and add: results are the same on every
+  machine, which save states and rollback netplay depend on.
+- FPSCR: the rounding mode is honored (`fctiw`, and the host's rounding
+  mode follows writes to FPSCR), compares set FPCC, `mcrfs` clears the
+  exception bits it reads. Not modelled: exception bits and FPRF after
+  arithmetic, double rounding in single-precision results (computed in
+  double, then rounded), and `fres`/`frsqrte` return exact values rather
+  than the 603e's estimates.
 
 ## Bus
 
@@ -72,10 +92,24 @@ itself at bus 0 / device 0 and nothing else on the bus yet.
   holds an exact copy of ROM `0xFFE00000`-`0xFFEFFFFF`, the PVR is at
   `0x80` and the rest of RAM was cleared (it starts filled with garbage).
 
+- `gamerun` (also with `SPIKEOUT_ROM_DIR`): runs the recompiled boot ROM
+  into the recompiled game and reports where and why it stopped, the last
+  blocks it ran and the devices it used that aren't emulated. Not a pass/
+  fail test: it shows what to work on next.
+
 On `spikeofe`: the boot ROM is 29 functions and 396 instructions. It runs
 about 2.9 million blocks (most of them clearing 8 MB of RAM and copying
 1 MB with a checksum) in well under a second, configures the MPC106 from
 its register tables, and touches no other device.
 
-The game's RAM program lifts to 2,163 functions and about 124,000
-instructions; 16,182 of them (13%) are floating point, which is next.
+The game's RAM program lifts to 2,175 functions and about 124,000
+instructions with nothing left unimplemented, and is compiled as the
+`game_ram` library (split over 8 files: about 100 s on 12 threads, 166 s
+as one file). `gamerun` runs it about 4.6 million blocks into its startup
+(PCI setup, a backup RAM test, I/O, network board, system and tilegen
+registers) at over 100 million blocks per second, until the first `sc`
+(`li r3, 17; sc` at `0x11678`): exceptions are next (roadmap milestone 2).
+
+The game's PCI configuration routines jump into stub tables
+(`base + size * 12`) that the analysis can't follow; their addresses are
+listed in `GameSpec::code_entries`.

@@ -12,17 +12,18 @@ Each milestone ends with something you can run and check.
 - [x] Confirm program ROM byte order against a real dump (`romcheck`): as-is
 - [x] Control-flow analysis: find functions and jump tables starting from the reset vector and exception vectors (`codemap`, [notes](control-flow.md))
 - [x] Lifter: emit C++ for each function: integer, branch, load/store, CR, SPRs ([notes](recompiler.md))
-- [ ] Lifter: floating point (13% of the game's instructions)
+- [x] Lifter: floating point (13% of the game's instructions); the whole game compiles (`game_ram`) and runs into its startup (`gamerun`)
 - [x] Runtime bus: dispatch loads/stores to RAM, ROM and device stubs; MPC106 PCI bridge
 - [x] The recompiled boot ROM runs from reset to the jump into RAM: bridge setup, RAM clear, 1 MB copy with checksum (`boottest`)
 - [ ] **Goal:** the recompiled boot code runs through the ROM/RAM self-test
 
 ## 2. Getting to the attract mode
 
+- [ ] Exceptions: `sc` (the first stop of `gamerun`), traps, and returning from a handler with `rfi`
 - [ ] Interrupt controller and decrementer
-- [ ] Banked CROM switching
+- [x] Banked CROM switching (bank select at `0xF0100008`, in `m3::Bus`)
 - [ ] 315-5881 security board decryption (key `0x29236FC8`)
-- [ ] Open-bus reads return all ones (Spikeout's ROM check needs it)
+- [x] Open-bus reads return all ones (Spikeout's ROM check needs it)
 - [ ] Frame timing: 57.524 Hz, 424 lines, IRQ 0x02/0x0D/0x40 as in [hardware-notes.md](hardware-notes.md)
 - [ ] EEPROM, RTC and backup RAM
 - [ ] Reference interpreter for code that the static pass misses, with logging so it can be added to the recompiled set

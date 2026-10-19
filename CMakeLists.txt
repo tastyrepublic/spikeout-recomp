@@ -55,10 +55,20 @@ add_library(analysis
 target_include_directories(analysis PUBLIC src)
 target_link_libraries(analysis PUBLIC ppc m3runtime PRIVATE spikeout_warnings)
 
+# Recompiled code has to give the same floating-point results on every
+# machine (save states and rollback netplay compare state across them), so
+# separate multiplies and adds must never be fused into FMA instructions.
+# MSVC doesn't contract by default.
+add_library(spikeout_fp INTERFACE)
+if(NOT MSVC)
+    target_compile_options(spikeout_fp INTERFACE -ffp-contract=off)
+endif()
+
 # What recompiled code runs against (CPU state, bus, function table).
+# Linking it brings in spikeout_fp for the generated code.
 add_library(recomp_runtime src/recomp/context.cpp)
 target_include_directories(recomp_runtime PUBLIC src)
-target_link_libraries(recomp_runtime PUBLIC ppc m3runtime PRIVATE spikeout_warnings)
+target_link_libraries(recomp_runtime PUBLIC ppc m3runtime spikeout_fp PRIVATE spikeout_warnings)
 
 # The lifter: analyzed PowerPC code -> C++ source.
 add_library(recomp_lifter src/recomp/lifter.cpp)
@@ -86,6 +96,7 @@ file(MAKE_DIRECTORY ${SPIKEOUT_GENERATED_DIR})
 set(SPIKEOUT_ROM_DIR "" CACHE PATH "Folder with the unzipped spikeofe ROM set (enables the boot ROM test)")
 
 if(SPIKEOUT_ROM_DIR)
+    # The boot ROM (fixed CROM code, run from reset).
     set(boot_rom_cpp ${SPIKEOUT_GENERATED_DIR}/boot_rom.cpp)
     add_custom_command(
         OUTPUT ${boot_rom_cpp}
@@ -93,8 +104,36 @@ if(SPIKEOUT_ROM_DIR)
         DEPENDS ppcrecomp
         COMMENT "Recompiling the boot ROM"
         VERBATIM)
-    add_executable(boottest tools/boottest.cpp ${boot_rom_cpp})
-    target_link_libraries(boottest PRIVATE recomp_runtime spikeout_warnings)
+    add_library(boot_rom STATIC ${boot_rom_cpp})
+    target_link_libraries(boot_rom PUBLIC recomp_runtime PRIVATE spikeout_warnings)
+
+    # The game: the program the boot ROM copies to RAM, split over several
+    # files so they compile in parallel.
+    set(game_ram_parts 8)
+    set(game_ram_cpp ${SPIKEOUT_GENERATED_DIR}/game_ram.cpp)
+    set(game_ram_files ${game_ram_cpp})
+    math(EXPR last_part "${game_ram_parts} - 1")
+    foreach(i RANGE ${last_part})
+        list(APPEND game_ram_files ${SPIKEOUT_GENERATED_DIR}/game_ram_${i}.cpp)
+    endforeach()
+    add_custom_command(
+        OUTPUT ${game_ram_files}
+        COMMAND ppcrecomp --rom ${SPIKEOUT_ROM_DIR} --segment ram --scan-pointers --name game_ram
+                --split ${game_ram_parts} -o ${game_ram_cpp}
+        DEPENDS ppcrecomp
+        COMMENT "Recompiling the game"
+        VERBATIM)
+    add_library(game_ram STATIC ${game_ram_files})
+    target_link_libraries(game_ram PUBLIC recomp_runtime PRIVATE spikeout_warnings)
+    if(MSVC)
+        target_compile_options(game_ram PRIVATE /bigobj)
+    endif()
+
+    add_executable(boottest tools/boottest.cpp)
+    target_link_libraries(boottest PRIVATE boot_rom spikeout_warnings)
+
+    add_executable(gamerun tools/gamerun.cpp)
+    target_link_libraries(gamerun PRIVATE game_ram boot_rom spikeout_warnings)
 endif()
 
 if(SPIKEOUT_BUILD_TESTS)

@@ -103,12 +103,19 @@ constexpr std::array kBootCopies = {
     CodeCopy{0x00000000, 0xFFE00000, 0x00100000},
 };
 
-// The boot ROM's PCI configuration read (0xFFF030B4) and write (0xFFF03114)
-// routines jump to `base + size * 12` with size 1, 2 or 4 (mflr r0; ...;
-// mtlr; blr): one stub per access width, each returning through r0.
+// PCI configuration accesses jump to `base + size * 12` with size 1, 2 or 4
+// (mflr r0; ...; mtlr; blr): one stub per access width, each returning
+// through r0. Read and write routines, in the boot ROM and in the game.
 constexpr std::array kCodeEntries = {
-    0xFFF030E4u, 0xFFF030F0u, 0xFFF03108u, // read byte, halfword, word
-    0xFFF03144u, 0xFFF03150u, 0xFFF03168u, // write byte, halfword, word
+    // Boot ROM, MPC106 (0xFFF030B4 read, 0xFFF03114 write)
+    0xFFF030E4u, 0xFFF030F0u, 0xFFF03108u,
+    0xFFF03144u, 0xFFF03150u, 0xFFF03168u,
+    // Game, MPC106 (0x4078 read, 0x4130 write)
+    0x000040DCu, 0x000040E8u, 0x00004100u,
+    0x00004194u, 0x000041A0u, 0x000041B8u,
+    // Game, the Real3D DMA device's own config ports at 0xC2000010/14
+    0x00002AD0u, 0x00002ADCu, 0x00002AF4u,
+    0x00002B44u, 0x00002B50u, 0x00002B68u,
 };
 
 } // namespace

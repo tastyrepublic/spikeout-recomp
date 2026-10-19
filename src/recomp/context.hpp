@@ -12,6 +12,7 @@
 #include "ppc/cpu_state.hpp"
 #include "runtime/bus.hpp"
 
+#include <array>
 #include <cstdint>
 #include <span>
 #include <stdexcept>
@@ -63,14 +64,26 @@ public:
     uint8_t read8(uint32_t addr) { return bus.read8(addr); }
     uint16_t read16(uint32_t addr) { return bus.read16(addr); }
     uint32_t read32(uint32_t addr) { return bus.read32(addr); }
+    uint64_t read64(uint32_t addr) { return bus.read64(addr); }
     void write8(uint32_t addr, uint8_t v) { bus.write8(addr, v); }
     void write16(uint32_t addr, uint16_t v) { bus.write16(addr, v); }
     void write32(uint32_t addr, uint32_t v) { bus.write32(addr, v); }
+    void write64(uint32_t addr, uint64_t v) { bus.write64(addr, v); }
 
     // Start of every basic block.
     void tick(uint32_t pc) {
         cpu.pc = pc;
+        recent[recent_pos++ & (recent.size() - 1)] = pc;
         if (--budget < 0) throw OutOfBudget(pc);
+    }
+
+    // The last blocks run, oldest first: where a stopped run came from.
+    std::array<uint32_t, 16> recent{};
+    uint32_t recent_pos = 0;
+    std::array<uint32_t, 16> recent_blocks() const {
+        std::array<uint32_t, 16> out{};
+        for (uint32_t i = 0; i < out.size(); ++i) out[i] = recent[(recent_pos + i) & (recent.size() - 1)];
+        return out;
     }
 
     GuestFunction find(uint32_t addr) const;

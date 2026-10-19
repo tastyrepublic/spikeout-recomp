@@ -33,6 +33,6 @@ int main(int argc, char** argv) {
     options.name = "lifter_test";
     options.source = "the lifter test program";
     std::ofstream out(argv[1], std::ios::binary);
-    out << recomp::lift(image, an, options);
+    out << recomp::lift(image, an, options).at(0);
     return out ? 0 : 1;
 }

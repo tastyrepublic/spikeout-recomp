@@ -7,6 +7,8 @@
 #include "runtime/bus.hpp"
 #include "runtime/rom.hpp"
 
+#include <bit>
+#include <cmath>
 #include <span>
 
 namespace generated {
@@ -202,6 +204,45 @@ TEST_CASE("lifter: lwarx / stwcx.") {
     m.run("atomic");
     CHECK_EQ(m.bus.read32(kBuffer), 42u);
     CHECK_EQ(m.s.gpr[6], 0x20000000u); // CR0 EQ: the store went through
+}
+
+TEST_CASE("lifter: floating point") {
+    Machine m;
+    auto put64 = [&](uint32_t addr, uint64_t v) { m.bus.write64(addr, v); };
+    m.bus.write32(kBuffer + 0, std::bit_cast<uint32_t>(1.5f));
+    m.bus.write32(kBuffer + 4, std::bit_cast<uint32_t>(2.25f));
+    put64(kBuffer + 8, std::bit_cast<uint64_t>(1e300));
+    m.bus.write32(kBuffer + 16, std::bit_cast<uint32_t>(-2.7f));
+    put64(kBuffer + 24, 0x3FF0000018000000u); // 1 + 0.75 * 2^-23: not a single
+    m.bus.write32(kBuffer + 56, 0x7F800001u);  // signaling NaN
+    m.s.gpr[3] = kBuffer;
+    m.s.gpr[21] = kBuffer + 64;
+    CHECK_EQ(m.run("fp"), kReturnAddr);
+
+    auto f = [&](int n) { return std::bit_cast<double>(m.s.fpr[n]); };
+    CHECK_EQ(f(3), 3.75);   // fadds
+    CHECK_EQ(f(4), 3.375);  // fmuls
+    CHECK_EQ(f(5), 1.5);    // fdivs
+    CHECK_EQ(f(6), -0.75);  // fsubs
+    CHECK_EQ(f(7), 4.875);  // fmadds
+    CHECK_EQ(f(8), -1.5);   // fneg
+    CHECK_EQ(f(9), 1.5);    // fabs
+    CHECK_EQ(f(10), 2.25);  // fsel: f6 < 0 picks frB
+    CHECK(std::isinf(f(12))); // fmul overflow
+    CHECK(std::isinf(f(13))); // frsp: too large for a single
+    CHECK_EQ(static_cast<uint32_t>(m.s.fpr[14]), 0xFFFFFFFEu); // fctiwz -2.7 = -2
+    CHECK_EQ(m.bus.read32(kBuffer + 64), 0xFFFFFFFEu);        // stfiwx
+    CHECK_EQ(static_cast<uint32_t>(m.s.fpr[16]), 0xFFFFFFFDu); // fctiw, nearest: -3
+    CHECK_EQ(static_cast<uint32_t>(m.s.fpr[17]), 0xFFFFFFFEu); // fctiw, RN toward zero: -2
+    CHECK_EQ(m.s.fpscr & 3, 0u);                              // RN restored
+    CHECK_EQ(m.bus.read32(kBuffer + 32), 0x3F800000u);        // stfs truncates, doesn't round
+    CHECK_EQ(m.s.fpr[19], std::bit_cast<uint64_t>(static_cast<double>(std::bit_cast<float>(0x40000001u)))); // fadds rounds
+    CHECK_EQ(m.bus.read32(kBuffer + 40), std::bit_cast<uint32_t>(3.75f));
+    CHECK_EQ(m.bus.read64(kBuffer + 48), 0x7FF0000000000000u); // stfd inf
+    CHECK_EQ(m.s.fpr[20], 0x7FF0000020000000u);               // lfs keeps the NaN signaling
+    CHECK_EQ(m.bus.read32(kBuffer + 60), 0x7F800001u);        // and stfs gives it back unchanged
+    CHECK_EQ(m.s.gpr[5] & 0x0F000000u, 0x08000000u);          // fcmpu cr1: 1.5 < 2.25
+    CHECK_EQ(m.s.fpscr & 0xF000u, 0x8000u);                   // FPCC: FL
 }
 
 TEST_CASE("lifter: runs stop on loops, missing code, bad returns, sc and traps") {
