@@ -58,6 +58,9 @@ struct GameSpec {
     uint32_t security_key;  // 315-5881 key
     std::span<const RomRegionSpec> regions;
     std::span<const CodeCopy> boot_copies = {};
+    // Function entries the control-flow analysis can't find by itself
+    // (targets of computed jumps), found by reading the code.
+    std::span<const uint32_t> code_entries = {};
 };
 
 // Places one file's data into a region buffer according to `spec`.

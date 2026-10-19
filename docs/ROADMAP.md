@@ -11,8 +11,10 @@ Each milestone ends with something you can run and check.
 - [x] ROM set definition for `spikeofe` and a verifying loader
 - [x] Confirm program ROM byte order against a real dump (`romcheck`): as-is
 - [x] Control-flow analysis: find functions and jump tables starting from the reset vector and exception vectors (`codemap`, [notes](control-flow.md))
-- [ ] Lifter: emit C++ for each function (integer, branch, load/store first, then FPU)
-- [ ] Runtime bus: dispatch loads/stores to RAM, ROM and device stubs
+- [x] Lifter: emit C++ for each function: integer, branch, load/store, CR, SPRs ([notes](recompiler.md))
+- [ ] Lifter: floating point (13% of the game's instructions)
+- [x] Runtime bus: dispatch loads/stores to RAM, ROM and device stubs; MPC106 PCI bridge
+- [x] The recompiled boot ROM runs from reset to the jump into RAM: bridge setup, RAM clear, 1 MB copy with checksum (`boottest`)
 - [ ] **Goal:** the recompiled boot code runs through the ROM/RAM self-test
 
 ## 2. Getting to the attract mode

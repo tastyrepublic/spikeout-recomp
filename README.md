@@ -29,7 +29,9 @@ Please don't open issues or PRs containing ROM data or links to it.
 | Memory map | `src/runtime/memory_map.*` | Step 2.1 address map ([docs](docs/memory-map.md), [hardware notes](docs/hardware-notes.md)) |
 | ROM loader | `src/runtime/rom.*`, `src/games/` | Verifies sizes/CRC32s, interleaves chips, normalizes byte order |
 | Control-flow analysis | `src/analysis/` | Functions, basic blocks and jump tables reachable from the vectors, through the boot ROM's copy into RAM ([notes](docs/control-flow.md)) |
-| Tools | `tools/` | `romcheck` (verify a set, show boot code), `ppcdis` (disassemble) and `codemap` (map the code) |
+| Lifter | `src/recomp/lifter.*` | PowerPC functions to C++ (integer, branch, load/store; floating point next) ([notes](docs/recompiler.md)) |
+| Runtime | `src/recomp/context.*`, `src/runtime/bus.*` | What recompiled code runs against: CPU state, function table, bus with RAM, ROM and the MPC106 PCI bridge |
+| Tools | `tools/` | `romcheck` (verify a set, show boot code), `ppcdis` (disassemble), `codemap` (map the code), `ppcrecomp` (recompile) and `boottest` (run the recompiled boot ROM) |
 
 ## Building
 
@@ -68,6 +70,21 @@ be followed):
 
 `--disasm` writes an annotated listing of everything found. Like the dumps
 above it comes from your ROMs, so keep it out of the repository.
+
+## Running recompiled code
+
+Point CMake at your unzipped ROM set and the build recompiles the boot ROM
+into `build/generated/` and adds a test that runs it:
+
+```sh
+cmake -S . -B build -DSPIKEOUT_ROM_DIR=path/to/spikeofe
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+`boottest` runs the recompiled boot code from the reset vector to the
+jump into RAM and checks what it did. Generated code is derived from your
+ROMs: it stays in the build directory and is never committed.
 
 ## Online play
 

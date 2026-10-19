@@ -103,6 +103,14 @@ constexpr std::array kBootCopies = {
     CodeCopy{0x00000000, 0xFFE00000, 0x00100000},
 };
 
+// The boot ROM's PCI configuration read (0xFFF030B4) and write (0xFFF03114)
+// routines jump to `base + size * 12` with size 1, 2 or 4 (mflr r0; ...;
+// mtlr; blr): one stub per access width, each returning through r0.
+constexpr std::array kCodeEntries = {
+    0xFFF030E4u, 0xFFF030F0u, 0xFFF03108u, // read byte, halfword, word
+    0xFFF03144u, 0xFFF03150u, 0xFFF03168u, // write byte, halfword, word
+};
+
 } // namespace
 
 const GameSpec kSpikeoutFinalEdition{
@@ -111,6 +119,7 @@ const GameSpec kSpikeoutFinalEdition{
     0x29236FC8,
     kRegions,
     kBootCopies,
+    kCodeEntries,
 };
 
 } // namespace m3::games
