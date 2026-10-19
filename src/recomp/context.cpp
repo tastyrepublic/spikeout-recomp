@@ -74,15 +74,61 @@ void Context::store_string(uint32_t rs, uint32_t ea, uint32_t nb) {
     }
 }
 
+namespace {
+
+// MSR bits (bit 31 = LSB).
+constexpr uint32_t kMsrLE = 1u << 0;
+constexpr uint32_t kMsrME = 1u << 12;
+constexpr uint32_t kMsrILE = 1u << 16;
+
+// Thrown by an rfi that ends the exception at `depth`; caught by the
+// exception() call that entered it. Unwinding instead of returning means
+// the rfi may sit any number of calls deep inside the handler.
+struct ExceptionReturn {
+    size_t depth;
+};
+
+} // namespace
+
+void Context::exception(uint32_t offset, uint32_t srr0, uint32_t cause, uint32_t resume) {
+    // 603e: SRR1[16-31] = MSR[16-31] (with cause bits above); the new MSR
+    // keeps ME, IP and ILE, sets LE from ILE and clears everything else
+    // (EE, PR, FP, FE0/1, SE, BE, IR, DR, RI).
+    cpu.srr0 = srr0;
+    cpu.srr1 = (cpu.msr & 0x0000FFFFu) | cause;
+    cpu.msr = (cpu.msr & (kMsrME | ppc::CpuState::kMsrIP | kMsrILE)) | ((cpu.msr & kMsrILE) ? kMsrLE : 0);
+    const uint32_t vector = ((cpu.msr & ppc::CpuState::kMsrIP) ? 0xFFF00000u : 0u) + offset;
+
+    resume_.push_back(resume);
+    const size_t depth = resume_.size();
+    struct Pop {
+        std::vector<uint32_t>& stack;
+        size_t depth;
+        ~Pop() { stack.resize(depth - 1); }
+    } pop{resume_, depth};
+    try {
+        call(vector);
+    } catch (const ExceptionReturn& r) {
+        if (r.depth != depth) throw; // returns from an outer exception
+        return;
+    }
+    throw GuestError(vector, "exception handler returned without rfi");
+}
+
+void Context::rfi() {
+    // 603e: MSR[16-23, 25-27, 30-31] = SRR1.
+    cpu.msr = (cpu.msr & ~0xFF73u) | (cpu.srr1 & 0xFF73u);
+    const uint32_t target = cpu.srr0 & ~3u;
+    for (size_t i = resume_.size(); i-- > 0;)
+        if (resume_[i] == target) throw ExceptionReturn{i + 1};
+    jump(target);
+}
+
 void Context::unimplemented(uint32_t pc, uint32_t raw) {
     throw GuestError(pc, "not implemented: " + ppc::disassemble(ppc::decode(raw), pc));
 }
 
 void Context::invalid(uint32_t pc, uint32_t raw) { throw GuestError(pc, "invalid instruction " + hex(raw)); }
-
-void Context::trap(uint32_t pc) { throw GuestError(pc, "trap"); }
-
-void Context::system_call(uint32_t pc) { throw GuestError(pc, "sc (system call exception not implemented)"); }
 
 void Context::unknown_spr(uint32_t pc, uint32_t spr) {
     throw GuestError(pc, "access to SPR " + std::to_string(spr) + " not implemented");

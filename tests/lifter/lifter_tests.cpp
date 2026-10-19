@@ -245,7 +245,30 @@ TEST_CASE("lifter: floating point") {
     CHECK_EQ(m.s.fpscr & 0xF000u, 0x8000u);                   // FPCC: FL
 }
 
-TEST_CASE("lifter: runs stop on loops, missing code, bad returns, sc and traps") {
+TEST_CASE("lifter: sc enters the 0xC00 handler and its rfi returns after the sc") {
+    Machine m;
+    m.s.msr = 0x9032; // EE, ME, IR, DR, RI; IP clear: vectors at 0
+    CHECK_EQ(m.run("syscall"), kReturnAddr);
+    CHECK_EQ(m.s.gpr[3], 1006u);                      // handler added 1000, then +1 after the sc
+    CHECK_EQ(m.s.gpr[4], addr_of("syscall.after"));   // SRR0
+    CHECK_EQ(m.s.gpr[5], 0x9032u);                    // SRR1 = old MSR
+    CHECK_EQ(m.s.gpr[6], 0x1000u);                    // MSR in the handler: only ME left
+    CHECK_EQ(m.s.msr, 0x9032u);                       // restored by rfi
+    CHECK_EQ(m.c.exception_depth(), size_t{0});
+}
+
+TEST_CASE("lifter: trap enters 0x700, handler steps past it, rfi from a called function") {
+    Machine m;
+    m.s.msr = 0x1000;
+    m.s.gpr[3] = 7;
+    CHECK_EQ(m.run("trapeq"), kReturnAddr);
+    CHECK_EQ(m.s.gpr[7], 0x77u);                           // the handler ran
+    CHECK_EQ(m.s.gpr[4], addr_of("trapeq.tw") + 4);        // SRR0 was the trap
+    CHECK_EQ(m.s.gpr[8] & recomp::Context::kSrr1Trap, recomp::Context::kSrr1Trap);
+    CHECK_EQ(m.c.exception_depth(), size_t{0});
+}
+
+TEST_CASE("lifter: runs stop on loops, missing code and bad returns") {
     {
         Machine m;
         m.c.budget = 100;
@@ -270,15 +293,5 @@ TEST_CASE("lifter: runs stop on loops, missing code, bad returns, sc and traps")
     {
         Machine m;
         CHECK_EQ(m.run("badret"), addr_of("double")); // what a caller's check would catch
-    }
-    for (const char* name : {"syscall", "trapeq"}) {
-        Machine m;
-        bool stopped = false;
-        try {
-            m.run(name);
-        } catch (const recomp::GuestError&) {
-            stopped = true;
-        }
-        CHECK(stopped);
     }
 }

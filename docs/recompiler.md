@@ -34,9 +34,9 @@ Register state lives in `ppc::CpuState` (`s.gpr[n]`, `s.cr`, `s.xer`, ...);
 flags are computed by the small inline helpers in `recomp/guest.hpp`.
 Every instruction's disassembly is kept as a comment.
 
-What isn't handled yet throws when reached instead of guessing: the
-system call and trap exceptions (and `eciwx`/`ecowx`, which Model 3 games
-don't use). Running into code that wasn't recompiled throws
+What isn't handled yet throws when reached instead of guessing
+(`eciwx`/`ecowx`, which Model 3 games don't use). Running into code that
+wasn't recompiled throws
 `recomp::MissingCode`; a callee returning somewhere other than the
 instruction after its call throws (`bad_return`), so a wrong assumption
 stops the run where it happens.
@@ -45,6 +45,29 @@ Every instruction the game uses is lifted: integer, branch, load/store,
 CR, SPR, time base and floating point. The time base advances by
 `Context::tb_step` on each TBL read: the recompiled code doesn't count
 cycles, and this keeps delay loops finite and repeatable.
+
+### Exceptions
+
+`Context::exception(vector, srr0, cause, resume)` enters a handler as the
+603e does: SRR0 and SRR1 (the old MSR's low half plus cause bits), a new
+MSR that keeps only ME, IP and ILE, and the vector at `0` or `0xFFF00000`
+by MSR[IP]. It runs the handler as a C++ call and returns when the
+handler's `rfi` goes back to `resume`, so the recompiled code that raised
+the exception simply carries on. That `rfi` unwinds with a C++ exception,
+so it may sit any number of calls deep inside the handler; an `rfi` to any
+other address is an ordinary jump (that is how the boot code enters the
+game). A handler that returns without `rfi` is an error.
+
+- `sc`: vector `0xC00`, resumes after the `sc`.
+- Traps (`tw`/`twi`): vector `0x700` with SRR1's trap bit; SRR0 points at
+  the trap and the code resumes after it (handlers step SRR0 past it).
+- Interrupts (next): the same entry at the start of a block, resuming at
+  that block.
+
+Spikeout's `sc` handler (`0x2428`) is a small dispatcher, not a task
+switcher: it calls a service from a table the game builds at
+`*(0x710008)` (interrupt enable/disable, user mode, reading the
+decrementer) and returns to the caller.
 
 ### Floating point
 
@@ -105,10 +128,12 @@ its register tables, and touches no other device.
 The game's RAM program lifts to 2,175 functions and about 124,000
 instructions with nothing left unimplemented, and is compiled as the
 `game_ram` library (split over 8 files: about 100 s on 12 threads, 166 s
-as one file). `gamerun` runs it about 4.6 million blocks into its startup
-(PCI setup, a backup RAM test, I/O, network board, system and tilegen
-registers) at over 100 million blocks per second, until the first `sc`
-(`li r3, 17; sc` at `0x11678`): exceptions are next (roadmap milestone 2).
+as one file). `gamerun` runs its whole
+initialization (PCI setup, a backup RAM test, system calls, I/O board,
+network board, sound board UART, tilegen registers and character RAM) in
+a few hundredths of a second, and ends up in `b 0x12320`, a branch to
+itself with interrupts enabled (MSR `0xF032`): the game waiting for an
+interrupt (vblank). Interrupts are next (roadmap milestone 2).
 
 The game's PCI configuration routines jump into stub tables
 (`base + size * 12`) that the analysis can't follow; their addresses are

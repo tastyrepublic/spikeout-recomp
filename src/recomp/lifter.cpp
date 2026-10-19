@@ -126,6 +126,8 @@ private:
         switch (b.exit) {
         case Exit::Fallthrough: line(edge(b.end)); break;
         case Exit::OutOfImage:  line("c.missing(" + hex(b.end) + ");"); break;
+        // A handler may resume after an unconditional trap; nothing there was recompiled.
+        case Exit::Trap:        line("c.missing(" + hex(b.end) + ");"); break;
         default: break;
         }
     }
@@ -164,7 +166,7 @@ private:
         const std::string cond = in.op == Op::B || in.op == Op::Rfi ? std::string() : condition(in);
         const std::string set_lr = "s.lr = " + hex(next) + ";";
 
-        if (in.op == Op::Rfi) return "s.msr = s.srr1; c.jump(s.srr0 & ~3u); return;";
+        if (in.op == Op::Rfi) return "c.rfi(); return;";
 
         if (in.op == Op::B || in.op == Op::Bc) {
             const uint32_t target = *ppc::branch_target(in, pc);

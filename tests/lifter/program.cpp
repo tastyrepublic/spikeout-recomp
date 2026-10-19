@@ -42,6 +42,9 @@ class Assembler {
 public:
     uint32_t here() const { return kBase + 4 * static_cast<uint32_t>(p_.words.size()); }
     void emit(uint32_t w) { p_.words.push_back(w); }
+    void org(uint32_t addr) {
+        while (here() < addr) emit(0);
+    }
     void label(const std::string& name) { p_.labels[name] = here(); }
     void entry(const std::string& name) {
         label(name);
@@ -96,6 +99,32 @@ private:
 Program build() {
     Assembler a;
 
+    // Exception vectors (MSR[IP] = 0 in the tests that use them).
+    // 0x700 program exception: step SRR0 past the trap, note it, and return
+    // through rfi from a called function (the rfi can be calls deep).
+    a.entry("trap_vector");
+    a.emit(mflr(9));
+    a.emit(mfspr(4, 26));            // mfsrr0 r4
+    a.emit(addi(4, 4, 4));
+    a.emit(mtspr(26, 4));            // mtsrr0 r4
+    a.emit(li(7, 0x77));
+    a.emit(mfspr(8, 27));            // mfsrr1 r8
+    a.bl("trap_exit");
+    a.emit(kBlr);                    // never reached
+    a.entry("trap_exit");
+    a.emit(mtlr(9));
+    a.emit(0x4C000064);              // rfi
+
+    // 0xC00 system call: r3 += 1000, report SRR0/SRR1/MSR, return
+    a.org(0xC00);
+    a.entry("sc_vector");
+    a.emit(addi(3, 3, 1000));
+    a.emit(mfspr(4, 26));            // mfsrr0 r4
+    a.emit(mfspr(5, 27));            // mfsrr1 r5
+    a.emit(X(83, 6, 0, 0));          // mfmsr  r6
+    a.emit(0x4C000064);              // rfi
+
+    a.org(0x1000);
     // arith(r3 = a, r4 = b)
     a.entry("arith");
     a.emit(XO(266, 5, 3, 4));       // add    r5, r3, r4
@@ -274,11 +303,15 @@ Program build() {
     a.emit(mtlr(0));
     a.emit(kBlr);
 
-    a.entry("syscall");
+    a.entry("syscall");              // r3 = sc(5) + 1
+    a.emit(li(3, 5));
     a.emit(0x44000002);              // sc
+    a.label("syscall.after");
+    a.emit(addi(3, 3, 1));
     a.emit(kBlr);
 
     a.entry("trapeq");
+    a.label("trapeq.tw");
     a.emit(X(4, 4, 3, 3));           // tw     4, r3, r3 (trap if equal)
     a.emit(kBlr);
 

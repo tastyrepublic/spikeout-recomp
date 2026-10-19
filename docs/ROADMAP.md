@@ -19,7 +19,7 @@ Each milestone ends with something you can run and check.
 
 ## 2. Getting to the attract mode
 
-- [ ] Exceptions: `sc` (the first stop of `gamerun`), traps, and returning from a handler with `rfi`
+- [x] Exceptions: `sc`, traps, and returning from a handler with `rfi` ([notes](recompiler.md#exceptions)); the game now initializes and waits for an interrupt
 - [ ] Interrupt controller and decrementer
 - [x] Banked CROM switching (bank select at `0xF0100008`, in `m3::Bus`)
 - [ ] 315-5881 security board decryption (key `0x29236FC8`)

@@ -17,6 +17,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace recomp {
 
@@ -105,15 +106,31 @@ public:
     void load_string(uint32_t rd, uint32_t ea, uint32_t nb);  // lswi/lswx
     void store_string(uint32_t rs, uint32_t ea, uint32_t nb); // stswi/stswx
 
+    // Exceptions. exception() enters a handler the way the 603e does (SRR0,
+    // SRR1, MSR, vector at 0 or 0xFFF00000 by MSR[IP]) and runs it; it
+    // returns when the handler's rfi goes back to `resume`, the address where
+    // the recompiled code that raised it carries on. An rfi anywhere else is
+    // a jump (the boot code enters the game that way).
+    void exception(uint32_t offset, uint32_t srr0, uint32_t cause, uint32_t resume);
+    void rfi();
+    // Exceptions being handled, innermost last.
+    size_t exception_depth() const { return resume_.size(); }
+
+    void system_call(uint32_t pc) { exception(0xC00, pc + 4, 0, pc + 4); }
+    // Program exception, trap type. SRR0 points at the trap; handlers step
+    // past it, so the code resumes after it.
+    void trap(uint32_t pc) { exception(0x700, pc, kSrr1Trap, pc + 4); }
+
     [[noreturn]] void unimplemented(uint32_t pc, uint32_t raw);
     [[noreturn]] void invalid(uint32_t pc, uint32_t raw);
     [[noreturn]] void missing(uint32_t addr) { throw MissingCode(addr); }
-    [[noreturn]] void trap(uint32_t pc);
-    [[noreturn]] void system_call(uint32_t pc);
     [[noreturn]] void unknown_spr(uint32_t pc, uint32_t spr);
+
+    static constexpr uint32_t kSrr1Trap = 1u << 17; // SRR1 bit 14
 
 private:
     std::span<const FunctionEntry> functions_;
+    std::vector<uint32_t> resume_;
 };
 
 } // namespace recomp

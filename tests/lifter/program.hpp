@@ -10,7 +10,7 @@
 
 namespace lifter_test {
 
-inline constexpr uint32_t kBase = 0x1000;     // where the program is loaded
+inline constexpr uint32_t kBase = 0x700;      // where the program is loaded (from the 0x700 vector up)
 inline constexpr uint32_t kBuffer = 0x10000;  // scratch memory used by the tests
 
 struct Program {
