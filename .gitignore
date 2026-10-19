@@ -1,0 +1,16 @@
+# Build output
+/build*/
+/out/
+compile_commands.json
+
+# Editors
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Game data: never commit ROMs or anything extracted from them
+/roms/
+*.zip
+*.7z
+*.bin
