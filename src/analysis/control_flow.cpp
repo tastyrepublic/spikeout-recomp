@@ -452,17 +452,21 @@ public:
         : image_(image), options_(options), table_starts_(table_starts) {}
 
     Analysis run(std::span<const Entry> entries) {
+        // Entries in order, each with everything it reaches before the next:
+        // an instruction is explored once, with the registers of the first
+        // path to it, so the seeds go first and the pointer scan's guesses
+        // (which may land inside a function) last.
         for (const Entry& e : entries) {
             if (!image_.read32(e.addr)) {
                 issue(IssueKind::TargetOutsideImage, e.addr, e.addr);
                 continue;
             }
             add_function(e.addr, e.kind, e.name);
-        }
-        while (!work_.empty()) {
-            Run r = std::move(work_.back());
-            work_.pop_back();
-            explore(r.pc, r.state);
+            while (!work_.empty()) {
+                Run r = std::move(work_.back());
+                work_.pop_back();
+                explore(r.pc, r.state);
+            }
         }
         Analysis out;
         build_blocks(out);
@@ -480,6 +484,7 @@ public:
     }
 
     const std::set<uint32_t>& constants() const { return constants_; }
+    const std::set<uint32_t>& stored_constants() const { return stored_constants_; }
 
 private:
     struct Run {
@@ -544,7 +549,7 @@ private:
             const uint64_t addr = uint64_t{t.table} + uint64_t{i} * t.stride;
             if (addr > 0xFFFFFFFCu) break;
             if (i > 0 && !v.exact && table_starts_.contains(static_cast<uint32_t>(addr))) break; // next table
-            const auto word = image_.read32(static_cast<uint32_t>(addr));
+            const auto word = image_.read_data32(static_cast<uint32_t>(addr));
             if (!word || !plausible_code(*word)) {
                 if (!v.exact) break; // guessed length: the table ends here
                 issue(IssueKind::BadTableEntry, site, word ? *word : static_cast<uint32_t>(addr));
@@ -554,6 +559,86 @@ private:
         }
         if (t.targets.empty()) return std::nullopt;
         return t;
+    }
+
+    // The instructions right before an indirect branch at `pc`, read as
+    //   rlwinm rB, rI, s, 0, 31-s ; [addis rB, rB, hi] ; [addi rB, rB, lo]
+    //   lwz rX, d(rB) ; mtlr/mtctr rX
+    // give a table at hi << 16 + lo + d with stride 1 << s, whatever the
+    // register state says. Each instruction is explored once, with the state
+    // of the first path to reach it, and on that path the index may be a
+    // constant (a state machine's dispatch after `li r3, 1`), which would
+    // leave only one entry.
+    //
+    // Or, with the base and the index in separate registers:
+    //   rlwinm rI', rI, ... ; lis rA, hi ; [addi rA, rA, lo]   (in any order)
+    //   lwzx rX, rA, rI' ; mtlr/mtctr rX
+    std::optional<Val> table_before(uint32_t pc, bool via_ctr) const {
+        auto insn = [&](uint32_t at) -> std::optional<Instruction> {
+            const auto w = image_.read32(at);
+            if (!w) return std::nullopt;
+            return ppc::decode(*w);
+        };
+        // A table index: a field of rI shifted into place (slwi, or a masked
+        // rlwinm like `rlwinm r3, r31, 11, 21, 28`: 256 entries 8 bytes apart).
+        auto index_from = [&](const Instruction& sl) -> std::optional<Val> {
+            if (sl.op != Op::Rlwinm || sl.mb() > sl.me()) return std::nullopt;
+            const uint32_t step = uint32_t{1} << (31 - sl.me());
+            if (step < 4 || step > 16) return std::nullopt;
+            const bool plain_shift = sl.mb() == 0 && sl.me() == 31 - sl.sh();
+            return Val::index(step, plain_shift ? 0 : bits_count(sl.me() - sl.mb() + 1), false);
+        };
+        const auto mt = insn(pc - 4);
+        if (!mt || mt->op != Op::Mtspr || mt->spr() != (via_ctr ? kSprCtr : kSprLr)) return std::nullopt;
+        const auto ld = insn(pc - 8);
+        if (ld && ld->op == Op::Lwzx && ld->rd() == mt->rs() && ld->ra() != 0) {
+            // Walk back over the few instructions that build the two
+            // registers (no branches in between): one is set by an rlwinm,
+            // the other by lis and addi.
+            std::vector<std::pair<uint32_t, Instruction>> run;
+            for (uint32_t at = pc - 12, n = 0; n < 6; ++n, at -= 4) {
+                const auto a = insn(at);
+                if (!a || ppc::branch_target(*a, at) || a->op == Op::Bclr || a->op == Op::Bcctr) break;
+                run.emplace_back(at, *a);
+            }
+            for (uint32_t index_reg : {ld->ra(), ld->rb()}) {
+                const uint32_t base_reg = index_reg == ld->ra() ? ld->rb() : ld->ra();
+                std::optional<Val> index;
+                for (const auto& [at, a] : run) // the nearest write to index_reg must be the rlwinm
+                    if (a.op == Op::Rlwinm ? a.ra() == index_reg : a.rd() == index_reg) {
+                        if (a.op == Op::Rlwinm) index = index_from(a);
+                        break;
+                    }
+                if (!index) continue;
+                uint32_t base = 0;
+                for (const auto& [at, a] : run) {
+                    if (a.op == Op::Addi && a.rd() == base_reg && a.ra() == base_reg) {
+                        base += static_cast<uint32_t>(a.simm());
+                    } else if (a.op == Op::Addis && a.rd() == base_reg && a.ra() == 0) { // lis: where it starts
+                        return index->with_kind(Val::Entry, base + (static_cast<uint32_t>(a.simm()) << 16));
+                    } else if (a.rd() == base_reg && a.op != Op::Rlwinm) {
+                        break; // set some other way
+                    }
+                }
+            }
+            return std::nullopt;
+        }
+        if (!ld || ld->op != Op::Lwz || ld->rd() != mt->rs() || ld->ra() == 0) return std::nullopt;
+        const uint32_t rb = ld->ra();
+        uint32_t base = static_cast<uint32_t>(ld->simm());
+        uint32_t at = pc - 12;
+        for (int i = 0; i < 2; ++i, at -= 4) { // addi and addis on the base register itself
+            const auto a = insn(at);
+            if (!a || a->rd() != rb || a->ra() != rb) break;
+            if (a->op == Op::Addi) base += static_cast<uint32_t>(a->simm());
+            else if (a->op == Op::Addis) base += static_cast<uint32_t>(a->simm()) << 16;
+            else break;
+        }
+        const auto sl = insn(at);
+        if (!sl || sl->ra() != rb) return std::nullopt;
+        const auto index = index_from(*sl);
+        if (!index) return std::nullopt;
+        return index->with_kind(Val::Entry, base);
     }
 
     void indirect_call(uint32_t pc, const Val& target, Insn& rec) {
@@ -652,7 +737,9 @@ private:
             }
             case Op::Bclr:
             case Op::Bcctr: {
-                const Val target = in.op == Op::Bclr ? s.lr : s.ctr;
+                Val target = in.op == Op::Bclr ? s.lr : s.ctr;
+                if (target.kind == Val::Loaded || target.kind == Val::Unknown || target.kind == Val::Computed)
+                    if (auto t = table_before(pc, in.op == Op::Bcctr)) target = *t;
                 if (in.lk()) {
                     indirect_call(pc, target, rec);
                     clobber_call(s);
@@ -695,6 +782,10 @@ private:
             case Op::Sc:
                 break;
             default:
+                if (options_.scan_pointers &&
+                    (in.op == Op::Stw || in.op == Op::Stwu || in.op == Op::Stwx || in.op == Op::Stwux) &&
+                    s.gpr[in.rs()].kind == Val::Const && image_.contains(s.gpr[in.rs()].value))
+                    stored_constants_.insert(s.gpr[in.rs()].value); // a code address saved for later?
                 step(s, in);
                 if (options_.scan_pointers) {
                     // Constants that might be code addresses (lis + addi of a callback).
@@ -764,6 +855,7 @@ private:
     const Options& options_;
     const std::set<uint32_t>& table_starts_; // tables found so far, to end guessed ones
     std::set<uint32_t> constants_;           // in-image constants built by the code
+    std::set<uint32_t> stored_constants_;    // ... and those it stores to memory with stw
     std::map<uint32_t, Insn> insns_;
     std::set<uint32_t> leaders_;
     std::map<uint32_t, Function> functions_;
@@ -807,19 +899,22 @@ Analysis analyze(const CodeImage& image, std::span<const Entry> entries, const O
         bool changed = false;
         for (const JumpTable& t : a.jump_tables) changed |= table_starts.insert(t.table).second;
         if (options.scan_pointers) {
-            auto consider = [&](uint32_t value, bool built_by_code) {
+            auto consider = [&](uint32_t value, bool stored) {
                 if (known.contains(value) || a.functions.contains(value) || !scanned(value)) return;
-                // A constant the code builds that lands on an instruction it
-                // already runs is taken even inside a function: tasks that
-                // yield store the address to resume at (lis + addi, then
-                // stw into the task) and their scheduler calls it later.
-                const bool resume_point = built_by_code && (value & 3) == 0 && a.block_containing(value);
+                // A pointer stored in data, or a constant the code builds and
+                // stores, that lands on an instruction the code already runs
+                // is taken even inside a function: tasks that yield store the
+                // address to resume at (lis + addi, then stw into the task),
+                // and tables point at shared tails (0x4119C: the end of the
+                // function at 0x41188). Not plain constants: numbers (sizes,
+                // offsets like 0x1EE00) land on code too.
+                const bool resume_point = stored && (value & 3) == 0 && a.block_containing(value);
                 if (!resume_point && !looks_like_function(image, value)) return;
                 known.insert(value);
                 all.push_back({value, EntryKind::Pointer, ""});
                 changed = true;
             };
-            for (uint32_t value : data_words) consider(value, false);
+            for (uint32_t value : data_words) consider(value, true);
             for (uint32_t value : analyzer.constants()) consider(value, true);
         }
         if (!changed) break;

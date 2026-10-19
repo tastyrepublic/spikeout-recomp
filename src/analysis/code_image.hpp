@@ -29,6 +29,9 @@ public:
 
     const Segment* segment_at(uint32_t addr) const;
     std::optional<uint32_t> read32(uint32_t addr) const;
+    // A data word at any alignment (tables can be packed: Spikeout has one at
+    // 0xA1579); the CPU reads those fine in big-endian mode.
+    std::optional<uint32_t> read_data32(uint32_t addr) const;
     bool contains(uint32_t addr) const { return segment_at(addr) != nullptr; }
 
     std::span<const Segment> segments() const { return segments_; }

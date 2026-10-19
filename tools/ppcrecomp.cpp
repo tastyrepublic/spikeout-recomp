@@ -125,8 +125,8 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
-    std::printf("ppcrecomp: %u functions, %u blocks, %u instructions -> %s", stats.functions, stats.blocks,
-                stats.instructions, out_path.c_str());
+    std::printf("ppcrecomp: %u functions, %u blocks, %u instructions, %u return sites -> %s", stats.functions, stats.blocks,
+                stats.instructions, stats.return_sites, out_path.c_str());
     if (files.size() > 1) std::printf(" + %zu files", files.size() - 1);
     std::printf("\n");
     if (!stats.unimplemented.empty()) {

@@ -29,6 +29,15 @@ One C++ function per guest function, taking a `recomp::Context&`:
 | jump to another function | `f_target(c); return;` (a tail call) |
 | jump table | `switch` over the table's targets |
 | `bctrl`, `blrl`, unresolved `bctr`/`blr`, `rfi` | `c.call()` / `c.jump()`: look the address up in the function table |
+| the instruction after a call | a return site: a label the function can be entered at (below) |
+
+**Return sites.** Spikeout's tasks run on stacks of their own and yield;
+when one is resumed and returns, its `blr` goes to the instruction after a
+call it made before it yielded, where no C++ call is waiting. So every
+instruction after a call is in the function table too, as `{site, f,
+site}`: `Context::call()` sets `c.resume_at`, and the function's first
+lines `goto` that site's label. All state is in `c.cpu`, so starting a
+function in the middle is just a jump (about 7,000 sites in the game).
 
 Register state lives in `ppc::CpuState` (`s.gpr[n]`, `s.cr`, `s.xer`, ...);
 flags are computed by the small inline helpers in `recomp/guest.hpp`.
@@ -217,10 +226,25 @@ Then, in order:
     the address to continue at, so the analysis now takes such constants
     as entries ([control-flow.md](control-flow.md#pointer-scan---scan-pointers)).
 
-After that the game runs on with nothing missing: 3 billion blocks, 8,316
-frames (2.4 minutes of game time), sending the Real3D a frame each time.
-No text is left on the tile layers, so what it shows is 3D only, which
-nothing draws yet. The RTC (read ~12,000 times) is still open bus.
+11. A red screen, the "TEAM SPIKEOUT PRESENTS" logo stuck halfway through
+    its fade: the game queues sound commands and sends them in the MIDI
+    interrupt (IRQ `0x40`), which nothing raised, so the queue filled up
+    and the game waited. The frame timing now raises it in VBlank as
+    Supermodel does.
+12. Code the analysis missed: a state machine's dispatch explored first
+    with a constant index, false entries explored before the real
+    function, a table at an odd address, a callback held in a register,
+    shared tails ([control-flow.md](control-flow.md)).
+13. A task returning into a function it had called from before it
+    yielded: return sites (above).
+
+With the RTC emulated too, the game now runs its attract mode with
+nothing missing: 6 billion blocks, 16,633 frames (almost 5 minutes of game
+time). The 2D layers (`m3::TilegenRenderer`) show the boot text, the
+logo, the title, "INSERT COIN(S)" and the "BASIC OPERATION" screens over
+their backgrounds; the 3D in between isn't drawn yet. Drawing costs:
+`gamerun` runs about 35 million blocks per second with it, close to twice
+real time.
 
 The game's PCI configuration routines jump into stub tables
 (`base + size * 12`) that the analysis can't follow; their addresses are

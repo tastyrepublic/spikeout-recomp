@@ -3,6 +3,7 @@
 //
 //   gamerun <rom_dir> [--blocks N] [--text] [--dump-tile FILE]
 //           [--netboard sim|real] [--net-trace N] [--net-disasm FILE]
+//           [--screenshot FILE.png] [--shot-every N] [--coin FRAME]
 //
 // Built only when CMake's SPIKEOUT_ROM_DIR is set. A run ends at the first
 // thing the runtime can't do yet (code that wasn't found, an exception, a
@@ -16,6 +17,10 @@
 // (m3::CommBoard); --netboard sim uses the simulation instead. --net-trace N
 // prints its first N accesses to the board's registers, --net-disasm writes
 // a disassembly of its RAM (the firmware; derived from the ROMs).
+//
+// The tile generator draws a line at a time as the frame runs (no 3D yet).
+// --screenshot writes the last finished frame as a PNG; with --shot-every N
+// also FILE-<frame>.png every N frames.
 #include "games/games.hpp"
 #include "ppc/disasm.hpp"
 #include "ppc/instruction.hpp"
@@ -24,6 +29,9 @@
 #include "runtime/bus.hpp"
 #include "runtime/commboard.hpp"
 #include "runtime/rom.hpp"
+#include "runtime/tilegen.hpp"
+#include "game_setup.hpp"
+#include "png_write.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -34,15 +42,12 @@
 #include <string>
 #include <vector>
 
-namespace generated {
-std::span<const recomp::FunctionEntry> boot_rom_functions();
-std::span<const recomp::FunctionEntry> game_ram_functions();
-} // namespace generated
-
 int main(int argc, char** argv) {
     const char* dir = nullptr;
     const char* dump_tile = nullptr;
     const char* net_disasm = nullptr;
+    const char* screenshot = nullptr;
+    uint64_t shot_every = 0, tilegen_trace = 0, coin_frame = 0;
     bool show_text = false, real_netboard = true, force_master = false;
     std::size_t net_trace = 0;
     int64_t blocks = 200'000'000;
@@ -55,12 +60,17 @@ int main(int argc, char** argv) {
         else if (arg == "--net-trace" && i + 1 < argc) net_trace = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--net-disasm" && i + 1 < argc) net_disasm = argv[++i];
         else if (arg == "--net-force-master") force_master = true;
+        else if (arg == "--screenshot" && i + 1 < argc) screenshot = argv[++i];
+        else if (arg == "--shot-every" && i + 1 < argc) shot_every = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--tilegen-trace" && i + 1 < argc) tilegen_trace = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--coin" && i + 1 < argc) coin_frame = std::strtoull(argv[++i], nullptr, 0);
         else if (!dir) dir = argv[i];
         else dir = nullptr, i = argc;
     }
     if (!dir) {
         std::fprintf(stderr, "usage: gamerun <rom_dir> [--blocks N] [--text] [--dump-tile FILE]\n"
-                             "               [--netboard sim|real] [--net-trace N] [--net-disasm FILE]\n");
+                             "               [--netboard sim|real] [--net-trace N] [--net-disasm FILE]\n"
+                             "               [--screenshot FILE.png] [--shot-every N]\n");
         return 2;
     }
     const m3::GameSpec& game = m3::games::kSpikeoutFinalEdition;
@@ -70,15 +80,11 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // One table, sorted: the RAM program's addresses are all below the boot ROM's.
-    std::vector<recomp::FunctionEntry> functions;
-    for (const auto& f : generated::game_ram_functions()) functions.push_back(f);
-    for (const auto& f : generated::boot_rom_functions()) functions.push_back(f);
-    std::sort(functions.begin(), functions.end(),
-              [](const recomp::FunctionEntry& a, const recomp::FunctionEntry& b) { return a.addr < b.addr; });
+    const std::vector<recomp::FunctionEntry> functions = tools::game_functions();
 
     m3::Bus bus(roms);
     bus.set_security_key(game.security_key);
+    tools::set_rtc_to_host(bus);
     for (uint8_t& b : bus.ram()) b = 0xA5;
     m3::CommBoard* comm = nullptr;
     if (real_netboard) {
@@ -92,6 +98,29 @@ int main(int argc, char** argv) {
     c.limit_blocks(static_cast<uint64_t>(blocks));
     recomp::FrameTiming timing;
     c.set_scheduler(&timing);
+    // The 2D layers, a line at a time; each finished frame is kept for --screenshot.
+    m3::TilegenRenderer tilegen;
+    std::vector<uint32_t> screen(m3::TilegenRenderer::kWidth * m3::TilegenRenderer::kHeight);
+    timing.on_display_line = [&](uint32_t line) {
+        if (line == 0) tilegen.begin_frame();
+        tilegen.draw_line(bus, static_cast<int>(line));
+    };
+    timing.on_frame_end = [&] {
+        tilegen.composite(screen);
+        bus.midi_out().clear(); // no sound board yet
+        // --coin: hold coin 1 (bank 0 bit 0, active low) for 6 frames.
+        const bool coin = coin_frame && timing.frames() >= coin_frame && timing.frames() < coin_frame + 6;
+        bus.inputs.bank0 = static_cast<uint8_t>(coin ? 0xFE : 0xFF);
+        if (tilegen_trace && timing.frames() % tilegen_trace == 0) {
+            std::printf("frame %6llu tilegen", static_cast<unsigned long long>(timing.frames()));
+            for (uint32_t reg : {0x20u, 0x40u, 0x44u, 0x60u, 0x64u, 0x68u, 0x6Cu}) std::printf(" %02x=%08x", reg, bus.tile_reg(reg));
+            std::printf("\n");
+        }
+        if (screenshot && shot_every && timing.frames() % shot_every == 0) {
+            const std::string path = std::string(screenshot) + "-" + std::to_string(timing.frames()) + ".png";
+            tools::write_png(path, screen, m3::TilegenRenderer::kWidth, m3::TilegenRenderer::kHeight);
+        }
+    };
     std::printf("%zu recompiled functions; running up to %lld blocks from %08x\n\n", functions.size(),
                 static_cast<long long>(blocks), c.cpu.pc);
 
@@ -122,6 +151,7 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(c.decrementer_interrupts), bus.irq().enable(), bus.irq().state());
 
     std::printf("Network board: %s\n", bus.netboard().describe().c_str());
+    std::printf("Sound board: %llu MIDI bytes sent (not emulated yet)\n", static_cast<unsigned long long>(bus.midi_bytes()));
     std::printf("EEPROM:");
     for (uint32_t i = 0; i < 64; ++i) std::printf("%s%04x", i % 16 == 0 ? "\n  " : " ", bus.eeprom().words()[i]);
     std::printf("\n");
@@ -161,7 +191,10 @@ int main(int argc, char** argv) {
         // little-endian, so the two entries in each CPU word are swapped.
         // Spikeout's font puts ASCII at tile numbers 0x20-0x7E.
         const auto tile = bus.tile_ram();
-        std::printf("\nText on the tile layers:\n");
+        std::printf("\nTilegen registers (as the tile generator sees them):\n ");
+        for (uint32_t reg : {0x00u, 0x08u, 0x0Cu, 0x20u, 0x40u, 0x44u, 0x60u, 0x64u, 0x68u, 0x6Cu})
+            std::printf(" %02x=%08x", reg, bus.tile_reg(reg));
+        std::printf("\n\nText on the tile layers:\n");
         for (uint32_t layer = 0; layer < 4; ++layer) {
             for (uint32_t row = 0; row < 64; ++row) {
                 std::string line;
@@ -175,6 +208,13 @@ int main(int argc, char** argv) {
                     std::printf("  layer %u row %2u: %s\n", layer, row, line.c_str());
             }
         }
+    }
+
+    if (screenshot) {
+        if (tools::write_png(screenshot, screen, m3::TilegenRenderer::kWidth, m3::TilegenRenderer::kHeight))
+            std::printf("\nScreen (last finished frame) written to %s\n", screenshot);
+        else
+            std::fprintf(stderr, "gamerun: cannot write %s\n", screenshot);
     }
 
     if (dump_tile) {

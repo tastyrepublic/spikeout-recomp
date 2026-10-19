@@ -24,21 +24,24 @@ Each milestone ends with something you can run and check.
 - [x] Banked CROM switching (bank select at `0xF0100008`, in `m3::Bus`)
 - [x] 315-5881 security board decryption (key `0x29236FC8`; `m3::Crypt315_5881`, MAME's cipher, checked against it on random streams)
 - [x] Open-bus reads return all ones (Spikeout's ROM check needs it)
-- [x] Frame timing: 57.524 Hz, 424 lines, IRQ 0x02/0x0D as in [hardware-notes.md](hardware-notes.md) (`recomp::FrameTiming`; not yet: MIDI IRQ 0x40, waiting for the IRQ 0x02 acknowledge)
+- [x] Frame timing: 57.524 Hz, 424 lines, IRQ 0x02/0x0D as in [hardware-notes.md](hardware-notes.md) (`recomp::FrameTiming`; not yet: waiting for the IRQ 0x02 acknowledge)
 - [x] Backup RAM (the game's RAM test passes)
-- [ ] RTC (read ~12,000 times during start-up)
+- [x] RTC (Epson RTC-72421, `m3::Rtc72421`): on the emulated time, settable by the game
 - [x] Network board: its own 68000 runs the firmware the game uploads (`m3::CommBoard`, Moira core; the simulation stays as `--netboard sim`); with the link set to master it brings the ring of one up (status 1 `0x2021`) and the game goes on to its ROM check
 - [x] Security board check: passes (it showed ILLEGAL ROM before the decrypter)
 - [x] JTAG scan chain of the Real3D chips; Real3D PCI ID, DMA device and ping-pong bit: the game runs its main loop and sends the Real3D real frames
 - [x] Settings EEPROM (93C46 on the I/O board, `m3::Eeprom93C46`): the game writes its defaults and runs as a link master on its own; before it, it read garbage, set up as a slave and the firmware reported NO CARRIER, as a lone slave should
 - [x] Task resume points: code that tasks yield to (stored `lis`/`addi`/`addic` constants) is found by the analysis; the game now runs minutes of game time without missing code
+- [x] Sound board link: MIDI port and IRQ 0x40 in VBlank (the game queues its sound commands and waits on them); the bytes are kept for a sound board
+- [x] Return sites: a resumed task can return into a function it called from before it yielded (`resume_at`, about 7,000 sites)
+- [x] The attract mode runs: logo, title, INSERT COIN, BASIC OPERATION (16,633 frames with no missing code)
 - [ ] Reference interpreter for code that the static pass misses, with logging so it can be added to the recompiled set
 - [ ] **Goal:** reaches the attract loop, verified against Supermodel's behavior
 
 ## 3. Graphics
 
-- [ ] SDL3 window and frontend
-- [ ] Tilegen 2D layers (text, HUD, menus)
+- [x] SDL3 window and frontend (`spikeout`: the game on its own thread at 57.524 Hz, keyboard to the I/O board)
+- [x] Tilegen 2D layers (`m3::TilegenRenderer`, drawn a line at a time): boot text, logos, attract screens
 - [ ] Real3D Pro-1000: display list / culling node walker
 - [ ] Polygon and texture decoding, native renderer (Vulkan/Metal via SDL GPU)
 - [ ] Widescreen and high resolution
@@ -48,7 +51,7 @@ Each milestone ends with something you can run and check.
 
 - [ ] 68000 sound CPU + SCSP (emulated; it's small)
 - [ ] DSB2 MPEG music board
-- [ ] Keyboard, gamepad and arcade stick mapping, coin/start/service
+- [ ] Keyboard (done in `spikeout`: coin, start, test, service, joystick, buttons), gamepad and arcade stick mapping
 
 ## 5. Local multiplayer
 

@@ -28,6 +28,8 @@ bool emulated(const Region& region, uint32_t) {
     case Device::Io:
     case Device::SecurityRam:
     case Device::SecurityCrypt:
+    case Device::Rtc:
+    case Device::SoundUart:
         return true;
     default:
         return false;
@@ -117,6 +119,17 @@ uint8_t Bus::device_read(const Region& region, uint32_t addr) {
         return net()->read8(addr);
     case Device::Io:
         return io_read(region.offset(addr));
+    case Device::SoundUart: // Supermodel: 0x00 data (a region lock in Magical Truck), 0x83 control
+        switch (region.offset(addr) & 0xF) {
+        case 0x0: return 0x00;
+        case 0x4: return 0x83;
+        default:  return 0x00;
+        }
+    case Device::Rtc: { // a register in the top byte of each word; byte 1: battery OK
+        const uint32_t off = region.offset(addr);
+        if ((off & 3) == 0) return rtc_.read(off >> 2, now());
+        return (off & 3) == 1 ? 0x03 : 0x00;
+    }
     case Device::SecurityRam:
         return security_ram_[region.offset(addr) % kSecurityRamSize];
     case Device::SecurityCrypt: // narrow reads see the status (0); data only as 32 bits
@@ -148,6 +161,17 @@ void Bus::io_write(uint32_t reg, uint8_t value) {
         io_bank_ = value;
     }
     // 0x10 drive board, 0x14 lamps, 0x24 serial: outputs, nothing to do yet
+}
+
+void Bus::midi_write(uint32_t reg, uint8_t value) {
+    if (reg == 0x0) { // data: to the sound board
+        midi_out_.push_back(value);
+        ++midi_bytes_;
+        irq_.deassert(0x40);
+    } else if (reg == 0x4) { // control
+        midi_ctrl_ = value;
+        if (!(value & 0x20)) irq_.deassert(0x40);
+    }
 }
 
 // ---- Security board (Supermodel's Model3.cpp, ReadSecurity / WriteSecurity) ----
@@ -337,6 +361,16 @@ void Bus::write_slow(uint32_t addr, uint32_t value, uint32_t size) {
     case Device::BackupRam:
         for (uint32_t i = 0; i < size; ++i)
             backup_ram_[(region->offset(addr) + i) % kBackupRamSize] = static_cast<uint8_t>(value >> (8 * (size - 1 - i)));
+        return;
+    case Device::SoundUart: // byte registers (Supermodel ignores wider writes)
+        if (size == 1) midi_write(region->offset(addr) & 0xF, static_cast<uint8_t>(value));
+        else count(region, addr, true);
+        return;
+    case Device::Rtc: // only the top byte of each word reaches the chip
+        for (uint32_t i = 0; i < size; ++i) {
+            const uint32_t off = region->offset(addr) + i;
+            if ((off & 3) == 0) rtc_.write(off >> 2, static_cast<uint8_t>(value >> (8 * (size - 1 - i))), now());
+        }
         return;
     case Device::SecurityRam:
         for (uint32_t i = 0; i < size; ++i)

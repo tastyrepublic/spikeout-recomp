@@ -21,6 +21,10 @@ const Segment* CodeImage::segment_at(uint32_t addr) const {
 
 std::optional<uint32_t> CodeImage::read32(uint32_t addr) const {
     if (addr & 3) return std::nullopt;
+    return read_data32(addr);
+}
+
+std::optional<uint32_t> CodeImage::read_data32(uint32_t addr) const {
     const Segment* s = segment_at(addr);
     if (!s || !s->contains(addr, 4)) return std::nullopt;
     const uint8_t* p = s->bytes.data() + (addr - s->base);

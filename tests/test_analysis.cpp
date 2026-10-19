@@ -268,6 +268,45 @@ TEST_CASE("control flow: a yielding task's resume point, and addresses built wit
     CHECK_EQ(a.functions.at(at(9)).kind, EntryKind::Pointer);
 }
 
+TEST_CASE("control flow: tables found from the code before the branch, whatever the index on the first path") {
+    // A state machine's dispatch reached first with a constant index (li),
+    // which alone would give one entry: the instructions say it's a table.
+    const std::vector<uint32_t> tail = {
+        li(5, 1), kBlr, // 8
+        li(5, 2), kBlr, // 10
+        at(8), at(10),  // 12: table
+    };
+    std::vector<uint32_t> jump = {li(4, 0), slwi(4, 4, 2), lis(3, 0), addi(3, 3, at(12)), lwzx(0, 3, 4), mtctr(0),
+                                  kBctr, kNop}; // lwzx form
+    std::vector<uint32_t> call = {li(3, 1), slwi(2, 3, 2), addis(2, 2, 0), addi(2, 2, at(12)), D(32, 0, 2, 0),
+                                  mtlr(0), 0x4E800021, kBlr}; // lwz form, blrl
+    jump.insert(jump.end(), tail.begin(), tail.end());
+    call.insert(call.end(), tail.begin(), tail.end());
+    for (const auto& code : {jump, call}) {
+        const auto a = run(code);
+        CHECK_EQ(a.jump_tables.size(), size_t{1});
+        if (a.jump_tables.size() == 1) CHECK((a.jump_tables.at(0).targets == std::vector<uint32_t>{at(8), at(10)}));
+    }
+}
+
+TEST_CASE("control flow: a data pointer to the middle of known code is an entry") {
+    const std::vector<uint32_t> code = {
+        lis(3, 0), addi(3, 3, at(8)), kBlr, kNop, // 0: makes 8 a callback (after a boundary)
+        li(5, 1), li(6, 2), li(7, 3), kBlr,       // 4: shared tail at 6, pointed to from data
+        li(5, 9), kBlr,                           // 8
+        0,
+        at(6),                                    // 11: data
+    };
+    const CodeImage image = image_of(code);
+    const std::array entries = {Entry{kBase, EntryKind::Seed, ""}, Entry{at(4), EntryKind::Seed, ""}};
+    Options options;
+    options.scan_pointers = true;
+    options.pointer_segments = {"test"};
+    const Analysis a = analyze(image, entries, options);
+    CHECK(a.functions.contains(at(6)));
+    CHECK_EQ(a.functions.at(at(6)).kind, EntryKind::Pointer);
+}
+
 TEST_CASE("control flow: constant blr and rfi start new functions") {
     const auto a = run({
         li(3, static_cast<uint32_t>(at(4))), // 0

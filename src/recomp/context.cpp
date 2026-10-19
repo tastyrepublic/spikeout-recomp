@@ -108,16 +108,17 @@ void Context::slow_tick(uint32_t pc) {
     next_check_ = std::max(next, blocks + 1);
 }
 
-GuestFunction Context::find(uint32_t addr) const {
+const FunctionEntry* Context::find(uint32_t addr) const {
     auto it = std::lower_bound(functions_.begin(), functions_.end(), addr,
                                [](const FunctionEntry& e, uint32_t a) { return e.addr < a; });
-    return it != functions_.end() && it->addr == addr ? it->fn : nullptr;
+    return it != functions_.end() && it->addr == addr ? &*it : nullptr;
 }
 
 void Context::call(uint32_t addr) {
-    GuestFunction fn = find(addr);
-    if (!fn) throw MissingCode(addr);
-    fn(*this);
+    const FunctionEntry* e = find(addr);
+    if (!e) throw MissingCode(addr);
+    resume_at = e->resume;
+    e->fn(*this);
 }
 
 void Context::follow_return(uint32_t next) {

@@ -7,7 +7,9 @@
 // four bytes at that address with the first one in the top byte.
 #pragma once
 
+#include "ppc/cpu_state.hpp"
 #include "runtime/crypt315_5881.hpp"
+#include "runtime/rtc.hpp"
 #include "runtime/eeprom.hpp"
 #include "runtime/jtag.hpp"
 #include "runtime/memory_map.hpp"
@@ -167,6 +169,7 @@ public:
     // sees them (little-endian: the bus byte-swaps, as Supermodel does).
     // Register 0x10 acknowledges IRQs: writing a bit clears it.
     uint32_t tile_reg(uint32_t reg) const { return tile_regs_[(reg & 0xFF) / 4]; }
+    const std::array<uint32_t, 64>& tile_regs() const { return tile_regs_; }
     // Tilegen RAM 0xF1000000-0xF111FFFF (characters, name tables, palette),
     // in CPU byte order: byte i is what the CPU reads at 0xF1000000 + i.
     std::span<const uint8_t> tile_ram() const { return tile_ram_; }
@@ -183,6 +186,21 @@ public:
         uint8_t controls2 = 0xFF; // 0x0C
     } inputs;
     Eeprom93C46& eeprom() { return eeprom_; }
+
+    // Sound board MIDI port (0xF0080000; Supermodel's Model3.cpp): +0 data
+    // (a write sends a byte to the sound board and clears IRQ 0x40), +4
+    // control (bit 0x20 asks for periodic MIDI IRQs, which the frame timing
+    // raises in VBlank; clearing it clears IRQ 0x40). Reads give 0x00 and
+    // 0x83. No sound board yet: the bytes are kept in midi_out() for one,
+    // and the frontend empties it.
+    uint8_t midi_control() const { return midi_ctrl_; }
+    std::vector<uint8_t>& midi_out() { return midi_out_; }
+    uint64_t midi_bytes() const { return midi_bytes_; }
+
+    // Real-time clock (0xF0140000), on the emulated time. It starts at
+    // 1970-01-01 00:00; a frontend sets it (rtc().set_time) from the host's
+    // clock or a fixed time for reproducible runs.
+    Rtc72421& rtc() { return rtc_; }
 
     // Security board (315-5881). The game writes encrypted data into the
     // board's RAM (0xF0180000, 128 KB), sets a sequence key and reads the
@@ -265,6 +283,11 @@ private:
     uint8_t io_bank_ = 0;
     uint8_t io_read(uint32_t reg);
     void io_write(uint32_t reg, uint8_t value);
+    Rtc72421 rtc_{ppc::CpuState::kCoreClockHz};
+    uint8_t midi_ctrl_ = 0;
+    std::vector<uint8_t> midi_out_;
+    uint64_t midi_bytes_ = 0;
+    void midi_write(uint32_t reg, uint8_t value);
     std::vector<uint8_t> security_ram_;
     Crypt315_5881 crypt_;
     bool security_first_read_ = true;

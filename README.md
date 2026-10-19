@@ -31,7 +31,7 @@ Please don't open issues or PRs containing ROM data or links to it.
 | Control-flow analysis | `src/analysis/` | Functions, basic blocks and jump tables reachable from the vectors, through the boot ROM's copy into RAM ([notes](docs/control-flow.md)) |
 | Lifter | `src/recomp/lifter.*` | PowerPC functions to C++: every instruction the game uses, floating point included ([notes](docs/recompiler.md)) |
 | Runtime | `src/recomp/context.*`, `src/runtime/bus.*` | What recompiled code runs against: CPU state, function table, bus with RAM, ROM and the MPC106 PCI bridge |
-| Tools | `tools/` | `romcheck` (verify a set, show boot code), `ppcdis` (disassemble), `codemap` (map the code), `ppcrecomp` (recompile), `boottest` (run the recompiled boot ROM) and `gamerun` (run it into the recompiled game) |
+| Tools | `tools/` | `romcheck` (verify a set, show boot code), `ppcdis` (disassemble), `codemap` (map the code), `ppcrecomp` (recompile), `boottest` (run the recompiled boot ROM), `gamerun` (run it into the recompiled game) and `spikeout` (the game in a window) |
 
 ## Building
 
@@ -85,8 +85,22 @@ ctest --test-dir build --output-on-failure
 The build also recompiles the whole game (`game_ram`, a few minutes the
 first time). `boottest` runs the recompiled boot code from the reset vector to the
 jump into RAM and checks what it did; `gamerun` keeps going into the game
-and reports where it stops. Generated code is derived from your
+and reports where it stops (`--screenshot`, `--shot-every N` save the
+screen as PNG). Generated code is derived from your
 ROMs: it stays in the build directory and is never committed.
+
+`spikeout` runs the game in a window (SDL3: CMake uses an installed one,
+or downloads and builds SDL 3.4 with the project; `-DSPIKEOUT_FRONTEND=OFF`
+leaves it out):
+
+```sh
+build/spikeout path/to/spikeofe
+```
+
+It shows the 2D layers only so far (boot text, logos, the attract
+screens; the 3D isn't drawn yet). Keys: `5` coin, `1` start, `F2` test,
+`F1` service, arrows, `Z` beat, `X` charge, `C` jump, `V` shift; hold
+`Tab` to run as fast as possible, `F12` for a screenshot, `Esc` to quit.
 
 ## Online play
 
@@ -107,6 +121,7 @@ Details in [docs/netplay.md](docs/netplay.md).
 - [MAME](https://github.com/mamedev/mame) (`src/mame/sega/model3.cpp`) — secondary reference for cross-checking and ROM set naming.
 - Motorola/IBM *PowerPC 603e RISC Microprocessor User's Manual* and *Programming Environments Manual*.
 - [Moira](https://github.com/dirkwhoffmann/Moira) by Dirk W. Hoffmann (MIT, vendored in `third_party/moira`) — the 68000 core that runs the network board's firmware.
+- [SDL 3](https://github.com/libsdl-org/SDL) (zlib license) for the window, downloaded at build time if not installed.
 - MAME's 315-5881 decryption by Andreas Naive, Olivier Galibert and David Haywood (BSD-3-Clause; tables and algorithm in `src/runtime/crypt315_5881.cpp`, with their notice), as also used by Supermodel.
 
 See [docs/REFERENCES.md](docs/REFERENCES.md) for how sources are used.

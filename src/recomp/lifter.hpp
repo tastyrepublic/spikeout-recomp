@@ -8,6 +8,10 @@
 // call), and jump tables are switches. Anything only known at run time goes
 // through Context::call()/jump().
 //
+// Every instruction after a call is also a return site: a label the
+// function can start at when Context::call() resumes it there (resume_at,
+// checked at the top of the function). The table lists those sites too.
+//
 // The generated code defines
 //     std::span<const recomp::FunctionEntry> generated::<name>_functions();
 // listing every function in it, sorted by address. It is derived from the
@@ -36,6 +40,7 @@ struct LiftStats {
     uint32_t functions = 0;
     uint32_t blocks = 0;
     uint32_t instructions = 0;
+    uint32_t return_sites = 0; // places after a call the runtime can resume at
     std::map<std::string, uint32_t> unimplemented; // mnemonic -> count (they throw at run time)
 };
 

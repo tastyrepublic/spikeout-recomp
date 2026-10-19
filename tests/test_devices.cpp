@@ -5,6 +5,7 @@
 #include "runtime/jtag.hpp"
 #include "runtime/netboard.hpp"
 #include "runtime/rom.hpp"
+#include "runtime/tilegen.hpp"
 
 #include <vector>
 
@@ -252,4 +253,122 @@ TEST_CASE("security: the game's view of the board, plain and compressed streams"
     CHECK((stream(0x0000) == plain));      // header 0x1D4FA: uncompressed
     CHECK((stream(0x1234) == compressed)); // header 0x354EB: compressed (bit 17)
     CHECK((stream(0x0000) == plain));      // a restart starts the stream over
+}
+
+TEST_CASE("rtc: calendar helpers round-trip") {
+    const Rtc72421::Date d = Rtc72421::to_date(Rtc72421::to_seconds({2024, 2, 29, 23, 59, 58}));
+    CHECK_EQ(d.year, 2024);
+    CHECK_EQ(d.month, 2);
+    CHECK_EQ(d.day, 29);
+    CHECK_EQ(d.hour, 23);
+    CHECK_EQ(Rtc72421::to_seconds({1970, 1, 1, 0, 0, 0}), int64_t{0});
+    CHECK_EQ(Rtc72421::to_seconds({2000, 3, 1, 0, 0, 0}), int64_t{951868800});
+}
+
+TEST_CASE("rtc: digits on the bus, emulated time, writes and 12-hour mode") {
+    RomSet roms;
+    Bus bus(roms); // no CPU attached: the time stays at cycle 0
+    auto reg = [&](uint32_t n) { return bus.read8(0xFE140000 + 4 * n); };
+    bus.rtc().set_time(Rtc72421::to_seconds({2026, 10, 19, 21, 7, 45}), 0);
+    CHECK_EQ(bus.read8(0xFE140001), 0x03u); // battery OK
+    const uint8_t expected[13] = {5, 4, 7, 0, 1, 2, 9, 1, 0, 1, 6, 2, 1}; // ... Monday
+    for (uint32_t n = 0; n < 13; ++n) CHECK_EQ(reg(n), uint32_t{expected[n]});
+
+    // One emulated second later.
+    Rtc72421 rtc(1000);
+    rtc.set_time(Rtc72421::to_seconds({1999, 12, 31, 23, 59, 59}), 0);
+    CHECK_EQ(rtc.read(0, 999), 9u);
+    CHECK_EQ(rtc.read(0, 1000), 0u);
+    CHECK_EQ(rtc.read(11, 1000), 0u); // year 00
+    CHECK_EQ(rtc.read(6, 1000), 1u);  // day 1
+
+    // STOP holds it; writing a digit sets it.
+    rtc.write(15, 0x4 | 0x2, 1000); // 24-hour, STOP
+    rtc.write(5, 1, 1000);          // hour 10..
+    rtc.write(4, 3, 1000);          // 13:00
+    CHECK_EQ(rtc.read(5, 50000), 1u);
+    CHECK_EQ(rtc.read(4, 50000), 3u);
+    CHECK_EQ(rtc.read(0, 50000), 0u); // stopped
+    rtc.write(15, 0x4, 50000);        // run again
+    CHECK_EQ(rtc.read(0, 51000), 1u);
+
+    // 12-hour mode: 13:xx reads 01 with the PM flag.
+    rtc.write(15, 0x0, 51000);
+    CHECK_EQ(rtc.read(4, 51000), 1u);
+    CHECK_EQ(rtc.read(5, 51000), 4u);
+}
+
+namespace {
+
+// Tilegen RAM in CPU byte order; the tile generator's word i is little-endian.
+struct TileRam {
+    std::vector<uint8_t> bytes = std::vector<uint8_t>(0x120000, 0);
+    void put(uint32_t byte_addr, uint32_t v) {
+        for (uint32_t i = 0; i < 4; ++i) bytes[byte_addr + i] = static_cast<uint8_t>(v >> (8 * i));
+    }
+};
+
+} // namespace
+
+TEST_CASE("tilegen: 4- and 8-bit tiles, scroll, line mask, transparency, colour offset") {
+    TileRam ram;
+    std::array<uint32_t, 64> regs{};
+    // Layer 0: 4-bit, above the 3D, on. Entry 0x0011: pattern 0x22, colours 0x10-0x1F.
+    regs[0x20 / 4] = 1u << 12 | 1u << 8;
+    regs[0x60 / 4] = 0x80000000u;
+    ram.put(0xF8000, 0x0011u << 16);       // tiles 0 (left, high half) and 1 of row 0
+    ram.put(0x22 * 32, 0x01234567u);        // its first row: pixels 0, 1, 2, ... 7
+    ram.put(0x100000 + 0x10 * 4, 0x8000u);  // colour 0x10: transparent
+    ram.put(0x100000 + 0x11 * 4, 0x001Fu);  // 0x11: red
+    ram.put(0x100000 + 0x12 * 4, 0x03E0u);  // 0x12: green
+    ram.put(0xF7000, 0xFFFF0000u);          // line 0: layers 0/1 show the primary (0)
+
+    TilegenRenderer r;
+    r.begin_frame();
+    r.draw_line(ram.bytes, regs, 0);
+    CHECK_EQ(r.top()[0], 0u);            // transparent
+    CHECK_EQ(r.top()[1], 0xFFFF0000u);   // red
+    CHECK_EQ(r.top()[2], 0xFF00FF00u);   // green
+    CHECK_EQ(r.bottom()[1], 0u);
+
+    regs[0x60 / 4] = 0x80000001u; // x scroll 1
+    regs[0x40 / 4] = 0xF0u;       // red offset -16 * 2
+    r.begin_frame();
+    r.draw_line(ram.bytes, regs, 0);
+    CHECK_EQ(r.top()[0], 0xFFDF0000u);
+
+    ram.put(0xF7000, 0x00000000u); // the mask picks the alternate layer (1, off): nothing
+    r.begin_frame();
+    r.draw_line(ram.bytes, regs, 0);
+    CHECK_EQ(r.top()[0], 0u);
+
+    // Layer 2: 8-bit, below the 3D. Entry 0x0103: pattern 0x103, colours 0x100-0x1FF.
+    regs[0x68 / 4] = 0x80000000u;
+    ram.put(0xF7000, 0x0000FFFFu);
+    ram.put(0xFC000, 0x0103u << 16);
+    ram.put(0x103 * 64, 0x05060708u);
+    ram.put(0x100000 + 0x105 * 4, 0x7C00u); // blue
+    r.begin_frame();
+    r.draw_line(ram.bytes, regs, 0);
+    CHECK_EQ(r.bottom()[0], 0xFF0000FFu);
+    std::vector<uint32_t> out(TilegenRenderer::kWidth * TilegenRenderer::kHeight);
+    r.composite(out);
+    CHECK_EQ(out[0], 0xFF0000FFu);
+    CHECK_EQ(out[TilegenRenderer::kWidth], 0xFF000000u); // line 1 not drawn: black
+}
+
+TEST_CASE("sound: MIDI port bytes, control and IRQ 0x40") {
+    RomSet roms;
+    Bus bus(roms);
+    CHECK_EQ(bus.read8(0xF0080004), 0x83u);
+    bus.irq().assert_irq(0x40);
+    bus.write8(0xF0080004, 0x07); // periodic IRQs off: clears it
+    CHECK_EQ(bus.irq().state() & 0x40, 0u);
+    bus.write8(0xF0080004, 0x27);
+    CHECK_EQ(bus.midi_control(), 0x27u);
+    bus.irq().assert_irq(0x40);
+    bus.write8(0xF0080000, 0xAE);
+    CHECK_EQ(bus.irq().state() & 0x40, 0u);
+    CHECK((bus.midi_out() == std::vector<uint8_t>{0xAE}));
+    CHECK_EQ(bus.midi_bytes(), uint64_t{1});
 }

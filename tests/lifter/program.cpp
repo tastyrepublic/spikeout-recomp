@@ -233,6 +233,7 @@ Program build() {
     a.emit(mflr(31));
     a.emit(li(3, 7));
     a.bl("double");
+    a.label("caller.after"); // a return site
     a.emit(addi(3, 3, 1));
     a.emit(mtlr(31));
     a.emit(kBlr);

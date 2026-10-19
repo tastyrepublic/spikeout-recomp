@@ -25,9 +25,14 @@ class Context;
 class Scheduler;
 using GuestFunction = void (*)(Context&);
 
+// A recompiled function, or a place inside one to resume at: `resume` is an
+// instruction right after a call in `fn` (a return site), which code can
+// return to without a C++ frame waiting there (a task resumed on its own
+// stack returns into the calls it made before it yielded).
 struct FunctionEntry {
     uint32_t addr;
     GuestFunction fn;
+    uint32_t resume = 0; // == addr for a return site; 0 for a function entry
 };
 
 // Execution reached an address with no recompiled function.
@@ -123,9 +128,13 @@ public:
         return out;
     }
 
-    GuestFunction find(uint32_t addr) const;
-    // Run the function at `addr` (an indirect call; the caller sets LR).
+    const FunctionEntry* find(uint32_t addr) const;
+    // Run the function at `addr` (an indirect call; the caller sets LR), or
+    // resume the function containing return site `addr`.
     void call(uint32_t addr);
+    // Set by call() for a return site; the function's prologue takes it
+    // (and clears it) and continues at that site.
+    uint32_t resume_at = 0;
     // Continue at `addr` (an indirect jump or tail call). Same as call():
     // the C++ stack only unwinds when the guest code returns.
     void jump(uint32_t addr) { call(addr); }

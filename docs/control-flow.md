@@ -57,14 +57,37 @@ unconditional branch, its branches stay in the image, and it doesn't start
 with a conditional branch or a branch to itself and has no absolute
 branches: floats like `0x42EB0000` (117.5) decode as `bc` to itself.
 
-A constant built by the code may also land inside a function, on an
-instruction the analysis already reached. Spikeout's tasks yield by storing
-the address to resume at (`lis` + `addi`, sometimes `addic`, then `stw`
-into the task at `12(r12)`), and the task loop at `0x11E10` calls it on a
-later frame, so such a resume point is an entry of its own. Words found in
-data still need the function boundary.
+A pointer may also land inside a function, on an instruction the analysis
+already reached, and that is taken as an entry too:
+
+- Spikeout's tasks yield by storing the address to resume at (`lis` +
+  `addi`, sometimes `addic`, then `stw` into the task at `12(r12)`); the
+  task loop at `0x11E10` calls it on a later frame.
+- Callbacks kept in a register across calls (`lis r31` / `addi r31` …
+  `mtlr r31; blrl` at `0x6532C`, which the tracker loses at the calls).
+- Tables pointing at shared tails: the record table at `0x93424` points at
+  `0x4119C`, the last instructions of the function at `0x41188`.
+
+Most such constants are false (plain numbers like `0x1EE00` land on code
+too), which costs only an extra function, as long as a real function's
+code is explored first: each instruction is explored once, with the
+registers of the first path to reach it, and a guessed entry in the middle
+of a function starts with nothing known. So the entries are explored in
+order, each with everything it reaches before the next: the seeds and
+their calls first, the scan's guesses last.
 
 The analysis is repeated until no new entries turn up.
+
+### Tables the register state misses
+
+Exploring each instruction once also means a dispatch reached first on a
+path where the index is a constant (a state machine after `li r3, 1`, at
+`0x324C4`) gives a constant address and one target. So before an indirect
+branch the analysis also reads the instructions themselves:
+`rlwinm` of the index, then `addis`/`addi` of the base, `lwz rX, d(rB)`,
+`mtlr`/`mtctr`, or the same with the base built separately by `lis`/`addi`
+and `lwzx rX, rA, rI`. Either way it's a table of guessed length. Table
+entries are data and may be unaligned: the one at `0xA1579` is.
 
 ## Results on `spikeofe`
 
@@ -72,16 +95,16 @@ With `--scan-pointers`:
 
 | | |
 |---|---|
-| Functions | about 2,570 (1,203 found only by the pointer scan) |
-| Instructions | about 119,700 (465 KB of the RAM copy) |
+| Functions | about 2,900 (1,445 found only by the pointer scan) |
+| Instructions | about 119,900 (466 KB of the RAM copy) |
 | Code area found | 70–98% per 64 KB of `0x0`–`0x7FFFF` |
-| Tables | 39 (15 jump, 24 call), all guessed length |
+| Tables | 42 (17 jump, 25 call), all guessed length |
 
 What's left, reported as issues:
 
-- **62 unresolved calls**: `bctrl`/`blrl` through function pointers loaded
+- **61 unresolved calls**: `bctrl`/`blrl` through function pointers loaded
   from RAM, e.g. a table whose address is itself stored at `0x710008`.
-- **8 unresolved jumps**: three copies of a PCI-config stub that jumps to
+- **7 unresolved jumps**: three copies of a PCI-config stub that jumps to
   `base + size * 12` (in the boot ROM and RAM), and tail calls through
   struct pointers.
 - The rest of the code is reachable only through those. The runtime will

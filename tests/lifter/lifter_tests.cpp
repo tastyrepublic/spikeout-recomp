@@ -356,3 +356,55 @@ TEST_CASE("lifter: runs stop on loops, missing code and bad returns") {
         CHECK_EQ(m.run("badret"), addr_of("double")); // what a caller's check would catch
     }
 }
+
+TEST_CASE("lifter: code can resume at a return site, with no call waiting there") {
+    // A task resumed on its own stack returns into the calls it made before
+    // it yielded: here, into caller right after its bl.
+    Machine m;
+    const recomp::FunctionEntry* site = m.c.find(addr_of("caller.after"));
+    CHECK(site != nullptr);
+    if (!site) return;
+    CHECK_EQ(site->resume, addr_of("caller.after"));
+    m.s.gpr[3] = 20;
+    m.s.gpr[31] = kReturnAddr; // the LR caller saved before its call
+    m.c.returned_to = 0;
+    m.c.call(addr_of("caller.after"));
+    CHECK_EQ(m.s.gpr[3], 21u);
+    CHECK_EQ(m.c.returned_to, kReturnAddr);
+    CHECK_EQ(m.c.resume_at, 0u);
+    CHECK_EQ(m.run("caller"), kReturnAddr); // still runs from the top when called
+    CHECK_EQ(m.s.gpr[3], 15u);
+}
+
+TEST_CASE("frame timing: display line and frame hooks, MIDI IRQs in VBlank") {
+    Machine m;
+    recomp::FrameTiming timing;
+    m.c.set_scheduler(&timing);
+    uint32_t lines = 0, frames = 0, last_line = 0;
+    timing.on_display_line = [&](uint32_t line) {
+        ++lines;
+        last_line = line;
+    };
+    timing.on_frame_end = [&] { ++frames; };
+    m.bus.write8(0xF0080004, 0x27); // the game asks for MIDI IRQs
+    m.bus.irq().set_enable(0x40);   // MSR[EE] is off: they stay pending
+    // A little into the first VBlank: IRQ 0x40 has been raised.
+    m.c.limit_blocks(5000 / 8);
+    try {
+        m.run("spin");
+    } catch (const recomp::OutOfBudget&) {
+    }
+    CHECK((m.bus.irq().state() & 0x40) != 0);
+    m.bus.write8(0xF0080000, 0x90); // a byte to the sound board acknowledges it
+    CHECK_EQ(m.bus.irq().state() & 0x40, 0u);
+    CHECK_EQ(m.bus.midi_out().size(), size_t{1});
+    // On through the first frame.
+    m.c.limit_blocks(timing.frame_cycles() / 8 + 100);
+    try {
+        m.run("spin");
+    } catch (const recomp::OutOfBudget&) {
+    }
+    CHECK_EQ(lines, 384u);
+    CHECK_EQ(last_line, 383u);
+    CHECK_EQ(frames, 1u);
+}

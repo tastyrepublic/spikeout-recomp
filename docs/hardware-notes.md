@@ -96,24 +96,43 @@ register (captures `0b00001`); 3D-RAMs: 4-bit instruction register
 `0x316c4057`, Earth `0x516c5057`, Mars `0x316c6057`, Jupiter `0x516c7057`.
 Spikeout reports "INVALID CONFIG DETECTED" without them.
 
-## Tilegen text
+## Tile generator (2D layers)
 
-Name tables at `0xF10F8000`, one per layer, `0x2000` bytes apart: 64 × 64
-entries of 16 bits, little-endian on the tile generator side, so each CPU
-word holds two entries in swapped order. Spikeout's font puts ASCII at
-tile numbers `0x20`–`0x7E`, which makes its messages readable straight
-from the name table (`gamerun --text`).
+The game writes Tilegen RAM little-endian (`stwbrx`): the tile generator's
+32-bit word *i* is a little-endian read of the bytes at `0xF1000000 + 4i`
+(palette entry 2 is white `0x7FFF`, a blank text tile is `0x0020`). Layout
+and registers as in Supermodel's `Render2D.cpp` notes; summary in
+`src/runtime/tilegen.hpp`. Four 64 × 64 layers of 8 × 8 tiles, 4- or
+8-bit, in two pairs (0/1 and 2/3); a line mask picks one layer of each pair
+per 32 pixels; each layer is above or below the 3D (register `0x20`);
+`0x40`/`0x44` add a colour offset to each pair (signed 8-bit per channel,
+doubled; MAME ignores these, Supermodel applies them). Name tables at
+`0xF10F8000`, one per layer, `0x2000` bytes apart, two entries per word
+(the left one in the high half). Spikeout's font puts ASCII at tile
+numbers `0x20`–`0x7E`, so its messages read straight from the name table
+(`gamerun --text`).
+
+Spikeout uses layers 0 and 2 (primary everywhere), 8-bit tiles: text and
+logos on 0, full-screen backgrounds and fades on 2. Its logo fades in by a
+white layer 2 with a colour offset moving from `0x00808000` to 0.
 
 ## Sound board link (`0xF0080000`)
 
 `+0` MIDI data (write: send byte to the sound board, clears IRQ `0x40`),
 `+4` MIDI control (bit `0x20` enables periodic MIDI IRQs; clearing it
-clears IRQ `0x40`).
+clears IRQ `0x40`). Reads: `0x00` and `0x83`. Spikeout queues its sound
+commands (`0x5830`, a 32-entry ring buffer) and sends them a byte per MIDI
+IRQ; without the IRQs the queue fills and the game waits. Supermodel
+raises IRQ `0x40` at the start of VBlank every 1000 cycles while bit
+`0x20` and the IRQ enable are set, at most 129 times; so do we.
 
-## RTC (`0xF0140000`)
+## RTC (`0xF0140000`, Epson RTC-72421)
 
-Register *n* at `+4n`. Byte 1 of each word reads `0x03` (battery voltage
-OK); a self-test checks it.
+Register *n* at `+4n`, in the top byte of each word: 0–12 the time as BCD
+digits (seconds, minutes, hours, day, month, two-digit year, day of the
+week), 13–15 control (HOLD, 30-second adjust, interrupt, RESET, STOP,
+24/12 hours). Byte 1 of each word reads `0x03` (battery voltage OK); a
+self-test checks it. Spikeout reads it ~12,000 times while starting.
 
 ## Inputs (`0xF0040000`, 315-5649)
 

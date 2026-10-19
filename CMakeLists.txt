@@ -44,6 +44,8 @@ add_library(m3runtime
     src/runtime/jtag.cpp
     src/runtime/commboard.cpp
     src/runtime/eeprom.cpp
+    src/runtime/rtc.cpp
+    src/runtime/tilegen.cpp
     src/runtime/crypt315_5881.cpp
     src/runtime/memory_map.cpp
     src/runtime/rom.cpp
@@ -153,6 +155,27 @@ if(SPIKEOUT_ROM_DIR)
 
     add_executable(gamerun tools/gamerun.cpp)
     target_link_libraries(gamerun PRIVATE game_ram boot_rom spikeout_warnings)
+
+    # The game in a window. SDL3 from the system if CMake finds it, otherwise
+    # downloaded and built with the project (zlib license).
+    option(SPIKEOUT_FRONTEND "Build the spikeout window (SDL3)" ON)
+    if(SPIKEOUT_FRONTEND)
+        find_package(SDL3 CONFIG QUIET)
+        if(NOT SDL3_FOUND)
+            include(FetchContent)
+            set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+            set(SDL_STATIC ON CACHE BOOL "" FORCE)
+            set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+            set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+            FetchContent_Declare(SDL3
+                GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+                GIT_TAG release-3.4.16
+                GIT_SHALLOW TRUE)
+            FetchContent_MakeAvailable(SDL3)
+        endif()
+        add_executable(spikeout tools/spikeout.cpp)
+        target_link_libraries(spikeout PRIVATE game_ram boot_rom SDL3::SDL3 spikeout_warnings)
+    endif()
 endif()
 
 if(SPIKEOUT_BUILD_TESTS)

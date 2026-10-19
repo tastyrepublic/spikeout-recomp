@@ -42,6 +42,24 @@ board), and keep the old behavior selectable while it is being tested.
 - **Clock**: our time is basic blocks × cycles per block, not real CPU
   cycles; how long code takes affects anything timed against the frame.
 
+## Clock, sound link and 2D
+
+- **Done:** the RTC runs on the emulated time from a start time the
+  frontend gives it (Supermodel returns the host's clock on every read and
+  ignores writes), so runs repeat, and the game can set it; 12/24 hours,
+  STOP, RESET and 30-second adjust follow the datasheet. BUSY is never
+  set and the interrupt output isn't emulated.
+- **MIDI IRQ timing** is Supermodel's (every 1000 cycles at the start of
+  VBlank, at most 129) and so is the order (Supermodel first waits for IRQ
+  `0x02` to be acknowledged, which we don't). Real timing comes from the
+  sound board's 68000 taking each byte; needs the sound board.
+- **Tile generator**: lines are drawn at the start of each display line,
+  as Supermodel does; the colour offset's channel order (red in the low
+  byte) is Supermodel's code, which its own comment contradicts; which
+  layer the line mask's first 16 pixels belong to (overscan) is a guess in
+  both emulators. Composite is 2D only: black, the layers below the 3D,
+  the layers above.
+
 ## Settings EEPROM and security board
 
 - **Done (datasheet):** the 93C46's dummy 0 bit before READ data. Supermodel

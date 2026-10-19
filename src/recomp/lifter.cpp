@@ -78,19 +78,38 @@ std::string spr_field(uint32_t spr) {
 
 class Emitter {
 public:
+    // `resume_sites`: return sites found so far, each with the first function
+    // that has it (shared by the emitters of all files).
     Emitter(const analysis::CodeImage& image, const analysis::Analysis& an, const std::set<uint32_t>& compiled,
-            LiftStats& stats)
-        : image_(image), an_(an), compiled_(compiled), stats_(stats) {}
+            LiftStats& stats, std::map<uint32_t, uint32_t>& resume_sites)
+        : image_(image), an_(an), compiled_(compiled), stats_(stats), resume_sites_(resume_sites) {}
 
     void function(const Function& fn) {
         blocks_.clear();
         blocks_.insert(fn.blocks.begin(), fn.blocks.end());
+        sites_.clear();
         ++stats_.functions;
 
-        out_ += "\n// " + (fn.name.empty() ? function_name(fn.entry) : fn.name) + "\n";
-        out_ += "void " + function_name(fn.entry) + "(Context& c) {\n    auto& s = c.cpu;\n    (void)s;\n";
-        if (fn.blocks.front() != fn.entry) out_ += "    goto " + label(fn.entry) + ";\n";
+        const std::string head = "\n// " + (fn.name.empty() ? function_name(fn.entry) : fn.name) + "\n" +
+                                 "void " + function_name(fn.entry) + "(Context& c) {\n    auto& s = c.cpu;\n    (void)s;\n";
+        std::string body;
+        body.swap(out_);
         for (uint32_t start : fn.blocks) block(an_.blocks.at(start));
+        body.swap(out_);
+
+        out_ += head;
+        // Resuming at a return site (Context::call sets resume_at): go to it.
+        if (!sites_.empty()) {
+            out_ += "    if (c.resume_at) [[unlikely]] {\n        const uint32_t at = c.resume_at;\n"
+                    "        c.resume_at = 0;\n        switch (at) {\n";
+            for (const auto& [site, name] : sites_) {
+                out_ += "        case " + hex(site) + ": goto " + name + ";\n";
+                resume_sites_.emplace(site, fn.entry);
+            }
+            out_ += "        default: break;\n        }\n    }\n";
+        }
+        if (fn.blocks.front() != fn.entry) out_ += "    goto " + label(fn.entry) + ";\n";
+        out_ += body;
         out_ += "}\n";
     }
 
@@ -117,6 +136,7 @@ private:
                 // Branches can be several lines: the comment goes on a line of its own.
                 line("// " + text);
                 line(branch(in, pc, b));
+                if (in.lk() && in.op != Op::Rfi) return_site(pc + 4, b);
                 break;
             default:
                 line(instruction(in, pc), text);
@@ -129,6 +149,18 @@ private:
         // A handler may resume after an unconditional trap; nothing there was recompiled.
         case Exit::Trap:        line("c.missing(" + hex(b.end) + ");"); break;
         default: break;
+        }
+    }
+
+    // After a call at `site - 4`: a label to resume at, inside this block or
+    // at the next one (when it is in this function).
+    void return_site(uint32_t site, const Block& b) {
+        if (site < b.end) {
+            const std::string name = "R_" + label(site).substr(2);
+            out_ += name + ":\n";
+            sites_.emplace(site, name);
+        } else if (blocks_.contains(site)) {
+            sites_.emplace(site, label(site));
         }
     }
 
@@ -540,7 +572,9 @@ private:
     const analysis::Analysis& an_;
     const std::set<uint32_t>& compiled_;
     LiftStats& stats_;
+    std::map<uint32_t, uint32_t>& resume_sites_;
     std::set<uint32_t> blocks_;
+    std::map<uint32_t, std::string> sites_; // this function's return sites and their labels
     std::string out_;
 };
 
@@ -579,18 +613,33 @@ std::vector<std::string> lift(const analysis::CodeImage& image, const analysis::
     }
 
     LiftStats stats;
-    std::vector<std::string> files;
+    std::map<uint32_t, uint32_t> resume_sites;
+    std::vector<std::string> bodies;
+    for (const auto& group : groups) {
+        Emitter emitter(image, an, compiled, stats, resume_sites);
+        for (uint32_t entry : group) emitter.function(an.functions.at(entry));
+        bodies.push_back(emitter.take());
+    }
+
+    // The table, sorted by address: functions, and return sites that aren't
+    // function entries themselves (the runtime resumes those inside the
+    // function that has them).
+    std::map<uint32_t, std::string> rows;
+    for (uint32_t entry : compiled) rows.emplace(entry, "    {" + hex(entry) + ", " + function_name(entry) + "},\n");
+    for (const auto& [site, fn] : resume_sites)
+        rows.emplace(site, "    {" + hex(site) + ", " + function_name(fn) + ", " + hex(site) + "},\n");
+    stats.return_sites = static_cast<uint32_t>(resume_sites.size());
     std::string table = head + "\nconst recomp::FunctionEntry kFunctions[] = {\n";
-    for (uint32_t entry : compiled) table += "    {" + hex(entry) + ", " + function_name(entry) + "},\n";
+    for (const auto& [addr, row] : rows) table += row;
     table += "};\n" + tail;
     table += "\nnamespace generated {\nstd::span<const recomp::FunctionEntry> " + options.name +
              "_functions() { return " + options.name + "::kFunctions; }\n} // namespace generated\n";
+
+    std::vector<std::string> files;
     files.push_back(std::move(table));
-    for (const auto& group : groups) {
-        Emitter emitter(image, an, compiled, stats);
-        for (uint32_t entry : group) emitter.function(an.functions.at(entry));
-        if (parts == 1) files[0].insert(files[0].find("\nconst recomp::FunctionEntry"), emitter.take());
-        else files.push_back(head + emitter.take() + tail);
+    for (std::string& body : bodies) {
+        if (parts == 1) files[0].insert(files[0].find("\nconst recomp::FunctionEntry"), body);
+        else files.push_back(head + body + tail);
     }
     if (stats_out) *stats_out = std::move(stats);
     return files;
