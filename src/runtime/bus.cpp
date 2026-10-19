@@ -22,6 +22,9 @@ bool emulated(const Region& region, uint32_t) {
     case Device::TileMap:
     case Device::Palette:
     case Device::BackupRam:
+    case Device::NetBoard:
+    case Device::Real3dDma:
+    case Device::Real3dStatus:
         return true;
     default:
         return false;
@@ -56,7 +59,12 @@ void Mpc106::reset() {
 }
 
 uint8_t Mpc106::read_data(uint32_t offset) const {
-    if (!bridge_selected()) return 0xFF; // no other PCI device is emulated
+    if (((addr_ >> 8) & 0xFFFF) == kReal3dDevice << 3) { // bus 0, device 13, function 0
+        constexpr uint32_t kReal3dPciId = 0x178611DB;     // little-endian, like the bridge's registers
+        const uint32_t byte = (addr_ & 0xFC) + offset;
+        return byte < 4 ? static_cast<uint8_t>(kReal3dPciId >> (8 * byte)) : 0;
+    }
+    if (!bridge_selected()) return 0xFF; // nothing else on the bus
     return regs_[((addr_ & 0xFC) + offset) & 0xFF];
 }
 
@@ -97,6 +105,10 @@ uint8_t Bus::device_read(const Region& region, uint32_t addr) const {
         return tile_ram_[addr - kTileRamBase];
     case Device::BackupRam:
         return backup_ram_[region.offset(addr) % kBackupRamSize];
+    case Device::NetBoard:
+        return netboard_.read8(addr);
+    case Device::Real3dDma:
+        return dma_read8(addr & 0xFF);
     default:
         return 0xFF; // Tilegen registers: only 32-bit reads reach them
     }
@@ -105,7 +117,7 @@ uint8_t Bus::device_read(const Region& region, uint32_t addr) const {
 uint8_t Bus::system_read(uint32_t reg) const {
     switch (reg) {
     case kSysCromBank:  return static_cast<uint8_t>(crom_bank_reg_);
-    case 0x10:          return 0; // JTAG TDO (bit 5): no JTAG chain emulated yet
+    case 0x10:          return static_cast<uint8_t>(jtag_.tdo() << 5); // JTAG TDO
     case kSysIrqEnable: return static_cast<uint8_t>(irq_.enable());
     case kSysIrqState:  return static_cast<uint8_t>(irq_.state());
     default:            return 0xFF; // 0x1C: games expect bits set
@@ -120,7 +132,71 @@ void Bus::system_write(uint32_t reg, uint8_t value) {
         break;
     case kSysIrqEnable: irq_.set_enable(value); break;
     case kSysIrqState:  irq_.deassert(value); break;
-    default: break; // 0x0C JTAG (Real3D configuration), 0x0D-0x0F and 0x1C LEDs
+    case 0x0C: // JTAG: TCK bit 6, TMS bit 2, TDI bit 5, TRST bit 7
+        jtag_.write(value & 0x40, value & 0x04, value & 0x20, value & 0x80);
+        break;
+    default: break; // 0x0D-0x0F and 0x1C: LEDs
+    }
+}
+
+// ---- Real3D DMA device (adapted from Supermodel's Real3D.cpp:
+//      Copyright 2011-2020 Bart Trzynadlowski, Nik Henson, Ian Curtis,
+//      Harry Tuttle, and Spindizzi. GPL-3.0-or-later.) ----
+
+constexpr uint32_t kDmaIrq = 0x100;       // non-maskable
+constexpr uint32_t kMercuryPciId = 0x16C311DB;
+
+uint32_t Bus::real3d_register(uint32_t reg) const {
+    if (reg == 0) return 0xFDFFFFFF | (ping_pong_ ? 0x02000000u : 0u);
+    if (reg >= 20 && reg <= 32) return 0; // line of sight: from the renderer, none yet
+    return 0xFFFFFFFF;
+}
+
+uint8_t Bus::dma_read8(uint32_t reg) const {
+    switch (reg) {
+    case 0x0C: return dma_.status; // bit 7 busy (never: copies finish at once), bit 0 IRQ pending
+    case 0x0E: return dma_.config;
+    default:   return 0;
+    }
+}
+
+void Bus::dma_write8(uint32_t reg, uint8_t value) {
+    switch (reg) {
+    case 0x0D: // IRQ acknowledge
+        if (value & 1) {
+            dma_.status &= static_cast<uint8_t>(~1u);
+            irq_.deassert(kDmaIrq);
+        }
+        break;
+    case 0x0E: dma_.config = value; break;
+    default: break;
+    }
+}
+
+uint32_t Bus::dma_read32(uint32_t reg) const { return reg == 0x14 ? dma_.data : 0; }
+
+void Bus::dma_write32(uint32_t reg, uint32_t value) {
+    switch (reg) {
+    case 0x00: dma_.src = value; break;
+    case 0x04: dma_.dest = value; break;
+    case 0x08: // length in words: copy now
+        for (uint32_t n = value; n != 0; --n) {
+            const uint32_t word = read32(dma_.src);
+            write32(dma_.dest, (dma_.config & 0x80) ? bswap32(word) : word);
+            dma_.src += 4;
+            dma_.dest += 4;
+        }
+        if (dma_.config & 1) { // IRQ on completion only when asked for
+            dma_.status |= 1;
+            irq_.assert_irq(kDmaIrq);
+        }
+        break;
+    case 0x10: // command
+        if (value & 0x20000000) dma_.data = kMercuryPciId;                     // ID
+        else if (value & 0x80000000) dma_.data = real3d_register(value & 0x3F); // read a status register
+        break;
+    case 0x14: dma_.data = 0xFFFFFFFF; break;
+    default: break;
     }
 }
 
@@ -132,6 +208,14 @@ uint8_t Bus::read_byte(uint32_t addr) {
         return 0xFF;
     }
     return device_read(*region, addr);
+}
+
+uint16_t Bus::read_slow16(uint32_t addr) {
+    if (addr >= kWorkRamSize) {
+        const Region* region = find_region(addr);
+        if (region && region->device == Device::NetBoard) return netboard_.read16(addr);
+    }
+    return static_cast<uint16_t>(read_byte(addr) << 8 | read_byte(addr + 1));
 }
 
 uint32_t Bus::read_slow32(uint32_t addr) {
@@ -146,6 +230,9 @@ uint32_t Bus::read_slow32(uint32_t addr) {
         return 0xFFFFFFFF;
     }
     if (region->device == Device::TileRegs) return bswap32(tile_reg(region->offset(addr)));
+    if (region->device == Device::NetBoard) return netboard_.read32(addr);
+    if (region->device == Device::Real3dDma) return bswap32(dma_read32(addr & 0xFF));
+    if (region->device == Device::Real3dStatus) return bswap32(real3d_register(addr & 0x3F));
     uint32_t v = 0;
     for (uint32_t i = 0; i < 4; ++i) v = v << 8 | device_read(*region, addr + i);
     return v;
@@ -195,6 +282,16 @@ void Bus::write_slow(uint32_t addr, uint32_t value, uint32_t size) {
     case Device::System: // byte registers; wider writes reach several of them
         for (uint32_t i = 0; i < size; ++i)
             system_write(region->offset(addr) + i, static_cast<uint8_t>(value >> (8 * (size - 1 - i))));
+        return;
+    case Device::Real3dDma: // 8-bit status/config registers, 32-bit byte-swapped address/length/command
+        if (size == 1) dma_write8(addr & 0xFF, static_cast<uint8_t>(value));
+        else if (size == 4) dma_write32(addr & 0xFF, bswap32(value));
+        else count(region, addr, true);
+        return;
+    case Device::NetBoard: // the board answers each width differently
+        if (size == 1) netboard_.write8(addr, static_cast<uint8_t>(value));
+        else if (size == 2) netboard_.write16(addr, static_cast<uint16_t>(value));
+        else netboard_.write32(addr, value);
         return;
     default:
         count(region, addr, true);

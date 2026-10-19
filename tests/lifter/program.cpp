@@ -422,6 +422,32 @@ Program build() {
     a.bc(12, 0, "frames.loop");      // blt
     a.emit(kBlr);
 
+    // LR set to a shared epilogue, then a branch (not a call) to a handler
+    // that is also an ordinary function: its blr lands in the epilogue
+    // (Spikeout's printf at 0x6FF4 does this).
+    a.entry("lrhelper");             // r4 += 100
+    a.emit(mflr(30));
+    a.emit(addi(4, 4, 100));
+    a.emit(mtlr(30));
+    a.emit(kBlr);
+    a.entry("lrtrick");              // r3 == 0: through lrhelper; else r4 = 1
+    a.emit(mflr(31));
+    a.la(2, "lrtrick.epilogue");
+    a.emit(mtlr(2));
+    a.emit(D(11, 0, 3, 0));          // cmpwi  r3, 0
+    a.bc(12, 2, "lrhelper");         // beq    lrhelper
+    a.emit(li(4, 1));
+    a.emit(kBlr);                    // to the epilogue (LR is a constant here)
+    a.label("lrtrick.epilogue");
+    a.emit(mtlr(31));
+    a.emit(kBlr);
+    a.entry("lrouter");              // r4 = 0; lrtrick(r3)
+    a.emit(mflr(29));
+    a.emit(li(4, 0));
+    a.bl("lrtrick");
+    a.emit(mtlr(29));
+    a.emit(kBlr);
+
     a.label("fnptr");
     a.word("double");
     return a.finish();

@@ -319,6 +319,16 @@ TEST_CASE("interrupts: frame timing raises IRQ 0x02 once a frame") {
     CHECK(m.c.cycles() >= irq_cycle && m.c.cycles() < irq_cycle + timing.line_cycles());
 }
 
+TEST_CASE("lifter: a blr that lands somewhere else is followed back") {
+    Machine m;
+    m.s.gpr[3] = 0; // through the handler, whose blr goes to lrtrick's epilogue
+    CHECK_EQ(m.run("lrouter"), kReturnAddr);
+    CHECK_EQ(m.s.gpr[4], 100u);
+    m.s.gpr[3] = 1; // straight to the epilogue
+    CHECK_EQ(m.run("lrouter"), kReturnAddr);
+    CHECK_EQ(m.s.gpr[4], 1u);
+}
+
 TEST_CASE("lifter: runs stop on loops, missing code and bad returns") {
     {
         Machine m;

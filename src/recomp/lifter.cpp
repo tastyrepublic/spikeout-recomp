@@ -142,7 +142,7 @@ private:
     std::string call(uint32_t target, uint32_t next) const {
         const std::string invoke =
             compiled_.contains(target) ? function_name(target) + "(c);" : "c.call(" + hex(target) + ");";
-        return invoke + " if (c.returned_to != " + hex(next) + ") c.bad_return(" + hex(next) + ");";
+        return invoke + " if (c.returned_to != " + hex(next) + ") c.follow_return(" + hex(next) + ");";
     }
 
     // Branch condition of a bc-type instruction, "" when it always branches.
@@ -182,7 +182,7 @@ private:
         // bclr / bcctr
         const std::string reg = in.op == Op::Bclr ? "s.lr" : "s.ctr";
         if (in.lk()) {
-            const std::string body = "c.call(t); if (c.returned_to != " + hex(next) + ") c.bad_return(" + hex(next) + ");";
+            const std::string body = "c.call(t); if (c.returned_to != " + hex(next) + ") c.follow_return(" + hex(next) + ");";
             return "{ const uint32_t t = " + reg + " & ~3u; " + set_lr + " " + guarded(cond, body) + " }";
         }
         std::string act;

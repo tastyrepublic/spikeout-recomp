@@ -26,8 +26,10 @@ Each milestone ends with something you can run and check.
 - [x] Open-bus reads return all ones (Spikeout's ROM check needs it)
 - [x] Frame timing: 57.524 Hz, 424 lines, IRQ 0x02/0x0D as in [hardware-notes.md](hardware-notes.md) (`recomp::FrameTiming`; not yet: MIDI IRQ 0x40, waiting for the IRQ 0x02 acknowledge)
 - [x] Backup RAM (the game's RAM test passes)
-- [ ] EEPROM and RTC
-- [ ] Network board present enough for single-cabinet boot (the game stops at "COMMUNICATION BOARD : NO DEVICE")
+- [ ] RTC (read ~12,000 times during start-up)
+- [x] Network board present (simulated, loopback ring of one); the game uploads to it and starts it
+- [x] JTAG scan chain of the Real3D chips; Real3D PCI ID, DMA device and ping-pong bit: the game runs its main loop and sends the Real3D real frames
+- [ ] Settings EEPROM (93C46 on the I/O board): the game reads garbage settings and sets the cabinet up as a link slave, so the network board waits for a master
 - [ ] Reference interpreter for code that the static pass misses, with logging so it can be added to the recompiled set
 - [ ] **Goal:** reaches the attract loop, verified against Supermodel's behavior
 

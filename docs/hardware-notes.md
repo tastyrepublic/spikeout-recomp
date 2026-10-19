@@ -66,6 +66,34 @@ IRQs are acknowledged by writing the bit to Tilegen register `0x10`
 clears. Only 32-bit accesses reach the Tilegen registers (Supermodel's
 `Model3.cpp` byte-swaps them; 8/16-bit accesses are dropped).
 
+## Real3D on the PCI bus, DMA device, ping-pong
+
+- PCI config, bus 0, device 13: register 0 = `0x178611DB` (the Step 2.x DMA
+  device). Spikeout's DMA init (`0x4F34`) checks vendor `0x11DB` and device
+  `0x1786` before marking DMA ready; without it, `dma_memcpy` asserts.
+- DMA device `0xC2000000`: `+0x0C` status (bit 7 busy, bit 0 IRQ),
+  `+0x0D` IRQ acknowledge, `+0x0E` configuration (bit 0: IRQ on completion,
+  bit 7: byte-reverse), `+0x00/04/08` source/destination/length (writing
+  the length copies), `+0x10` command (`0x20000000`: ID, answers Mercury's
+  `0x16C311DB`; `0x80000000 | reg`: read a status register), `+0x14`
+  result. 32-bit registers are byte-swapped on the bus. Completion IRQ is
+  `0x100` (non-maskable).
+- Status register 0 (`0x84000000`, or the DMA command) = `0xFDFFFFFF`, plus
+  `0x02000000` when the ping-pong bit is set. It flips at the start of the
+  display line in Tilegen register `0x08`; Spikeout waits for it every
+  frame.
+
+## JTAG (Real3D chips)
+
+Step 2.1 chain, first to last: Jupiter, Mercury, Venus, Earth, 3D-RAM,
+Mars, Mars, 3D-RAM ×3, Earth, 3D-RAM, Mars, Mars, 3D-RAM ×3. ASIC
+instructions: 3 IDCODE (32 bits), 8 mode word (32 bits), 9 memory
+configuration (Mercury, 57 bits), anything else BYPASS; 5-bit instruction
+register (captures `0b00001`); 3D-RAMs: 4-bit instruction register
+(captures `0b1001`), always BYPASS. ID codes: Mercury `0x416c3057`, Venus
+`0x316c4057`, Earth `0x516c5057`, Mars `0x316c6057`, Jupiter `0x516c7057`.
+Spikeout reports "INVALID CONFIG DETECTED" without them.
+
 ## Tilegen text
 
 Name tables at `0xF10F8000`, one per layer, `0x2000` bytes apart: 64 × 64

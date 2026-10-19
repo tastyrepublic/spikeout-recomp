@@ -7,7 +7,9 @@
 // four bytes at that address with the first one in the top byte.
 #pragma once
 
+#include "runtime/jtag.hpp"
 #include "runtime/memory_map.hpp"
+#include "runtime/netboard.hpp"
 #include "runtime/rom.hpp"
 
 #include <array>
@@ -24,8 +26,10 @@ constexpr uint32_t bswap32(uint32_t v) {
 }
 
 // MPC106 PCI bridge: PCI configuration space through CONFIG_ADDR
-// (0xFEC00CF8) and CONFIG_DATA (0xFEE00CFC). Only the bridge's own registers
-// (bus 0, device 0) are emulated; other devices read as all ones. Reset
+// (0xFEC00CF8) and CONFIG_DATA (0xFEE00CFC). The bridge itself is bus 0,
+// device 0; the Real3D is device 13 and answers only its ID (0x178611DB,
+// the Step 2.x DMA device: Real3D.cpp, ReadPCIConfigSpace), which the game
+// checks before it uses DMA. Other devices read as all ones. Reset
 // values and the byte order of the data port follow Supermodel's
 // Src/Model3/MPC10x.cpp: the registers are stored little-endian, as on PCI,
 // and the data port hands the bytes to the CPU in address order, so the
@@ -49,6 +53,7 @@ public:
 
 private:
     bool bridge_selected() const { return ((addr_ >> 8) & 0xFFFF) == 0; } // bus 0, device 0, function 0
+    static constexpr uint32_t kReal3dDevice = 13;
     uint32_t addr_ = 0;
     std::array<uint8_t, 256> regs_{};
 };
@@ -99,7 +104,7 @@ public:
     }
     uint16_t read16(uint32_t addr) {
         if (addr < kWorkRamSize - 1) return static_cast<uint16_t>(ram_[addr] << 8 | ram_[addr + 1]);
-        return static_cast<uint16_t>(read_byte(addr) << 8 | read_byte(addr + 1));
+        return read_slow16(addr);
     }
     uint32_t read32(uint32_t addr) {
         if (addr < kWorkRamSize - 3) return load_be32(&ram_[addr]);
@@ -133,6 +138,17 @@ public:
     std::span<const uint8_t> ram() const { return ram_; }
     Mpc106& pci() { return pci_; }
     Irq& irq() { return irq_; }
+    NetBoard& netboard() { return netboard_; }
+
+    // Real3D status registers (0x84000000, also read through the DMA
+    // device's command 0x80000000 | reg). Register 0 holds the ping-pong
+    // bit (0x02000000), which flips once a frame when the Real3D is done
+    // with it; games pace their rendering on it (Supermodel's
+    // CReal3D::ReadRegister / FlipPingPongBit).
+    uint32_t real3d_register(uint32_t reg) const;
+    void flip_ping_pong() { ping_pong_ = !ping_pong_; }
+    bool ping_pong() const { return ping_pong_; }
+    const Jtag& jtag() const { return jtag_; }
     // Tilegen registers (0xF1180000, 32-bit only), as the tile generator
     // sees them (little-endian: the bus byte-swaps, as Supermodel does).
     // Register 0x10 acknowledges IRQs: writing a bit clears it.
@@ -169,6 +185,7 @@ public:
 
 private:
     uint8_t read_byte(uint32_t addr);
+    uint16_t read_slow16(uint32_t addr);
     uint32_t read_slow32(uint32_t addr);
     // `value` holds the whole access, `size` bytes, big-endian.
     void write_slow(uint32_t addr, uint32_t value, uint32_t size);
@@ -180,8 +197,24 @@ private:
     uint8_t system_read(uint32_t reg) const;
     void system_write(uint32_t reg, uint8_t value);
 
+    // Real3D DMA device (0xC2000000; Supermodel's Real3D.cpp,
+    // Read/WriteDMARegister8/32): copies words around the bus, and answers
+    // commands through 0x10/0x14 (the ID command gives Mercury's PCI ID,
+    // 0x16C311DB, which Step 2.x games expect).
+    uint8_t dma_read8(uint32_t reg) const;
+    void dma_write8(uint32_t reg, uint8_t value);
+    uint32_t dma_read32(uint32_t reg) const;
+    void dma_write32(uint32_t reg, uint32_t value);
+    struct Dma {
+        uint32_t src = 0, dest = 0, data = 0;
+        uint8_t status = 0, config = 0;
+    } dma_;
+
     Mpc106 pci_;
     Irq irq_;
+    NetBoard netboard_;
+    bool ping_pong_ = false;
+    Jtag jtag_;
     std::array<uint32_t, 64> tile_regs_{};
     std::vector<uint8_t> tile_ram_;
     std::vector<uint8_t> backup_ram_;

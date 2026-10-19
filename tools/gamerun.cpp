@@ -97,6 +97,15 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(c.external_interrupts),
                 static_cast<unsigned long long>(c.decrementer_interrupts), bus.irq().enable(), bus.irq().state());
 
+    static const char* const kNetStates[] = {"start", "init", "testing", "ready", "error"};
+    std::printf("Network board: %s, state %s, status0 %04x, status1 %04x\n",
+                bus.netboard().running() ? "running" : "stopped",
+                kNetStates[static_cast<int>(bus.netboard().state())], bus.netboard().status0(),
+                bus.netboard().status1());
+    std::printf("  set up by the game: %s, size %04x, segment %04x\n",
+                bus.netboard().net_ram16(0x400) == 0 ? "master" : "slave", bus.netboard().net_ram16(0x402),
+                bus.netboard().net_ram16(0x404));
+
     std::printf("\nLast blocks:\n");
     for (uint32_t pc : c.recent_blocks())
         if (pc) {

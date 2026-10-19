@@ -120,12 +120,22 @@ matter:
 ## Bus
 
 `m3::Bus` (`src/runtime/bus.*`): 8 MB of work RAM, the fixed and banked
-program ROMs, the MPC106 PCI bridge's configuration ports, the system
-registers (CROM bank select, IRQ enable/pending/acknowledge, LEDs), the
-interrupt controller (`m3::Irq`), the Tilegen registers and RAM (stored,
-not drawn yet) and the 128 KB backup RAM. Everything else is open bus
+program ROMs, the MPC106 PCI bridge's configuration ports (with the
+Real3D's PCI ID at device 13), the system registers (CROM bank select,
+IRQ enable/pending/acknowledge, LEDs, JTAG), the interrupt controller
+(`m3::Irq`), the Tilegen registers and RAM (stored, not drawn yet), the
+128 KB backup RAM, the network board (`m3::NetBoard`), the JTAG scan chain
+of the Real3D chips (`m3::Jtag`), and the Real3D's DMA device and status
+registers (with the per-frame ping-pong bit). Everything else is open bus
 (reads all ones, writes dropped) and counted per region, so a run reports
 which devices the game used that aren't emulated yet.
+
+The network board, JTAG chain and Real3D DMA/status registers are adapted
+from Supermodel (`SimNetBoard.cpp`, `JTAG.cpp`, `Real3D.cpp`, and the
+matching cases of `Model3.cpp`), keeping its byte-order behavior exactly.
+The network board is the high-level simulation: no 68000, a once-a-frame
+state machine, and a `NetLink` to send segments round the ring (a
+`LoopbackLink` for a lone cabinet: a ring of one).
 
 Tilegen registers are 32-bit only and byte-swapped on the bus (the tile
 generator is little-endian), as in Supermodel; register `0x10`
@@ -164,18 +174,28 @@ The game's RAM program lifts to 2,175 functions and about 124,000
 instructions with nothing left unimplemented, and is compiled as the
 `game_ram` library (split over 8 files: about 100 s on 12 threads, 166 s
 as one file). With frame timing and interrupts, `gamerun` runs it frame
-by frame (two external interrupts and one decrementer interrupt a frame;
-about 550 frames, 9.6 s of game time, in 200 million blocks). It passes
-its backup RAM test and then shows
+by frame at about 290 million blocks per second (some 25 times real time).
+On the way it went through, in order, each fixed by emulating what the
+game checks:
 
-```
-INVALID CONFIG DETECTED
-COMMUNICATION BOARD : NO DEVICE
-```
+1. "ABORT: BACKUP RAM ERROR!!": backup RAM.
+2. "COMMUNICATION BOARD : NO DEVICE": the network board's comm RAM test.
+3. "INVALID CONFIG DETECTED": reading the Real3D chips' ID codes over JTAG.
+4. Waiting for the Real3D DMA device to be idle.
+5. A blr that returns into another function's epilogue (printf), which the
+   runtime now follows.
+6. An assertion in `dma_memcpy`: the DMA init (`0x4F34`) checks the Real3D's
+   PCI ID (`0x178611DB`, device 13) before marking DMA ready.
+7. Waiting for the Real3D's ping-pong bit to flip.
 
-because the network board, which every Spikeout cabinet has, isn't
-emulated yet. It also reads the RTC (not emulated) and probes memory above
-8 MB.
+It now shows "TWO PROCESSORS DETECTED / COMMUNICATION BOARD : DOWNLOADED",
+runs its main loop, and sends the Real3D real frames (display lists,
+polygon RAM, textures), which nothing draws yet. The network board stays
+in its start-up test: the game set this cabinet up as a link **slave**
+(net RAM `0x400` = 1), and a lone slave waits for a master. That setting
+comes from the game's settings EEPROM (a 93C46 on the I/O board, read
+through ~19,000 accesses to `0xF0040000`), which isn't emulated yet, so
+the game reads garbage settings.
 
 The game's PCI configuration routines jump into stub tables
 (`base + size * 12`) that the analysis can't follow; their addresses are

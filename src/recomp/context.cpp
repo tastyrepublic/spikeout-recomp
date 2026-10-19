@@ -119,6 +119,13 @@ void Context::call(uint32_t addr) {
     fn(*this);
 }
 
+void Context::follow_return(uint32_t next) {
+    for (int hops = 0; returned_to != next; ++hops) {
+        if (hops == 64) bad_return(next);
+        jump(returned_to); // that code's blr sets returned_to again
+    }
+}
+
 void Context::bad_return(uint32_t expected) {
     throw GuestError(cpu.pc, "returned to " + hex(returned_to) + ", expected " + hex(expected));
 }

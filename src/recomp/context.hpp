@@ -130,7 +130,13 @@ public:
     // the C++ stack only unwinds when the guest code returns.
     void jump(uint32_t addr) { call(addr); }
 
-    // The callee's blr went somewhere other than the instruction after the call.
+    // After a call, the callee's blr went somewhere other than `next`, the
+    // instruction after the call. Hand-written code does that on purpose:
+    // Spikeout's printf sets LR to its own epilogue and branches to handlers
+    // that end in blr. So carry on where it went, as the CPU would, until
+    // execution comes back to `next`.
+    void follow_return(uint32_t next);
+    // follow_return() gave up: the code never came back.
     [[noreturn]] void bad_return(uint32_t expected);
 
     void dcbz(uint32_t ea);

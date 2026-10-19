@@ -40,6 +40,8 @@ target_link_libraries(ppc PRIVATE spikeout_warnings)
 # Model 3 runtime: memory map, ROM loading, game definitions.
 add_library(m3runtime
     src/runtime/bus.cpp
+    src/runtime/netboard.cpp
+    src/runtime/jtag.cpp
     src/runtime/memory_map.cpp
     src/runtime/rom.cpp
     src/games/games.cpp
@@ -142,7 +144,8 @@ if(SPIKEOUT_BUILD_TESTS)
         tests/test_main.cpp
         tests/test_ppc.cpp
         tests/test_runtime.cpp
-        tests/test_analysis.cpp)
+        tests/test_analysis.cpp
+        tests/test_devices.cpp)
     target_link_libraries(spikeout_tests PRIVATE analysis m3runtime spikeout_warnings)
     add_test(NAME spikeout_tests COMMAND spikeout_tests)
 
