@@ -52,7 +52,7 @@ Jtag::Jtag() {
         {false, A::Mercury, false, 0},        {false, A::Mercury, false, 0},
         {false, A::Mercury, false, 0},
     };
-    for (size_t i = 0; i < chain_.size(); ++i) {
+    for (std::size_t i = 0; i < chain_.size(); ++i) {
         chain_[i].asic = kChain[i].asic;
         chain_[i].kind = kChain[i].kind;
         chain_[i].first_of_kind = kChain[i].first;
@@ -115,7 +115,7 @@ void Jtag::update_dr(Device& d) {
     if (!d.asic) return;
     if (d.instruction == kModeword) {
         d.modeword = static_cast<uint32_t>(d.shift);
-        if (d.first_of_kind) modewords_[static_cast<size_t>(d.kind)] = d.modeword;
+        if (d.first_of_kind) modewords_[static_cast<std::size_t>(d.kind)] = d.modeword;
     } else if (d.instruction == kMemoryConfig && d.kind == Asic::Mercury && d.first_of_kind) {
         mem_config_[0] = static_cast<uint32_t>(d.shift >> 38) & 0x7FFFF;
         mem_config_[1] = static_cast<uint32_t>(d.shift >> 19) & 0x7FFFF;
@@ -149,7 +149,7 @@ void Jtag::rising_edge(bool tms, bool tdi) {
     default:
         break;
     }
-    state_ = static_cast<State>(kNext[static_cast<size_t>(state_)][tms ? 1 : 0]);
+    state_ = static_cast<State>(kNext[static_cast<std::size_t>(state_)][tms ? 1 : 0]);
 }
 
 void Jtag::falling_edge() {

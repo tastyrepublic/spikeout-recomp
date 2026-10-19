@@ -91,7 +91,7 @@ uint8_t Bus::device_read(const Region& region, uint32_t addr) const {
     }
     case Device::BankedCrom: {
         const auto& banked = roms_.region(RomRegionId::BankedCrom);
-        const size_t off = size_t{crom_bank_} * kCromWindowSize + (addr - kBankedCromBase);
+        const std::size_t off = std::size_t{crom_bank_} * kCromWindowSize + (addr - kBankedCromBase);
         return off < banked.size() ? banked[off] : 0xFF;
     }
     case Device::PciConfigAddr:

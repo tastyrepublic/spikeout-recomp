@@ -140,7 +140,7 @@ void CommBoard::deliver_receive() {
     if (packet.empty()) return; // nothing yet (or the link is down)
     ++packets_received;
     uint8_t* comm = bank(false);
-    const size_t size = std::min<size_t>({packet.size(), recv_size_ & 0x7FFFu, 0x10000u - recv_offset_});
+    const std::size_t size = std::min<std::size_t>({packet.size(), recv_size_ & 0x7FFFu, 0x10000u - recv_offset_});
     std::memcpy(comm + recv_offset_, packet.data(), size);
     receive_armed_ = false;
     set_irq(6, true); // receive complete
@@ -204,7 +204,7 @@ void CommBoard::io_write(uint32_t index, uint16_t v, uint16_t mask, bool from_ho
         break;
     case kIoTxEnable:
         if (low == 0x80) { // data transfer enable: send now
-            const size_t size = std::min<size_t>(send_size_ & 0x7FFFu, 0x10000u - send_offset_);
+            const std::size_t size = std::min<std::size_t>(send_size_ & 0x7FFFu, 0x10000u - send_offset_);
             link_->send(bank(false) + send_offset_, size);
             ++packets_sent;
             deliver_receive();

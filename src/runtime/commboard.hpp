@@ -30,6 +30,7 @@
 #include "runtime/netboard.hpp"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -87,7 +88,7 @@ public:
         uint8_t size;
     };
     std::vector<Access> trace;
-    size_t trace_limit = 0;
+    std::size_t trace_limit = 0;
 
     // Debug aid, off by default: when the game writes the link role (68000
     // word 0x400: 0 master, otherwise slave), store 0 instead. A lone

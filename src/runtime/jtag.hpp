@@ -14,6 +14,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace m3 {
@@ -28,7 +29,7 @@ public:
 
     enum class Asic : uint8_t { Mercury, Venus, Earth, Mars, Jupiter };
     // Mode word last written to the first ASIC of each kind.
-    uint32_t modeword(Asic a) const { return modewords_[static_cast<size_t>(a)]; }
+    uint32_t modeword(Asic a) const { return modewords_[static_cast<std::size_t>(a)]; }
     // Mercury's memory configuration (3 words of 19 bits).
     uint32_t memory_config(uint32_t i) const { return mem_config_[i]; }
 

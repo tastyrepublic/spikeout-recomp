@@ -44,7 +44,7 @@ int main(int argc, char** argv) {
     const char* dump_tile = nullptr;
     const char* net_disasm = nullptr;
     bool show_text = false, real_netboard = true, force_master = false;
-    size_t net_trace = 0;
+    std::size_t net_trace = 0;
     int64_t blocks = 200'000'000;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];

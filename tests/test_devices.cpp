@@ -19,9 +19,9 @@ bool clock(Jtag& j, bool tms, bool tdi = false) {
     return j.tdo();
 }
 
-uint32_t bits_to_word(const std::vector<bool>& bits, size_t from) {
+uint32_t bits_to_word(const std::vector<bool>& bits, std::size_t from) {
     uint32_t v = 0;
-    for (size_t i = 0; i < 32; ++i) v |= uint32_t{bits[from + i]} << i;
+    for (std::size_t i = 0; i < 32; ++i) v |= uint32_t{bits[from + i]} << i;
     return v;
 }
 
@@ -67,7 +67,7 @@ TEST_CASE("jtag: a mode word written to Mercury is kept") {
             const int len = asic ? 5 : 4;
             for (int b = 0; b < len; ++b) in.push_back((asic ? instruction : 15u) >> b & 1);
         }
-        for (size_t i = 0; i < in.size(); ++i) clock(j, i + 1 == in.size(), in[i]); // last bit: Exit1-IR
+        for (std::size_t i = 0; i < in.size(); ++i) clock(j, i + 1 == in.size(), in[i]); // last bit: Exit1-IR
         clock(j, true);  // Update-IR
     };
     shift_ir(8); // MODEWORD on every ASIC
@@ -78,7 +78,7 @@ TEST_CASE("jtag: a mode word written to Mercury is kept") {
     std::vector<bool> in(296, false);
     const uint32_t word = 0x12345678;
     for (int b = 0; b < 32; ++b) in[232 + b] = (word >> b) & 1;
-    for (size_t i = 0; i < in.size(); ++i) clock(j, i + 1 == in.size(), in[i]);
+    for (std::size_t i = 0; i < in.size(); ++i) clock(j, i + 1 == in.size(), in[i]);
     clock(j, true); // Update-DR
     CHECK_EQ(j.modeword(Jtag::Asic::Mercury), word);
 }
@@ -131,8 +131,8 @@ TEST_CASE("commboard: uploaded 68000 firmware answers a command through IRQ 2") 
         0x33FC, 0xFFFF, 0x0004, 0x00A0, // move.w #$ffff,$400a0   IRQ 2 ack
         0x4E73,                 // rte
     };
-    for (size_t i = 0; i < 3; ++i) rom[0x100 / 2 + i] = main_loop[i];
-    for (size_t i = 0; i < 11; ++i) rom[0x200 / 2 + i] = handler[i];
+    for (std::size_t i = 0; i < 3; ++i) rom[0x100 / 2 + i] = main_loop[i];
+    for (std::size_t i = 0; i < 11; ++i) rom[0x200 / 2 + i] = handler[i];
 
     CommBoard board;
     // Upload as the game does: stwbrx of each 68000 word, one per 32-bit word.

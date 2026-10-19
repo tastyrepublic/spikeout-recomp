@@ -235,7 +235,7 @@ void SimNetBoard::run_frame() {
                 status1_ = 0x40;          // "link broken" for the main board
                 break;
             }
-            std::memcpy(comm_ram + to, in.data(), std::min<size_t>(in.size(), 0x10000 - to));
+            std::memcpy(comm_ram + to, in.data(), std::min<std::size_t>(in.size(), 0x10000 - to));
         }
         commbank_ = !commbank_;
         break;

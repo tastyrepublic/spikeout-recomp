@@ -25,6 +25,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -38,7 +39,7 @@ namespace m3 {
 class NetLink {
 public:
     virtual ~NetLink() = default;
-    virtual void send(const uint8_t* data, size_t size) = 0;
+    virtual void send(const uint8_t* data, std::size_t size) = 0;
     // The next packet from the previous cabinet; empty if the link broke.
     virtual std::vector<uint8_t> receive() = 0;
     // True when this cabinet is linked to itself (a ring of one).
@@ -48,7 +49,7 @@ public:
 // A lone cabinet: everything sent comes straight back.
 class LoopbackLink : public NetLink {
 public:
-    void send(const uint8_t* data, size_t size) override { queue_.emplace_back(data, data + size); }
+    void send(const uint8_t* data, std::size_t size) override { queue_.emplace_back(data, data + size); }
     std::vector<uint8_t> receive() override;
     bool loopback() const override { return true; }
 
