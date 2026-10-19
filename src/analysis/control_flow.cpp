@@ -275,6 +275,10 @@ void step(State& s, const Instruction& in) {
     case Op::Addis:
         set(s, rd, ra == 0 ? Val::constant(simm << 16) : add_imm(g[ra], simm << 16));
         return;
+    case Op::Addic: // the same sum (rA is never r0's zero here); compilers also build addresses with it
+    case Op::AddicRc:
+        set(s, rd, add_imm(g[ra], simm));
+        return;
     case Op::Add:
         set(s, rd, add(g[ra], g[rb]));
         return;
@@ -803,16 +807,20 @@ Analysis analyze(const CodeImage& image, std::span<const Entry> entries, const O
         bool changed = false;
         for (const JumpTable& t : a.jump_tables) changed |= table_starts.insert(t.table).second;
         if (options.scan_pointers) {
-            auto consider = [&](uint32_t value) {
-                if (known.contains(value) || a.functions.contains(value) || !scanned(value) ||
-                    !looks_like_function(image, value))
-                    return;
+            auto consider = [&](uint32_t value, bool built_by_code) {
+                if (known.contains(value) || a.functions.contains(value) || !scanned(value)) return;
+                // A constant the code builds that lands on an instruction it
+                // already runs is taken even inside a function: tasks that
+                // yield store the address to resume at (lis + addi, then
+                // stw into the task) and their scheduler calls it later.
+                const bool resume_point = built_by_code && (value & 3) == 0 && a.block_containing(value);
+                if (!resume_point && !looks_like_function(image, value)) return;
                 known.insert(value);
                 all.push_back({value, EntryKind::Pointer, ""});
                 changed = true;
             };
-            for (uint32_t value : data_words) consider(value);
-            for (uint32_t value : analyzer.constants()) consider(value);
+            for (uint32_t value : data_words) consider(value, false);
+            for (uint32_t value : analyzer.constants()) consider(value, true);
         }
         if (!changed) break;
     }

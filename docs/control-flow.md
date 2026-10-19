@@ -56,6 +56,14 @@ branch, `rfi`, padding). Plausible means it decodes up to its first
 unconditional branch, its branches stay in the image, and it doesn't start
 with a conditional branch or a branch to itself and has no absolute
 branches: floats like `0x42EB0000` (117.5) decode as `bc` to itself.
+
+A constant built by the code may also land inside a function, on an
+instruction the analysis already reached. Spikeout's tasks yield by storing
+the address to resume at (`lis` + `addi`, sometimes `addic`, then `stw`
+into the task at `12(r12)`), and the task loop at `0x11E10` calls it on a
+later frame, so such a resume point is an entry of its own. Words found in
+data still need the function boundary.
+
 The analysis is repeated until no new entries turn up.
 
 ## Results on `spikeofe`
@@ -64,16 +72,16 @@ With `--scan-pointers`:
 
 | | |
 |---|---|
-| Functions | about 2,190 (955 found only by the pointer scan) |
-| Instructions | about 112,000 (437 KB of the RAM copy) |
+| Functions | about 2,570 (1,203 found only by the pointer scan) |
+| Instructions | about 119,700 (465 KB of the RAM copy) |
 | Code area found | 70–98% per 64 KB of `0x0`–`0x7FFFF` |
-| Tables | 35 (15 jump, 20 call), all guessed length |
+| Tables | 39 (15 jump, 24 call), all guessed length |
 
 What's left, reported as issues:
 
-- **42 unresolved calls**: `bctrl`/`blrl` through function pointers loaded
+- **62 unresolved calls**: `bctrl`/`blrl` through function pointers loaded
   from RAM, e.g. a table whose address is itself stored at `0x710008`.
-- **7 unresolved jumps**: three copies of a PCI-config stub that jumps to
+- **8 unresolved jumps**: three copies of a PCI-config stub that jumps to
   `base + size * 12` (in the boot ROM and RAM), and tail calls through
   struct pointers.
 - The rest of the code is reachable only through those. The runtime will

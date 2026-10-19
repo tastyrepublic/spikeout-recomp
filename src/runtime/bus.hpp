@@ -7,6 +7,8 @@
 // four bytes at that address with the first one in the top byte.
 #pragma once
 
+#include "runtime/crypt315_5881.hpp"
+#include "runtime/eeprom.hpp"
 #include "runtime/jtag.hpp"
 #include "runtime/memory_map.hpp"
 #include "runtime/netboard.hpp"
@@ -168,6 +170,32 @@ public:
     // Tilegen RAM 0xF1000000-0xF111FFFF (characters, name tables, palette),
     // in CPU byte order: byte i is what the CPU reads at 0xF1000000 + i.
     std::span<const uint8_t> tile_ram() const { return tile_ram_; }
+    // I/O board (315-5649, 0xF0040000): inputs and the settings EEPROM.
+    // Register 0x00 selects the input bank and drives the EEPROM (CS bit 6,
+    // CLK bit 7, DI bit 5); 0x04 reads the switches of that bank (bank 1:
+    // EEPROM DO in bit 5); 0x08/0x0C the game's controls. Inputs are active
+    // low: a frontend clears bits for pressed switches (Supermodel's
+    // Model3.cpp, ReadInputs/WriteInputs, has the bit layout).
+    struct Inputs {
+        uint8_t bank0 = 0xFF; // coin 1/2 (bits 0-1), test A, service A, start 1/2 (bits 2-5)
+        uint8_t bank1 = 0xFF; // service B (bit 6), test B (bit 7); bit 5 is the EEPROM
+        uint8_t controls = 0xFF; // 0x08 Spikeout: beat, charge, shift, jump; down, up, right, left
+        uint8_t controls2 = 0xFF; // 0x0C
+    } inputs;
+    Eeprom93C46& eeprom() { return eeprom_; }
+
+    // Security board (315-5881). The game writes encrypted data into the
+    // board's RAM (0xF0180000, 128 KB), sets a sequence key and reads the
+    // plaintext back through the registers at 0xF01A0000 (Supermodel's
+    // Model3.cpp, ReadSecurity/WriteSecurity): 0x00 status (never busy),
+    // 0x10/0x14 restart at address 0, 0x18 sequence key (byte-swapped, in the
+    // top half), 0x1C data (top half; the first read after a restart gives
+    // 0xFFFF). The decrypter reads word i from the top half of the RAM's
+    // 32-bit word i. Without a key (set_security_key) data reads all ones.
+    void set_security_key(uint32_t key) { crypt_.set_key(key); }
+    std::span<uint8_t> security_ram() { return security_ram_; }
+    static constexpr uint32_t kSecurityRamSize = 0x20000;
+
     // Battery-backed SRAM (0xF00C0000, 128 KB). Starts zeroed; saving and
     // loading it across runs is up to the frontend.
     std::span<uint8_t> backup_ram() { return backup_ram_; }
@@ -202,7 +230,7 @@ private:
     // `value` holds the whole access, `size` bytes, big-endian.
     void write_slow(uint32_t addr, uint32_t value, uint32_t size);
     void count(const Region* region, uint32_t addr, bool write);
-    uint8_t device_read(const Region& region, uint32_t addr) const;
+    uint8_t device_read(const Region& region, uint32_t addr);
 
     const RomSet& roms_;
     std::vector<uint8_t> ram_;
@@ -233,6 +261,15 @@ private:
     const void* clock_user_ = nullptr;
     bool ping_pong_ = false;
     Jtag jtag_;
+    Eeprom93C46 eeprom_;
+    uint8_t io_bank_ = 0;
+    uint8_t io_read(uint32_t reg);
+    void io_write(uint32_t reg, uint8_t value);
+    std::vector<uint8_t> security_ram_;
+    Crypt315_5881 crypt_;
+    bool security_first_read_ = true;
+    uint32_t security_read32(uint32_t reg);
+    void security_write32(uint32_t reg, uint32_t value);
     std::array<uint32_t, 64> tile_regs_{};
     std::vector<uint8_t> tile_ram_;
     std::vector<uint8_t> backup_ram_;

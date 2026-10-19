@@ -13,8 +13,10 @@ Behavior the runtime has to reproduce, collected from Supermodel
 ## Bus behavior
 
 - **Unmapped reads return all ones** (`0xFF`, `0xFFFF`, `0xFFFFFFFF`).
-  Spikeout relies on this: a routine at `0x6FAC8` probes the security
-  device and shows "ILLEGAL ROM" if it gets 0.
+  Supermodel says Spikeout shows "ILLEGAL ROM" if unhandled reads give 0,
+  naming a routine at `0x6FAC8`; in Final Edition that address is network
+  code, and the security check is the one described under
+  [Security board](#security-board-0xf0180000-315-5881).
 - 64-bit accesses are split into two 32-bit accesses, high word first.
 - The `0xF0xxxxxx` system devices are also reached at `0xFExxxxxx`.
 - Tilegen RAM (`0xF1000000`–`0xF111FFFF`, including palette) is stored
@@ -124,14 +126,32 @@ OK); a self-test checks it.
 **One player per cabinet.** Spikeout's multiplayer is up to four linked
 cabinets, one player each — not several players on one board.
 
+## Settings EEPROM (93C46 on the I/O board)
+
+64 words of 16 bits, bit-banged through register `0x00` (CS bit 6, CLK
+bit 7, DI bit 5) and read in bit 5 of register `0x04`, bank 1
+(`m3::Eeprom93C46`). On a blank chip Spikeout writes its defaults: words
+0–2 are the signature "M3SEGA", then the settings, with a second copy of
+them from word `0x23`. With these settings the cabinet is a link master
+and, alone, runs without starting the network board's 68000.
+
 ## Security board (`0xF0180000`, 315-5881)
 
-- `0xF0180000`–`0xF019FFFF`: RAM the decrypter reads.
+- `0xF0180000`–`0xF019FFFF`: RAM the decrypter reads; encrypted word *i*
+  is the top half of 32-bit word *i*.
 - `0xF01A0000` registers: `+0x00` status (reads 0); `+0x10`/`+0x14` reset
   the decrypt address; `+0x18` sets the sub-key (byte-swapped high half);
   `+0x1C` data — first read after a reset returns `0xFFFF0000`, later reads
   return decrypted words in the high half.
-- Key for Spikeout Final Edition: `0x29236FC8` (`Crypto.cpp` implements it).
+- Key for Spikeout Final Edition: `0x29236FC8`. The cipher (MAME's, also in
+  Supermodel's `Crypto.cpp`) is `m3::Crypt315_5881`.
+- The game's check (Final Edition): `0x123B4` calls `0x7650C` with sub-key
+  `0x9EF6`, the source data at `0x8D943` and the expected plaintext at
+  `0x8D8E8`; `0x765F4` writes the source words with `stwbrx` to
+  `0xFE180000 + 4i`, restarts the decrypter, sets the sub-key, discards the
+  first data read, polls status bit 0 (busy) and reads the words back with
+  `lwbrx`. A mismatch prints "ILLEGAL ROM" and stops. With the
+  decrypter emulated the check passes.
 
 ## Network board firmware (uploaded by the game)
 
@@ -147,8 +167,8 @@ The game writes the board's firmware into net RAM (`0xC0020000`, the
   status 0), runs it from a table, writes the result to status 0 with bit
   15 cleared. Command 1 is the comm RAM test the game also does.
 - Link role: 68000 word `0x400` (written by the game at `0xC0020800`):
-  0 master, anything else slave. Spikeout derives it from a setting; with
-  the EEPROM unemulated it reads `0x0020`.
+  0 master, anything else slave. Spikeout derives it from a setting in the
+  EEPROM; before the EEPROM was emulated it got `0x0020`, a slave.
 - Status 1 as the game reads it: bits 13-15 link state (non-zero: still
   checking; `0xE000` at start), bit 11 "no carrier"; `0x2021 + 0x20 * n +
   index` when the ring is up. A slave arms its receiver and waits for a

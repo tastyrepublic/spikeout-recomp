@@ -25,6 +25,9 @@ bool emulated(const Region& region, uint32_t) {
     case Device::NetBoard:
     case Device::Real3dDma:
     case Device::Real3dStatus:
+    case Device::Io:
+    case Device::SecurityRam:
+    case Device::SecurityCrypt:
         return true;
     default:
         return false;
@@ -74,7 +77,11 @@ void Mpc106::write_data(uint32_t offset, uint8_t value) {
 
 Bus::Bus(const RomSet& roms)
     : roms_(roms), ram_(kWorkRamSize, 0), netboard_(std::make_unique<SimNetBoard>()),
-      tile_ram_(kTileRamSize, 0), backup_ram_(kBackupRamSize, 0) {}
+      security_ram_(kSecurityRamSize, 0), tile_ram_(kTileRamSize, 0), backup_ram_(kBackupRamSize, 0) {
+    crypt_.set_reader([this](uint32_t word) -> uint16_t { // the top half of the RAM's 32-bit word `word`
+        return word < kSecurityRamSize / 4 ? static_cast<uint16_t>(load_be32(&security_ram_[word * 4]) >> 16) : 0;
+    });
+}
 
 void Bus::count(const Region* region, uint32_t addr, bool write) {
     Unhandled& u = unhandled_[region ? region->name : std::string_view("unmapped")];
@@ -82,7 +89,7 @@ void Bus::count(const Region* region, uint32_t addr, bool write) {
     ++(write ? u.writes : u.reads);
 }
 
-uint8_t Bus::device_read(const Region& region, uint32_t addr) const {
+uint8_t Bus::device_read(const Region& region, uint32_t addr) {
     switch (region.device) {
     case Device::FixedCrom: {
         const auto& crom = roms_.region(RomRegionId::Crom);
@@ -108,10 +115,70 @@ uint8_t Bus::device_read(const Region& region, uint32_t addr) const {
         return backup_ram_[region.offset(addr) % kBackupRamSize];
     case Device::NetBoard:
         return net()->read8(addr);
+    case Device::Io:
+        return io_read(region.offset(addr));
+    case Device::SecurityRam:
+        return security_ram_[region.offset(addr) % kSecurityRamSize];
+    case Device::SecurityCrypt: // narrow reads see the status (0); data only as 32 bits
+        return region.offset(addr) < 4 ? 0 : 0xFF;
     case Device::Real3dDma:
         return dma_read8(addr & 0xFF);
     default:
         return 0xFF; // Tilegen registers: only 32-bit reads reach them
+    }
+}
+
+// ---- I/O board (Supermodel's Model3.cpp, ReadInputs / WriteInputs) ----
+
+uint8_t Bus::io_read(uint32_t reg) {
+    switch (reg & 0x3F) {
+    case 0x00: return io_bank_;
+    case 0x04:
+        if ((io_bank_ & 1) == 0) return inputs.bank0;
+        return static_cast<uint8_t>((inputs.bank1 & ~0x20) | (eeprom_.read_do() ? 0x20 : 0));
+    case 0x08: return inputs.controls;
+    case 0x0C: return inputs.controls2;
+    default:   return 0xFF; // nothing pressed, no analog inputs
+    }
+}
+
+void Bus::io_write(uint32_t reg, uint8_t value) {
+    if ((reg & 0x3F) == 0x00) {
+        eeprom_.write_pins(value & 0x40, value & 0x80, value & 0x20); // CS, CLK, DI
+        io_bank_ = value;
+    }
+    // 0x10 drive board, 0x14 lamps, 0x24 serial: outputs, nothing to do yet
+}
+
+// ---- Security board (Supermodel's Model3.cpp, ReadSecurity / WriteSecurity) ----
+
+uint32_t Bus::security_read32(uint32_t reg) {
+    switch (reg & 0x3C) {
+    case 0x00: return 0; // status: never busy
+    case 0x1C:
+        if (security_first_read_) {
+            security_first_read_ = false;
+            return 0xFFFF0000;
+        }
+        return uint32_t{crypt_.decrypt()} << 16;
+    default: return 0xFFFFFFFF;
+    }
+}
+
+void Bus::security_write32(uint32_t reg, uint32_t value) {
+    switch (reg & 0x3C) {
+    case 0x10:
+    case 0x14: // start again from address 0
+        crypt_.set_address_low(0);
+        crypt_.set_address_high(0);
+        security_first_read_ = true;
+        return;
+    case 0x18: { // sequence key, byte-swapped in the top half
+        const uint16_t key = static_cast<uint16_t>(value >> 16);
+        crypt_.set_subkey(static_cast<uint16_t>(key >> 8 | key << 8));
+        return;
+    }
+    default: return;
     }
 }
 
@@ -233,6 +300,7 @@ uint32_t Bus::read_slow32(uint32_t addr) {
     if (region->device == Device::TileRegs) return bswap32(tile_reg(region->offset(addr)));
     if (region->device == Device::NetBoard) return net()->read32(addr);
     if (region->device == Device::Real3dDma) return bswap32(dma_read32(addr & 0xFF));
+    if (region->device == Device::SecurityCrypt) return security_read32(region->offset(addr));
     if (region->device == Device::Real3dStatus) return bswap32(real3d_register(addr & 0x3F));
     uint32_t v = 0;
     for (uint32_t i = 0; i < 4; ++i) v = v << 8 | device_read(*region, addr + i);
@@ -270,6 +338,14 @@ void Bus::write_slow(uint32_t addr, uint32_t value, uint32_t size) {
         for (uint32_t i = 0; i < size; ++i)
             backup_ram_[(region->offset(addr) + i) % kBackupRamSize] = static_cast<uint8_t>(value >> (8 * (size - 1 - i)));
         return;
+    case Device::SecurityRam:
+        for (uint32_t i = 0; i < size; ++i)
+            security_ram_[(region->offset(addr) + i) % kSecurityRamSize] = static_cast<uint8_t>(value >> (8 * (size - 1 - i)));
+        return;
+    case Device::SecurityCrypt: // 32-bit registers
+        if (size == 4) security_write32(region->offset(addr), value);
+        else count(region, addr, true);
+        return;
     case Device::TileRegs: { // 32-bit only; narrower writes don't reach the registers
         if (size != 4) {
             count(region, addr, true);
@@ -283,6 +359,10 @@ void Bus::write_slow(uint32_t addr, uint32_t value, uint32_t size) {
     case Device::System: // byte registers; wider writes reach several of them
         for (uint32_t i = 0; i < size; ++i)
             system_write(region->offset(addr) + i, static_cast<uint8_t>(value >> (8 * (size - 1 - i))));
+        return;
+    case Device::Io: // byte registers; wider writes reach several of them
+        for (uint32_t i = 0; i < size; ++i)
+            io_write(region->offset(addr) + i, static_cast<uint8_t>(value >> (8 * (size - 1 - i))));
         return;
     case Device::Real3dDma: // 8-bit status/config registers, 32-bit byte-swapped address/length/command
         if (size == 1) dma_write8(addr & 0xFF, static_cast<uint8_t>(value));

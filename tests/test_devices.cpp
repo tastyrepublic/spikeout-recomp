@@ -166,3 +166,90 @@ TEST_CASE("bus: Real3D on the PCI bus, DMA ID command and ping-pong bit") {
     bus.write32(0xC2000010, bswap32(0x80000000));
     CHECK_EQ(bswap32(bus.read32(0xC2000014)), 0xFFFFFFFFu);
 }
+
+namespace {
+
+// Clocks one command into the EEPROM through the I/O board (bank 1 selected).
+struct EepromPins {
+    Bus& bus;
+    void clock(bool di) {
+        const uint8_t base = 0x41 | (di ? 0x20 : 0); // CS, bank 1, DI
+        bus.write8(0xF0040000, base);
+        bus.write8(0xF0040000, base | 0x80); // rising edge
+    }
+    void send(uint32_t bits, int count) {
+        for (int i = count - 1; i >= 0; --i) clock((bits >> i) & 1);
+    }
+    bool dout() { return (bus.read8(0xF0040004) & 0x20) != 0; }
+    void deselect() { bus.write8(0xF0040000, 0x01); }
+};
+
+} // namespace
+
+TEST_CASE("eeprom: writes need EWEN; READ gives the dummy 0 then D15 first") {
+    RomSet roms;
+    Bus bus(roms);
+    EepromPins pins{bus};
+
+    pins.send(0b1'01'000101'1011111011101111, 25); // WRITE 5, 0xBEEF while writes are disabled
+    pins.deselect();
+    CHECK_EQ(bus.eeprom().words()[5], 0xFFFFu);
+
+    pins.send(0b1'00'110000, 9); // EWEN
+    pins.deselect();
+    pins.send(0b1'01'000101'1011111011101111, 25);
+    pins.deselect();
+    CHECK_EQ(bus.eeprom().words()[5], 0xBEEFu);
+    pins.send(0, 1); // CS up again: busy (DO low), then ready
+    for (int i = 0; i < Eeprom93C46::kBusyReads; ++i) CHECK(!pins.dout());
+    CHECK(pins.dout());
+    pins.deselect();
+
+    pins.send(0b1'10'000101, 9); // READ 5
+    CHECK(!pins.dout());         // the dummy bit
+    uint32_t word = 0;
+    for (int i = 0; i < 32; ++i) { // two words: 5, then 6 (blank)
+        pins.clock(false);
+        word = word << 1 | (pins.dout() ? 1u : 0u);
+    }
+    CHECK_EQ(word, 0xBEEFFFFFu);
+    pins.deselect();
+}
+
+TEST_CASE("security: 315-5881 block cipher matches MAME's") {
+    // Known answers from MAME's implementation (via Supermodel's Crypto.cpp).
+    CHECK_EQ(Crypt315_5881::block_decrypt(0x29236FC8, 0x9EF6, 0x0000, 0x0000), 0xE6AAu);
+    CHECK_EQ(Crypt315_5881::block_decrypt(0x29236FC8, 0x9EF6, 0x0000, 0xFFFF), 0xBE94u);
+    CHECK_EQ(Crypt315_5881::block_decrypt(0x29236FC8, 0x9EF6, 0x0001, 0xBEEF), 0xEB34u);
+    CHECK_EQ(Crypt315_5881::block_decrypt(0x29236FC8, 0x9EF6, 0x1234, 0xFFFF), 0x63BDu);
+}
+
+TEST_CASE("security: the game's view of the board, plain and compressed streams") {
+    RomSet roms;
+    Bus bus(roms);
+    // Encrypted words, one in the top half of each 32-bit word of the board's RAM.
+    for (uint32_t i = 0; i < 0x8000; ++i) bus.write32(0xFE180000 + 4 * i, (i * 0x9E37u + 0x1234u) << 16);
+
+    auto stream = [&](uint16_t sequence_key) {
+        bus.write32(0xFE1A0010, 0); // start again at address 0
+        bus.write32(0xFE1A0018, uint32_t{static_cast<uint16_t>(sequence_key << 8 | sequence_key >> 8)} << 16);
+        CHECK_EQ(bus.read32(0xFE1A0000), 0u);          // status: never busy
+        CHECK_EQ(bus.read32(0xFE1A001C), 0xFFFF0000u); // the first read after a restart
+        std::vector<uint32_t> words;
+        for (int i = 0; i < 12; ++i) words.push_back(bus.read32(0xFE1A001C) >> 16);
+        return words;
+    };
+
+    // No key (no security chip): the data reads as all ones.
+    CHECK_EQ(stream(0x0000).at(0), 0xFFFFu);
+
+    bus.set_security_key(0x29236FC8); // Spikeout's
+    // Expected output from MAME's implementation for the same RAM and keys.
+    const std::vector<uint32_t> plain = {0x1A81, 0xBB2E, 0x5E03, 0xDFFA, 0x8A95, 0x5ECA,
+                                         0xACE1, 0x6288, 0x17F6, 0x6BA8, 0x9F5D, 0x716A};
+    const std::vector<uint32_t> compressed = {0x0000, 0x4B4B, 0x0F4B, 0x0F0F, 0x000F, 0x0000,
+                                              0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000};
+    CHECK((stream(0x0000) == plain));      // header 0x1D4FA: uncompressed
+    CHECK((stream(0x1234) == compressed)); // header 0x354EB: compressed (bit 17)
+    CHECK((stream(0x0000) == plain));      // a restart starts the stream over
+}

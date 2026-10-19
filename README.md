@@ -107,6 +107,7 @@ Details in [docs/netplay.md](docs/netplay.md).
 - [MAME](https://github.com/mamedev/mame) (`src/mame/sega/model3.cpp`) — secondary reference for cross-checking and ROM set naming.
 - Motorola/IBM *PowerPC 603e RISC Microprocessor User's Manual* and *Programming Environments Manual*.
 - [Moira](https://github.com/dirkwhoffmann/Moira) by Dirk W. Hoffmann (MIT, vendored in `third_party/moira`) — the 68000 core that runs the network board's firmware.
+- MAME's 315-5881 decryption by Andreas Naive, Olivier Galibert and David Haywood (BSD-3-Clause; tables and algorithm in `src/runtime/crypt315_5881.cpp`, with their notice), as also used by Supermodel.
 
 See [docs/REFERENCES.md](docs/REFERENCES.md) for how sources are used.
 

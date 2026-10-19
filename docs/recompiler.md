@@ -203,16 +203,24 @@ It now shows "TWO PROCESSORS DETECTED / COMMUNICATION BOARD : DOWNLOADED",
 runs its main loop, and sends the Real3D real frames (display lists,
 polygon RAM, textures), which nothing draws yet.
 
-The network board's firmware then runs on its own 68000. The game set this
-cabinet up as a link **slave** (`0x0020` in the role word): a setting from
-its settings EEPROM (a 93C46 on the I/O board, read through ~19,000
-accesses to `0xF0040000`), which isn't emulated yet, so the setting is
-garbage. A lone slave waits for a master that never comes, and the firmware
-reports it: the game shows NO CARRIER! CHECK NETWORK CABLE, which is what
-a real lone slave cabinet would do. With `--net-force-master` the firmware
-brings the ring of one up (status 1 `0x2021`, frames going round each
-transfer) and the game moves on to show ILLEGAL ROM: the security board
-check, next.
+Then, in order:
+
+8. NO CARRIER! CHECK NETWORK CABLE: without its settings EEPROM (a 93C46
+   on the I/O board) the game set the cabinet up as a link slave, and a
+   lone slave's firmware (running on the network board's own 68000) waits
+   for a master that never comes, as a real one would. With the EEPROM
+   emulated the game writes its defaults ("M3SEGA" signature) on the blank
+   chip and runs as a master on its own.
+9. ILLEGAL ROM: the security board's 315-5881 decrypter, now emulated
+   (MAME's cipher, Spikeout's key `0x29236FC8`), so the check passes.
+10. Code reached only through task resume points: tasks yield by storing
+    the address to continue at, so the analysis now takes such constants
+    as entries ([control-flow.md](control-flow.md#pointer-scan---scan-pointers)).
+
+After that the game runs on with nothing missing: 3 billion blocks, 8,316
+frames (2.4 minutes of game time), sending the Real3D a frame each time.
+No text is left on the tile layers, so what it shows is 3D only, which
+nothing draws yet. The RTC (read ~12,000 times) is still open bus.
 
 The game's PCI configuration routines jump into stub tables
 (`base + size * 12`) that the analysis can't follow; their addresses are

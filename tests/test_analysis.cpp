@@ -250,6 +250,24 @@ TEST_CASE("control flow: pointer scan finds callbacks in data and constants") {
     CHECK(!a.functions.contains(at(16))); // a float, not code
 }
 
+TEST_CASE("control flow: a yielding task's resume point, and addresses built with addic") {
+    const std::vector<uint32_t> code = {
+        lis(3, 0), addi(3, 3, at(4)), D(36, 3, 12, 12), li(5, 0), // 0: stw r3, 12(r12): resume at 4
+        li(5, 1), lis(4, 0), D(12, 4, 4, at(9)), D(36, 4, 12, 12), // 4: addic r4, r4: resume at 9
+        kBlr,
+        li(6, 2), kBlr, // 9
+    };
+    const CodeImage image = image_of(code);
+    const std::array entries = {Entry{kBase, EntryKind::Seed, ""}};
+    Options options;
+    options.scan_pointers = true;
+    options.pointer_segments = {"test"};
+    const Analysis a = analyze(image, entries, options);
+    CHECK_EQ(a.functions.size(), size_t{3});
+    CHECK_EQ(a.functions.at(at(4)).kind, EntryKind::Pointer); // inside the first function, but built by code
+    CHECK_EQ(a.functions.at(at(9)).kind, EntryKind::Pointer);
+}
+
 TEST_CASE("control flow: constant blr and rfi start new functions") {
     const auto a = run({
         li(3, static_cast<uint32_t>(at(4))), // 0

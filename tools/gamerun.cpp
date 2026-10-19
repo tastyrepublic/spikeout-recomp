@@ -78,6 +78,7 @@ int main(int argc, char** argv) {
               [](const recomp::FunctionEntry& a, const recomp::FunctionEntry& b) { return a.addr < b.addr; });
 
     m3::Bus bus(roms);
+    bus.set_security_key(game.security_key);
     for (uint8_t& b : bus.ram()) b = 0xA5;
     m3::CommBoard* comm = nullptr;
     if (real_netboard) {
@@ -121,6 +122,9 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(c.decrementer_interrupts), bus.irq().enable(), bus.irq().state());
 
     std::printf("Network board: %s\n", bus.netboard().describe().c_str());
+    std::printf("EEPROM:");
+    for (uint32_t i = 0; i < 64; ++i) std::printf("%s%04x", i % 16 == 0 ? "\n  " : " ", bus.eeprom().words()[i]);
+    std::printf("\n");
     if (comm && !comm->trace.empty()) {
         std::printf("\nNetwork board 68000, register accesses:\n");
         for (const auto& a : comm->trace)

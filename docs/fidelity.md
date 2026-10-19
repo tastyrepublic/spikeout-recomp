@@ -42,6 +42,25 @@ board), and keep the old behavior selectable while it is being tested.
 - **Clock**: our time is basic blocks × cycles per block, not real CPU
   cycles; how long code takes affects anything timed against the frame.
 
+## Settings EEPROM and security board
+
+- **Done (datasheet):** the 93C46's dummy 0 bit before READ data. Supermodel
+  leaves it out (its notes say shifting in an extra bit "causes problems");
+  we show it on DO after the last address bit, and D15 comes with the next
+  clock, as the datasheet has it. A write refused because writes are
+  disabled starts no programming cycle.
+- **EEPROM programming time** is a number of DO reads (5) showing busy, as
+  in Supermodel, not the datasheet's milliseconds; needs a time base.
+- **Security board status** always reads 0 (never busy) and the first data
+  read after a restart gives `0xFFFF` (Supermodel); the game polls the
+  busy bit, so a real board takes time per word. Needs a real board.
+- **315-5881 stream on malformed data**: where MAME's code reads or writes
+  outside its buffers (a compressed line whose last run goes past the end,
+  a -1 shift at the start of a line, a plain substream after a compressed
+  one), ours stays in bounds; on valid data the output is the same
+  (checked against Supermodel's copy of MAME's code on 3,000 random
+  streams). Some s-box entries are unknown in MAME too (255).
+
 ## Network board
 
 - **Done:** `m3::CommBoard` runs the board's own 68000 (Moira) on the

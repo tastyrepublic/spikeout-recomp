@@ -22,15 +22,16 @@ Each milestone ends with something you can run and check.
 - [x] Exceptions: `sc`, traps, and returning from a handler with `rfi` ([notes](recompiler.md#exceptions)); the game now initializes and waits for an interrupt
 - [x] Interrupt controller and decrementer; the game runs frame by frame in its interrupt handlers
 - [x] Banked CROM switching (bank select at `0xF0100008`, in `m3::Bus`)
-- [ ] 315-5881 security board decryption (key `0x29236FC8`)
+- [x] 315-5881 security board decryption (key `0x29236FC8`; `m3::Crypt315_5881`, MAME's cipher, checked against it on random streams)
 - [x] Open-bus reads return all ones (Spikeout's ROM check needs it)
 - [x] Frame timing: 57.524 Hz, 424 lines, IRQ 0x02/0x0D as in [hardware-notes.md](hardware-notes.md) (`recomp::FrameTiming`; not yet: MIDI IRQ 0x40, waiting for the IRQ 0x02 acknowledge)
 - [x] Backup RAM (the game's RAM test passes)
 - [ ] RTC (read ~12,000 times during start-up)
 - [x] Network board: its own 68000 runs the firmware the game uploads (`m3::CommBoard`, Moira core; the simulation stays as `--netboard sim`); with the link set to master it brings the ring of one up (status 1 `0x2021`) and the game goes on to its ROM check
-- [ ] Security board check: the game shows ILLEGAL ROM once the link is up (as master)
+- [x] Security board check: passes (it showed ILLEGAL ROM before the decrypter)
 - [x] JTAG scan chain of the Real3D chips; Real3D PCI ID, DMA device and ping-pong bit: the game runs its main loop and sends the Real3D real frames
-- [ ] Settings EEPROM (93C46 on the I/O board): the game reads garbage settings and sets the cabinet up as a link slave; the real firmware then reports NO CARRIER, as a lone slave should (`gamerun --net-force-master` works around it for testing)
+- [x] Settings EEPROM (93C46 on the I/O board, `m3::Eeprom93C46`): the game writes its defaults and runs as a link master on its own; before it, it read garbage, set up as a slave and the firmware reported NO CARRIER, as a lone slave should
+- [x] Task resume points: code that tasks yield to (stored `lis`/`addi`/`addic` constants) is found by the analysis; the game now runs minutes of game time without missing code
 - [ ] Reference interpreter for code that the static pass misses, with logging so it can be added to the recompiled set
 - [ ] **Goal:** reaches the attract loop, verified against Supermodel's behavior
 

@@ -25,3 +25,9 @@ contains adapted code and name the source file in a comment.
 
 MAME's `model3.cpp` is BSD-3-Clause. Only facts (addresses, ROM names,
 sizes, checksums) are taken from it.
+
+One exception: the 315-5881 decryption (`src/runtime/crypt315_5881.cpp`)
+is MAME's code (BSD-3-Clause, Andreas Naive, Olivier Galibert, David
+Haywood), taken through Supermodel's `Src/Model3/Crypto.cpp`, which uses it
+the same way. BSD-3-Clause allows this in a GPL project; the file keeps
+MAME's notice and license text and Supermodel's notice.
