@@ -19,6 +19,9 @@ TEST_CASE("memory map: known addresses") {
     CHECK_EQ(find_region(0x007FFFFF)->device, Device::WorkRam);
     CHECK(find_region(0x00800000) == nullptr);
     CHECK_EQ(find_region(0x84000010)->device, Device::Real3dStatus);
+    CHECK_EQ(find_region(0x8C123456)->device, Device::Real3dCullingLow);
+    CHECK_EQ(find_region(0x94000000)->device, Device::Real3dTextureFifo);
+    CHECK_EQ(find_region(0x983FFFFC)->device, Device::Real3dPolygonRam);
     CHECK_EQ(find_region(0xC0001000)->device, Device::NetBoard);
     CHECK_EQ(find_region(0xF0040000)->device, Device::Io);
     CHECK_EQ(find_region(0xFE040000)->device, Device::Io);      // mirror

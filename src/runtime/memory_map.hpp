@@ -1,8 +1,9 @@
 // Main-CPU address map of a Sega Model 3 Step 2.1 board (Spikeout,
 // Daytona USA 2, Star Wars Trilogy, ...), with the 315-5881 security board.
 //
-// Source: MAME's sega/model3.cpp (model3_10_mem, model3_mem,
-// model3_5881_mem and init_model3_20). See docs/memory-map.md.
+// Sources: MAME's sega/model3.cpp (model3_10_mem, model3_mem,
+// model3_5881_mem, init_model3_20) and Supermodel's Src/Model3/Model3.cpp
+// (Real3D regions MAME doesn't map). See docs/memory-map.md.
 #pragma once
 
 #include <cstdint>
@@ -15,8 +16,12 @@ enum class Device : uint8_t {
     WorkRam,          // 8 MB main RAM
     Real3dStatus,     // Real3D Pro-1000 status registers (read)
     Real3dCommand,    // Real3D command port (write)
-    Real3dDisplayList,// Real3D culling/display list RAM (write)
+    Real3dCullingLow, // Real3D low culling RAM (write)
+    Real3dCullingHigh,// Real3D high culling RAM / display list (write)
+    Real3dTexturePort,// Real3D VROM texture port (write)
+    Real3dTextureFifo,// Real3D texture upload FIFO (write)
     Real3dPolygonRam, // Real3D polygon RAM (write)
+    Real3dConfig,     // Real3D configuration registers (write)
     Real3dDma,        // Real3D DMA controller (Step 2.x)
     NetBoard,         // Model 3 comm/network board (cabinet link)
     Io,               // Sega 315-5649 I/O: inputs, EEPROM, outputs

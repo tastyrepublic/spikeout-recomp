@@ -2,17 +2,25 @@
 
 As used by Spikeout / Spikeout: Final Edition. Taken from MAME's
 `sega/model3.cpp` (`model3_10_mem`, `model3_mem`, `model3_5881_mem`,
-`init_model3_20`); the code version is `src/runtime/memory_map.cpp`.
+`init_model3_20`), cross-checked against Supermodel's `Src/Model3/Model3.cpp`,
+which also supplies the Real3D regions marked (S). The code version is
+`src/runtime/memory_map.cpp`.
+
 Regions marked *mirrored* also respond with address bits 25–27 set
-(`0xF2xxxxxx` … `0xFExxxxxx`).
+(`0xF2xxxxxx` … `0xFExxxxxx`) in MAME; Supermodel only implements the
+`0xFExxxxxx` mirror, which is the one games are known to use.
 
 | Start | End | Device | Notes |
 |---|---|---|---|
 | `0x00000000` | `0x007FFFFF` | Work RAM | 8 MB |
 | `0x84000000` | `0x8400003F` | Real3D status | read |
 | `0x88000000` | `0x88000007` | Real3D command port | write |
-| `0x8E000000` | `0x8E0FFFFF` | Real3D display list (culling) RAM | write |
-| `0x98000000` | `0x980FFFFF` | Real3D polygon RAM | write |
+| `0x8C000000` | `0x8C3FFFFF` | Real3D low culling RAM | write (S) |
+| `0x8E000000` | `0x8E0FFFFF` | Real3D high culling RAM (display list) | write |
+| `0x90000000` | `0x900000FF` | Real3D VROM texture port | write (S) |
+| `0x94000000` | `0x940FFFFF` | Real3D texture FIFO | write (S) |
+| `0x98000000` | `0x983FFFFF` | Real3D polygon RAM | write; 4 MB per Supermodel, MAME maps 1 MB |
+| `0x9C000000` | `0x9CFFFFFF` | Real3D configuration registers | write (S) |
 | `0xC0000000` | `0xC003FFFF` | Network board | cabinet link |
 | `0xC2000000` | `0xC20000FF` | Real3D DMA | Step 2.x |
 | `0xF0040000` | `0xF004003F` | 315-5649 I/O (inputs, EEPROM) | mirrored |
