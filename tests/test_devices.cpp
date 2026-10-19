@@ -6,8 +6,11 @@
 #include "runtime/netboard.hpp"
 #include "runtime/rom.hpp"
 #include "runtime/real3d_render.hpp"
+#include "runtime/scsp.hpp"
+#include "runtime/soundboard.hpp"
 #include "runtime/tilegen.hpp"
 
+#include <algorithm>
 #include <bit>
 #include <vector>
 
@@ -373,6 +376,88 @@ TEST_CASE("sound: MIDI port bytes, control and IRQ 0x40") {
     CHECK_EQ(bus.irq().state() & 0x40, 0u);
     CHECK((bus.midi_out() == std::vector<uint8_t>{0xAE}));
     CHECK_EQ(bus.midi_bytes(), uint64_t{1});
+}
+
+TEST_CASE("scsp: a looped 16-bit slot plays in the centre at full level, and fades out after key off") {
+    std::vector<uint8_t> ram(Scsp::kRamSize, 0);
+    for (uint32_t i = 0; i < 16; ++i) ram[0x1000 + 2 * i] = 0x40; // 0x4000
+    Scsp scsp(ram, true);
+    scsp.write16(0x02, 0x1000); // SA
+    scsp.write16(0x04, 0);      // LSA
+    scsp.write16(0x06, 16);     // LEA
+    scsp.write16(0x08, 0x001F); // AR 31: no attack time; D1R, D2R 0: hold
+    scsp.write16(0x0A, 0x001F); // RR 31
+    scsp.write16(0x16, 0xE000); // DISDL 7 (0 dB), DIPAN 0 (centre)
+    scsp.write16(0x00, 0x1800 | 1 << 5); // KYONEX, KYONB, normal loop
+    CHECK_EQ(scsp.active_slots(), 1);
+    int32_t l = 0, r = 0;
+    for (int i = 0; i < 100; ++i) scsp.sample(l, r);
+    CHECK_EQ(l, 0x4000);
+    CHECK_EQ(r, 0x4000);
+    scsp.write16(0x00, 0x1000 | 1 << 5); // key off: release
+    for (int i = 0; i < 1000; ++i) scsp.sample(l, r);
+    CHECK_EQ(scsp.active_slots(), 0);
+    CHECK_EQ(l, 0);
+}
+
+TEST_CASE("scsp: timer A overflow interrupts at its level until acknowledged") {
+    std::vector<uint8_t> ram(Scsp::kRamSize, 0);
+    Scsp scsp(ram, true);
+    scsp.write16(0x424, 1 << 6); // SCILV0, SCILV1: timer A at level 3
+    scsp.write16(0x426, 1 << 6);
+    scsp.write16(0x41E, 0x40);   // SCIEB: timer A
+    scsp.write16(0x418, 0x00FE); // prescale 1, count 0xFE
+    scsp.tick_timers();
+    CHECK_EQ(scsp.irq_level(), 0);
+    CHECK_EQ(scsp.read16(0x418), 0x00FFu);
+    scsp.tick_timers(); // overflows
+    CHECK_EQ(scsp.irq_level(), 3);
+    scsp.write16(0x418, 0x00FE);
+    scsp.write16(0x422, 0x40); // SCIRE
+    CHECK_EQ(scsp.irq_level(), 0);
+}
+
+TEST_CASE("scsp: MIDI input interrupts while bytes wait; only the data byte takes one") {
+    std::vector<uint8_t> ram(Scsp::kRamSize, 0);
+    Scsp scsp(ram, true);
+    scsp.write16(0x424, 1 << 3); // MIDI at level 1
+    scsp.write16(0x41E, 0x08);
+    CHECK_EQ(scsp.irq_level(), 0);
+    scsp.midi_in(0x12);
+    scsp.midi_in(0x34);
+    CHECK_EQ(scsp.irq_level(), 1);
+    CHECK_EQ(scsp.read8(0x404) & 1, 0); // MIEMPTY clear; the status byte takes nothing
+    CHECK_EQ(scsp.read16(0x404) & 0xFF, 0x12);
+    CHECK_EQ(scsp.read8(0x405), 0x34u);
+    CHECK_EQ(scsp.read8(0x404) & 1, 1); // now empty
+    CHECK_EQ(scsp.irq_level(), 0);
+}
+
+TEST_CASE("sound board: vectors from the program, sample ROM banks through 0x400001") {
+    std::vector<uint8_t> program(0x80000, 0), samples(0x1000000, 0);
+    const uint8_t code[] = {
+        0x00, 0x00, 0x20, 0x00, 0x00, 0x60, 0x01, 0x00, // SSP 0x2000, PC 0x600100
+    };
+    std::copy(std::begin(code), std::end(code), program.begin());
+    const uint8_t body[] = {
+        0x33, 0xF9, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, // move.w $800000,$1000
+        0x13, 0xFC, 0x00, 0x10, 0x00, 0x40, 0x00, 0x01,             // move.b #$10,$400001
+        0x33, 0xF9, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x10, 0x02, // move.w $800000,$1002
+        0x60, 0xFE,                                                 // bra.s *
+    };
+    std::copy(std::begin(body), std::end(body), program.begin() + 0x100);
+    samples[0] = 0x12;
+    samples[1] = 0x34;
+    samples[0x800000] = 0x56;
+    samples[0x800001] = 0x78;
+    SoundBoard board(program, samples);
+    std::vector<int16_t> out(2 * 4);
+    board.render(out.data(), 4);
+    CHECK_EQ(board.pc(), 0x60011Cu);
+    CHECK_EQ(board.ram(0)[0x1000], 0x12u);
+    CHECK_EQ(board.ram(0)[0x1001], 0x34u);
+    CHECK_EQ(board.ram(0)[0x1002], 0x56u);
+    CHECK_EQ(board.ram(0)[0x1003], 0x78u);
 }
 
 TEST_CASE("real3d: textures through the FIFO land in 8x8 tiles, pairs swapped") {

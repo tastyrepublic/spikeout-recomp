@@ -77,6 +77,43 @@ VBlank, after the frame is drawn, as Supermodel does (`m3::Real3d`).
 Supermodel also waits for both the command port and the tile generator to
 say a frame is ready before drawing; we draw every frame.
 
+## Sound board
+
+`m3::SoundBoard` and `m3::Scsp` are adapted from Supermodel's SCSP (ElSemi's,
+through MAME's conversion). Changes made on the evidence of the board or
+the chip's documented register layout:
+
+- **Done:** 512 KB of RAM per SCSP (MAME's map of the board; Supermodel
+  has 1 MB). MDL and PLFOS read at their documented widths (Supermodel
+  widens each by a bit as tuning: "a value of 30 is somehow needed for
+  correct FM mix in VF3"); FM depth uses MAME's scale for the real field.
+  Reading the MIDI status byte doesn't take a byte from the FIFO, and the
+  FIFO's empty/full flags read correctly (Supermodel takes a byte on either
+  half and never sets the flags). Timers reload all 8 bits (Supermodel
+  drops bit 0). Idle slots start released, so the first key-on starts them.
+  The LFO noise table is a fixed sequence (Supermodel uses `rand()`), so
+  runs repeat.
+- **MIDI timing:** the main board's port is a uPD71051 serial chip at
+  31,250 baud (MAME), so bytes arrive about 320 µs apart; we pass a frame's
+  bytes at the start of the sound board's frame, into a 256-byte FIFO, as
+  Supermodel does. The game's IRQ `0x40` pacing on the main board should
+  then come from the chip's transmitter, not the 1000-cycle burst.
+- **Sync:** in the window the sound board runs on the audio device's
+  clock, as the real one runs on its own crystal, and takes each frame's
+  MIDI bytes when the main board finishes the frame: a command plays up to
+  a frame (plus the device's buffer) late, and a slow main-board frame
+  delays commands instead of making the sound crackle. `gamerun` runs it a
+  frame at a time after each main-board frame (as Supermodel does), so runs
+  repeat exactly.
+- **Kept from Supermodel, unverified:** an overflowed timer stays at
+  `0xFF` and pending until reloaded (the chip's timers probably keep
+  counting); timers B and C share timer B's interrupt level; envelope rates
+  add the key-rate scale even when a rate is 0; noise and silence sources
+  (SSCTL) play nothing; the DSP's memory access only on odd steps.
+- **Mixing:** the two SCSPs are summed into one stereo pair (on the
+  cabinet they may be front and rear speakers); the music board (DSB2) is
+  not emulated yet.
+
 ## Settings EEPROM and security board
 
 - **Done (datasheet):** the 93C46's dummy 0 bit before READ data. Supermodel

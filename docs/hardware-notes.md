@@ -153,6 +153,36 @@ IRQ; without the IRQs the queue fills and the game waits. Supermodel
 raises IRQ `0x40` at the start of VBlank every 1000 cycles while bit
 `0x20` and the IRQ enable are set, at most 129 times; so do we.
 
+On the board the port is an NEC uPD71051 serial chip (8251-compatible,
+MAME's `model3.cpp`): a MIDI-rate line, 31,250 baud, about 3,100 bytes a
+second, into the first SCSP's MIDI input; the music board listens on the
+same line. The control writes are commands to that chip. Pacing the bytes
+by its transmit timing instead of Supermodel's burst is in
+[fidelity.md](fidelity.md).
+
+## Sound board
+
+A 68000 at 11.2896 MHz (45.1584 MHz / 4) and two SCSPs (315-5687) at
+22.5792 MHz, each with 512 KB of sound RAM that it plays samples from; the
+SCSPs can't reach the sample ROMs, the 68000 copies what it needs. 68000
+map (Supermodel and MAME agree):
+
+| Address | |
+|---|---|
+| `0x000000` | SCSP 1 RAM (the 68000's vectors are copied here at reset) |
+| `0x100000` | SCSP 1 registers: slots `0x000`, common `0x400`, ring buffer `0x600`, DSP `0x700`–`0xEE3` |
+| `0x200000` | SCSP 2 RAM |
+| `0x300000` | SCSP 2 registers |
+| `0x400001` | control: bit 4 selects the upper 8 MB of sample ROM at `0x800000` |
+| `0x600000` | program ROM, 512 KB |
+| `0x800000` | sample ROM, an 8 MB window into the 16 MB |
+
+Spikeout's driver takes interrupts at levels 1 and 2 (the SCSP's timers)
+and 3 (MIDI input, one per byte). In the attract mode the SCSPs play only
+the sound effects, in bursts with each demo fight: the music is on the
+DSB2 board (a 68EC000 at 11 MHz and an MPEG decoder, in a metal box),
+which MAME notes should be mixed in through the SCSP's external input.
+
 ## RTC (`0xF0140000`, Epson RTC-72421)
 
 Register *n* at `+4n`, in the top byte of each word: 0–12 the time as BCD

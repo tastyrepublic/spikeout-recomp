@@ -1,11 +1,12 @@
 // spikeout: the recompiled game in a window (SDL3).
 //
-//   spikeout <rom_dir> [--scale N] [--netboard sim] [--frames N]
+//   spikeout <rom_dir> [--scale N] [--netboard sim] [--frames N] [--mute]
 //
 // The game runs on its own thread, paced to the Model 3's 57.524 Hz; the
 // window shows the tile generator's 2D layers and the Real3D's picture
-// (drawn in software for now) and passes the
-// keyboard to the I/O board:
+// (drawn in software for now). The sound board plays through the default
+// audio device (--mute: not at all); the music board isn't emulated yet.
+// The keyboard goes to the I/O board:
 //
 //   5 coin      1 start      F2 test      F1 service
 //   arrows      joystick
@@ -37,8 +38,10 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
@@ -48,6 +51,8 @@ namespace {
 constexpr int kWidth = m3::TilegenRenderer::kWidth, kHeight = m3::TilegenRenderer::kHeight;
 
 struct Stop {}; // thrown from the frame callback to end the run
+
+class Sound;
 
 // What the window and the game thread share.
 struct Shared {
@@ -59,6 +64,7 @@ struct Shared {
     std::atomic<uint8_t> bank0{0xFF}, bank1{0xFF}, controls{0xFF};
     std::atomic<bool> quit{false}, fast{false};
     uint64_t max_frames = 0; // 0: run until the window is closed
+    Sound* sound = nullptr; // nullptr: muted
 };
 
 // Keyboard state to the I/O board's input bytes (bits clear while pressed).
@@ -77,6 +83,61 @@ void read_keys(Shared& shared) {
                             {SDL_SCANCODE_LEFT, 7}});
     shared.fast = k[SDL_SCANCODE_TAB];
 }
+
+// The sound board plays on the audio device's clock, as the real one runs
+// on its own crystal: SDL asks for samples as it needs them, and the board
+// takes the game's MIDI bytes as they arrive. A slow frame on the main
+// board (the software 3D) then delays a sound command by that much instead
+// of starving the device, which crackled.
+class Sound {
+public:
+    explicit Sound(const m3::RomSet& roms)
+        : board_(roms.region(m3::RomRegionId::SoundProgram), roms.region(m3::RomRegionId::SoundSamples)) {
+        const SDL_AudioSpec spec{SDL_AUDIO_S16, 2, m3::Scsp::kSampleRate};
+        stream_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, &Sound::feed, this);
+        if (stream_) SDL_ResumeAudioStreamDevice(stream_);
+        else std::fprintf(stderr, "spikeout: no sound: %s\n", SDL_GetError());
+    }
+    ~Sound() {
+        if (stream_) SDL_DestroyAudioStream(stream_); // stops the callbacks first
+    }
+
+    // From the game thread: the MIDI bytes sent during a frame (empties the list).
+    void send(std::vector<uint8_t>& midi) {
+        if (stream_) {
+            std::lock_guard<std::mutex> guard(lock_);
+            midi_.insert(midi_.end(), midi.begin(), midi.end());
+        }
+        midi.clear();
+    }
+
+private:
+    static void SDLCALL feed(void* self, SDL_AudioStream* stream, int additional, int) {
+        static_cast<Sound*>(self)->play(stream, additional);
+    }
+
+    void play(SDL_AudioStream* stream, int bytes) {
+        {
+            // Into the board's FIFO as it has room; the rest waits here
+            // (running fast with Tab sends more than plays in real time).
+            std::lock_guard<std::mutex> guard(lock_);
+            while (!midi_.empty() && board_.midi_waiting() < 192) {
+                board_.midi_in(midi_.front());
+                midi_.pop_front();
+            }
+        }
+        const auto frames = static_cast<std::size_t>(bytes + 3) / 4;
+        buffer_.resize(2 * frames);
+        board_.render(buffer_.data(), frames);
+        SDL_PutAudioStreamData(stream, buffer_.data(), static_cast<int>(frames * 4));
+    }
+
+    m3::SoundBoard board_;
+    std::mutex lock_;
+    std::deque<uint8_t> midi_;
+    std::vector<int16_t> buffer_;
+    SDL_AudioStream* stream_ = nullptr;
+};
 
 void run_game(const m3::RomSet& roms, bool real_netboard, Shared& shared) {
     const m3::GameSpec& game = m3::games::kSpikeoutFinalEdition;
@@ -108,7 +169,8 @@ void run_game(const m3::RomSet& roms, bool real_netboard, Shared& shared) {
             shared.frame.swap(screen);
             shared.frame_number = timing.frames();
         }
-        bus.midi_out().clear(); // no sound board yet
+        if (shared.sound) shared.sound->send(bus.midi_out());
+        else bus.midi_out().clear();
         bus.inputs.bank0 = shared.bank0;
         bus.inputs.bank1 = shared.bank1;
         bus.inputs.controls = shared.controls;
@@ -150,15 +212,17 @@ int main(int argc, char** argv) {
     int scale = 2;
     bool real_netboard = true;
     uint64_t max_frames = 0;
+    bool mute = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--scale" && i + 1 < argc) scale = std::max(1, std::atoi(argv[++i]));
         else if (arg == "--netboard" && i + 1 < argc) real_netboard = std::string(argv[++i]) == "real";
         else if (arg == "--frames" && i + 1 < argc) max_frames = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--mute") mute = true;
         else if (!dir) dir = argv[i];
     }
     if (!dir) {
-        std::fprintf(stderr, "usage: spikeout <rom_dir> [--scale N] [--netboard sim|real] [--frames N]\n");
+        std::fprintf(stderr, "usage: spikeout <rom_dir> [--scale N] [--netboard sim|real] [--frames N] [--mute]\n");
         return 2;
     }
     const m3::RomSet roms = m3::load_rom_set(m3::games::kSpikeoutFinalEdition, dir);
@@ -167,7 +231,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
         std::fprintf(stderr, "spikeout: SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
@@ -186,6 +250,9 @@ int main(int argc, char** argv) {
 
     Shared shared;
     shared.max_frames = max_frames;
+    std::unique_ptr<Sound> sound;
+    if (!mute) sound = std::make_unique<Sound>(roms);
+    shared.sound = sound.get();
     std::thread game([&] { run_game(roms, real_netboard, shared); });
 
     std::vector<uint32_t> shown(kWidth * kHeight);
@@ -243,6 +310,7 @@ int main(int argc, char** argv) {
 
     shared.quit = true;
     game.join();
+    sound.reset();
     SDL_DestroyTexture(texture);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);

@@ -48,6 +48,8 @@ add_library(m3runtime
     src/runtime/tilegen.cpp
     src/runtime/real3d.cpp
     src/runtime/real3d_render.cpp
+    src/runtime/scsp.cpp
+    src/runtime/soundboard.cpp
     src/runtime/crypt315_5881.cpp
     src/runtime/memory_map.cpp
     src/runtime/rom.cpp

@@ -53,7 +53,8 @@ Each milestone ends with something you can run and check.
 
 ## 4. Sound and input
 
-- [ ] 68000 sound CPU + SCSP (emulated; it's small)
+- [x] 68000 sound CPU + two SCSPs (`m3::SoundBoard`, `m3::Scsp`, adapted from Supermodel's SCSP with fixes from the chip's register layout and MAME's board map): the sound effects play in the window (SDL audio) and `gamerun --wav` records them
+- [ ] MIDI link timed like the board's serial chip (31,250 baud) instead of a burst per frame
 - [ ] DSB2 MPEG music board
 - [ ] Keyboard (done in `spikeout`: coin, start, test, service, joystick, buttons), gamepad and arcade stick mapping
 

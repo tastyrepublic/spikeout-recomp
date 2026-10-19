@@ -4,6 +4,7 @@
 //   gamerun <rom_dir> [--blocks N] [--text] [--dump-tile FILE]
 //           [--netboard sim|real] [--net-trace N] [--net-disasm FILE]
 //           [--screenshot FILE.png] [--shot-every N] [--press NAME@FRAME[:N]]...
+//           [--wav FILE.wav]
 //
 // Built only when CMake's SPIKEOUT_ROM_DIR is set. A run ends at the first
 // thing the runtime can't do yet (code that wasn't found, an exception, a
@@ -26,6 +27,9 @@
 // --press NAME@FRAME[:N] holds an input for N frames (default 6) from FRAME:
 // coin, start, test, service, beat, charge, shift, jump, up, down, left,
 // right. Repeat it for more presses.
+//
+// The sound board (m3::SoundBoard) runs with the game; --wav writes what
+// it played (44.1 kHz stereo).
 #include "games/games.hpp"
 #include "ppc/disasm.hpp"
 #include "ppc/instruction.hpp"
@@ -38,9 +42,11 @@
 #include "runtime/tilegen.hpp"
 #include "game_setup.hpp"
 #include "png_write.hpp"
+#include "wav_write.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -81,6 +87,7 @@ int main(int argc, char** argv) {
     const char* dump_tile = nullptr;
     const char* net_disasm = nullptr;
     const char* screenshot = nullptr;
+    const char* wav = nullptr;
     uint64_t shot_every = 0, tilegen_trace = 0;
     std::vector<Press> presses;
     bool show_text = false, real_netboard = true, force_master = false;
@@ -96,6 +103,7 @@ int main(int argc, char** argv) {
         else if (arg == "--net-disasm" && i + 1 < argc) net_disasm = argv[++i];
         else if (arg == "--net-force-master") force_master = true;
         else if (arg == "--screenshot" && i + 1 < argc) screenshot = argv[++i];
+        else if (arg == "--wav" && i + 1 < argc) wav = argv[++i];
         else if (arg == "--shot-every" && i + 1 < argc) shot_every = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--tilegen-trace" && i + 1 < argc) tilegen_trace = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--press" && i + 1 < argc) {
@@ -118,7 +126,7 @@ int main(int argc, char** argv) {
     if (!dir) {
         std::fprintf(stderr, "usage: gamerun <rom_dir> [--blocks N] [--text] [--dump-tile FILE]\n"
                              "               [--netboard sim|real] [--net-trace N] [--net-disasm FILE]\n"
-                             "               [--screenshot FILE.png] [--shot-every N]\n");
+                             "               [--screenshot FILE.png] [--shot-every N] [--wav FILE.wav]\n");
         return 2;
     }
     const m3::GameSpec& game = m3::games::kSpikeoutFinalEdition;
@@ -150,6 +158,11 @@ int main(int argc, char** argv) {
     m3::TilegenRenderer tilegen;
     m3::Real3dRenderer real3d;
     std::vector<uint32_t> screen(m3::TilegenRenderer::kWidth * m3::TilegenRenderer::kHeight);
+    // The sound board, a frame at a time; --wav keeps what it played.
+    tools::FrameSound sound(roms);
+    std::vector<int16_t> audio;
+    int peak = 0;
+    double energy = 0, sound_seconds = 0;
     timing.on_display_line = [&](uint32_t line) {
         if (line == 0) tilegen.begin_frame();
         tilegen.draw_line(bus, static_cast<int>(line));
@@ -157,7 +170,14 @@ int main(int argc, char** argv) {
     timing.on_frame_end = [&] {
         if (screenshot) real3d.render(bus.real3d()); // the 3D is drawn in software: only when it will be seen
         tilegen.composite(screen, real3d.image());
-        bus.midi_out().clear(); // no sound board yet
+        const auto sound_start = std::chrono::steady_clock::now();
+        const std::span<const int16_t> pcm = sound.frame(bus.midi_out());
+        sound_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - sound_start).count();
+        if (wav) audio.insert(audio.end(), pcm.begin(), pcm.end());
+        for (int16_t s : pcm) {
+            peak = std::max(peak, std::abs(static_cast<int>(s)));
+            energy += static_cast<double>(s) * s;
+        }
         // --press: inputs held for the coming frame (active low).
         uint8_t in[2] = {0xFF, 0xFF};
         for (const Press& p : presses)
@@ -205,7 +225,12 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(c.decrementer_interrupts), bus.irq().enable(), bus.irq().state());
 
     std::printf("Network board: %s\n", bus.netboard().describe().c_str());
-    std::printf("Sound board: %llu MIDI bytes sent (not emulated yet)\n", static_cast<unsigned long long>(bus.midi_bytes()));
+    const double played = static_cast<double>(sound.board.samples());
+    std::printf("Sound board: %s; %d slots playing, %llu MIDI bytes dropped; output peak %d, RMS %.0f; %.2f s to run it\n",
+                sound.board.describe().c_str(), sound.board.active_slots(),
+                static_cast<unsigned long long>(sound.board.midi_dropped()), peak,
+                played > 0 ? std::sqrt(energy / (2 * played)) : 0.0, sound_seconds);
+    if (wav && tools::write_wav(wav, audio, m3::Scsp::kSampleRate)) std::printf("Wrote %s\n", wav);
     if (c.first_nan_pc) // SPIKEOUT_FP_TRAP builds
         std::printf("First FP NaN: at %08x (%016llx)\n", c.first_nan_pc, static_cast<unsigned long long>(c.first_nan_bits));
     if (screenshot) {

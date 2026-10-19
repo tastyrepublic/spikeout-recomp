@@ -3,9 +3,13 @@
 #pragma once
 
 #include "recomp/context.hpp"
+#include "recomp/frame_timing.hpp"
 #include "runtime/bus.hpp"
+#include "runtime/rom.hpp"
+#include "runtime/soundboard.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <ctime>
 #include <span>
 #include <vector>
@@ -35,5 +39,32 @@ inline void set_rtc_to_host(m3::Bus& bus) {
             m3::Rtc72421::to_seconds({lt->tm_year + 1900, lt->tm_mon + 1, lt->tm_mday, lt->tm_hour, lt->tm_min, lt->tm_sec}),
             0);
 }
+
+// The sound board, fed each frame with the bytes the game sent to its MIDI
+// port and run for that frame's share of 44.1 kHz samples.
+class FrameSound {
+public:
+    explicit FrameSound(const m3::RomSet& roms)
+        : board(roms.region(m3::RomRegionId::SoundProgram), roms.region(m3::RomRegionId::SoundSamples)) {}
+
+    // Takes the MIDI bytes the game sent during one frame (and empties the
+    // list); returns that frame's interleaved stereo samples (766 or 767).
+    std::span<const int16_t> frame(std::vector<uint8_t>& midi) {
+        for (uint8_t b : midi) board.midi_in(b);
+        midi.clear();
+        due_ += static_cast<double>(m3::Scsp::kSampleRate) / recomp::FrameTiming::kRefreshHz;
+        const auto n = static_cast<std::size_t>(due_);
+        due_ -= static_cast<double>(n);
+        buffer_.resize(2 * n);
+        board.render(buffer_.data(), n);
+        return buffer_;
+    }
+
+    m3::SoundBoard board;
+
+private:
+    double due_ = 0;
+    std::vector<int16_t> buffer_;
+};
 
 } // namespace tools
