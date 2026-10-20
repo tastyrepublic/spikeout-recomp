@@ -180,52 +180,6 @@ void print_probe(const m3::Real3dRenderer& r, int x, int y, uint64_t frame) {
                     h.outcome);
 }
 
-// Boards that run one at a time, in order: each runs until it passes the
-// turn on, then waits for it to come back. A board that has stopped is
-// skipped.
-class Turns {
-public:
-    explicit Turns(std::size_t boards) : done_(boards, false) {}
-    std::size_t boards() const { return done_.size(); }
-
-    void wait(std::size_t i) {
-        std::unique_lock lock(mutex_);
-        changed_.wait(lock, [&] { return turn_ == i; });
-    }
-    void pass(std::size_t i) {
-        {
-            std::lock_guard lock(mutex_);
-            advance(i);
-        }
-        changed_.notify_all();
-        wait(i);
-    }
-    void finish(std::size_t i) {
-        {
-            std::lock_guard lock(mutex_);
-            done_[i] = true;
-            advance(i);
-        }
-        changed_.notify_all();
-    }
-
-private:
-    void advance(std::size_t i) {
-        for (std::size_t k = 1; k <= done_.size(); ++k) {
-            const std::size_t next = (i + k) % done_.size();
-            if (!done_[next]) {
-                turn_ = next;
-                return;
-            }
-        }
-    }
-
-    std::mutex mutex_;
-    std::condition_variable changed_;
-    std::size_t turn_ = 0;
-    std::vector<bool> done_;
-};
-
 // One Model 3 board and what the run keeps of it.
 struct Machine {
     Machine(std::size_t i, const m3::RomSet& roms, std::span<const recomp::FunctionEntry> functions)
@@ -255,7 +209,7 @@ struct Machine {
 
 bool for_board(int board, std::size_t index) { return board == kAllBoards || static_cast<std::size_t>(board) == index; }
 
-void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing* ring, Turns& turns) {
+void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing* ring, tools::Turns& turns) {
     m3::Bus& bus = m.bus;
     bus.midi_burst = o.midi_burst;
     bus.dma_timed = !o.dma_instant;
@@ -357,7 +311,7 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
     };
 }
 
-void run(Machine& m, Turns& turns) {
+void run(Machine& m, tools::Turns& turns) {
     turns.wait(m.index);
     const auto start = std::chrono::steady_clock::now();
     try {
@@ -677,7 +631,7 @@ int main(int argc, char** argv) {
                 std::printf("\n");
             });
     }
-    Turns turns(o.boards);
+    tools::Turns turns(o.boards);
     std::vector<std::unique_ptr<Machine>> machines;
     for (std::size_t i = 0; i < o.boards; ++i) {
         machines.push_back(std::make_unique<Machine>(i, roms, functions));

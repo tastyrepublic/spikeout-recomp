@@ -2,6 +2,7 @@
 //
 //   spikeout <rom_dir> [--scale N] [--netboard sim] [--frames N] [--mute] [--quads]
 //                     [--midi-burst] [--dma-instant] [--sound-volume N] [--music-volume N]
+//                     [--boards N]
 //
 // The game runs on its own thread, paced to the Model 3's 57.524 Hz; the
 // window shows the tile generator's 2D layers and the Real3D's picture
@@ -15,6 +16,18 @@
 //   Tab (held)  run as fast as possible
 //   F12         screenshot (spikeout-<frame>.png)
 //   Esc         quit
+//
+// --boards N (2-4) runs N cabinets linked in a ring, as in an arcade: each
+// is a complete board with its own player, the window split between them
+// (side by side, or 2 x 2). Board 0 is set up as the master and the others
+// as slaves (tools::kLinkSettingAddr). They take turns on their threads
+// every few display lines (gamerun --boards). The keys above drive board 0
+// (F5-F8 move them to board 1-4); a second set drives board 1:
+//
+//   6 coin      2 start      I J K L    joystick
+//   A beat      S charge     D jump     F shift
+//
+// Only board 0's sound plays.
 //
 // --frames N quits after N frames and writes the last one to
 // spikeout-<N>.png (for testing). --quads draws quads whole, as Supermodel's
@@ -40,6 +53,8 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -55,29 +70,38 @@
 namespace {
 
 constexpr int kWidth = m3::TilegenRenderer::kWidth, kHeight = m3::TilegenRenderer::kHeight;
+constexpr std::size_t kMaxBoards = 4;
+constexpr uint32_t kTurnLines = 8; // display lines a linked board runs before passing the turn on
 
 struct Stop {}; // thrown from the frame callback to end the run
 
 class Sound;
 
-// What the window and the game thread share.
-struct Shared {
-    std::mutex lock;
+// One board's picture and inputs.
+struct Screen {
     std::vector<uint32_t> frame = std::vector<uint32_t>(kWidth * kHeight, 0xFF000000u); // last finished frame
     uint64_t frame_number = 0;
     std::string stopped; // why the game stopped, once it has
     // Inputs, active low, as the I/O board shows them.
     std::atomic<uint8_t> bank0{0xFF}, bank1{0xFF}, controls{0xFF};
+};
+
+// What the window and the game threads share.
+struct Shared {
+    std::mutex lock;
+    std::array<Screen, kMaxBoards> screens;
+    std::size_t boards = 1;
     std::atomic<bool> quit{false}, fast{false};
     uint64_t max_frames = 0; // 0: run until the window is closed
+    bool real_netboard = true;
     bool quads = false;      // draw quads whole (slower)
     bool midi_burst = false; // Supermodel's MIDI timing
     bool dma_instant = false; // Real3D DMA done at once (Supermodel, MAME)
     Sound* sound = nullptr; // nullptr: muted
 };
 
-// Keyboard state to the I/O board's input bytes (bits clear while pressed).
-void read_keys(Shared& shared) {
+// Keyboard state to the I/O boards' input bytes (bits clear while pressed).
+void read_keys(Shared& shared, std::size_t focus) {
     const bool* k = SDL_GetKeyboardState(nullptr);
     auto bits = [&](std::initializer_list<std::pair<SDL_Scancode, int>> map) {
         uint8_t v = 0xFF;
@@ -85,11 +109,24 @@ void read_keys(Shared& shared) {
             if (k[key]) v = static_cast<uint8_t>(v & ~(1u << bit));
         return v;
     };
-    shared.bank0 = bits({{SDL_SCANCODE_5, 0}, {SDL_SCANCODE_F2, 2}, {SDL_SCANCODE_F1, 3}, {SDL_SCANCODE_1, 4}});
-    shared.bank1 = 0xFF;
-    shared.controls = bits({{SDL_SCANCODE_Z, 0}, {SDL_SCANCODE_X, 1}, {SDL_SCANCODE_V, 2}, {SDL_SCANCODE_C, 3},
-                            {SDL_SCANCODE_DOWN, 4}, {SDL_SCANCODE_UP, 5}, {SDL_SCANCODE_RIGHT, 6},
-                            {SDL_SCANCODE_LEFT, 7}});
+    for (Screen& s : shared.screens) {
+        s.bank0 = 0xFF;
+        s.controls = 0xFF;
+    }
+    // The second player's keys first: board 1, unless the first player's
+    // keys are there too.
+    if (shared.boards > 1 && focus != 1) {
+        Screen& p2 = shared.screens[1];
+        p2.bank0 = bits({{SDL_SCANCODE_6, 0}, {SDL_SCANCODE_2, 4}});
+        p2.controls = bits({{SDL_SCANCODE_A, 0}, {SDL_SCANCODE_S, 1}, {SDL_SCANCODE_F, 2}, {SDL_SCANCODE_D, 3},
+                            {SDL_SCANCODE_K, 4}, {SDL_SCANCODE_I, 5}, {SDL_SCANCODE_L, 6}, {SDL_SCANCODE_J, 7}});
+    }
+    Screen& p1 = shared.screens[focus];
+    p1.bank0 = bits({{SDL_SCANCODE_5, 0}, {SDL_SCANCODE_F2, 2}, {SDL_SCANCODE_F1, 3}, {SDL_SCANCODE_1, 4}});
+    p1.bank1 = 0xFF;
+    p1.controls = bits({{SDL_SCANCODE_Z, 0}, {SDL_SCANCODE_X, 1}, {SDL_SCANCODE_V, 2}, {SDL_SCANCODE_C, 3},
+                        {SDL_SCANCODE_DOWN, 4}, {SDL_SCANCODE_UP, 5}, {SDL_SCANCODE_RIGHT, 6},
+                        {SDL_SCANCODE_LEFT, 7}});
     shared.fast = k[SDL_SCANCODE_TAB];
 }
 
@@ -183,15 +220,21 @@ private:
     SDL_AudioStream* stream_ = nullptr;
 };
 
-void run_game(const m3::RomSet& roms, bool real_netboard, Shared& shared) {
+// Board `index`: run until quit. Board 0 paces the run (the others take
+// turns with it); with one board there are no turns.
+void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, tools::Turns& turns, Shared& shared) {
     const m3::GameSpec& game = m3::games::kSpikeoutFinalEdition;
     const std::vector<recomp::FunctionEntry> functions = tools::game_functions();
+    Screen& out = shared.screens[index];
     m3::Bus bus(roms);
     bus.set_security_key(game.security_key);
     tools::set_rtc_to_host(bus);
-    if (real_netboard) bus.use_netboard(std::make_unique<m3::CommBoard>());
+    if (shared.real_netboard) bus.use_netboard(std::make_unique<m3::CommBoard>(ring ? ring->port(index) : nullptr));
+    else if (ring) bus.use_netboard(std::make_unique<m3::SimNetBoard>(ring->port(index)));
     bus.midi_burst = shared.midi_burst;
     bus.dma_timed = !shared.dma_instant;
+    const bool linked = ring != nullptr;
+    const uint8_t link_setting = index == 0 ? 1 : 2; // master, slave
 
     recomp::Context c(bus, functions);
     recomp::FrameTiming timing;
@@ -207,22 +250,28 @@ void run_game(const m3::RomSet& roms, bool real_netboard, Shared& shared) {
     timing.on_display_line = [&](uint32_t line) {
         if (line == 0) tilegen.begin_frame();
         tilegen.draw_line(bus, static_cast<int>(line));
+        if (linked && line % kTurnLines == kTurnLines - 1) {
+            bus.netboard().sync(c.cycles());
+            turns.pass(index);
+        }
     };
     timing.on_frame_end = [&] {
         real3d.render(bus.real3d());
         tilegen.composite(screen, real3d.image());
         {
             std::lock_guard<std::mutex> guard(shared.lock);
-            shared.frame.swap(screen);
-            shared.frame_number = timing.frames();
+            out.frame.swap(screen);
+            out.frame_number = timing.frames();
         }
-        if (shared.sound) shared.sound->send(bus.midi_out());
+        if (shared.sound && index == 0) shared.sound->send(bus.midi_out());
         else bus.midi_out().clear();
-        bus.inputs.bank0 = shared.bank0;
-        bus.inputs.bank1 = shared.bank1;
-        bus.inputs.controls = shared.controls;
+        if (linked && timing.frames() < tools::kLinkSettingFrames) bus.write8(tools::kLinkSettingAddr, link_setting);
+        bus.inputs.bank0 = out.bank0;
+        bus.inputs.bank1 = out.bank1;
+        bus.inputs.controls = out.controls;
         if (shared.max_frames && timing.frames() >= shared.max_frames) shared.quit = true;
         if (shared.quit) throw Stop{};
+        if (index != 0) return; // board 0 paces them all
         if (shared.fast) { // run free, and pace from here when Tab is let go
             start = clock::now();
             paced_from = timing.frames();
@@ -239,6 +288,7 @@ void run_game(const m3::RomSet& roms, bool real_netboard, Shared& shared) {
     };
 
     std::string why;
+    turns.wait(index);
     try {
         c.call(c.cpu.pc);
         why = "the reset code returned";
@@ -248,24 +298,32 @@ void run_game(const m3::RomSet& roms, bool real_netboard, Shared& shared) {
     } catch (const recomp::GuestError& e) {
         why = e.what();
     }
+    turns.finish(index);
     std::lock_guard<std::mutex> guard(shared.lock);
-    shared.stopped = why.empty() ? "quit" : why;
+    out.stopped = why.empty() ? "quit" : why;
 }
+
+// The boards' screens side by side (2) or 2 x 2 (3, 4).
+int grid_columns(std::size_t boards) { return boards == 1 ? 1 : 2; }
+int grid_rows(std::size_t boards) { return boards <= 2 ? 1 : 2; }
 
 } // namespace
 
 int main(int argc, char** argv) {
     const char* dir = nullptr;
-    int scale = 2;
+    int scale = 0;
     bool real_netboard = true;
     uint64_t max_frames = 0;
     bool mute = false, quads = false, midi_burst = false, dma_instant = false;
     int sound_volume = 100, music_volume = 100;
+    std::size_t boards = 1;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--scale" && i + 1 < argc) scale = std::max(1, std::atoi(argv[++i]));
         else if (arg == "--netboard" && i + 1 < argc) real_netboard = std::string(argv[++i]) == "real";
         else if (arg == "--frames" && i + 1 < argc) max_frames = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--boards" && i + 1 < argc)
+            boards = std::clamp<std::size_t>(std::strtoull(argv[++i], nullptr, 0), 1, kMaxBoards);
         else if (arg == "--quads") quads = true;
         else if (arg == "--midi-burst") midi_burst = true;
         else if (arg == "--dma-instant") dma_instant = true;
@@ -276,46 +334,63 @@ int main(int argc, char** argv) {
     }
     if (!dir) {
         std::fprintf(stderr, "usage: spikeout <rom_dir> [--scale N] [--netboard sim|real] [--frames N] [--mute] [--quads]\n"
-                             "                [--midi-burst] [--dma-instant] [--sound-volume N] [--music-volume N]\n");
+                             "                [--midi-burst] [--dma-instant] [--sound-volume N] [--music-volume N]\n"
+                             "                [--boards N]\n");
         return 2;
     }
+    if (scale == 0) scale = boards == 1 ? 2 : 1;
     const m3::RomSet roms = m3::load_rom_set(m3::games::kSpikeoutFinalEdition, dir);
     if (!roms.complete()) {
         std::fprintf(stderr, "spikeout: ROM set incomplete; run romcheck for details\n");
         return 1;
     }
 
+    const int cols = grid_columns(boards), rows = grid_rows(boards);
+    const int width = kWidth * cols, height = kHeight * rows;
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
         std::fprintf(stderr, "spikeout: SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
     SDL_Window* window = nullptr;
     SDL_Renderer* renderer = nullptr;
-    if (!SDL_CreateWindowAndRenderer("Spikeout: Final Edition", kWidth * scale, kHeight * scale, SDL_WINDOW_RESIZABLE,
+    if (!SDL_CreateWindowAndRenderer("Spikeout: Final Edition", width * scale, height * scale, SDL_WINDOW_RESIZABLE,
                                      &window, &renderer)) {
         std::fprintf(stderr, "spikeout: %s\n", SDL_GetError());
         return 1;
     }
     SDL_SetRenderVSync(renderer, 1);
-    SDL_SetRenderLogicalPresentation(renderer, kWidth, kHeight, SDL_LOGICAL_PRESENTATION_LETTERBOX);
-    SDL_Texture* texture =
-        SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, kWidth, kHeight);
+    SDL_SetRenderLogicalPresentation(renderer, width, height, SDL_LOGICAL_PRESENTATION_LETTERBOX);
+    SDL_Texture* texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, width, height);
     SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_NEAREST);
 
     Shared shared;
+    shared.boards = boards;
     shared.max_frames = max_frames;
+    shared.real_netboard = real_netboard;
     shared.quads = quads;
     shared.midi_burst = midi_burst;
     shared.dma_instant = dma_instant;
     std::unique_ptr<Sound> sound;
     if (!mute) sound = std::make_unique<Sound>(roms, sound_volume, music_volume);
     shared.sound = sound.get();
-    std::thread game([&] { run_game(roms, real_netboard, shared); });
+    std::unique_ptr<m3::LinkRing> ring;
+    if (boards > 1) ring = std::make_unique<m3::LinkRing>(boards);
+    tools::Turns turns(boards);
+    std::vector<std::thread> games;
+    for (std::size_t i = 0; i < boards; ++i)
+        games.emplace_back([&, i] { run_game(roms, i, ring.get(), turns, shared); });
 
-    std::vector<uint32_t> shown(kWidth * kHeight);
-    uint64_t shown_number = 0;
+    // What the window shows: every board's last frame in the grid.
+    std::vector<uint32_t> shown(static_cast<std::size_t>(width) * height, 0xFF000000u);
+    auto place = [&](std::size_t board, const std::vector<uint32_t>& frame) {
+        const int x0 = static_cast<int>(board) % cols * kWidth, y0 = static_cast<int>(board) / cols * kHeight;
+        for (int y = 0; y < kHeight; ++y)
+            std::copy_n(frame.begin() + y * kWidth, kWidth, shown.begin() + (y0 + y) * width + x0);
+    };
+    std::array<uint64_t, kMaxBoards> shown_number{};
+    std::size_t focus = 0; // the board the first player's keys drive
     bool running = true;
-    bool reported = false;
+    std::size_t reported = 0;
     auto fps_start = std::chrono::steady_clock::now();
     uint64_t fps_frames = 0;
     while (running) {
@@ -324,29 +399,36 @@ int main(int argc, char** argv) {
             if (e.type == SDL_EVENT_QUIT) running = false;
             if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_ESCAPE) running = false;
             if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_F12 && !e.key.repeat) {
-                const std::string path = "spikeout-" + std::to_string(shown_number) + ".png";
-                if (tools::write_png(path, shown, kWidth, kHeight)) std::printf("screenshot: %s\n", path.c_str());
+                const std::string path = "spikeout-" + std::to_string(shown_number[0]) + ".png";
+                if (tools::write_png(path, shown, width, height)) std::printf("screenshot: %s\n", path.c_str());
+            }
+            if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode >= SDL_SCANCODE_F5 && e.key.scancode <= SDL_SCANCODE_F8) {
+                const auto board = static_cast<std::size_t>(e.key.scancode - SDL_SCANCODE_F5);
+                if (board < boards) focus = board;
             }
         }
-        read_keys(shared);
+        read_keys(shared, focus);
         {
             std::lock_guard<std::mutex> guard(shared.lock);
-            if (shared.frame_number != shown_number) {
-                shown = shared.frame;
-                fps_frames += shared.frame_number - shown_number;
-                shown_number = shared.frame_number;
-            }
-            if (!shared.stopped.empty() && !reported) {
-                std::printf("spikeout: the game stopped at frame %llu: %s\n",
-                            static_cast<unsigned long long>(shown_number), shared.stopped.c_str());
-                SDL_SetWindowTitle(window, ("Spikeout: stopped (" + shared.stopped + ")").c_str());
-                reported = true;
-                if (max_frames) { // a test run: keep the last frame and close
-                    shown = shared.frame;
-                    const std::string path = "spikeout-" + std::to_string(shown_number) + ".png";
-                    if (tools::write_png(path, shown, kWidth, kHeight)) std::printf("screenshot: %s\n", path.c_str());
-                    running = false;
+            for (std::size_t b = 0; b < boards; ++b) {
+                Screen& s = shared.screens[b];
+                if (s.frame_number != shown_number[b]) {
+                    place(b, s.frame);
+                    if (b == 0) fps_frames += s.frame_number - shown_number[b];
+                    shown_number[b] = s.frame_number;
                 }
+                if (!s.stopped.empty() && !(reported & (1u << b))) {
+                    std::printf("spikeout: board %zu stopped at frame %llu: %s\n", b,
+                                static_cast<unsigned long long>(shown_number[b]), s.stopped.c_str());
+                    SDL_SetWindowTitle(window, ("Spikeout: stopped (" + s.stopped + ")").c_str());
+                    reported |= 1u << b;
+                }
+            }
+            if (max_frames && reported == (1u << boards) - 1) { // a test run: keep the last frames and close
+                for (std::size_t b = 0; b < boards; ++b) place(b, shared.screens[b].frame);
+                const std::string path = "spikeout-" + std::to_string(shown_number[0]) + ".png";
+                if (tools::write_png(path, shown, width, height)) std::printf("screenshot: %s\n", path.c_str());
+                running = false;
             }
         }
         const auto now = std::chrono::steady_clock::now();
@@ -358,7 +440,7 @@ int main(int argc, char** argv) {
             fps_start = now;
             fps_frames = 0;
         }
-        SDL_UpdateTexture(texture, nullptr, shown.data(), kWidth * 4);
+        SDL_UpdateTexture(texture, nullptr, shown.data(), width * 4);
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
         SDL_RenderTexture(renderer, texture, nullptr, nullptr);
@@ -366,7 +448,7 @@ int main(int argc, char** argv) {
     }
 
     shared.quit = true;
-    game.join();
+    for (std::thread& g : games) g.join();
     sound.reset();
     SDL_DestroyTexture(texture);
     SDL_DestroyRenderer(renderer);

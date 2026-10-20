@@ -9,9 +9,11 @@
 #include "runtime/soundboard.hpp"
 
 #include <algorithm>
+#include <condition_variable>
 #include <cstdint>
 #include <ctime>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <vector>
 
@@ -86,5 +88,58 @@ private:
     double due_ = 0;
     std::vector<int16_t> buffer_;
 };
+
+// Linked boards in one process, each on its own thread, run one at a time
+// in order: each runs until it passes the turn on, then waits for it to
+// come back. A board that has stopped is skipped. Only one runs at a time,
+// so a run with the same inputs is the same every time.
+class Turns {
+public:
+    explicit Turns(std::size_t boards) : done_(boards, false) {}
+    std::size_t boards() const { return done_.size(); }
+
+    void wait(std::size_t i) {
+        std::unique_lock lock(mutex_);
+        changed_.wait(lock, [&] { return turn_ == i; });
+    }
+    void pass(std::size_t i) {
+        {
+            std::lock_guard lock(mutex_);
+            advance(i);
+        }
+        changed_.notify_all();
+        wait(i);
+    }
+    void finish(std::size_t i) {
+        {
+            std::lock_guard lock(mutex_);
+            done_[i] = true;
+            advance(i);
+        }
+        changed_.notify_all();
+    }
+
+private:
+    void advance(std::size_t i) {
+        for (std::size_t k = 1; k <= done_.size(); ++k) {
+            const std::size_t next = (i + k) % done_.size();
+            if (!done_[next]) {
+                turn_ = next;
+                return;
+            }
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable changed_;
+    std::size_t turn_ = 0;
+    std::vector<bool> done_;
+};
+
+// The link setting (0 stand-alone, 1 master, 2 slave) is the byte at
+// 0x10019E, read at start-up from the EEPROM settings; until the EEPROM
+// word for it is known, linked runs write it over the first frames.
+constexpr uint32_t kLinkSettingAddr = 0x10019E;
+constexpr uint64_t kLinkSettingFrames = 3000;
 
 } // namespace tools
