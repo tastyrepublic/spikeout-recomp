@@ -16,6 +16,11 @@ namespace {
 
 constexpr uint16_t swap16(uint16_t v) { return static_cast<uint16_t>(v << 8 | v >> 8); }
 
+constexpr uint64_t kSlice = 256; // 68000 cycles run at a time, at most
+
+// t * to / from without overflowing in a long run.
+constexpr uint64_t rescale(uint64_t t, uint64_t from, uint64_t to) { return t / from * to + t % from * to / from; }
+
 // Main board view: 0xC0000000 comm RAM, 0xC0010000 I/O, 0xC0020000 68000 RAM.
 enum HostRegion : uint32_t { kHostComm = 0, kHostIo = 1 };
 uint32_t host_region(uint32_t addr) { return (addr & 0x3FFFF) >> 16; }
@@ -85,7 +90,7 @@ uint8_t& CommBoard::host_ram(uint32_t addr, uint32_t byte) {
 // ---- Time ----
 
 void CommBoard::sync(uint64_t main_cycles) {
-    const uint64_t target = main_cycles * options_.cpu_hz / options_.main_hz;
+    const uint64_t target = rescale(main_cycles, options_.main_hz, options_.cpu_hz);
     if (in_reset_) {
         cpu_->setClock(static_cast<moira::i64>(target));
         return;
@@ -97,8 +102,13 @@ void CommBoard::run_until(uint64_t target) {
     const uint64_t irq5_period = options_.cpu_hz / options_.irq5_hz;
     const bool timed = options_.irq5_per_frame == 0;
     while (!in_reset_ && cpu_cycles() < target) {
-        const uint64_t stop = std::min({target, timed ? next_irq5_ : UINT64_MAX, frame_irq5_next_});
+        if (send_irq_armed_ && send_complete()) set_irq(4, true); // transmit complete
+        // Short runs, so what the firmware starts (a transmission, arming
+        // the receiver) and what comes in over the link are timely.
+        const uint64_t stop =
+            std::min({target, timed ? next_irq5_ : UINT64_MAX, frame_irq5_next_, cpu_cycles() + kSlice});
         cpu_->executeUntil(static_cast<moira::i64>(stop));
+        if (send_irq_armed_ && send_complete()) set_irq(4, true);
         if (timed && cpu_cycles() >= next_irq5_) {
             set_irq(5, true);
             next_irq5_ += irq5_period;
@@ -156,6 +166,7 @@ void CommBoard::update_ipl() {
 
 void CommBoard::deliver_receive() {
     if (!receive_enabled_ || !receive_armed_) return;
+    link_->set_time(rescale(cpu_cycles(), options_.cpu_hz, options_.main_hz));
     std::vector<uint8_t> packet = link_->receive();
     if (packet.empty()) return; // nothing yet (or the link is down)
     ++packets_received;
@@ -163,6 +174,7 @@ void CommBoard::deliver_receive() {
     const std::size_t size = std::min<std::size_t>({packet.size(), recv_size_ & 0x7FFFu, 0x10000u - recv_offset_});
     std::memcpy(comm + recv_offset_, packet.data(), size);
     receive_armed_ = false;
+    send_waiting_ = false;
     set_irq(6, true); // receive complete
 }
 
@@ -183,7 +195,10 @@ void CommBoard::ctrl_write(uint32_t reg, uint16_t v) {
         set_irq(2, false);
         io_[kIoAck] |= 1;
         break;
-    default: break; // 0x80 LEDs, 0xC0 node ID?, 0xE0 ?
+    case 0xE0: // written by a slave's IRQ 6 handler: its tick (see Options::irq5_on_e0)
+        if (options_.irq5_on_e0) set_irq(5, true);
+        break;
+    default: break; // 0x80 LEDs, 0xC0 (0x7FFF, or a value from a table by node: a timer?)
     }
 }
 
@@ -223,14 +238,20 @@ void CommBoard::io_write(uint32_t index, uint16_t v, uint16_t mask, bool from_ho
         deliver_receive();
         break;
     case kIoTxEnable:
-        if (low == 0x80) { // data transfer enable: send now
+        if (low == 0x80) { // data transfer enable: send now; it arrives once all of it has gone
             const std::size_t size = std::min<std::size_t>(send_size_ & 0x7FFFu, 0x10000u - send_offset_);
+            send_done_ = cpu_cycles() + static_cast<uint64_t>(options_.link_cycles_per_byte * static_cast<double>(size));
+            link_->set_time(rescale(send_done_, options_.cpu_hz, options_.main_hz));
             link_->send(bank(false) + send_offset_, size);
             ++packets_sent;
+            send_waiting_ = options_.send_waits_for_receive;
             deliver_receive();
         }
         break;
-    case kIoTxIrq: set_irq(4, low == 0x8C); break; // transmit complete while 0x8C (MAME)
+    case kIoTxIrq: // transmit complete while 0x8C (MAME), once the frame has gone
+        send_irq_armed_ = low == 0x8C;
+        set_irq(4, send_irq_armed_ && send_complete());
+        break;
     case kIoRxOffset: recv_offset_ = static_cast<uint16_t>(recv_offset_ >> 8 | low << 8); break;
     case kIoRxSize:   recv_size_ = static_cast<uint16_t>(recv_size_ >> 8 | low << 8); break;
     case kIoTxOffset: send_offset_ = static_cast<uint16_t>(send_offset_ >> 8 | low << 8); break;

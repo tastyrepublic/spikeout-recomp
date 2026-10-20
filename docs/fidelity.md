@@ -395,10 +395,46 @@ What the firmware's handlers settle (`hardware-notes.md` has the detail):
   byte-swapped (`rol #8`) at 68000 offset 6. With `n ^ 3` the game gets the
   counter (`0x022A`, `0x022C`, ...); with `n ^ 2` it would get it
   byte-swapped, and the firmware's `rol #8` would have no reason to be there.
-- **Banks:** in link mode IRQ 2 and IRQ 5 swap the bank, and the frame
-  header is written once in each bank. Which bank the main board sees is
-  still open: a ring of one runs the same either way (the same interrupts,
-  to the count, over 2,078 frames), so it needs two linked boards.
+- **Banks: settled by linked boards.** In link mode IRQ 2 and IRQ 5 swap
+  the bank, and the frame header is written once in each bank. A ring of
+  one runs the same either way, but with two boards (`gamerun --boards 2`)
+  only one choice works: when the main board sees the bank the 68000
+  selects (MAME), both cabinets leave NETWORK CHECKING and play together;
+  when it sees the other one (`--net-other-bank`), the link runs (status 1
+  `0x2041`/`0x2042`, frames every tick) but neither game ever leaves
+  NETWORK CHECKING (5,188 frames).
+- **A slave's tick (IRQ 5) comes from control register `0xE0`.** The
+  slave's IRQ 5 handler (`0x2056`) clears D4 without saving it, and D4
+  counts the polls since the slave armed its receiver: when the master's
+  frame comes in, D4 must be under 2 (`0xAE0`), or the slave answers
+  `$6502` instead of `$68xx` and the master never gets past its first
+  command. So the tick has to come right with the master's frame, not from
+  the slave's own (unsynchronized) video frame. The slave's IRQ 6 handler
+  (`0x20C0`) writes `0xE0` exactly when it is in the phase that needs a tick
+  (`$60E` = 2), and nothing else writes it; we raise IRQ 5 on that write
+  (`CommBoardOptions::irq5_on_e0`; `gamerun --net-e0-irq5 off` turns it
+  off). The master never writes `0xE0`; its tick stays once a main-board
+  frame. MAME's TODO calls IRQ 5 the "data frame exchange cycle start
+  signal on MASTER", source unknown.
+- **Transmit complete waits for the frame being received.** In the data
+  phase each side sends with its receiver armed, waits for transmit
+  complete (IRQ 4), then looks for the other side's frame and gives up if
+  its tick flag (`$608`, never cleared in the slave's data loop) is set
+  (`0xC94`, `0xEF4`). The slave sends its 12,800-byte frame as soon as it
+  has answered the master's small one, the master only after that answer
+  reaches it, so with IRQ 4 after each frame's own time on the wire the
+  slave always gives up (status 1 bit `0x40`) in the first exchange. With
+  IRQ 4 held until the armed receiver has its frame too, as on a ring whose
+  transmitters are clocked by what they receive, rings of 2, 3 and 4 run
+  (`CommBoardOptions::send_waits_for_receive`; `--net-send-waits off`
+  restores the other). The wire time itself is a guess, 4 MB/s
+  (`link_cycles_per_byte`, `--link-byte-cycles`).
+- **Linked play:** with board 0 set to master and the others to slave
+  (setting 2), rings of 2, 3 and 4 come up (status 1 `0x2021 + 0x20 *
+  (n - 1) + index`, index from 1), stay up through attract mode and
+  play, and a 2-player game shows each cabinet the other's player.
+  Registers seen but not understood: control `0xC0` (`0x7FFF` with each
+  small frame, a per-node table value with the data frame: a timer?).
 - **A lone cabinet** with the default settings uploads the firmware,
   checks the board and keeps it in reset; the link vectors are never
   installed. The link setting is the byte at `0x10019E` (`-32354(r13)`; the

@@ -797,3 +797,102 @@ TEST_CASE("commboard: IRQ 5 locked to the main board's frames") {
     board.sync(3 * frame);             // no more until the next frame ends
     CHECK_EQ(board.irqs_taken[5], 2u);
 }
+
+TEST_CASE("link ring: board i sends to i + 1, a packet arrives once the receiver reaches its time") {
+    LinkRing ring(2);
+    auto a = ring.port(0), b = ring.port(1);
+    CHECK(!a->loopback());
+    const uint8_t data[] = {1, 2, 3};
+    a->set_time(1000);
+    a->send(data, sizeof data);
+    b->set_time(999);
+    CHECK(b->receive().empty()); // sent later than the receiver's time
+    CHECK(a->receive().empty()); // nothing sent to board 0
+    b->set_time(1000);
+    CHECK_EQ(b->receive().size(), 3u);
+    CHECK_EQ(ring.delivered(), 1u);
+    CHECK(LinkRing(1).port(0)->loopback());
+}
+
+namespace {
+
+// A firmware for the link tests: SSP 0xFF00, start at 0x100; IRQ 4 (0x70
+// -> 0x300) and IRQ 6 (0x78 -> 0x380) acknowledge and return.
+std::vector<uint16_t> link_firmware(const std::vector<uint16_t>& main) {
+    std::vector<uint16_t> rom(0x200, 0x4E71);
+    auto put32 = [&](uint32_t addr, uint32_t v) {
+        rom[addr / 2] = static_cast<uint16_t>(v >> 16);
+        rom[addr / 2 + 1] = static_cast<uint16_t>(v);
+    };
+    put32(0x00, 0x0000FF00);
+    put32(0x04, 0x00000100);
+    put32(0x70, 0x00000300);
+    put32(0x74, 0x00000340);
+    put32(0x78, 0x00000380);
+    for (std::size_t i = 0; i < main.size(); ++i) rom[0x100 / 2 + i] = main[i];
+    const uint16_t irq4[] = {0x13FC, 0x0000, 0x000C, 0x001D, 0x4E73};               // move.b #0,$c001d; rte
+    const uint16_t irq5[] = {0x33FC, 0xFFFF, 0x0004, 0x0040, 0x4E73};               // move.w #$ffff,$40040; rte
+    const uint16_t irq6[] = {0x13FC, 0x0000, 0x000C, 0x0017, 0x13FC, 0x0000, 0x000C, 0x0015, 0x4E73}; // disarm; rte
+    std::copy(std::begin(irq4), std::end(irq4), rom.begin() + 0x300 / 2);
+    std::copy(std::begin(irq5), std::end(irq5), rom.begin() + 0x340 / 2);
+    std::copy(std::begin(irq6), std::end(irq6), rom.begin() + 0x380 / 2);
+    return rom;
+}
+
+void start(CommBoard& board, const std::vector<uint16_t>& rom) {
+    for (uint32_t i = 0; i < rom.size(); ++i) board.write32(0xC0020000 + 4 * i, brx(rom[i]));
+    board.write32(0xC0010180, brx(1));
+}
+
+} // namespace
+
+TEST_CASE("commboard: a write to control register 0xE0 raises IRQ 5") {
+    const std::vector<uint16_t> main = {
+        0x46FC, 0x2000,                         // move.w #$2000,sr
+        0x33FC, 0x0000, 0x0004, 0x00E0,         // move.w #0,$400e0
+        0x60FE,                                 // bra.s *
+    };
+    CommBoardOptions opts;
+    opts.irq5_per_frame = 0;
+    opts.irq5_hz = 1; // no timer tick in this test
+    CommBoard board(nullptr, opts);
+    start(board, link_firmware(main));
+    board.sync(1'000'000);
+    CHECK_EQ(board.irqs_taken[5], 1u);
+
+    opts.irq5_on_e0 = false;
+    CommBoard old(nullptr, opts);
+    start(old, link_firmware(main));
+    old.sync(1'000'000);
+    CHECK_EQ(old.irqs_taken[5], 0u);
+}
+
+TEST_CASE("commboard: transmit complete waits for the frame being received") {
+    // Send with the receiver armed, as the link firmware does, then wait.
+    const std::vector<uint16_t> main = {
+        0x46FC, 0x2700,                         // move.w #$2700,sr
+        0x13FC, 0x0080, 0x000C, 0x001B,         // move.b #$80,$c001b   transmit
+        0x13FC, 0x0080, 0x000C, 0x0015,         // move.b #$80,$c0015   receive enable
+        0x13FC, 0x008C, 0x000C, 0x0017,         // move.b #$8c,$c0017   IRQ 6 when in
+        0x13FC, 0x008C, 0x000C, 0x001D,         // move.b #$8c,$c001d   IRQ 4 when sent
+        0x46FC, 0x2000,                         // move.w #$2000,sr
+        0x60FE,                                 // bra.s *
+    };
+    for (const bool waits : {true, false}) {
+        LinkRing ring(2);
+        CommBoardOptions opts;
+        opts.send_waits_for_receive = waits;
+        CommBoard board(ring.port(0), opts);
+        auto other = ring.port(1);
+        start(board, link_firmware(main));
+        board.sync(1'000'000);
+        CHECK_EQ(board.packets_sent, 1u);
+        CHECK_EQ(board.irqs_taken[4], waits ? 0u : 1u);
+        const uint8_t frame[] = {0x68, 0x00};
+        other->set_time(1'000'000);
+        other->send(frame, sizeof frame);
+        board.sync(2'000'000);
+        CHECK_EQ(board.irqs_taken[6], 1u);
+        CHECK_EQ(board.irqs_taken[4], 1u);
+    }
+}

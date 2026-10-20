@@ -28,6 +28,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -44,6 +45,10 @@ public:
     virtual std::vector<uint8_t> receive() = 0;
     // True when this cabinet is linked to itself (a ring of one).
     virtual bool loopback() const = 0;
+    // The board's time in main board cycles, set before each send() and
+    // receive(): a link between boards in one process (LinkRing) delivers
+    // a packet once the receiver has reached the time it was sent.
+    virtual void set_time(uint64_t /*main_cycles*/) {}
 };
 
 // A lone cabinet: everything sent comes straight back.
@@ -55,6 +60,40 @@ public:
 
 private:
     std::deque<std::vector<uint8_t>> queue_;
+};
+
+// Cabinets linked in one process: board i sends to board i + 1, the last
+// to board 0. Each packet carries the time it was sent and arrives once
+// the receiver's time reaches it (plus `latency`). Not thread-safe: the
+// boards take turns (gamerun --boards hands the turn round every few
+// lines), so a board can be up to a turn late to see a packet sent by a
+// board that ran after it, never early.
+class LinkRing {
+public:
+    explicit LinkRing(std::size_t boards);
+    std::size_t boards() const { return state_->inbox.size(); }
+    // Board i's end of the ring (each taken once).
+    std::unique_ptr<NetLink> port(std::size_t i);
+    void set_latency(uint64_t main_cycles) { state_->latency = main_cycles; }
+    uint64_t delivered() const { return state_->delivered; }
+    // Debug aid: called for each packet sent (board, its time, the data).
+    void on_send(std::function<void(std::size_t, uint64_t, const std::vector<uint8_t>&)> fn) {
+        state_->on_send = std::move(fn);
+    }
+
+private:
+    struct Packet {
+        uint64_t at; // main board cycle it can arrive
+        std::vector<uint8_t> data;
+    };
+    struct State {
+        std::vector<std::deque<Packet>> inbox; // by receiver
+        uint64_t latency = 0;
+        uint64_t delivered = 0;
+        std::function<void(std::size_t, uint64_t, const std::vector<uint8_t>&)> on_send;
+    };
+    class Port;
+    std::shared_ptr<State> state_;
 };
 
 // The network board as the main board's bus sees it, whichever way it is

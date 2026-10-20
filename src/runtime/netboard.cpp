@@ -40,6 +40,36 @@ std::vector<uint8_t> LoopbackLink::receive() {
     return packet;
 }
 
+class LinkRing::Port : public NetLink {
+public:
+    Port(std::shared_ptr<State> state, std::size_t index) : state_(std::move(state)), index_(index) {}
+
+    void send(const uint8_t* data, std::size_t size) override {
+        auto& next = state_->inbox[(index_ + 1) % state_->inbox.size()];
+        next.push_back({now_ + state_->latency, std::vector<uint8_t>(data, data + size)});
+        if (state_->on_send) state_->on_send(index_, now_, next.back().data);
+    }
+    std::vector<uint8_t> receive() override {
+        auto& inbox = state_->inbox[index_];
+        if (inbox.empty() || inbox.front().at > now_) return {};
+        std::vector<uint8_t> packet = std::move(inbox.front().data);
+        inbox.pop_front();
+        ++state_->delivered;
+        return packet;
+    }
+    bool loopback() const override { return state_->inbox.size() == 1; }
+    void set_time(uint64_t main_cycles) override { now_ = main_cycles; }
+
+private:
+    std::shared_ptr<State> state_;
+    std::size_t index_;
+    uint64_t now_ = 0;
+};
+
+LinkRing::LinkRing(std::size_t boards) : state_(std::make_shared<State>()) { state_->inbox.resize(std::max<std::size_t>(boards, 1)); }
+
+std::unique_ptr<NetLink> LinkRing::port(std::size_t i) { return std::make_unique<Port>(state_, i % boards()); }
+
 SimNetBoard::SimNetBoard(std::unique_ptr<NetLink> link)
     : link_(link ? std::move(link) : std::make_unique<LoopbackLink>()), net_ram_(0x10000, 0), buffer_(0x20000, 0) {}
 

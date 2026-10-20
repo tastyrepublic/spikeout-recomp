@@ -8,7 +8,7 @@
 //                  byte-swapped 68000 word per 32-bit PowerPC word. The game
 //                  uploads the firmware here.
 //   68000 0x40000  control: 0x00 comm RAM bank (bit 0), 0x40 IRQ 5 ack,
-//                  0xA0 IRQ 2 ack, 0x80 LEDs, 0xC0 node ID?, 0xE0 ?
+//                  0xA0 IRQ 2 ack, 0x80 LEDs, 0xC0 ?, 0xE0 (raises IRQ 5)
 //   68000 0x80000  comm RAM, 64 KB of 128 KB (two banks): shared with the
 //                  main board at 0xC0000000
 //   68000 0xC0000  I/O registers (16-bit), shared with the main board at
@@ -23,8 +23,10 @@
 // Not known from either source, so these are choices (see Options and
 // docs/fidelity.md): the 68000 clock, what raises IRQ 5 and how often, the
 // link status values, the PowerPC's byte order of comm RAM (the two sources
-// disagree), whether both CPUs see the same comm RAM bank, and how I/O
-// register 0 (which the main board waits on after a command) gets set.
+// disagree), how I/O register 0 (which the main board waits on after a
+// command) gets set, and the link's timing. Linked boards settled that both
+// CPUs see the same comm RAM bank, and the firmware shows a slave's IRQ 5
+// follows its write to control 0xE0.
 #pragma once
 
 #include "runtime/netboard.hpp"
@@ -51,6 +53,25 @@ struct CommBoardOptions {
     // IRQ 5 locked to the main board's frame: this many a frame, evenly
     // spaced from the frame's end (0: irq5_hz instead). See the .cpp.
     uint32_t irq5_per_frame = 1;
+    // A write to control register 0xE0 raises IRQ 5. A slave's IRQ 6
+    // handler writes it when a master's frame comes in, and its IRQ 5
+    // handler resets the count of polls that frame must have arrived
+    // within (2), so its tick has to follow the frame (docs/fidelity.md).
+    bool irq5_on_e0 = true;
+    // Time on the wire, in 68000 cycles a byte (0: none): a frame arrives,
+    // and transmit complete (IRQ 4) comes, once it has all gone. Each board
+    // waits for its own transmission before looking for the other's frame,
+    // so both have to be on the wire together. The rate is unknown: 2.5
+    // cycles at 10 MHz is 4 MB/s (12,800 bytes in 3.2 ms).
+    double link_cycles_per_byte = 2.5;
+    // Transmit complete (IRQ 4) also waits for the frame the receiver is
+    // armed for, as on a ring where a node's transmitter is clocked by what
+    // it receives. The firmware sends with its receiver armed, waits for
+    // IRQ 4, and only then looks for the other side's frame, giving up if
+    // its tick has come: a slave sends its data frame before the master's
+    // reaches it, so without this the link fails in its first data
+    // exchange (false: IRQ 4 after the frame's own time on the wire).
+    bool send_waits_for_receive = true;
     double main_frame_hz = 57.524160;
     uint64_t main_hz = 166'000'000; // the main board's CPU clock
     uint16_t link_status = 5;       // receive/transmit status reads: both sources return 5
@@ -145,6 +166,12 @@ private:
     uint16_t recv_offset_ = 0, recv_size_ = 0, send_offset_ = 0, send_size_ = 0;
     bool receive_enabled_ = false; // 0x14 = 0x80
     bool receive_armed_ = false;   // 0x16 = 0x8C: IRQ 6 when data is in
+    uint64_t send_done_ = 0;       // 68000 cycle the last frame is all sent
+    bool send_irq_armed_ = false;  // 0x1C = 0x8C: IRQ 4 once it is
+    bool send_waiting_ = false;    // send_waits_for_receive: sent with the receiver armed
+    bool send_complete() const {
+        return cpu_cycles() >= send_done_ && !(send_waiting_ && receive_enabled_ && receive_armed_);
+    }
 };
 
 } // namespace m3

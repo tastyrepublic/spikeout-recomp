@@ -3,8 +3,9 @@
 //
 //   gamerun <rom_dir> [--blocks N] [--text] [--dump-tile FILE]
 //           [--netboard sim|real] [--net-trace N] [--net-disasm FILE]
-//           [--screenshot FILE.png] [--shot-every N] [--press NAME@FRAME[:N]]...
+//           [--screenshot FILE.png] [--shot-every N] [--press [B:]NAME@FRAME[:N]]...
 //           [--wav FILE.wav] [--probe X,Y@FRAME] [--quads]
+//           [--boards N] [--slice LINES] [--link-latency CYCLES]
 //
 // Built only when CMake's SPIKEOUT_ROM_DIR is set. A run ends at the first
 // thing the runtime can't do yet (code that wasn't found, an exception, a
@@ -19,14 +20,30 @@
 // prints its first N accesses to the board's registers, --net-disasm writes
 // a disassembly of its RAM (the firmware; derived from the ROMs).
 //
+// --boards N runs N complete boards (cabinets) in one process, their network
+// boards linked in a ring (m3::LinkRing): board i sends to board i + 1. Each
+// runs on its own thread, but only one at a time: they take turns every
+// --slice display lines (default 8), in board order, so a run is the same
+// every time. A packet arrives once the receiver's clock reaches the time it
+// was sent (plus --link-latency main board cycles, default 0). Each board's
+// link setting is its own: set it with --poke (board 0 master, board 1
+// slave: `--poke 0:10019E=1@0:2000 --poke 1:10019E=2@0:2000`). --blocks
+// counts for each board. Files from boards after the first get "-bN" before
+// their extension; --net-disasm writes board 0's firmware. --link-trace N
+// prints the first N packets; --net-watch prints each board's network
+// status registers when they change. The link's open questions
+// (docs/fidelity.md) have switches: --net-e0-irq5 off, --net-send-waits off,
+// --net-other-bank, --link-byte-cycles C (68000 cycles a byte on the wire).
+//
 // The tile generator draws a line at a time as the frame runs; the 3D is
 // drawn at the end of a frame, only when screenshots are being written.
 // --screenshot writes the last finished frame as a PNG; with --shot-every N
 // also FILE-<frame>.png every N frames.
 //
-// --press NAME@FRAME[:N] holds an input for N frames (default 6) from FRAME:
-// coin, start, test, service, beat, charge, shift, jump, up, down, left,
-// right. Repeat it for more presses.
+// --press [B:]NAME@FRAME[:N] holds an input for N frames (default 6) from
+// FRAME: coin, start, test, service, beat, charge, shift, jump, up, down,
+// left, right. Repeat it for more presses. --poke [B:]ADDR=VALUE@FRAME[:N]
+// writes a byte of RAM. Without B: they apply to every board.
 //
 // The sound board (m3::SoundBoard) runs with the game; --wav writes what
 // it played (44.1 kHz stereo).
@@ -52,20 +69,27 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
+
+constexpr int kAllBoards = -1;
 
 struct Press {
     std::string name;
     uint64_t frame = 0, frames = 6;
     int bank = 0; // 0: input bank 0 (coin, start...), 1: the controls byte
     int bit = 0;
+    int board = kAllBoards;
 };
 
 // --poke ADDR=VALUE@FRAME[:N]: write a byte of RAM at the end of N frames
@@ -74,6 +98,33 @@ struct Poke {
     uint32_t addr = 0;
     uint8_t value = 0;
     uint64_t frame = 0, frames = 1;
+    int board = kAllBoards;
+};
+
+struct Options {
+    const char* dir = nullptr;
+    const char* dump_tile = nullptr;
+    const char* net_disasm = nullptr;
+    const char* screenshot = nullptr;
+    const char* wav = nullptr;
+    uint64_t shot_every = 0, tilegen_trace = 0;
+    int probe_x = -1, probe_y = -1;
+    int sound_volume = 100, music_volume = 100;
+    uint64_t probe_frame = 0;
+    std::vector<Press> presses;
+    std::vector<Poke> pokes;
+    bool show_text = false, real_netboard = true, force_master = false, quads = false, midi_burst = false,
+         dma_instant = false;
+    std::size_t net_trace = 0;
+    int64_t blocks = 200'000'000;
+    std::size_t boards = 1;
+    uint32_t slice = 8;
+    uint64_t link_latency = 0;
+    uint64_t link_trace = 0;
+    bool net_watch = false;
+    bool irq5_on_e0 = true, send_waits_for_receive = m3::CommBoardOptions().send_waits_for_receive,
+         host_sees_other_bank = false;
+    double link_cycles_per_byte = m3::CommBoardOptions().link_cycles_per_byte;
 };
 
 // Where each input is, active low (hardware-notes.md, Inputs).
@@ -93,6 +144,29 @@ bool input_bit(const std::string& name, int& bank, int& bit) {
     return false;
 }
 
+// "B:rest" -> board B and "rest"; anything else -> every board.
+std::string board_prefix(const std::string& spec, int& board) {
+    const size_t colon = spec.find(':');
+    const size_t end = spec.find_first_of("=@");
+    if (colon != std::string::npos && colon > 0 && colon < end &&
+        spec.find_first_not_of("0123456789") == colon) {
+        board = std::atoi(spec.c_str());
+        return spec.substr(colon + 1);
+    }
+    board = kAllBoards;
+    return spec;
+}
+
+// FILE.ext -> FILE-bN.ext for boards after the first.
+std::string board_path(const std::string& path, std::size_t board) {
+    if (board == 0) return path;
+    const std::string tag = "-b" + std::to_string(board);
+    const size_t dot = path.find_last_of('.');
+    const size_t slash = path.find_last_of("/\\");
+    if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) return path + tag;
+    return path.substr(0, dot) + tag + path.substr(dot);
+}
+
 // --probe: every triangle that covered the pixel, and what became of it.
 void print_probe(const m3::Real3dRenderer& r, int x, int y, uint64_t frame) {
     std::printf("Probe %d,%d at frame %llu: %zu triangles cover it\n", x, y, static_cast<unsigned long long>(frame),
@@ -106,201 +180,210 @@ void print_probe(const m3::Real3dRenderer& r, int x, int y, uint64_t frame) {
                     h.outcome);
 }
 
-} // namespace
+// Boards that run one at a time, in order: each runs until it passes the
+// turn on, then waits for it to come back. A board that has stopped is
+// skipped.
+class Turns {
+public:
+    explicit Turns(std::size_t boards) : done_(boards, false) {}
+    std::size_t boards() const { return done_.size(); }
 
-int main(int argc, char** argv) {
-    const char* dir = nullptr;
-    const char* dump_tile = nullptr;
-    const char* net_disasm = nullptr;
-    const char* screenshot = nullptr;
-    const char* wav = nullptr;
-    uint64_t shot_every = 0, tilegen_trace = 0;
-    int probe_x = -1, probe_y = -1;
-    int sound_volume = 100, music_volume = 100;
-    uint64_t probe_frame = 0;
-    std::vector<Press> presses;
-    std::vector<Poke> pokes;
-    bool show_text = false, real_netboard = true, force_master = false, quads = false, midi_burst = false, dma_instant = false;
-    std::size_t net_trace = 0;
-    int64_t blocks = 200'000'000;
-    for (int i = 1; i < argc; ++i) {
-        const std::string arg = argv[i];
-        if (arg == "--blocks" && i + 1 < argc) blocks = std::strtoll(argv[++i], nullptr, 0);
-        else if (arg == "--dump-tile" && i + 1 < argc) dump_tile = argv[++i];
-        else if (arg == "--text") show_text = true;
-        else if (arg == "--netboard" && i + 1 < argc) real_netboard = std::string(argv[++i]) == "real";
-        else if (arg == "--net-trace" && i + 1 < argc) net_trace = std::strtoull(argv[++i], nullptr, 0);
-        else if (arg == "--net-disasm" && i + 1 < argc) net_disasm = argv[++i];
-        else if (arg == "--net-force-master") force_master = true;
-        else if (arg == "--screenshot" && i + 1 < argc) screenshot = argv[++i];
-        else if (arg == "--wav" && i + 1 < argc) wav = argv[++i];
-        else if (arg == "--quads") quads = true;
-        else if (arg == "--midi-burst") midi_burst = true;
-        else if (arg == "--dma-instant") dma_instant = true;
-        else if (arg == "--sound-volume" && i + 1 < argc) sound_volume = std::atoi(argv[++i]);
-        else if (arg == "--music-volume" && i + 1 < argc) music_volume = std::atoi(argv[++i]);
-        else if (arg == "--shot-every" && i + 1 < argc) shot_every = std::strtoull(argv[++i], nullptr, 0);
-        else if (arg == "--probe" && i + 1 < argc) { // X,Y@FRAME
-            unsigned long long frame = 0;
-            if (std::sscanf(argv[++i], "%d,%d@%llu", &probe_x, &probe_y, &frame) == 3) probe_frame = frame;
+    void wait(std::size_t i) {
+        std::unique_lock lock(mutex_);
+        changed_.wait(lock, [&] { return turn_ == i; });
+    }
+    void pass(std::size_t i) {
+        {
+            std::lock_guard lock(mutex_);
+            advance(i);
         }
-        else if (arg == "--tilegen-trace" && i + 1 < argc) tilegen_trace = std::strtoull(argv[++i], nullptr, 0);
-        else if (arg == "--poke" && i + 1 < argc) {
-            Poke k;
-            unsigned addr = 0, value = 0;
-            unsigned long long frame = 0, frames = 1;
-            const int n = std::sscanf(argv[++i], "%x=%x@%llu:%llu", &addr, &value, &frame, &frames);
-            if (n < 3) {
-                std::fprintf(stderr, "gamerun: --poke ADDR=VALUE@FRAME[:N] (hex address and value)\n");
-                return 2;
+        changed_.notify_all();
+        wait(i);
+    }
+    void finish(std::size_t i) {
+        {
+            std::lock_guard lock(mutex_);
+            done_[i] = true;
+            advance(i);
+        }
+        changed_.notify_all();
+    }
+
+private:
+    void advance(std::size_t i) {
+        for (std::size_t k = 1; k <= done_.size(); ++k) {
+            const std::size_t next = (i + k) % done_.size();
+            if (!done_[next]) {
+                turn_ = next;
+                return;
             }
-            k.addr = addr;
-            k.value = static_cast<uint8_t>(value);
-            k.frame = frame;
-            k.frames = n == 4 ? frames : 1;
-            pokes.push_back(k);
         }
-        else if (arg == "--press" && i + 1 < argc) {
-            // NAME@FRAME[:N]: hold NAME for N frames (default 6) from FRAME.
-            const std::string spec = argv[++i];
-            const size_t at = spec.find('@'), colon = spec.find(':', at == std::string::npos ? 0 : at);
-            Press p;
-            p.name = spec.substr(0, at);
-            if (at != std::string::npos) p.frame = std::strtoull(spec.c_str() + at + 1, nullptr, 0);
-            if (colon != std::string::npos) p.frames = std::strtoull(spec.c_str() + colon + 1, nullptr, 0);
-            if (!input_bit(p.name, p.bank, p.bit)) {
-                std::fprintf(stderr, "gamerun: unknown input '%s'\n", p.name.c_str());
-                return 2;
-            }
-            presses.push_back(p);
-        }
-        else if (!dir) dir = argv[i];
-        else dir = nullptr, i = argc;
-    }
-    if (!dir) {
-        std::fprintf(stderr, "usage: gamerun <rom_dir> [--blocks N] [--text] [--dump-tile FILE]\n"
-                             "               [--netboard sim|real] [--net-trace N] [--net-disasm FILE]\n"
-                             "               [--screenshot FILE.png] [--shot-every N] [--wav FILE.wav]\n"
-                             "               [--probe X,Y@FRAME] [--quads] [--midi-burst] [--dma-instant]\n"
-                             "               [--sound-volume N] [--music-volume N]\n"
-                             "               [--press NAME@FRAME[:N]]... [--poke ADDR=VALUE@FRAME[:N]]...\n");
-        return 2;
-    }
-    const m3::GameSpec& game = m3::games::kSpikeoutFinalEdition;
-    const m3::RomSet roms = m3::load_rom_set(game, dir);
-    if (!roms.complete()) {
-        std::fprintf(stderr, "gamerun: ROM set incomplete; run romcheck for details\n");
-        return 1;
     }
 
-    const std::vector<recomp::FunctionEntry> functions = tools::game_functions();
+    std::mutex mutex_;
+    std::condition_variable changed_;
+    std::size_t turn_ = 0;
+    std::vector<bool> done_;
+};
 
-    m3::Bus bus(roms);
-    bus.midi_burst = midi_burst;
-    bus.dma_timed = !dma_instant;
+// One Model 3 board and what the run keeps of it.
+struct Machine {
+    Machine(std::size_t i, const m3::RomSet& roms, std::span<const recomp::FunctionEntry> functions)
+        : index(i), bus(roms), c(bus, functions), sound(roms),
+          screen(m3::TilegenRenderer::kWidth * m3::TilegenRenderer::kHeight) {}
+
+    std::size_t index;
+    m3::Bus bus;
+    m3::CommBoard* comm = nullptr;
+    recomp::Context c;
+    recomp::FrameTiming timing;
+    m3::TilegenRenderer tilegen;
+    m3::Real3dRenderer real3d;
+    tools::FrameSound sound;
+    std::vector<uint32_t> screen;
+    std::vector<int16_t> audio;
+
+    std::string why;
+    double seconds = 0;
+    int peak = 0;
+    double energy = 0, sound_seconds = 0, render_seconds = 0, setup_ms = 0, raster_ms = 0;
+    uint64_t frames_rendered = 0, frames_spotlit = 0, frames_scroll_fog = 0, frames_ambient_fog = 0,
+             frames_block_culled = 0;
+    uint64_t micro_tris = 0, translator_tris = 0, inverted_tris = 0;
+    uint16_t net_status[2] = {0, 0}; // --net-watch
+};
+
+bool for_board(int board, std::size_t index) { return board == kAllBoards || static_cast<std::size_t>(board) == index; }
+
+void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing* ring, Turns& turns) {
+    m3::Bus& bus = m.bus;
+    bus.midi_burst = o.midi_burst;
+    bus.dma_timed = !o.dma_instant;
     bus.set_security_key(game.security_key);
     tools::set_rtc_to_host(bus);
     for (uint8_t& b : bus.ram()) b = 0xA5;
-    m3::CommBoard* comm = nullptr;
-    if (real_netboard) {
-        auto board = std::make_unique<m3::CommBoard>();
-        comm = board.get();
-        comm->trace_limit = net_trace;
-        comm->force_master = force_master;
+    if (o.real_netboard) {
+        m3::CommBoardOptions options;
+        options.irq5_on_e0 = o.irq5_on_e0;
+        options.link_cycles_per_byte = o.link_cycles_per_byte;
+        options.send_waits_for_receive = o.send_waits_for_receive;
+        options.host_sees_other_bank = o.host_sees_other_bank;
+        auto board = std::make_unique<m3::CommBoard>(ring ? ring->port(m.index) : nullptr, options);
+        m.comm = board.get();
+        m.comm->trace_limit = o.net_trace;
+        m.comm->force_master = o.force_master;
         bus.use_netboard(std::move(board));
+    } else if (ring) {
+        bus.use_netboard(std::make_unique<m3::SimNetBoard>(ring->port(m.index)));
     }
-    recomp::Context c(bus, functions);
-    c.limit_blocks(static_cast<uint64_t>(blocks));
-    recomp::FrameTiming timing;
-    c.set_scheduler(&timing);
+    m.c.limit_blocks(static_cast<uint64_t>(o.blocks));
+    m.c.set_scheduler(&m.timing);
+    m.real3d.set_probe(o.probe_x, o.probe_y);
+    m.real3d.set_quads(o.quads);
+    m.sound.board.set_volumes(o.sound_volume, o.music_volume);
+
     // The 2D layers, a line at a time; each finished frame is kept for --screenshot.
-    m3::TilegenRenderer tilegen;
-    m3::Real3dRenderer real3d;
-    real3d.set_probe(probe_x, probe_y);
-    real3d.set_quads(quads);
-    std::vector<uint32_t> screen(m3::TilegenRenderer::kWidth * m3::TilegenRenderer::kHeight);
-    // The sound board, a frame at a time; --wav keeps what it played.
-    tools::FrameSound sound(roms);
-    sound.board.set_volumes(sound_volume, music_volume);
-    std::vector<int16_t> audio;
-    int peak = 0;
-    double energy = 0, sound_seconds = 0, render_seconds = 0, setup_ms = 0, raster_ms = 0;
-    uint64_t frames_rendered = 0, frames_spotlit = 0, frames_scroll_fog = 0, frames_ambient_fog = 0, frames_block_culled = 0;
-    uint64_t micro_tris = 0, translator_tris = 0, inverted_tris = 0;
-    timing.on_display_line = [&](uint32_t line) {
-        if (line == 0) tilegen.begin_frame();
-        tilegen.draw_line(bus, static_cast<int>(line));
+    // With several boards, the turn passes on every o.slice lines, the
+    // network board caught up first so what it sent is on the link.
+    m.timing.on_display_line = [&m, &turns, slice = o.slice](uint32_t line) {
+        if (line == 0) m.tilegen.begin_frame();
+        m.tilegen.draw_line(m.bus, static_cast<int>(line));
+        if (turns.boards() > 1 && line % slice == slice - 1) {
+            m.bus.netboard().sync(m.c.cycles());
+            turns.pass(m.index);
+        }
     };
-    timing.on_frame_end = [&] {
+    m.timing.on_frame_end = [&m, &o] {
+        const uint64_t frame = m.timing.frames();
         // The 3D is drawn in software: only when it will be seen.
-        if (screenshot || (probe_frame && timing.frames() == probe_frame)) {
+        if (o.screenshot || (o.probe_frame && frame == o.probe_frame)) {
             const auto render_start = std::chrono::steady_clock::now();
-            real3d.render(bus.real3d());
-            setup_ms += real3d.stats().setup_ms;
-            raster_ms += real3d.stats().raster_ms;
-            if (real3d.stats().spotlights) ++frames_spotlit;
-            if (real3d.stats().block_culled) ++frames_block_culled;
-            {
-                const auto& s = real3d.stats();
-                frames_scroll_fog += s.scroll_fog;
-                frames_ambient_fog += s.ambient_fog;
-                micro_tris += s.micro_polys;
-                translator_tris += s.translator_polys;
-                inverted_tris += s.inverted_polys;
-            }
-            render_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - render_start).count();
-            ++frames_rendered;
+            m.real3d.render(m.bus.real3d());
+            const auto& s = m.real3d.stats();
+            m.setup_ms += s.setup_ms;
+            m.raster_ms += s.raster_ms;
+            if (s.spotlights) ++m.frames_spotlit;
+            if (s.block_culled) ++m.frames_block_culled;
+            m.frames_scroll_fog += s.scroll_fog;
+            m.frames_ambient_fog += s.ambient_fog;
+            m.micro_tris += s.micro_polys;
+            m.translator_tris += s.translator_polys;
+            m.inverted_tris += s.inverted_polys;
+            m.render_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - render_start).count();
+            ++m.frames_rendered;
         }
-        if (probe_frame && timing.frames() == probe_frame) print_probe(real3d, probe_x, probe_y, probe_frame);
-        tilegen.composite(screen, real3d.image());
+        if (o.probe_frame && frame == o.probe_frame && m.index == 0) print_probe(m.real3d, o.probe_x, o.probe_y, frame);
+        m.tilegen.composite(m.screen, m.real3d.image());
         const auto sound_start = std::chrono::steady_clock::now();
-        const std::span<const int16_t> pcm = sound.frame(bus.midi_out(), timing.frame_start(timing.frames() - 1), timing.frame_cycles());
-        sound_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - sound_start).count();
-        if (wav) audio.insert(audio.end(), pcm.begin(), pcm.end());
+        const std::span<const int16_t> pcm =
+            m.sound.frame(m.bus.midi_out(), m.timing.frame_start(frame - 1), m.timing.frame_cycles());
+        m.sound_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - sound_start).count();
+        if (o.wav) m.audio.insert(m.audio.end(), pcm.begin(), pcm.end());
         for (int16_t s : pcm) {
-            peak = std::max(peak, std::abs(static_cast<int>(s)));
-            energy += static_cast<double>(s) * s;
+            m.peak = std::max(m.peak, std::abs(static_cast<int>(s)));
+            m.energy += static_cast<double>(s) * s;
         }
-        for (const Poke& k : pokes)
-            if (timing.frames() >= k.frame && timing.frames() < k.frame + k.frames) bus.write8(k.addr, k.value);
+        for (const Poke& k : o.pokes)
+            if (for_board(k.board, m.index) && frame >= k.frame && frame < k.frame + k.frames)
+                m.bus.write8(k.addr, k.value);
         // --press: inputs held for the coming frame (active low).
         uint8_t in[2] = {0xFF, 0xFF};
-        for (const Press& p : presses)
-            if (timing.frames() >= p.frame && timing.frames() < p.frame + p.frames)
+        for (const Press& p : o.presses)
+            if (for_board(p.board, m.index) && frame >= p.frame && frame < p.frame + p.frames)
                 in[p.bank] = static_cast<uint8_t>(in[p.bank] & ~(1u << p.bit));
-        bus.inputs.bank0 = in[0];
-        bus.inputs.controls = in[1];
-        if (tilegen_trace && timing.frames() % tilegen_trace == 0) {
-            std::printf("frame %6llu tilegen", static_cast<unsigned long long>(timing.frames()));
-            for (uint32_t reg : {0x20u, 0x40u, 0x44u, 0x60u, 0x64u, 0x68u, 0x6Cu}) std::printf(" %02x=%08x", reg, bus.tile_reg(reg));
+        m.bus.inputs.bank0 = in[0];
+        m.bus.inputs.controls = in[1];
+        // --net-watch: the network board's status registers, when they change.
+        if (o.net_watch && m.comm) {
+            const uint16_t s0 = m.comm->io(0x88), s1 = m.comm->io(0x8A);
+            if (s0 != m.net_status[0] || s1 != m.net_status[1])
+                std::printf("board %zu frame %llu: network status0 %04x status1 %04x, 68000 PC %06x\n", m.index,
+                            static_cast<unsigned long long>(frame), s0, s1, m.comm->pc());
+            m.net_status[0] = s0;
+            m.net_status[1] = s1;
+        }
+        if (o.tilegen_trace && frame % o.tilegen_trace == 0) {
+            std::printf("%sframe %6llu tilegen", m.index ? ("board " + std::to_string(m.index) + " ").c_str() : "",
+                        static_cast<unsigned long long>(frame));
+            for (uint32_t reg : {0x20u, 0x40u, 0x44u, 0x60u, 0x64u, 0x68u, 0x6Cu}) std::printf(" %02x=%08x", reg, m.bus.tile_reg(reg));
             std::printf("\n");
         }
-        if (screenshot && shot_every && timing.frames() % shot_every == 0) {
-            const std::string path = std::string(screenshot) + "-" + std::to_string(timing.frames()) + ".png";
-            tools::write_png(path, screen, m3::TilegenRenderer::kWidth, m3::TilegenRenderer::kHeight);
+        if (o.screenshot && o.shot_every && frame % o.shot_every == 0) {
+            const std::string path = board_path(o.screenshot, m.index);
+            const size_t dot = path.find_last_of('.');
+            tools::write_png(path.substr(0, dot) + "-" + std::to_string(frame) + path.substr(dot), m.screen,
+                             m3::TilegenRenderer::kWidth, m3::TilegenRenderer::kHeight);
         }
     };
-    std::printf("%zu recompiled functions; running up to %lld blocks from %08x\n\n", functions.size(),
-                static_cast<long long>(blocks), c.cpu.pc);
+}
 
+void run(Machine& m, Turns& turns) {
+    turns.wait(m.index);
     const auto start = std::chrono::steady_clock::now();
-    std::string why;
     try {
-        c.call(c.cpu.pc);
-        why = "the reset code returned";
+        m.c.call(m.c.cpu.pc);
+        m.why = "the reset code returned";
     } catch (const recomp::OutOfBudget&) {
-        why = "block limit reached";
+        m.why = "block limit reached";
     } catch (const recomp::MissingCode& e) {
-        why = e.what();
+        m.why = e.what();
     } catch (const recomp::GuestError& e) {
-        why = e.what();
+        m.why = e.what();
+    } catch (const std::exception& e) {
+        m.why = std::string("error: ") + e.what();
     }
-    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    m.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    turns.finish(m.index);
+}
+
+void report(Machine& m, const Options& o) {
+    recomp::Context& c = m.c;
+    m3::Bus& bus = m.bus;
     const long long ran = static_cast<long long>(c.blocks);
 
-    std::printf("Stopped: %s\n", why.c_str());
-    std::printf("Ran %lld blocks in %.2f s (%.0f million blocks/s), %.2f 603e cycles a block\n", ran, seconds,
-                static_cast<double>(ran) / seconds / 1e6,
+    std::printf("Stopped: %s\n", m.why.c_str());
+    std::printf("Ran %lld blocks in %.2f s (%.0f million blocks/s), %.2f 603e cycles a block\n", ran, m.seconds,
+                static_cast<double>(ran) / m.seconds / 1e6,
                 ran > 0 ? static_cast<double>(c.cycles()) / static_cast<double>(ran) : 0.0);
     std::printf("PC %08x  LR %08x  CTR %08x  MSR %08x  CR %08x\n", c.cpu.pc, c.cpu.lr, c.cpu.ctr, c.cpu.msr, c.cpu.cr);
     // Address translation as the game set it up (the runtime treats every
@@ -356,37 +439,42 @@ int main(int argc, char** argv) {
 
     std::printf("Frames %llu (%.2f s of game time); interrupts taken: %llu external, %llu decrementer; "
                 "IRQ enable %02x, pending %02x\n",
-                static_cast<unsigned long long>(timing.frames()),
-                static_cast<double>(timing.frames()) / recomp::FrameTiming::kRefreshHz,
+                static_cast<unsigned long long>(m.timing.frames()),
+                static_cast<double>(m.timing.frames()) / recomp::FrameTiming::kRefreshHz,
                 static_cast<unsigned long long>(c.external_interrupts),
                 static_cast<unsigned long long>(c.decrementer_interrupts), bus.irq().enable(), bus.irq().state());
 
     std::printf("Network board: %s\n", bus.netboard().describe().c_str());
-    const double played = static_cast<double>(sound.board.samples());
+    const double played = static_cast<double>(m.sound.board.samples());
     std::printf("Sound board: %s; %d slots playing, %llu MIDI bytes dropped; output peak %d, RMS %.0f; %.2f s to run it\n",
-                sound.board.describe().c_str(), sound.board.active_slots(),
-                static_cast<unsigned long long>(sound.board.midi_dropped()), peak,
-                played > 0 ? std::sqrt(energy / (2 * played)) : 0.0, sound_seconds);
-    if (const m3::Dsb2* music = sound.board.music())
+                m.sound.board.describe().c_str(), m.sound.board.active_slots(),
+                static_cast<unsigned long long>(m.sound.board.midi_dropped()), m.peak,
+                played > 0 ? std::sqrt(m.energy / (2 * played)) : 0.0, m.sound_seconds);
+    if (const m3::Dsb2* music = m.sound.board.music())
         std::printf("Music board: %s; its output peak %d, RMS %.0f\n", music->describe().c_str(), music->music_peak,
                     played > 0 ? std::sqrt(music->music_energy / (2 * played)) : 0.0);
-    if (wav && tools::write_wav(wav, audio, m3::Scsp::kSampleRate)) std::printf("Wrote %s\n", wav);
+    if (o.wav) {
+        const std::string path = board_path(o.wav, m.index);
+        if (tools::write_wav(path.c_str(), m.audio, m3::Scsp::kSampleRate)) std::printf("Wrote %s\n", path.c_str());
+    }
     if (c.first_nan_pc) // SPIKEOUT_FP_TRAP builds
         std::printf("First FP NaN: at %08x (%016llx)\n", c.first_nan_pc, static_cast<unsigned long long>(c.first_nan_bits));
-    if (screenshot) {
-        if (frames_rendered)
+    if (o.screenshot) {
+        if (m.frames_rendered)
             std::printf("Real3D renderer: %.2f ms a frame on average (%.2f setting up, %.2f drawing; %llu frames)\n",
-                        1000.0 * render_seconds / static_cast<double>(frames_rendered),
-                        setup_ms / static_cast<double>(frames_rendered), raster_ms / static_cast<double>(frames_rendered),
-                        static_cast<unsigned long long>(frames_rendered));
+                        1000.0 * m.render_seconds / static_cast<double>(m.frames_rendered),
+                        m.setup_ms / static_cast<double>(m.frames_rendered),
+                        m.raster_ms / static_cast<double>(m.frames_rendered),
+                        static_cast<unsigned long long>(m.frames_rendered));
         std::printf("  block culling (white, no scene) in %llu frames; spotlight on in %llu; scroll fog in %llu, "
                     "ambient fog in %llu; triangle setups with a microtexture %llu, translator map %llu, inverted "
                     "texture %llu\n",
-                    static_cast<unsigned long long>(frames_block_culled), static_cast<unsigned long long>(frames_spotlit),
-                    static_cast<unsigned long long>(frames_scroll_fog),
-                    static_cast<unsigned long long>(frames_ambient_fog), static_cast<unsigned long long>(micro_tris),
-                    static_cast<unsigned long long>(translator_tris), static_cast<unsigned long long>(inverted_tris));
-        const auto& st = real3d.stats();
+                    static_cast<unsigned long long>(m.frames_block_culled),
+                    static_cast<unsigned long long>(m.frames_spotlit),
+                    static_cast<unsigned long long>(m.frames_scroll_fog),
+                    static_cast<unsigned long long>(m.frames_ambient_fog), static_cast<unsigned long long>(m.micro_tris),
+                    static_cast<unsigned long long>(m.translator_tris), static_cast<unsigned long long>(m.inverted_tris));
+        const auto& st = m.real3d.stats();
         std::printf("Real3D (last frame): %u viewports, %u nodes, %u models, %u polygons, %u triangles drawn; "
                     "%llu textures uploaded\n",
                     st.viewports, st.nodes, st.models, st.polygons, st.triangles_drawn,
@@ -396,7 +484,7 @@ int main(int argc, char** argv) {
                     st.models_in_polygon_ram, st.hidden_nodes, st.lod_rejected, st.frustum_culled, st.faded_out);
         std::printf("  configuration registers: %08x %08x %08x %08x\n", bus.real3d().config(0), bus.real3d().config(1),
                     bus.real3d().config(2), bus.real3d().config(3));
-        for (const auto& v : real3d.viewport_info())
+        for (const auto& v : m.real3d.viewport_info())
             std::printf("  viewport %06x: priority %d, %gx%g at (%g, %g), eye matrix %u, %u models%s; "
                         "spotlight words %08x %08x %08x %08x %08x\n",
                         v.addr, v.priority, static_cast<double>(v.width), static_cast<double>(v.height),
@@ -406,18 +494,19 @@ int main(int argc, char** argv) {
     std::printf("EEPROM:");
     for (uint32_t i = 0; i < 64; ++i) std::printf("%s%04x", i % 16 == 0 ? "\n  " : " ", bus.eeprom().words()[i]);
     std::printf("\n");
+    m3::CommBoard* comm = m.comm;
     if (comm && !comm->trace.empty()) {
         std::printf("\nNetwork board 68000, register accesses:\n");
         for (const auto& a : comm->trace)
             std::printf("  %10llu  pc %06x  %s%u %06x  %04x\n", static_cast<unsigned long long>(a.cycle), a.pc,
                         a.write ? "W" : "R", a.size * 8u, a.addr, a.value);
     }
-    if (comm && net_disasm) {
-        if (std::FILE* f = std::fopen((std::string(net_disasm) + ".bin").c_str(), "wb")) { // raw 68000 RAM
+    if (comm && o.net_disasm && m.index == 0) {
+        if (std::FILE* f = std::fopen((std::string(o.net_disasm) + ".bin").c_str(), "wb")) { // raw 68000 RAM
             std::fwrite(comm->ram().data(), 1, comm->ram().size(), f);
             std::fclose(f);
         }
-        if (std::FILE* f = std::fopen(net_disasm, "w")) {
+        if (std::FILE* f = std::fopen(o.net_disasm, "w")) {
             const auto ram = comm->ram();
             for (uint32_t addr = 0; addr < 0x10000;) {
                 uint32_t len = 2;
@@ -436,7 +525,7 @@ int main(int argc, char** argv) {
             std::printf("  %08x  %s\n", pc, ppc::disassemble(ppc::decode(raw), pc).c_str());
         }
 
-    if (show_text) {
+    if (o.show_text) {
         // The four layers' name tables: 64 x 64 entries of 16 bits from
         // 0xF10F8000, 0x2000 bytes apart. The tile generator is
         // little-endian, so the two entries in each CPU word are swapped.
@@ -461,17 +550,20 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (screenshot) {
-        if (tools::write_png(screenshot, screen, m3::TilegenRenderer::kWidth, m3::TilegenRenderer::kHeight))
-            std::printf("\nScreen (last finished frame) written to %s\n", screenshot);
+    if (o.screenshot) {
+        const std::string path = board_path(o.screenshot, m.index);
+        if (tools::write_png(path, m.screen, m3::TilegenRenderer::kWidth, m3::TilegenRenderer::kHeight))
+            std::printf("\nScreen (last finished frame) written to %s\n", path.c_str());
         else
-            std::fprintf(stderr, "gamerun: cannot write %s\n", screenshot);
+            std::fprintf(stderr, "gamerun: cannot write %s\n", path.c_str());
     }
 
-    if (dump_tile) {
-        std::FILE* f = std::fopen(dump_tile, "wb");
+    if (o.dump_tile) {
+        const std::string path = board_path(o.dump_tile, m.index);
+        std::FILE* f = std::fopen(path.c_str(), "wb");
         const auto tile = bus.tile_ram();
-        if (!f || std::fwrite(tile.data(), 1, tile.size(), f) != tile.size()) std::fprintf(stderr, "gamerun: cannot write %s\n", dump_tile);
+        if (!f || std::fwrite(tile.data(), 1, tile.size(), f) != tile.size())
+            std::fprintf(stderr, "gamerun: cannot write %s\n", path.c_str());
         if (f) std::fclose(f);
     }
 
@@ -481,5 +573,135 @@ int main(int argc, char** argv) {
         std::printf("  %-16.*s %llu reads, %llu writes (first at %08x)\n", int(region.size()), region.data(),
                     static_cast<unsigned long long>(u.reads), static_cast<unsigned long long>(u.writes),
                     u.first_addr);
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    Options o;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--blocks" && i + 1 < argc) o.blocks = std::strtoll(argv[++i], nullptr, 0);
+        else if (arg == "--dump-tile" && i + 1 < argc) o.dump_tile = argv[++i];
+        else if (arg == "--text") o.show_text = true;
+        else if (arg == "--netboard" && i + 1 < argc) o.real_netboard = std::string(argv[++i]) == "real";
+        else if (arg == "--net-trace" && i + 1 < argc) o.net_trace = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--net-disasm" && i + 1 < argc) o.net_disasm = argv[++i];
+        else if (arg == "--net-force-master") o.force_master = true;
+        else if (arg == "--net-send-waits" && i + 1 < argc) o.send_waits_for_receive = std::string(argv[++i]) != "off";
+        else if (arg == "--net-watch") o.net_watch = true;
+        else if (arg == "--net-other-bank") o.host_sees_other_bank = true;
+        else if (arg == "--net-e0-irq5" && i + 1 < argc) o.irq5_on_e0 = std::string(argv[++i]) != "off";
+        else if (arg == "--link-byte-cycles" && i + 1 < argc) o.link_cycles_per_byte = std::strtod(argv[++i], nullptr);
+        else if (arg == "--screenshot" && i + 1 < argc) o.screenshot = argv[++i];
+        else if (arg == "--wav" && i + 1 < argc) o.wav = argv[++i];
+        else if (arg == "--quads") o.quads = true;
+        else if (arg == "--midi-burst") o.midi_burst = true;
+        else if (arg == "--dma-instant") o.dma_instant = true;
+        else if (arg == "--sound-volume" && i + 1 < argc) o.sound_volume = std::atoi(argv[++i]);
+        else if (arg == "--music-volume" && i + 1 < argc) o.music_volume = std::atoi(argv[++i]);
+        else if (arg == "--shot-every" && i + 1 < argc) o.shot_every = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--boards" && i + 1 < argc) o.boards = std::max<std::size_t>(1, std::strtoull(argv[++i], nullptr, 0));
+        else if (arg == "--slice" && i + 1 < argc) o.slice = std::max<uint32_t>(1, static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 0)));
+        else if (arg == "--link-latency" && i + 1 < argc) o.link_latency = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--link-trace" && i + 1 < argc) o.link_trace = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--probe" && i + 1 < argc) { // X,Y@FRAME
+            unsigned long long frame = 0;
+            if (std::sscanf(argv[++i], "%d,%d@%llu", &o.probe_x, &o.probe_y, &frame) == 3) o.probe_frame = frame;
+        }
+        else if (arg == "--tilegen-trace" && i + 1 < argc) o.tilegen_trace = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--poke" && i + 1 < argc) {
+            Poke k;
+            const std::string spec = board_prefix(argv[++i], k.board);
+            unsigned addr = 0, value = 0;
+            unsigned long long frame = 0, frames = 1;
+            const int n = std::sscanf(spec.c_str(), "%x=%x@%llu:%llu", &addr, &value, &frame, &frames);
+            if (n < 3) {
+                std::fprintf(stderr, "gamerun: --poke [B:]ADDR=VALUE@FRAME[:N] (hex address and value)\n");
+                return 2;
+            }
+            k.addr = addr;
+            k.value = static_cast<uint8_t>(value);
+            k.frame = frame;
+            k.frames = n == 4 ? frames : 1;
+            o.pokes.push_back(k);
+        }
+        else if (arg == "--press" && i + 1 < argc) {
+            // [B:]NAME@FRAME[:N]: hold NAME for N frames (default 6) from FRAME.
+            Press p;
+            const std::string spec = board_prefix(argv[++i], p.board);
+            const size_t at = spec.find('@'), colon = spec.find(':', at == std::string::npos ? 0 : at);
+            p.name = spec.substr(0, at);
+            if (at != std::string::npos) p.frame = std::strtoull(spec.c_str() + at + 1, nullptr, 0);
+            if (colon != std::string::npos) p.frames = std::strtoull(spec.c_str() + colon + 1, nullptr, 0);
+            if (!input_bit(p.name, p.bank, p.bit)) {
+                std::fprintf(stderr, "gamerun: unknown input '%s'\n", p.name.c_str());
+                return 2;
+            }
+            o.presses.push_back(p);
+        }
+        else if (!o.dir) o.dir = argv[i];
+        else o.dir = nullptr, i = argc;
+    }
+    if (!o.dir) {
+        std::fprintf(stderr, "usage: gamerun <rom_dir> [--blocks N] [--text] [--dump-tile FILE]\n"
+                             "               [--netboard sim|real] [--net-trace N] [--net-disasm FILE]\n"
+                             "               [--screenshot FILE.png] [--shot-every N] [--wav FILE.wav]\n"
+                             "               [--probe X,Y@FRAME] [--quads] [--midi-burst] [--dma-instant]\n"
+                             "               [--sound-volume N] [--music-volume N]\n"
+                             "               [--boards N] [--slice LINES] [--link-latency CYCLES]\n"
+                             "               [--press [B:]NAME@FRAME[:N]]... [--poke [B:]ADDR=VALUE@FRAME[:N]]...\n");
+        return 2;
+    }
+    const m3::GameSpec& game = m3::games::kSpikeoutFinalEdition;
+    const m3::RomSet roms = m3::load_rom_set(game, o.dir);
+    if (!roms.complete()) {
+        std::fprintf(stderr, "gamerun: ROM set incomplete; run romcheck for details\n");
+        return 1;
+    }
+
+    const std::vector<recomp::FunctionEntry> functions = tools::game_functions();
+
+    std::unique_ptr<m3::LinkRing> ring;
+    if (o.boards > 1) {
+        ring = std::make_unique<m3::LinkRing>(o.boards);
+        ring->set_latency(o.link_latency);
+        if (o.link_trace)
+            ring->on_send([left = o.link_trace](std::size_t from, uint64_t at, const std::vector<uint8_t>& data) mutable {
+                if (!left) return;
+                --left;
+                std::printf("link: board %zu sends at frame %.3f, %zu bytes:", from,
+                            static_cast<double>(at) / static_cast<double>(recomp::FrameTiming().frame_cycles()),
+                            data.size());
+                for (std::size_t k = 0; k < std::min<std::size_t>(data.size(), 24); ++k) std::printf(" %02x", data[k]);
+                std::printf("\n");
+            });
+    }
+    Turns turns(o.boards);
+    std::vector<std::unique_ptr<Machine>> machines;
+    for (std::size_t i = 0; i < o.boards; ++i) {
+        machines.push_back(std::make_unique<Machine>(i, roms, functions));
+        set_up(*machines.back(), o, game, ring.get(), turns);
+    }
+
+    std::printf("%zu recompiled functions; running up to %lld blocks from %08x", functions.size(),
+                static_cast<long long>(o.blocks), machines[0]->c.cpu.pc);
+    if (o.boards > 1)
+        std::printf(" on each of %zu linked boards, taking turns every %u lines", o.boards, o.slice);
+    std::printf("\n\n");
+
+    if (o.boards == 1) {
+        run(*machines[0], turns);
+    } else {
+        std::vector<std::thread> threads;
+        for (auto& m : machines) threads.emplace_back([&m, &turns] { run(*m, turns); });
+        for (auto& t : threads) t.join();
+    }
+
+    for (auto& m : machines) {
+        if (o.boards > 1) std::printf("%s==== Board %zu ====\n", m->index ? "\n" : "", m->index);
+        report(*m, o);
+    }
+    if (ring) std::printf("\nLink: %llu packets delivered around the ring\n", static_cast<unsigned long long>(ring->delivered()));
     return 0;
 }

@@ -66,7 +66,11 @@ restored to the last confirmed frame and re-simulated (GGPO style).
 
 1. Single board, single player (milestones 1–4).
 2. Run two boards in one process with a virtual link → local 2-player.
-   This proves the link emulation without any networking.
+   This proves the link emulation without any networking. **Done in
+   `gamerun --boards N`** (2–4, `m3::LinkRing`; one thread per board,
+   taking turns every `--slice` lines, the same every run). Still to do:
+   the window frontend (one window or split screen per player, inputs per
+   board).
 3. Mode A over LAN, checked against Supermodel's link behavior.
 4. Save states for all boards, determinism tests.
 5. Mode B rollback online.
