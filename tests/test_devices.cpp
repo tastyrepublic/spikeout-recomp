@@ -648,6 +648,14 @@ TEST_CASE("real3d: a viewport and a red quad, drawn the same with one thread or 
     CHECK_EQ(one.stats().viewports, 1u);
     CHECK_EQ(one.stats().models, 1u);
     CHECK_EQ(one.stats().polygons, 1u);
+    // The scene both renderers draw from: one quad, in front of the eye.
+    const Real3dScene& scene = one.scene();
+    CHECK_EQ(scene.viewports.size(), 1u);
+    CHECK_EQ(scene.polygons.size(), 1u);
+    CHECK_EQ(scene.polygons[0].vertex_count, 4);
+    CHECK_EQ(scene.vertices.size(), 4u);
+    CHECK(scene.vertices[0].z < 0);
+    CHECK(!scene.polygons[0].lit);
     const size_t centre = 192 * 496 + 248;
     CHECK_EQ(one.image()[centre], 0xFFFF0000u); // red, lighting off
     CHECK_EQ(one.image()[0], 0u);               // nothing at the corner
