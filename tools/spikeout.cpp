@@ -1,11 +1,11 @@
 // spikeout: the recompiled game in a window (SDL3).
 //
-//   spikeout <rom_dir> [--scale N] [--netboard sim] [--frames N] [--mute]
+//   spikeout <rom_dir> [--scale N] [--netboard sim] [--frames N] [--mute] [--quads]
 //
 // The game runs on its own thread, paced to the Model 3's 57.524 Hz; the
 // window shows the tile generator's 2D layers and the Real3D's picture
-// (drawn in software for now). The sound board plays through the default
-// audio device (--mute: not at all); the music board isn't emulated yet.
+// (drawn in software for now). The sound and music boards play through the
+// default audio device (--mute: not at all).
 // The keyboard goes to the I/O board:
 //
 //   5 coin      1 start      F2 test      F1 service
@@ -16,7 +16,8 @@
 //   Esc         quit
 //
 // --frames N quits after N frames and writes the last one to
-// spikeout-<N>.png (for testing).
+// spikeout-<N>.png (for testing). --quads draws quads whole, as Supermodel's
+// "quad rendering" option (slower in software).
 //
 // Built only when CMake's SPIKEOUT_ROM_DIR is set (it links the recompiled
 // game).
@@ -64,6 +65,7 @@ struct Shared {
     std::atomic<uint8_t> bank0{0xFF}, bank1{0xFF}, controls{0xFF};
     std::atomic<bool> quit{false}, fast{false};
     uint64_t max_frames = 0; // 0: run until the window is closed
+    bool quads = false;      // draw quads whole (slower)
     Sound* sound = nullptr; // nullptr: muted
 };
 
@@ -93,6 +95,7 @@ class Sound {
 public:
     explicit Sound(const m3::RomSet& roms)
         : board_(roms.region(m3::RomRegionId::SoundProgram), roms.region(m3::RomRegionId::SoundSamples)) {
+        tools::attach_music(board_, roms);
         const SDL_AudioSpec spec{SDL_AUDIO_S16, 2, m3::Scsp::kSampleRate};
         stream_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, &Sound::feed, this);
         if (stream_) SDL_ResumeAudioStreamDevice(stream_);
@@ -152,6 +155,7 @@ void run_game(const m3::RomSet& roms, bool real_netboard, Shared& shared) {
     c.set_scheduler(&timing);
     m3::TilegenRenderer tilegen;
     m3::Real3dRenderer real3d;
+    real3d.set_quads(shared.quads);
     std::vector<uint32_t> screen(kWidth * kHeight);
 
     using clock = std::chrono::steady_clock;
@@ -212,12 +216,13 @@ int main(int argc, char** argv) {
     int scale = 2;
     bool real_netboard = true;
     uint64_t max_frames = 0;
-    bool mute = false;
+    bool mute = false, quads = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--scale" && i + 1 < argc) scale = std::max(1, std::atoi(argv[++i]));
         else if (arg == "--netboard" && i + 1 < argc) real_netboard = std::string(argv[++i]) == "real";
         else if (arg == "--frames" && i + 1 < argc) max_frames = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--quads") quads = true;
         else if (arg == "--mute") mute = true;
         else if (!dir) dir = argv[i];
     }
@@ -250,6 +255,7 @@ int main(int argc, char** argv) {
 
     Shared shared;
     shared.max_frames = max_frames;
+    shared.quads = quads;
     std::unique_ptr<Sound> sound;
     if (!mute) sound = std::make_unique<Sound>(roms);
     shared.sound = sound.get();

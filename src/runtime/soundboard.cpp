@@ -6,6 +6,7 @@
 #include <Moira.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdio>
 
 namespace m3 {
@@ -54,13 +55,18 @@ std::string SoundBoard::describe() const {
 void SoundBoard::midi_in(uint8_t byte) {
     ++midi_bytes;
     scsp1_.midi_in(byte);
+    if (dsb_) dsb_->midi_in(byte);
 }
 
 void SoundBoard::render(int16_t* out, std::size_t frames) {
+    // The music board's output goes into both SCSPs' external inputs, where
+    // the game sets its level (MAME: "should be chained with SCSP EXTS").
+    music_.assign(2 * frames, 0);
+    if (dsb_) dsb_->render(music_.data(), frames);
     for (std::size_t i = 0; i < frames; ++i) {
         int32_t l1, r1, l2, r2;
-        scsp1_.sample(l1, r1);
-        scsp2_.sample(l2, r2);
+        scsp1_.sample(l1, r1, music_[2 * i], music_[2 * i + 1]);
+        scsp2_.sample(l2, r2, music_[2 * i], music_[2 * i + 1]);
         out[2 * i] = static_cast<int16_t>(std::clamp(l1 + l2, -32768, 32767));
         out[2 * i + 1] = static_cast<int16_t>(std::clamp(r1 + r2, -32768, 32767));
         scsp1_.tick_timers();

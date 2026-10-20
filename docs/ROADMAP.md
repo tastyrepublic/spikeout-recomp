@@ -46,7 +46,7 @@ Each milestone ends with something you can run and check.
 - [x] Real3D Pro-1000: memory, texture uploads, the viewport and culling-node walker, model decoding (`m3::Real3d`, `m3::Real3dRenderer`)
 - [x] Software rasterizer (depth buffer, perspective-correct textures, sun and ambient light; bands of lines on several threads): the attract mode in 3D at about real time
 - [x] Fog and the ping-pong update buffers
-- [ ] Still missing from the 3D: spotlight, specular, LOD blending, frustum culling, translucency sorting
+- [x] Matched against Supermodel frame by frame: frustum culling, LOD fades and cross-fades, back faces, the alpha-test rules (fixed holes in the fighters), opaque-before-translucent order, bilinear mipmapped textures, per-pixel lighting with specular, fixed shading and the spotlight (`gamerun --probe` for single pixels)
 - [ ] Native renderer (Vulkan/Metal via SDL GPU)
 - [ ] Widescreen and high resolution
 - [ ] **Goal:** attract mode and gameplay render correctly
@@ -55,7 +55,7 @@ Each milestone ends with something you can run and check.
 
 - [x] 68000 sound CPU + two SCSPs (`m3::SoundBoard`, `m3::Scsp`, adapted from Supermodel's SCSP with fixes from the chip's register layout and MAME's board map): the sound effects play in the window (SDL audio) and `gamerun --wav` records them
 - [ ] MIDI link timed like the board's serial chip (31,250 baud) instead of a burst per frame
-- [ ] DSB2 MPEG music board
+- [x] DSB2 MPEG music board (`m3::Dsb2`: its 68000, the serial line at 31,250 baud, the decoder's commands, MPEG Layer II through minimp3): the music plays
 - [ ] Keyboard (done in `spikeout`: coin, start, test, service, joystick, buttons), gamepad and arcade stick mapping
 
 ## 5. Local multiplayer

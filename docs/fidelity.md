@@ -62,14 +62,63 @@ board), and keep the old behavior selectable while it is being tested.
 
 ## Real3D (3D)
 
-The first renderer (`m3::Real3dRenderer`, software) draws the scene in
-memory at the end of each frame, with fog (per viewport, by each
-polygon's fog intensity). Not modelled yet, roughly in order of what
-you'd notice: the spotlight, specular highlights, blending between LOD
-levels (the nearer level is drawn whole), frustum culling (the rasterizer
-clips instead, which only costs time), translucency order (drawn in scene
-order, not sorted), texture filtering (nearest texel), fixed shading and
-the Step 1.5 luminous rules.
+The software renderer (`m3::Real3dRenderer`) draws the scene in memory at
+the end of each frame. It follows Supermodel's New3D engine, compared
+frame by frame against Supermodel 0.3a on the attract mode (both from
+empty NVRAM, so the demo runs the same):
+
+- **Scene walk:** frustum culling by each node's bounding sphere against
+  the viewport's planes (words `0x0C`-`0x13`); level of detail with the
+  node fading out past its delete size and two neighbouring levels
+  cross-faded; model scale (node word 1) applied to the cull and blend
+  radii.
+- **Polygons:** one-sided polygons facing away aren't drawn; two-sided
+  ones show their back, lit from that side. Texture alpha cuts out texels
+  only with the contour bit (alpha test below 32/255) and blends only with
+  the polygon's texture-alpha bits; otherwise the texture is opaque. (Our
+  first renderer cut out every format-0 texel with its T bit clear, which
+  riddled the fighters' skin with holes.) Triangles are clipped against
+  the near plane and the view's sides (with a margin), as a GPU does; our
+  first renderer clipped only at the near plane and dropped the huge
+  triangles that left, which lost ceilings, floors and walls close to the
+  camera.
+- **Drawing order:** each priority is drawn twice, its ordinary and then
+  its high-priority polygons (header 6 bit 4), each from a fresh depth
+  buffer: the opaque pass, with a viewport's layered polygons (decals,
+  bit 3) after the rest of it, depth scaled by 1 + 1/512 and one per pixel;
+  then the translucent polygons into one of two translucency layers (bit
+  17). Within a layer the nearest translucent polygon replaces what is
+  there, without blending (the chip's translucency is two screen-door
+  patterns), so overlapping shadows don't darken each other; an opaque
+  pixel clears both layers; at the end one layer blends by its alpha and
+  both together mix to an opaque colour.
+- **Textures:** bilinear, with mipmaps from the levels stored in texture
+  memory, blended between two levels; the level from the polygon's
+  texture NP value and its distance, as the hardware does; repeat, clamp
+  and mirror per axis.
+- **Lighting:** per pixel, from the interpolated normal: sun, ambient,
+  fixed shading, specular (smooth: a power of the sun's angle by
+  shininess; flat: the reflected sun's z), no upper limit before the
+  final colour clamp (Step 2); the spotlight (a screen ellipse with a
+  depth range) and the spotlight on fog. Spikeout leaves the spotlight's
+  colours at 0 (off) in the attract mode and the first stage.
+- Fog per viewport by each polygon's fog intensity (with a fog start
+  alone, too). Scroll fog and ambient fog are drawn over the 2D layers
+  before the scene (Supermodel's guess at the hardware's rule for which
+  viewport supplies them); Spikeout uses scroll fog in most frames.
+- Also as Supermodel: normals divided by the node's model scale rather
+  than normalized, signed bytes read as (2b + 1) / 255, the translator map
+  (colour x 16), inverted textures, microtextures, format 7 without the
+  alpha test, viewports in whole pixels, translucency layers over the 2D
+  with straight alpha. `--quads` draws quads whole with mean value
+  coordinates (Supermodel's optional quad rendering); by default they are
+  two triangles, the same picture for flat, linearly mapped quads.
+
+Still different: Supermodel's lighting is its own estimate of the
+hardware (per-pixel; the real chips may light per vertex); the Step 1.5
+luminous rules; microtextures; translucency patterns; the polygon RAM's
+"layered" polygons; line-of-sight reads. `gamerun --probe X,Y@FRAME`
+lists every triangle at one pixel and what became of it, for comparing.
 
 Timing: writes to high culling RAM and polygon RAM after the ping-pong
 flip go into the update buffers in low culling RAM and are applied at
@@ -111,8 +160,34 @@ the chip's documented register layout:
   add the key-rate scale even when a rate is 0; noise and silence sources
   (SSCTL) play nothing; the DSP's memory access only on odd steps.
 - **Mixing:** the two SCSPs are summed into one stereo pair (on the
-  cabinet they may be front and rear speakers); the music board (DSB2) is
-  not emulated yet.
+  cabinet they may be front and rear speakers).
+
+## Music board (DSB2)
+
+`m3::Dsb2`: the board's own 68000 runs its program; the decoder is a
+black box modelled by its commands (Supermodel's decoding) and minimp3.
+
+- **Done (board):** commands come over the 31,250-baud serial line, one
+  byte every 320 µs, each raising IRQ 1 until the 68000 reads it from the
+  8251 (MAME's map of the board); Supermodel hands the board a frame's
+  bytes in a burst, 500 cycles apart, and its status register always says
+  a byte is there.
+- **Clock:** 11 MHz, from the board's 33 MHz crystal / 3 (MAME's board
+  notes; Supermodel uses 11 MHz too, MAME's device 8 MHz "unknown").
+- **Kept from Supermodel, unverified:** IRQ 2 as a 1 kHz timer; the
+  meaning of the decoder's volume and stereo commands (`0xB0`/`0xA1` and
+  others: which speaker each sets is marked "?" there); a start address
+  sent while a track plays makes the loop; decoder status always 1.
+- **Done (mixing):** the music goes into both SCSPs' external inputs
+  (EXTS 0/1), which mix it at slots 16/17's levels (their effect level, or
+  the direct level when that is 0, as MAME's SCSP does) and feed it to the
+  effect DSP. MAME notes the music "should be chained with SCSP EXTS", and
+  Spikeout's driver sets those levels as it plays: during the attract mode
+  SCSP 1's go `0x0000`, `0x7200`, `0x7000`, `0x6000` and SCSP 2's turn on
+  at `0x8000`. Supermodel and MAME add the music straight to the output,
+  which plays it about 12 dB over the sound effects. That it reaches both
+  chips is a choice (the driver sets levels on both).
+- Linear interpolation from 32 to 44.1 kHz.
 
 ## Settings EEPROM and security board
 

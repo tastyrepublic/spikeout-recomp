@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <ctime>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -40,12 +41,20 @@ inline void set_rtc_to_host(m3::Bus& bus) {
             0);
 }
 
+// The music board (DSB2) on the sound board's serial line.
+inline void attach_music(m3::SoundBoard& board, const m3::RomSet& roms) {
+    board.attach_music(std::make_unique<m3::Dsb2>(roms.region(m3::RomRegionId::MpegProgram),
+                                                  roms.region(m3::RomRegionId::MpegMusic)));
+}
+
 // The sound board, fed each frame with the bytes the game sent to its MIDI
 // port and run for that frame's share of 44.1 kHz samples.
 class FrameSound {
 public:
     explicit FrameSound(const m3::RomSet& roms)
-        : board(roms.region(m3::RomRegionId::SoundProgram), roms.region(m3::RomRegionId::SoundSamples)) {}
+        : board(roms.region(m3::RomRegionId::SoundProgram), roms.region(m3::RomRegionId::SoundSamples)) {
+        attach_music(board, roms);
+    }
 
     // Takes the MIDI bytes the game sent during one frame (and empties the
     // list); returns that frame's interleaved stereo samples (766 or 767).

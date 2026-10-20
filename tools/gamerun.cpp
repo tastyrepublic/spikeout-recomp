@@ -4,7 +4,7 @@
 //   gamerun <rom_dir> [--blocks N] [--text] [--dump-tile FILE]
 //           [--netboard sim|real] [--net-trace N] [--net-disasm FILE]
 //           [--screenshot FILE.png] [--shot-every N] [--press NAME@FRAME[:N]]...
-//           [--wav FILE.wav]
+//           [--wav FILE.wav] [--probe X,Y@FRAME] [--quads]
 //
 // Built only when CMake's SPIKEOUT_ROM_DIR is set. A run ends at the first
 // thing the runtime can't do yet (code that wasn't found, an exception, a
@@ -30,6 +30,11 @@
 //
 // The sound board (m3::SoundBoard) runs with the game; --wav writes what
 // it played (44.1 kHz stereo).
+//
+// --probe X,Y@FRAME draws the 3D at FRAME and lists every triangle that
+// covered pixel (X, Y), with its polygon header and what became of it there
+// (drawn, behind, cut out, blended): for finding holes and wrong pixels.
+// --quads draws quads whole, as Supermodel's "quad rendering" option (slower).
 #include "games/games.hpp"
 #include "ppc/disasm.hpp"
 #include "ppc/instruction.hpp"
@@ -80,6 +85,19 @@ bool input_bit(const std::string& name, int& bank, int& bit) {
     return false;
 }
 
+// --probe: every triangle that covered the pixel, and what became of it.
+void print_probe(const m3::Real3dRenderer& r, int x, int y, uint64_t frame) {
+    std::printf("Probe %d,%d at frame %llu: %zu triangles cover it\n", x, y, static_cast<unsigned long long>(frame),
+                r.probe().size());
+    for (const auto& h : r.probe())
+        std::printf("  polygon %06x [%08x %08x %08x %08x %08x %08x %08x] priority %d, %s format %d%s, alpha %.2f, "
+                    "texel alpha %.2f, 1/w %.4g, %s: %s\n",
+                    h.polygon, h.header[0], h.header[1], h.header[2], h.header[3], h.header[4], h.header[5],
+                    h.header[6], h.priority, h.textured ? "textured" : "flat", h.format, h.contour ? " contour" : "",
+                    static_cast<double>(h.alpha), static_cast<double>(h.texel_alpha), static_cast<double>(h.w), h.pass,
+                    h.outcome);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -89,8 +107,10 @@ int main(int argc, char** argv) {
     const char* screenshot = nullptr;
     const char* wav = nullptr;
     uint64_t shot_every = 0, tilegen_trace = 0;
+    int probe_x = -1, probe_y = -1;
+    uint64_t probe_frame = 0;
     std::vector<Press> presses;
-    bool show_text = false, real_netboard = true, force_master = false;
+    bool show_text = false, real_netboard = true, force_master = false, quads = false;
     std::size_t net_trace = 0;
     int64_t blocks = 200'000'000;
     for (int i = 1; i < argc; ++i) {
@@ -104,7 +124,12 @@ int main(int argc, char** argv) {
         else if (arg == "--net-force-master") force_master = true;
         else if (arg == "--screenshot" && i + 1 < argc) screenshot = argv[++i];
         else if (arg == "--wav" && i + 1 < argc) wav = argv[++i];
+        else if (arg == "--quads") quads = true;
         else if (arg == "--shot-every" && i + 1 < argc) shot_every = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--probe" && i + 1 < argc) { // X,Y@FRAME
+            unsigned long long frame = 0;
+            if (std::sscanf(argv[++i], "%d,%d@%llu", &probe_x, &probe_y, &frame) == 3) probe_frame = frame;
+        }
         else if (arg == "--tilegen-trace" && i + 1 < argc) tilegen_trace = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--press" && i + 1 < argc) {
             // NAME@FRAME[:N]: hold NAME for N frames (default 6) from FRAME.
@@ -126,7 +151,8 @@ int main(int argc, char** argv) {
     if (!dir) {
         std::fprintf(stderr, "usage: gamerun <rom_dir> [--blocks N] [--text] [--dump-tile FILE]\n"
                              "               [--netboard sim|real] [--net-trace N] [--net-disasm FILE]\n"
-                             "               [--screenshot FILE.png] [--shot-every N] [--wav FILE.wav]\n");
+                             "               [--screenshot FILE.png] [--shot-every N] [--wav FILE.wav]\n"
+                             "               [--probe X,Y@FRAME] [--quads] [--press NAME@FRAME[:N]]...\n");
         return 2;
     }
     const m3::GameSpec& game = m3::games::kSpikeoutFinalEdition;
@@ -157,18 +183,40 @@ int main(int argc, char** argv) {
     // The 2D layers, a line at a time; each finished frame is kept for --screenshot.
     m3::TilegenRenderer tilegen;
     m3::Real3dRenderer real3d;
+    real3d.set_probe(probe_x, probe_y);
+    real3d.set_quads(quads);
     std::vector<uint32_t> screen(m3::TilegenRenderer::kWidth * m3::TilegenRenderer::kHeight);
     // The sound board, a frame at a time; --wav keeps what it played.
     tools::FrameSound sound(roms);
     std::vector<int16_t> audio;
     int peak = 0;
-    double energy = 0, sound_seconds = 0;
+    double energy = 0, sound_seconds = 0, render_seconds = 0, setup_ms = 0, raster_ms = 0;
+    uint64_t frames_rendered = 0, frames_spotlit = 0, frames_scroll_fog = 0, frames_ambient_fog = 0;
+    uint64_t micro_tris = 0, translator_tris = 0, inverted_tris = 0;
     timing.on_display_line = [&](uint32_t line) {
         if (line == 0) tilegen.begin_frame();
         tilegen.draw_line(bus, static_cast<int>(line));
     };
     timing.on_frame_end = [&] {
-        if (screenshot) real3d.render(bus.real3d()); // the 3D is drawn in software: only when it will be seen
+        // The 3D is drawn in software: only when it will be seen.
+        if (screenshot || (probe_frame && timing.frames() == probe_frame)) {
+            const auto render_start = std::chrono::steady_clock::now();
+            real3d.render(bus.real3d());
+            setup_ms += real3d.stats().setup_ms;
+            raster_ms += real3d.stats().raster_ms;
+            if (real3d.stats().spotlights) ++frames_spotlit;
+            {
+                const auto& s = real3d.stats();
+                frames_scroll_fog += s.scroll_fog;
+                frames_ambient_fog += s.ambient_fog;
+                micro_tris += s.micro_polys;
+                translator_tris += s.translator_polys;
+                inverted_tris += s.inverted_polys;
+            }
+            render_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - render_start).count();
+            ++frames_rendered;
+        }
+        if (probe_frame && timing.frames() == probe_frame) print_probe(real3d, probe_x, probe_y, probe_frame);
         tilegen.composite(screen, real3d.image());
         const auto sound_start = std::chrono::steady_clock::now();
         const std::span<const int16_t> pcm = sound.frame(bus.midi_out());
@@ -230,23 +278,43 @@ int main(int argc, char** argv) {
                 sound.board.describe().c_str(), sound.board.active_slots(),
                 static_cast<unsigned long long>(sound.board.midi_dropped()), peak,
                 played > 0 ? std::sqrt(energy / (2 * played)) : 0.0, sound_seconds);
+    // The music reaches the speakers through the SCSPs' external inputs, at
+    // the levels the game sets on slots 16/17 (register 0x16 of each).
+    if (const m3::Dsb2* music = sound.board.music())
+        std::printf("Music board: %s; its output peak %d, RMS %.0f; SCSP input levels %04x / %04x\n",
+                    music->describe().c_str(), music->music_peak,
+                    played > 0 ? std::sqrt(music->music_energy / (2 * played)) : 0.0,
+                    sound.board.scsp(0).slot_reg(16, 0x16), sound.board.scsp(1).slot_reg(16, 0x16));
     if (wav && tools::write_wav(wav, audio, m3::Scsp::kSampleRate)) std::printf("Wrote %s\n", wav);
     if (c.first_nan_pc) // SPIKEOUT_FP_TRAP builds
         std::printf("First FP NaN: at %08x (%016llx)\n", c.first_nan_pc, static_cast<unsigned long long>(c.first_nan_bits));
     if (screenshot) {
+        if (frames_rendered)
+            std::printf("Real3D renderer: %.2f ms a frame on average (%.2f setting up, %.2f drawing; %llu frames)\n",
+                        1000.0 * render_seconds / static_cast<double>(frames_rendered),
+                        setup_ms / static_cast<double>(frames_rendered), raster_ms / static_cast<double>(frames_rendered),
+                        static_cast<unsigned long long>(frames_rendered));
+        std::printf("  spotlight on in %llu frames; scroll fog in %llu, ambient fog in %llu; triangle setups with a "
+                    "microtexture %llu, translator map %llu, inverted texture %llu\n",
+                    static_cast<unsigned long long>(frames_spotlit), static_cast<unsigned long long>(frames_scroll_fog),
+                    static_cast<unsigned long long>(frames_ambient_fog), static_cast<unsigned long long>(micro_tris),
+                    static_cast<unsigned long long>(translator_tris), static_cast<unsigned long long>(inverted_tris));
         const auto& st = real3d.stats();
         std::printf("Real3D (last frame): %u viewports, %u nodes, %u models, %u polygons, %u triangles drawn; "
                     "%llu textures uploaded\n",
                     st.viewports, st.nodes, st.models, st.polygons, st.triangles_drawn,
                     static_cast<unsigned long long>(bus.real3d().textures_uploaded()));
-        std::printf("  %u models in polygon RAM, %u hidden nodes, %u nodes too far (LOD)\n", st.models_in_polygon_ram,
-                    st.hidden_nodes, st.lod_rejected);
+        std::printf("  %u models in polygon RAM, %u hidden nodes, %u nodes too far (LOD), %u outside the view, "
+                    "%u models faded out\n",
+                    st.models_in_polygon_ram, st.hidden_nodes, st.lod_rejected, st.frustum_culled, st.faded_out);
         std::printf("  configuration registers: %08x %08x %08x %08x\n", bus.real3d().config(0), bus.real3d().config(1),
                     bus.real3d().config(2), bus.real3d().config(3));
         for (const auto& v : real3d.viewport_info())
-            std::printf("  viewport %06x: priority %d, %gx%g at (%g, %g), eye matrix %u, %u models%s\n", v.addr,
-                        v.priority, static_cast<double>(v.width), static_cast<double>(v.height),
-                        static_cast<double>(v.x), static_cast<double>(v.y), v.eye, v.models, v.disabled ? ", off" : "");
+            std::printf("  viewport %06x: priority %d, %gx%g at (%g, %g), eye matrix %u, %u models%s; "
+                        "spotlight words %08x %08x %08x %08x %08x\n",
+                        v.addr, v.priority, static_cast<double>(v.width), static_cast<double>(v.height),
+                        static_cast<double>(v.x), static_cast<double>(v.y), v.eye, v.models, v.disabled ? ", off" : "",
+                        v.spot_words[0], v.spot_words[1], v.spot_words[2], v.spot_words[3], v.spot_words[4]);
     }
     std::printf("EEPROM:");
     for (uint32_t i = 0; i < 64; ++i) std::printf("%s%04x", i % 16 == 0 ? "\n  " : " ", bus.eeprom().words()[i]);

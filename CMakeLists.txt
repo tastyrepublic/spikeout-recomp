@@ -50,17 +50,28 @@ add_library(m3runtime
     src/runtime/real3d_render.cpp
     src/runtime/scsp.cpp
     src/runtime/soundboard.cpp
+    src/runtime/dsb2.cpp
     src/runtime/crypt315_5881.cpp
     src/runtime/memory_map.cpp
     src/runtime/rom.cpp
     src/games/games.cpp
     src/games/spikeofe.cpp)
 target_include_directories(m3runtime PUBLIC src)
-target_link_libraries(m3runtime PUBLIC ppc PRIVATE moira spikeout_warnings)
+target_link_libraries(m3runtime PUBLIC ppc PRIVATE moira minimp3 spikeout_warnings)
 
 # Moira 68000 core (MIT, Dirk W. Hoffmann, v3.0; third_party/moira) for the
 # network board's 68000. Musashi was rejected: its bundled SoftFloat 2b
 # license has a disputed indemnity clause.
+# minimp3 (CC0, lieff/minimp3, third_party/minimp3): decodes the music
+# board's MPEG audio.
+add_library(minimp3 STATIC third_party/minimp3/minimp3.cpp)
+target_include_directories(minimp3 SYSTEM PUBLIC third_party/minimp3)
+if(MSVC)
+    target_compile_options(minimp3 PRIVATE /w)
+else()
+    target_compile_options(minimp3 PRIVATE -w)
+endif()
+
 add_library(moira STATIC third_party/moira/Moira.cpp third_party/moira/MoiraDebugger.cpp)
 target_include_directories(moira SYSTEM PUBLIC third_party/moira)
 if(MSVC)

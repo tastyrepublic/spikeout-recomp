@@ -15,6 +15,7 @@
 // only the parts listed).
 #pragma once
 
+#include "runtime/dsb2.hpp"
 #include "runtime/scsp.hpp"
 
 #include <array>
@@ -36,10 +37,13 @@ public:
     ~SoundBoard();
 
     void reset();
-    // A byte from the main board's MIDI port.
+    // The music board, on the same serial line; its music is mixed in.
+    void attach_music(std::unique_ptr<Dsb2> dsb) { dsb_ = std::move(dsb); }
+    Dsb2* music() const { return dsb_.get(); }
+    // A byte from the main board's MIDI port (to the music board too).
     void midi_in(uint8_t byte);
     // Runs the board for `frames` output samples at 44.1 kHz, writing
-    // interleaved stereo (both SCSPs mixed).
+    // interleaved stereo (both SCSPs and the music board mixed).
     void render(int16_t* out, std::size_t frames);
 
     // ---- Inspection ----
@@ -52,6 +56,7 @@ public:
     uint64_t midi_dropped() const { return scsp1_.midi_dropped; }
     std::size_t midi_waiting() const { return scsp1_.midi_pending(); }
     std::span<const uint8_t> ram(int chip) const { return chip ? ram2_ : ram1_; }
+    const Scsp& scsp(int chip) const { return chip ? scsp2_ : scsp1_; }
     std::string describe() const;
 
 private:
@@ -68,6 +73,8 @@ private:
     std::vector<uint8_t> ram1_, ram2_;
     Scsp scsp1_, scsp2_;
     std::unique_ptr<Cpu> cpu_;
+    std::unique_ptr<Dsb2> dsb_;
+    std::vector<int16_t> music_;
     uint8_t ctrl_ = 0;
     uint64_t samples_ = 0;
 };

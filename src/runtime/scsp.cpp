@@ -418,8 +418,9 @@ int32_t Scsp::update_slot(Slot& slot, int16_t* ring_out) {
     return sample;
 }
 
-void Scsp::sample(int32_t& left, int32_t& right) {
+void Scsp::sample(int32_t& left, int32_t& right, int16_t ext_left, int16_t ext_right) {
     const Tables& t = tables();
+    dsp_.exts = {ext_left, ext_right};
     int32_t l = 0, r = 0;
     for (Slot& slot : slots_) {
         int16_t* ring = &ring_[bufptr_];
@@ -440,6 +441,12 @@ void Scsp::sample(int32_t& left, int32_t& right) {
         const unsigned enc = (f.efpan() << 8) | (f.efsdl() << 13);
         l += (dsp_.efreg[i] * t.lpan[enc]) >> kShift;
         r += (dsp_.efreg[i] * t.rpan[enc]) >> kShift;
+    }
+    for (std::size_t i = 0; i < 2; ++i) { // external inputs: slot 16/17's effect level, or its direct level when that is 0 (MAME)
+        const Fields f{slots_[16 + i].data};
+        const unsigned enc = f.efsdl() ? (f.efpan() << 8) | (f.efsdl() << 13) : (f.dipan() << 8) | (f.disdl() << 13);
+        l += (dsp_.exts[i] * t.lpan[enc]) >> kShift;
+        r += (dsp_.exts[i] * t.rpan[enc]) >> kShift;
     }
     // The mix is 18 bits; a 16-bit DAC takes the top 16 (an 18-bit one the
     // same range, with two more bits).

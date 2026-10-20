@@ -183,6 +183,32 @@ the sound effects, in bursts with each demo fight: the music is on the
 DSB2 board (a 68EC000 at 11 MHz and an MPEG decoder, in a metal box),
 which MAME notes should be mixed in through the SCSP's external input.
 
+## Music board (DSB2, 837-12273)
+
+A 68EC000 at 11 MHz (33 MHz / 3), 128 KB of program, 128 KB of RAM, an
+8251-type serial chip on the main board's line, a Sega MPEG decoder
+(315-6028A) and 16 MB of MPEG ROM. 68000 map (Supermodel and MAME agree):
+
+| Address | |
+|---|---|
+| `0x000000` | program ROM, 128 KB |
+| `0xC00001` / `0xC00003` | serial chip: received byte / status (bit 1 a byte waits; it holds IRQ 1 until read) |
+| `0xD00001` | system control (bit 3: MPEG ROM bank, boards with 32 MB) |
+| `0xE00003` | decoder commands |
+| `0xE80001` | decoder status |
+| `0xF00000` | RAM, 128 KB |
+
+IRQ 2 is a 1 kHz timer. Decoder commands (Supermodel): `0x14`/`0x15` and
+three bytes set the start address (sent while a track plays, the loop
+start), `0x24`/`0x25` and three bytes the end, `0x74`/`0x75` plays,
+`0x84`/`0x85` stops; `0xB0`/`0xA1` and others take a volume or stereo
+byte. Spikeout's tracks are MPEG-1 Layer II at 32 kHz; in the attract
+mode it starts one and then sets a loop on a second.
+
+The board's output goes into the SCSPs' external inputs (EXTS), so the
+sound driver sets the music's level and pan there, on slots 16/17
+(register `0x16`), and changes them as it plays.
+
 ## RTC (`0xF0140000`, Epson RTC-72421)
 
 Register *n* at `+4n`, in the top byte of each word: 0–12 the time as BCD

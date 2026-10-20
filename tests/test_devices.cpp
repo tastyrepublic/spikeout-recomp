@@ -2,6 +2,7 @@
 
 #include "runtime/bus.hpp"
 #include "runtime/commboard.hpp"
+#include "runtime/dsb2.hpp"
 #include "runtime/jtag.hpp"
 #include "runtime/netboard.hpp"
 #include "runtime/rom.hpp"
@@ -400,6 +401,21 @@ TEST_CASE("scsp: a looped 16-bit slot plays in the centre at full level, and fad
     CHECK_EQ(l, 0);
 }
 
+TEST_CASE("scsp: external inputs mix at slot 16/17's levels, silent until set") {
+    std::vector<uint8_t> ram(Scsp::kRamSize, 0);
+    Scsp scsp(ram, true);
+    int32_t l = 0, r = 0;
+    scsp.sample(l, r, 0x1000, 0x1000);
+    CHECK_EQ(l, 0); // levels 0: nothing
+    scsp.write16(16 * 0x20 + 0x16, 0xE000); // slot 16: DISDL 7 (0 dB), centre; EFSDL 0
+    scsp.sample(l, r, 0x1000, 0);
+    CHECK_EQ(l, 0x1000);
+    CHECK_EQ(r, 0x1000);
+    scsp.write16(16 * 0x20 + 0x16, 0xE0A0); // EFSDL 5 (-12 dB) takes over
+    scsp.sample(l, r, 0x1000, 0);
+    CHECK(l > 0x3E0 && l < 0x420);
+}
+
 TEST_CASE("scsp: timer A overflow interrupts at its level until acknowledged") {
     std::vector<uint8_t> ram(Scsp::kRamSize, 0);
     Scsp scsp(ram, true);
@@ -458,6 +474,32 @@ TEST_CASE("sound board: vectors from the program, sample ROM banks through 0x400
     CHECK_EQ(board.ram(0)[0x1001], 0x34u);
     CHECK_EQ(board.ram(0)[0x1002], 0x56u);
     CHECK_EQ(board.ram(0)[0x1003], 0x78u);
+}
+
+TEST_CASE("dsb2: bytes arrive at the serial line's rate, each through IRQ 1, and reach the decoder") {
+    std::vector<uint8_t> program(0x20000, 0), mpeg(16, 0);
+    const uint8_t vectors[] = {0x00, 0xF1, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00}; // SSP 0xF10000, PC 0x100
+    std::copy(std::begin(vectors), std::end(vectors), program.begin());
+    const uint8_t autovectors[] = {0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x10}; // autovectors 1: 0x200, 2 (timer): 0x210
+    std::copy(std::begin(autovectors), std::end(autovectors), program.begin() + 0x64);
+    const uint8_t idle[] = {0x46, 0xFC, 0x20, 0x00, 0x60, 0xFE}; // move.w #$2000,sr; bra.s *
+    std::copy(std::begin(idle), std::end(idle), program.begin() + 0x100);
+    const uint8_t handler[] = {0x13, 0xF9, 0x00, 0xC0, 0x00, 0x01, 0x00, 0xE0, 0x00, 0x03, // move.b $C00001,$E00003
+                               0x4E, 0x73};                                                 // rte
+    std::copy(std::begin(handler), std::end(handler), program.begin() + 0x200);
+    program[0x210] = 0x4E; // rte
+    program[0x211] = 0x73;
+    Dsb2 dsb(program, mpeg);
+    for (uint8_t b : std::initializer_list<uint8_t>{0x24, 0x00, 0x00, 0x10, 0x74}) dsb.midi_in(b); // end address 0x10, play
+    std::vector<int16_t> out(2 * 200, 0);
+    dsb.render(out.data(), 20); // 20 samples: 5,000 cycles, two bytes' time at 31,250 baud
+    CHECK(dsb.commands >= 1 && dsb.commands <= 2);
+    dsb.render(out.data(), 200);
+    CHECK_EQ(dsb.commands, uint64_t{5});
+    CHECK_EQ(dsb.irqs_taken[1], uint64_t{5});
+    CHECK_EQ(dsb.tracks_started, uint64_t{1});
+    CHECK(!dsb.playing()); // no MPEG frames in 16 zero bytes: it stops
+    CHECK_EQ(out[399], int16_t{0});
 }
 
 TEST_CASE("real3d: textures through the FIFO land in 8x8 tiles, pairs swapped") {

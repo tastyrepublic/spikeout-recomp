@@ -32,8 +32,10 @@ public:
     void write8(uint32_t addr, uint8_t v);
     void write16(uint32_t addr, uint16_t v);
 
-    // One output sample: front left/right of this chip, 16-bit range.
-    void sample(int32_t& left, int32_t& right);
+    // One output sample of this chip, 16-bit range. `ext_left`/`ext_right`
+    // are the external inputs (EXTS 0/1): mixed at slots 16/17's levels, and
+    // inputs to the effect DSP.
+    void sample(int32_t& left, int32_t& right, int16_t ext_left = 0, int16_t ext_right = 0);
     // Advance the timers by one sample (master).
     void tick_timers();
     // The interrupt level for the sound CPU, 0 when none (master).
@@ -45,6 +47,8 @@ public:
     uint64_t midi_dropped = 0;
 
     int active_slots() const;
+    uint16_t common_reg(uint32_t addr) const { return regs_[(addr & 0x3E) / 2]; } // 0x400-0x42F, as last written
+    uint16_t slot_reg(int slot, uint32_t addr) const { return slots_[static_cast<std::size_t>(slot & 31)].data[(addr & 0x1E) / 2]; }
 
 private:
     struct Lfo {
