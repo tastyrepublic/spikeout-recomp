@@ -125,6 +125,81 @@ target_link_libraries(codemap PRIVATE analysis spikeout_warnings)
 add_executable(ppcrecomp tools/ppcrecomp.cpp)
 target_link_libraries(ppcrecomp PRIVATE recomp_lifter spikeout_warnings)
 
+# SDL3, for the window and the GPU renderer: from the system if CMake finds
+# it, otherwise downloaded and built with the project (zlib license).
+option(SPIKEOUT_FRONTEND "Build the spikeout window (SDL3)" ON)
+option(SPIKEOUT_GPU "Build the GPU renderer (SDL GPU: Vulkan, Metal)" ON)
+include(FetchContent)
+if(SPIKEOUT_FRONTEND OR SPIKEOUT_GPU)
+    find_package(SDL3 CONFIG QUIET)
+    if(NOT SDL3_FOUND)
+        set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+        set(SDL_STATIC ON CACHE BOOL "" FORCE)
+        set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+        set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(SDL3
+            GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+            GIT_TAG release-3.4.16
+            GIT_SHALLOW TRUE)
+        FetchContent_MakeAvailable(SDL3)
+    endif()
+endif()
+
+# The GPU renderer. Its shaders (src/gpu/shaders, GLSL) are compiled at build
+# time to SPIR-V for Vulkan with glslang (BSD-3-Clause and others) and to
+# Metal source with SPIRV-Cross (Apache-2.0), both downloaded as build tools.
+if(SPIKEOUT_GPU)
+    set(ENABLE_OPT OFF CACHE BOOL "" FORCE)
+    set(ENABLE_GLSLANG_BINARIES ON CACHE BOOL "" FORCE)
+    set(GLSLANG_TESTS OFF CACHE BOOL "" FORCE)
+    set(GLSLANG_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+    set(ENABLE_HLSL OFF CACHE BOOL "" FORCE)
+    set(ENABLE_SPVREMAPPER OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(glslang
+        GIT_REPOSITORY https://github.com/KhronosGroup/glslang.git
+        GIT_TAG 16.4.0
+        GIT_SHALLOW TRUE)
+    set(SPIRV_CROSS_CLI ON CACHE BOOL "" FORCE)
+    foreach(part GLSL HLSL MSL CPP REFLECT UTIL) # the command-line tool needs them all
+        set(SPIRV_CROSS_ENABLE_${part} ON CACHE BOOL "" FORCE)
+    endforeach()
+    set(SPIRV_CROSS_STATIC ON CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_SHARED OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_C_API OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_SKIP_INSTALL ON CACHE BOOL "" FORCE)
+    FetchContent_Declare(spirv_cross
+        GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Cross.git
+        GIT_TAG vulkan-sdk-1.4.350.0
+        GIT_SHALLOW TRUE)
+    FetchContent_MakeAvailable(glslang spirv_cross)
+
+    set(shader_dir ${CMAKE_SOURCE_DIR}/src/gpu/shaders)
+    set(shader_out ${CMAKE_BINARY_DIR}/shaders)
+    file(MAKE_DIRECTORY ${shader_out})
+    set(shader_sources)
+    foreach(shader present.vert present.frag)
+        string(REPLACE "." "_" name ${shader})
+        set(spv ${shader_out}/${shader}.spv)
+        set(msl ${shader_out}/${shader}.msl)
+        set(cpp ${shader_out}/${name}.cpp)
+        add_custom_command(
+            OUTPUT ${cpp}
+            COMMAND $<TARGET_FILE:glslang-standalone> -V --target-env vulkan1.0 -o ${spv} ${shader_dir}/${shader}
+            COMMAND $<TARGET_FILE:spirv-cross> ${spv} --msl --msl-version 20100 --output ${msl}
+            COMMAND ${CMAKE_COMMAND} -DNAME=${name} -DSPV=${spv} -DMSL=${msl} -DOUT=${cpp}
+                    -P ${CMAKE_SOURCE_DIR}/cmake/embed_shader.cmake
+            DEPENDS ${shader_dir}/${shader} ${CMAKE_SOURCE_DIR}/cmake/embed_shader.cmake glslang-standalone spirv-cross
+            COMMENT "Compiling shader ${shader}"
+            VERBATIM)
+        list(APPEND shader_sources ${cpp})
+    endforeach()
+
+    add_library(m3gpu src/gpu/present.cpp ${shader_sources})
+    target_include_directories(m3gpu PUBLIC src)
+    target_link_libraries(m3gpu PUBLIC SDL3::SDL3 PRIVATE spikeout_warnings)
+endif()
+
 # Code generated from ROM data goes here, never into the source tree.
 set(SPIKEOUT_GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
 file(MAKE_DIRECTORY ${SPIKEOUT_GENERATED_DIR})
@@ -178,25 +253,15 @@ if(SPIKEOUT_ROM_DIR)
     add_executable(gamerun tools/gamerun.cpp)
     target_link_libraries(gamerun PRIVATE game_ram boot_rom spikeout_warnings)
 
-    # The game in a window. SDL3 from the system if CMake finds it, otherwise
-    # downloaded and built with the project (zlib license).
-    option(SPIKEOUT_FRONTEND "Build the spikeout window (SDL3)" ON)
+    # The game in a window (SDL3, see above); with SPIKEOUT_GPU it draws
+    # through the GPU.
     if(SPIKEOUT_FRONTEND)
-        find_package(SDL3 CONFIG QUIET)
-        if(NOT SDL3_FOUND)
-            include(FetchContent)
-            set(SDL_SHARED OFF CACHE BOOL "" FORCE)
-            set(SDL_STATIC ON CACHE BOOL "" FORCE)
-            set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
-            set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
-            FetchContent_Declare(SDL3
-                GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
-                GIT_TAG release-3.4.16
-                GIT_SHALLOW TRUE)
-            FetchContent_MakeAvailable(SDL3)
-        endif()
         add_executable(spikeout tools/spikeout.cpp)
         target_link_libraries(spikeout PRIVATE game_ram boot_rom SDL3::SDL3 spikeout_warnings)
+        if(SPIKEOUT_GPU)
+            target_link_libraries(spikeout PRIVATE m3gpu)
+            target_compile_definitions(spikeout PRIVATE SPIKEOUT_GPU)
+        endif()
     endif()
 endif()
 
@@ -209,6 +274,10 @@ if(SPIKEOUT_BUILD_TESTS)
         tests/test_analysis.cpp
         tests/test_devices.cpp)
     target_link_libraries(spikeout_tests PRIVATE analysis m3runtime spikeout_warnings)
+    if(SPIKEOUT_GPU)
+        target_sources(spikeout_tests PRIVATE tests/test_gpu.cpp)
+        target_link_libraries(spikeout_tests PRIVATE m3gpu)
+    endif()
     add_test(NAME spikeout_tests COMMAND spikeout_tests)
 
     # Lifter tests: a small test program is lifted at build time and run.

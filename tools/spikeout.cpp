@@ -2,7 +2,7 @@
 //
 //   spikeout <rom_dir> [--scale N] [--netboard sim] [--frames N] [--mute] [--quads]
 //                     [--midi-burst] [--dma-instant] [--sound-volume N] [--music-volume N]
-//                     [--boards N]
+//                     [--boards N] [--no-gpu]
 //
 // The game runs on its own thread, paced to the Model 3's 57.524 Hz; the
 // window shows the tile generator's 2D layers and the Real3D's picture
@@ -29,6 +29,9 @@
 //
 // Only board 0's sound plays.
 //
+// The window draws through the GPU (Vulkan, Metal) when SDL finds one it
+// can use, else, or with --no-gpu, through SDL's 2D renderer.
+//
 // --frames N quits after N frames and writes the last one to
 // spikeout-<N>.png (for testing). --quads draws quads whole, as Supermodel's
 // "quad rendering" option (slower in software). --midi-burst sends the sound
@@ -49,6 +52,9 @@
 #include "runtime/tilegen.hpp"
 #include "game_setup.hpp"
 #include "png_write.hpp"
+#ifdef SPIKEOUT_GPU
+#include "gpu/present.hpp"
+#endif
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
@@ -314,7 +320,7 @@ int main(int argc, char** argv) {
     int scale = 0;
     bool real_netboard = true;
     uint64_t max_frames = 0;
-    bool mute = false, quads = false, midi_burst = false, dma_instant = false;
+    bool mute = false, quads = false, midi_burst = false, dma_instant = false, use_gpu = true;
     int sound_volume = 100, music_volume = 100;
     std::size_t boards = 1;
     for (int i = 1; i < argc; ++i) {
@@ -328,6 +334,7 @@ int main(int argc, char** argv) {
         else if (arg == "--midi-burst") midi_burst = true;
         else if (arg == "--dma-instant") dma_instant = true;
         else if (arg == "--mute") mute = true;
+        else if (arg == "--no-gpu") use_gpu = false;
         else if (arg == "--sound-volume" && i + 1 < argc) sound_volume = std::atoi(argv[++i]);
         else if (arg == "--music-volume" && i + 1 < argc) music_volume = std::atoi(argv[++i]);
         else if (!dir) dir = argv[i];
@@ -335,7 +342,7 @@ int main(int argc, char** argv) {
     if (!dir) {
         std::fprintf(stderr, "usage: spikeout <rom_dir> [--scale N] [--netboard sim|real] [--frames N] [--mute] [--quads]\n"
                              "                [--midi-burst] [--dma-instant] [--sound-volume N] [--music-volume N]\n"
-                             "                [--boards N]\n");
+                             "                [--boards N] [--no-gpu]\n");
         return 2;
     }
     if (scale == 0) scale = boards == 1 ? 2 : 1;
@@ -351,17 +358,43 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "spikeout: SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
-    SDL_Window* window = nullptr;
-    SDL_Renderer* renderer = nullptr;
-    if (!SDL_CreateWindowAndRenderer("Spikeout: Final Edition", width * scale, height * scale, SDL_WINDOW_RESIZABLE,
-                                     &window, &renderer)) {
+    SDL_Window* window = SDL_CreateWindow("Spikeout: Final Edition", width * scale, height * scale, SDL_WINDOW_RESIZABLE);
+    if (!window) {
         std::fprintf(stderr, "spikeout: %s\n", SDL_GetError());
         return 1;
     }
-    SDL_SetRenderVSync(renderer, 1);
-    SDL_SetRenderLogicalPresentation(renderer, width, height, SDL_LOGICAL_PRESENTATION_LETTERBOX);
-    SDL_Texture* texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, width, height);
-    SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_NEAREST);
+    // Shown through the GPU (Vulkan, Metal) when there is one SDL can use,
+    // otherwise through SDL's 2D renderer.
+#ifdef SPIKEOUT_GPU
+    auto gpu_device = std::make_unique<gpu::Device>();
+    auto presenter = std::make_unique<gpu::Presenter>();
+    bool on_gpu = false;
+    if (use_gpu) {
+        on_gpu = gpu_device->open(window) && presenter->open(*gpu_device);
+        if (on_gpu) std::printf("spikeout: drawing with the GPU (%s)\n", gpu_device->driver());
+        else {
+            std::printf("spikeout: no GPU (%s); drawing with SDL's renderer\n", gpu_device->error().c_str());
+            presenter.reset(); // gives the window back
+            gpu_device.reset();
+        }
+    }
+#else
+    const bool on_gpu = false;
+    (void)use_gpu;
+#endif
+    SDL_Renderer* renderer = nullptr;
+    SDL_Texture* texture = nullptr;
+    if (!on_gpu) {
+        renderer = SDL_CreateRenderer(window, nullptr);
+        if (!renderer) {
+            std::fprintf(stderr, "spikeout: %s\n", SDL_GetError());
+            return 1;
+        }
+        SDL_SetRenderVSync(renderer, 1);
+        SDL_SetRenderLogicalPresentation(renderer, width, height, SDL_LOGICAL_PRESENTATION_LETTERBOX);
+        texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, width, height);
+        SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_NEAREST);
+    }
 
     Shared shared;
     shared.boards = boards;
@@ -440,6 +473,12 @@ int main(int argc, char** argv) {
             fps_start = now;
             fps_frames = 0;
         }
+#ifdef SPIKEOUT_GPU
+        if (on_gpu) {
+            presenter->present(shown, width, height); // waits for the display (vsync)
+            continue;
+        }
+#endif
         SDL_UpdateTexture(texture, nullptr, shown.data(), width * 4);
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
@@ -450,6 +489,10 @@ int main(int argc, char** argv) {
     shared.quit = true;
     for (std::thread& g : games) g.join();
     sound.reset();
+#ifdef SPIKEOUT_GPU
+    presenter.reset(); // before the device, and both before the window
+    gpu_device.reset();
+#endif
     SDL_DestroyTexture(texture);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
