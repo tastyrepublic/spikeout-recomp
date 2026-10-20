@@ -66,6 +66,8 @@ public:
     uint32_t model(uint32_t addr) const; // polygon RAM or VROM
     const uint32_t* culling_ptr(uint32_t addr) const; // nullptr outside memory
     uint16_t texel(uint32_t x, uint32_t y) const { return texture_[(y & 2047) * kTextureWidth + (x & 2047)]; }
+    // All of texture RAM, 2048 x 2048 texels, row by row (for the GPU).
+    std::span<const uint16_t> texture_ram() const { return texture_; }
 
     // Writes since the last flush (for tests and statistics).
     uint64_t textures_uploaded() const { return textures_uploaded_; }

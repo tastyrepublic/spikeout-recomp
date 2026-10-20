@@ -111,12 +111,13 @@ void TilegenRenderer::draw_line(std::span<const uint8_t> ram, const std::array<u
     }
 }
 
-void TilegenRenderer::composite(std::span<uint32_t> out, std::span<const uint32_t> three_d) const {
-    const std::size_t n = std::min(out.size(), bottom_.size());
+void TilegenRenderer::composite(std::span<uint32_t> out, std::span<const uint32_t> bottom, std::span<const uint32_t> top,
+                                std::span<const uint32_t> three_d) {
+    const std::size_t n = std::min(out.size(), bottom.size());
     const bool has_3d = three_d.size() >= n;
     for (std::size_t i = 0; i < n; ++i) {
         uint32_t p = 0xFF000000u;
-        if (bottom_[i]) p = bottom_[i];
+        if (bottom[i]) p = bottom[i];
         if (has_3d) {
             const uint32_t q = three_d[i];
             const uint32_t a = q >> 24;
@@ -130,7 +131,7 @@ void TilegenRenderer::composite(std::span<uint32_t> out, std::span<const uint32_
                 p = 0xFF000000u | mix(16) | mix(8) | mix(0);
             }
         }
-        if (top_[i]) p = top_[i];
+        if (top[i]) p = top[i];
         out[i] = p;
     }
 }

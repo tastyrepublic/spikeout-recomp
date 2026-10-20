@@ -178,27 +178,47 @@ if(SPIKEOUT_GPU)
     set(shader_dir ${CMAKE_SOURCE_DIR}/src/gpu/shaders)
     set(shader_out ${CMAKE_BINARY_DIR}/shaders)
     file(MAKE_DIRECTORY ${shader_out})
+    # FILE or FILE@DEFINE: a variant built with DEFINE set, named
+    # file_define_stage (scene.frag@OPAQUE -> scene_opaque_frag).
+    set(shaders present.vert present.frag scene.vert scene.frag scene.frag@OPAQUE
+        background_fog.frag depth_copy.frag composite.frag screen.frag)
+    file(GLOB shader_includes ${shader_dir}/*.glsl)
     set(shader_sources)
-    foreach(shader present.vert present.frag)
-        string(REPLACE "." "_" name ${shader})
-        set(spv ${shader_out}/${shader}.spv)
-        set(msl ${shader_out}/${shader}.msl)
+    foreach(entry ${shaders})
+        string(REPLACE "@" ";" parts ${entry})
+        list(GET parts 0 shader)
+        string(REGEX REPLACE "\\.(vert|frag)$" "" base ${shader})
+        string(REGEX MATCH "(vert|frag)$" stage ${shader})
+        set(defines)
+        set(name ${base})
+        list(LENGTH parts n)
+        if(n GREATER 1)
+            list(GET parts 1 define)
+            set(defines -D${define})
+            string(TOLOWER ${define} lower)
+            set(name ${base}_${lower})
+        endif()
+        set(name ${name}_${stage})
+        set(spv ${shader_out}/${name}.spv)
+        set(msl ${shader_out}/${name}.msl)
         set(cpp ${shader_out}/${name}.cpp)
         add_custom_command(
             OUTPUT ${cpp}
-            COMMAND $<TARGET_FILE:glslang-standalone> -V --target-env vulkan1.0 -o ${spv} ${shader_dir}/${shader}
-            COMMAND $<TARGET_FILE:spirv-cross> ${spv} --msl --msl-version 20100 --output ${msl}
+            COMMAND $<TARGET_FILE:glslang-standalone> -V --target-env vulkan1.0 -I${shader_dir} ${defines}
+                    -o ${spv} ${shader_dir}/${shader}
+            COMMAND $<TARGET_FILE:spirv-cross> ${spv} --msl --msl-version 20100 --msl-decoration-binding --output ${msl}
             COMMAND ${CMAKE_COMMAND} -DNAME=${name} -DSPV=${spv} -DMSL=${msl} -DOUT=${cpp}
                     -P ${CMAKE_SOURCE_DIR}/cmake/embed_shader.cmake
-            DEPENDS ${shader_dir}/${shader} ${CMAKE_SOURCE_DIR}/cmake/embed_shader.cmake glslang-standalone spirv-cross
-            COMMENT "Compiling shader ${shader}"
+            DEPENDS ${shader_dir}/${shader} ${shader_includes} ${CMAKE_SOURCE_DIR}/cmake/embed_shader.cmake
+                    glslang-standalone spirv-cross
+            COMMENT "Compiling shader ${name}"
             VERBATIM)
         list(APPEND shader_sources ${cpp})
     endforeach()
 
-    add_library(m3gpu src/gpu/present.cpp ${shader_sources})
+    add_library(m3gpu src/gpu/present.cpp src/gpu/real3d_gpu.cpp ${shader_sources})
     target_include_directories(m3gpu PUBLIC src)
-    target_link_libraries(m3gpu PUBLIC SDL3::SDL3 PRIVATE spikeout_warnings)
+    target_link_libraries(m3gpu PUBLIC SDL3::SDL3 m3runtime PRIVATE spikeout_warnings)
 endif()
 
 # Code generated from ROM data goes here, never into the source tree.
@@ -253,6 +273,10 @@ if(SPIKEOUT_ROM_DIR)
 
     add_executable(gamerun tools/gamerun.cpp)
     target_link_libraries(gamerun PRIVATE game_ram boot_rom spikeout_warnings)
+    if(SPIKEOUT_GPU)
+        target_link_libraries(gamerun PRIVATE m3gpu)
+        target_compile_definitions(gamerun PRIVATE SPIKEOUT_GPU)
+    endif()
 
     # The game in a window (SDL3, see above); with SPIKEOUT_GPU it draws
     # through the GPU.

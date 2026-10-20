@@ -105,6 +105,27 @@ struct Real3dScene {
         uint32_t spotlights = 0; // viewports with the spotlight on
     } stats;
 
+    // Fog over the 2D layers behind the 3D, drawn before the scene so the
+    // scene covers it (Supermodel's DrawAmbientFog and DrawScrollFog, its
+    // "best guess at the logic based upon what games are doing"; Spikeout
+    // sets scroll fog on one viewport of a priority):
+    //  - ambient fog: in the lowest priority with viewports, the lowest fog
+    //    ambient among those with fog (a density or start) and no scroll fog
+    //    darkens its viewport: black at 1 - ambient;
+    //  - scroll fog: the highest scroll fog value of the lowest priority that
+    //    has one fills its viewport with its fog colour (times the fog
+    //    ambient, plus the spotlight on fog) at that alpha, if some viewport
+    //    with the same fog colour has fog or a spotlight on fog.
+    struct BackgroundFog {
+        int ambient = -1; // viewport darkened (-1: none), and by how much
+        float ambient_alpha = 0;
+        int scroll = -1; // viewport filled with scroll fog (-1: none)
+        int light = -1;  // the viewport whose fog ambient and spotlight colour it
+        float attenuation = 0; // of the spotlight on fog
+        bool spot = false;     // the spotlight shows on it
+    };
+    BackgroundFog background_fog() const;
+
     // The viewports as read, for reports.
     struct ViewportInfo {
         int priority;

@@ -2,7 +2,7 @@
 //
 //   spikeout <rom_dir> [--scale N] [--netboard sim] [--frames N] [--mute] [--quads]
 //                     [--midi-burst] [--dma-instant] [--sound-volume N] [--music-volume N]
-//                     [--boards N] [--no-gpu]
+//                     [--boards N] [--no-gpu] [--soft-3d] [--render-scale N]
 //
 // The game runs on its own thread, paced to the Model 3's 57.524 Hz; the
 // window shows the tile generator's 2D layers and the Real3D's picture
@@ -30,7 +30,10 @@
 // Only board 0's sound plays.
 //
 // The window draws through the GPU (Vulkan, Metal) when SDL finds one it
-// can use, else, or with --no-gpu, through SDL's 2D renderer.
+// can use, else, or with --no-gpu, through SDL's 2D renderer. On the GPU the
+// 3D is drawn there too (gpu::Real3dGpu), one board only; --soft-3d keeps it
+// in software. --render-scale N draws the 3D N times as large each way (the
+// 2D layers stay 496x384).
 //
 // --frames N quits after N frames and writes the last one to
 // spikeout-<N>.png (for testing). --quads draws quads whole, as Supermodel's
@@ -54,6 +57,7 @@
 #include "png_write.hpp"
 #ifdef SPIKEOUT_GPU
 #include "gpu/present.hpp"
+#include "gpu/real3d_gpu.hpp"
 #endif
 
 #include <SDL3/SDL.h>
@@ -104,6 +108,18 @@ struct Shared {
     bool midi_burst = false; // Supermodel's MIDI timing
     bool dma_instant = false; // Real3D DMA done at once (Supermodel, MAME)
     Sound* sound = nullptr; // nullptr: muted
+
+    // The 3D drawn by the GPU (one board): the game thread leaves each
+    // frame's scene and 2D layers here, and the window draws them.
+    bool gpu_3d = false;
+    struct GpuFrame {
+        m3::Real3dScene scene;
+        std::vector<uint32_t> bottom, top;
+        uint64_t number = 0;
+    } gpu_frame;
+    // Texture RAM as of the last upload, and which upload that was.
+    std::shared_ptr<const std::vector<uint16_t>> textures;
+    uint64_t textures_version = 0;
 };
 
 // Keyboard state to the I/O boards' input bytes (bits clear while pressed).
@@ -261,10 +277,31 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             turns.pass(index);
         }
     };
+    m3::Real3dSceneBuilder builder;
+    Shared::GpuFrame gpu_frame;
+    uint64_t textures_seen = UINT64_MAX;
     timing.on_frame_end = [&] {
-        real3d.render(bus.real3d());
-        tilegen.composite(screen, real3d.image());
-        {
+        if (shared.gpu_3d) { // the scene and layers for the window to draw
+            const m3::Real3d& mem = bus.real3d();
+            builder.build(mem, gpu_frame.scene);
+            gpu_frame.bottom.assign(tilegen.bottom().begin(), tilegen.bottom().end());
+            gpu_frame.top.assign(tilegen.top().begin(), tilegen.top().end());
+            gpu_frame.number = timing.frames();
+            std::shared_ptr<const std::vector<uint16_t>> textures;
+            if (mem.textures_uploaded() != textures_seen) {
+                textures_seen = mem.textures_uploaded();
+                textures = std::make_shared<const std::vector<uint16_t>>(mem.texture_ram().begin(), mem.texture_ram().end());
+            }
+            std::lock_guard<std::mutex> guard(shared.lock);
+            std::swap(shared.gpu_frame, gpu_frame);
+            if (textures) {
+                shared.textures = std::move(textures);
+                ++shared.textures_version;
+            }
+            out.frame_number = timing.frames();
+        } else {
+            real3d.render(bus.real3d());
+            tilegen.composite(screen, real3d.image());
             std::lock_guard<std::mutex> guard(shared.lock);
             out.frame.swap(screen);
             out.frame_number = timing.frames();
@@ -317,10 +354,10 @@ int grid_rows(std::size_t boards) { return boards <= 2 ? 1 : 2; }
 
 int main(int argc, char** argv) {
     const char* dir = nullptr;
-    int scale = 0;
+    int scale = 0, render_scale = 1;
     bool real_netboard = true;
     uint64_t max_frames = 0;
-    bool mute = false, quads = false, midi_burst = false, dma_instant = false, use_gpu = true;
+    bool mute = false, quads = false, midi_burst = false, dma_instant = false, use_gpu = true, gpu_3d = true;
     int sound_volume = 100, music_volume = 100;
     std::size_t boards = 1;
     for (int i = 1; i < argc; ++i) {
@@ -335,6 +372,8 @@ int main(int argc, char** argv) {
         else if (arg == "--dma-instant") dma_instant = true;
         else if (arg == "--mute") mute = true;
         else if (arg == "--no-gpu") use_gpu = false;
+        else if (arg == "--soft-3d") gpu_3d = false;
+        else if (arg == "--render-scale" && i + 1 < argc) render_scale = std::clamp(std::atoi(argv[++i]), 1, 8);
         else if (arg == "--sound-volume" && i + 1 < argc) sound_volume = std::atoi(argv[++i]);
         else if (arg == "--music-volume" && i + 1 < argc) music_volume = std::atoi(argv[++i]);
         else if (!dir) dir = argv[i];
@@ -342,7 +381,7 @@ int main(int argc, char** argv) {
     if (!dir) {
         std::fprintf(stderr, "usage: spikeout <rom_dir> [--scale N] [--netboard sim|real] [--frames N] [--mute] [--quads]\n"
                              "                [--midi-burst] [--dma-instant] [--sound-volume N] [--music-volume N]\n"
-                             "                [--boards N] [--no-gpu]\n");
+                             "                [--boards N] [--no-gpu] [--soft-3d] [--render-scale N]\n");
         return 2;
     }
     if (scale == 0) scale = boards == 1 ? 2 : 1;
@@ -406,6 +445,38 @@ int main(int argc, char** argv) {
     std::unique_ptr<Sound> sound;
     if (!mute) sound = std::make_unique<Sound>(roms, sound_volume, music_volume);
     shared.sound = sound.get();
+#ifdef SPIKEOUT_GPU
+    // The 3D on the GPU too (one board; linked test runs draw it in software).
+    std::unique_ptr<gpu::Real3dGpu> real3d_gpu;
+    if (on_gpu && boards == 1 && gpu_3d) {
+        real3d_gpu = std::make_unique<gpu::Real3dGpu>();
+        if (real3d_gpu->open(*gpu_device, render_scale)) {
+            shared.gpu_3d = true;
+        } else {
+            std::printf("spikeout: 3D in software (%s)\n", real3d_gpu->error().c_str());
+            real3d_gpu.reset();
+        }
+    }
+    Shared::GpuFrame gpu_frame; // the frame the window shows
+    std::shared_ptr<const std::vector<uint16_t>> textures;
+    uint64_t textures_version = 0;
+    // Reads the GPU's 3D back and composes the screen (F12, the end of a test
+    // run), at 496x384: drawn larger, every render_scale-th pixel.
+    auto capture = [&] {
+        std::vector<uint32_t> drawn, three_d(static_cast<std::size_t>(kWidth) * kHeight);
+        if (textures) real3d_gpu->render(gpu_frame.scene, *textures, textures_version, &drawn);
+        const auto stride = static_cast<std::size_t>(kWidth * render_scale);
+        for (std::size_t y = 0; y < static_cast<std::size_t>(kHeight) && !drawn.empty(); ++y)
+            for (std::size_t x = 0; x < static_cast<std::size_t>(kWidth); ++x)
+                three_d[y * kWidth + x] = drawn[y * static_cast<std::size_t>(render_scale) * stride + x * static_cast<std::size_t>(render_scale)];
+        std::vector<uint32_t> screen(static_cast<std::size_t>(kWidth) * kHeight);
+        m3::TilegenRenderer::composite(screen, gpu_frame.bottom, gpu_frame.top, three_d);
+        return screen;
+    };
+#else
+    (void)gpu_3d;
+    (void)render_scale;
+#endif
     std::unique_ptr<m3::LinkRing> ring;
     if (boards > 1) ring = std::make_unique<m3::LinkRing>(boards);
     tools::Turns turns(boards);
@@ -433,6 +504,9 @@ int main(int argc, char** argv) {
             if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_ESCAPE) running = false;
             if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_F12 && !e.key.repeat) {
                 const std::string path = "spikeout-" + std::to_string(shown_number[0]) + ".png";
+#ifdef SPIKEOUT_GPU
+                if (shared.gpu_3d) shown = capture();
+#endif
                 if (tools::write_png(path, shown, width, height)) std::printf("screenshot: %s\n", path.c_str());
             }
             if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode >= SDL_SCANCODE_F5 && e.key.scancode <= SDL_SCANCODE_F8) {
@@ -457,8 +531,22 @@ int main(int argc, char** argv) {
                     reported |= 1u << b;
                 }
             }
+#ifdef SPIKEOUT_GPU
+            // A newer frame for the GPU to draw (the swap leaves the older one
+            // in its place, for the game thread to fill next).
+            if (shared.gpu_3d && shared.gpu_frame.number > gpu_frame.number) {
+                std::swap(gpu_frame, shared.gpu_frame);
+                if (shared.textures_version != textures_version) {
+                    textures = shared.textures;
+                    textures_version = shared.textures_version;
+                }
+            }
+#endif
             if (max_frames && reported == (1u << boards) - 1) { // a test run: keep the last frames and close
                 for (std::size_t b = 0; b < boards; ++b) place(b, shared.screens[b].frame);
+#ifdef SPIKEOUT_GPU
+                if (shared.gpu_3d) shown = capture();
+#endif
                 const std::string path = "spikeout-" + std::to_string(shown_number[0]) + ".png";
                 if (tools::write_png(path, shown, width, height)) std::printf("screenshot: %s\n", path.c_str());
                 running = false;
@@ -474,6 +562,15 @@ int main(int argc, char** argv) {
             fps_frames = 0;
         }
 #ifdef SPIKEOUT_GPU
+        if (on_gpu && shared.gpu_3d) {
+            if (textures && !gpu_frame.bottom.empty()) {
+                real3d_gpu->render(gpu_frame.scene, *textures, textures_version);
+                presenter->present_layers(gpu_frame.bottom, gpu_frame.top, real3d_gpu->image(), kWidth, kHeight);
+            } else {
+                presenter->present(shown, width, height);
+            }
+            continue;
+        }
         if (on_gpu) {
             presenter->present(shown, width, height); // waits for the display (vsync)
             continue;
@@ -490,7 +587,8 @@ int main(int argc, char** argv) {
     for (std::thread& g : games) g.join();
     sound.reset();
 #ifdef SPIKEOUT_GPU
-    presenter.reset(); // before the device, and both before the window
+    real3d_gpu.reset(); // before the device, and all before the window
+    presenter.reset();
     gpu_device.reset();
 #endif
     SDL_DestroyTexture(texture);

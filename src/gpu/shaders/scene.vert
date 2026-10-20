@@ -1,0 +1,35 @@
+// A scene vertex: eye space to the polygon's viewport. Clip w is the
+// distance along the view, and depth kNear / distance (decals a little
+// nearer), so the depth buffer holds what the software renderer compares:
+// larger is nearer.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "scene_common.glsl"
+
+layout(location = 0) in vec3 position; // eye space, z < 0 in front
+layout(location = 1) in vec2 uv_in;    // texels
+layout(location = 2) in float shade_in;
+layout(location = 3) in vec3 normal_in;
+layout(location = 4) in uint polygon_in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Polygons { Polygon polygons[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Viewports { Viewport viewports[]; };
+
+layout(location = 0) out vec2 uv;
+layout(location = 1) out float shade;
+layout(location = 2) out vec3 normal;
+layout(location = 3) flat out uint polygon;
+
+void main() {
+    const Polygon p = polygons[polygon_in];
+    const vec4 f = viewports[p.flags.z].frustum; // left, right, bottom, top
+    const float w = -position.z;
+    const float x = (2.0 * position.x - (f.x + f.y) * w) / (f.y - f.x);
+    const float y = (2.0 * position.y - (f.z + f.w) * w) / (f.w - f.z);
+    const float bias = (p.flags.x & kFlagLayered) != 0u ? kDecalBias : 1.0;
+    gl_Position = vec4(x, y, kNear * bias, w);
+    uv = uv_in;
+    shade = shade_in;
+    normal = normal_in;
+    polygon = polygon_in;
+}

@@ -45,7 +45,11 @@ public:
     std::span<const uint32_t> top() const { return top_; }
     // Black, then the layers below the 3D, the 3D picture (`three_d`, same
     // size, alpha 0 where empty; may be empty), then the layers above.
-    void composite(std::span<uint32_t> out, std::span<const uint32_t> three_d = {}) const;
+    void composite(std::span<uint32_t> out, std::span<const uint32_t> three_d = {}) const {
+        composite(out, bottom_, top_, three_d);
+    }
+    static void composite(std::span<uint32_t> out, std::span<const uint32_t> bottom, std::span<const uint32_t> top,
+                          std::span<const uint32_t> three_d);
 
 private:
     std::vector<uint32_t> bottom_, top_;

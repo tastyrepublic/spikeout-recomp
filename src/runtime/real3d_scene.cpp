@@ -51,6 +51,51 @@ Mat4 Mat4::operator*(const Mat4& b) const {
     return r;
 }
 
+Real3dScene::BackgroundFog Real3dScene::background_fog() const {
+    BackgroundFog fog;
+    float lowest = 1.0f;
+    for (int priority = 0; priority < 4; ++priority) {
+        bool any = false;
+        for (size_t i = 0; i < viewports.size(); ++i) {
+            const Viewport& v = viewports[i];
+            if (v.priority != priority) continue;
+            any = true;
+            if (v.scroll_fog > 0 || (v.fog_density <= 0 && v.fog_start <= 0)) continue;
+            if (v.fog_ambient < lowest) {
+                fog.ambient = static_cast<int>(i);
+                lowest = v.fog_ambient;
+            }
+        }
+        if (fog.ambient >= 0 || any) break;
+    }
+    fog.ambient_alpha = 1.0f - lowest;
+
+    for (int priority = 0; priority < 4 && fog.scroll < 0; ++priority)
+        for (size_t i = 0; i < viewports.size(); ++i) {
+            const Viewport& v = viewports[i];
+            if (v.priority == priority && v.scroll_fog > 0 &&
+                (fog.scroll < 0 || viewports[static_cast<size_t>(fog.scroll)].scroll_fog < v.scroll_fog))
+                fog.scroll = static_cast<int>(i);
+        }
+    if (fog.scroll < 0) return fog;
+    const Viewport& scroll = viewports[static_cast<size_t>(fog.scroll)];
+    for (size_t i = 0; i < viewports.size(); ++i) {
+        const Viewport& v = viewports[i];
+        if (v.fog_colour_set != scroll.fog_colour_set) continue;
+        const bool spot_on_fog = v.spot_fog_colour[0] > 0 || v.spot_fog_colour[1] > 0 || v.spot_fog_colour[2] > 0;
+        const bool has_fog = v.fog_density > 0 || v.fog_start > 0 || v.scroll_attenuation > 0;
+        const bool spot_fog = v.fog_attenuation > 0 && spot_on_fog;
+        if (!has_fog && !spot_fog) continue;
+        // With regular fog on, the hardware seems to skip the spotlight on fog (Supermodel, ECA).
+        fog.light = static_cast<int>(i);
+        fog.attenuation = has_fog && spot_fog ? 0.0f : v.fog_attenuation;
+        fog.spot = fog.attenuation > 0 && spot_on_fog;
+        return fog;
+    }
+    fog.scroll = -1; // no viewport lights it
+    return fog;
+}
+
 float Real3dSceneBuilder::culling_float(uint32_t addr) const { return as_float(mem_->culling(addr)); }
 
 void Real3dSceneBuilder::build(const Real3d& mem, Real3dScene& scene) {

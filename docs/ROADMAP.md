@@ -48,8 +48,10 @@ Each milestone ends with something you can run and check.
 - [x] Software rasterizer (depth buffer, perspective-correct textures, sun and ambient light; bands of lines on several threads): the attract mode in 3D at about real time
 - [x] Fog and the ping-pong update buffers
 - [x] Matched against Supermodel frame by frame: frustum culling, LOD fades and cross-fades, back faces, the alpha-test rules (fixed holes in the fighters), opaque-before-translucent order, bilinear mipmapped textures, per-pixel lighting with specular, fixed shading and the spotlight (`gamerun --probe` for single pixels)
-- [ ] Native renderer (Vulkan/Metal via SDL GPU)
-- [ ] Widescreen and high resolution
+- [x] Native renderer (`gpu::Real3dGpu`, SDL GPU: Vulkan, Metal): the scene shared with the software renderer (`m3::Real3dScene`), shaders that sample, light and fog as it does, the same passes; the window draws the 3D with it, and `gamerun --renderer compare` checks it against the software picture (through a gameplay run, about 0.1% of pixels differ, along polygon edges)
+- [ ] GPU renderer: quads drawn whole (`--quads`), the probe, decals in the translucency layers seeing the opaque pass's; Direct3D 12
+- [x] High resolution: `spikeout --render-scale N` draws the 3D N times as large
+- [ ] Widescreen
 - [ ] **Goal:** attract mode and gameplay render correctly
 
 ## 4. Sound and input

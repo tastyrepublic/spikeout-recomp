@@ -653,17 +653,8 @@ void Real3dRenderer::light_and_fog(const Triangle& T, float cx, float cy, float 
 
 namespace m3 {
 
-// Fog over the 2D layers behind the 3D, drawn before the scene so the scene
-// covers it (Supermodel's DrawAmbientFog and DrawScrollFog, its "best guess
-// at the logic based upon what games are doing"; Spikeout sets scroll fog on
-// one viewport of a priority):
-//  - ambient fog: in the lowest priority with viewports, the lowest fog
-//    ambient among those with fog (a density or start) and no scroll fog
-//    darkens its viewport: black at 1 - ambient;
-//  - scroll fog: the highest scroll fog value of the lowest priority that
-//    has one fills its viewport with its fog colour (times the fog ambient,
-//    plus the spotlight on fog) at that alpha, if some viewport with the
-//    same fog colour has fog or a spotlight on fog.
+// Fog over the 2D layers behind the 3D, before the scene (see
+// Real3dScene::background_fog for which and where).
 void Real3dRenderer::draw_background_fog() {
     // Fills a viewport's rectangle; `constant`: the colour is the same everywhere.
     auto fill = [&](const Viewport& rect, bool constant, auto&& rgba) {
@@ -685,51 +676,25 @@ void Real3dRenderer::draw_background_fog() {
         }
     };
 
-    const Viewport* ambient = nullptr;
-    float lowest = 1.0f;
-    for (int priority = 0; priority < 4; ++priority) {
-        bool any = false;
-        for (const Viewport& v : scene_.viewports) {
-            if (v.priority != priority) continue;
-            any = true;
-            if (v.scroll_fog > 0 || (v.fog_density <= 0 && v.fog_start <= 0)) continue;
-            if (v.fog_ambient < lowest) {
-                ambient = &v;
-                lowest = v.fog_ambient;
-            }
-        }
-        if (ambient || any) break;
+    const Real3dScene::BackgroundFog fog = scene_.background_fog();
+    if (fog.ambient >= 0) {
+        ++stats_.ambient_fog;
+        fill(scene_.viewports[static_cast<size_t>(fog.ambient)], true,
+             [&](float, float) { return std::array<float, 4>{0, 0, 0, fog.ambient_alpha}; });
     }
-    if (ambient) ++stats_.ambient_fog;
-    if (ambient) fill(*ambient, true, [&](float, float) { return std::array<float, 4>{0, 0, 0, 1.0f - lowest}; });
-
-    const Viewport* scroll = nullptr;
-    for (int priority = 0; priority < 4 && !scroll; ++priority)
-        for (const Viewport& v : scene_.viewports)
-            if (v.priority == priority && v.scroll_fog > 0 && (!scroll || scroll->scroll_fog < v.scroll_fog)) scroll = &v;
-    if (!scroll) return;
-    for (const Viewport& v : scene_.viewports) {
-        if (v.fog_colour_set != scroll->fog_colour_set) continue;
-        const bool spot_on_fog = v.spot_fog_colour[0] > 0 || v.spot_fog_colour[1] > 0 || v.spot_fog_colour[2] > 0;
-        const bool fog = v.fog_density > 0 || v.fog_start > 0 || v.scroll_attenuation > 0;
-        const bool spot_fog = v.fog_attenuation > 0 && spot_on_fog;
-        if (!fog && !spot_fog) continue;
-        // With regular fog on, the hardware seems to skip the spotlight on fog (Supermodel, ECA).
-        const float attenuation = fog && spot_fog ? 0.0f : v.fog_attenuation;
-        ++stats_.scroll_fog;
-        const bool spot = attenuation > 0 && spot_on_fog;
-        fill(*scroll, !spot, [&](float x, float y) {
-            const float ex = (x - v.spot_x) / v.spot_rx, ey = (y - v.spot_y) / v.spot_ry;
-            const float ellipse = spot ? std::max(0.0f, 1.0f - (ex * ex + ey * ey)) : 0.0f;
-            std::array<float, 4> c{};
-            for (size_t i = 0; i < 3; ++i)
-                c[i] = scroll->fog_colour_set[i] * v.fog_ambient +
-                       v.spot_fog_colour[i] * ellipse * scroll->fog_colour_set[i] * attenuation;
-            c[3] = scroll->scroll_fog;
-            return c;
-        });
-        return;
-    }
+    if (fog.scroll < 0) return;
+    const Viewport& scroll = scene_.viewports[static_cast<size_t>(fog.scroll)];
+    const Viewport& v = scene_.viewports[static_cast<size_t>(fog.light)];
+    ++stats_.scroll_fog;
+    fill(scroll, !fog.spot, [&](float x, float y) {
+        const float ex = (x - v.spot_x) / v.spot_rx, ey = (y - v.spot_y) / v.spot_ry;
+        const float ellipse = fog.spot ? std::max(0.0f, 1.0f - (ex * ex + ey * ey)) : 0.0f;
+        std::array<float, 4> c{};
+        for (size_t i = 0; i < 3; ++i)
+            c[i] = scroll.fog_colour_set[i] * v.fog_ambient + v.spot_fog_colour[i] * ellipse * scroll.fog_colour_set[i] * fog.attenuation;
+        c[3] = scroll.scroll_fog;
+        return c;
+    });
 }
 
 } // namespace m3

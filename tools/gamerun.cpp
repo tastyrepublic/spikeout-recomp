@@ -5,7 +5,7 @@
 //           [--netboard sim|real] [--net-trace N] [--net-disasm FILE]
 //           [--screenshot FILE.png] [--shot-every N] [--press [B:]NAME@FRAME[:N]]...
 //           [--wav FILE.wav] [--probe X,Y@FRAME] [--quads]
-//           [--boards N] [--slice LINES] [--link-latency CYCLES]
+//           [--boards N] [--slice LINES] [--link-latency CYCLES] [--renderer software|gpu|compare]
 //
 // Built only when CMake's SPIKEOUT_ROM_DIR is set. A run ends at the first
 // thing the runtime can't do yet (code that wasn't found, an exception, a
@@ -52,6 +52,11 @@
 // covered pixel (X, Y), with its polygon header and what became of it there
 // (drawn, behind, cut out, blended): for finding holes and wrong pixels.
 // --quads draws quads whole, as Supermodel's "quad rendering" option (slower).
+//
+// --renderer gpu draws the 3D on the GPU instead (gpu::Real3dGpu, read back
+// for the screenshots); --renderer compare draws it both ways and reports
+// how far apart the pictures are, with each screenshot's GPU version beside
+// it (FILE-<frame>-gpu.png).
 #include "games/games.hpp"
 #include "ppc/disasm.hpp"
 #include "ppc/instruction.hpp"
@@ -65,6 +70,10 @@
 #include "game_setup.hpp"
 #include "png_write.hpp"
 #include "wav_write.hpp"
+#ifdef SPIKEOUT_GPU
+#include "gpu/present.hpp"
+#include "gpu/real3d_gpu.hpp"
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -122,6 +131,8 @@ struct Options {
     uint64_t link_latency = 0;
     uint64_t link_trace = 0;
     bool net_watch = false;
+    // --renderer: the 3D in software, on the GPU, or both, compared.
+    enum class Renderer { Software, Gpu, Compare } renderer = Renderer::Software;
     bool irq5_on_e0 = true, send_waits_for_receive = m3::CommBoardOptions().send_waits_for_receive,
          host_sees_other_bank = false;
     double link_cycles_per_byte = m3::CommBoardOptions().link_cycles_per_byte;
@@ -205,7 +216,36 @@ struct Machine {
              frames_block_culled = 0;
     uint64_t micro_tris = 0, translator_tris = 0, inverted_tris = 0;
     uint16_t net_status[2] = {0, 0}; // --net-watch
+
+    // --renderer gpu / compare: the GPU's picture, and how it compared with
+    // the software renderer's (pixels with a channel more than 2 apart).
+#ifdef SPIKEOUT_GPU
+    std::unique_ptr<gpu::Real3dGpu> gpu;
+#endif
+    m3::Real3dSceneBuilder builder;
+    m3::Real3dScene scene;
+    std::vector<uint32_t> gpu_image;
+    double gpu_seconds = 0;
+    uint64_t gpu_frames = 0, frames_compared = 0, frames_differing = 0, pixels_differing = 0;
+    uint64_t worst_frame = 0, worst_pixels = 0;
+    int max_difference = 0;
 };
+
+// How far apart two pictures are: pixels with a channel more than 2 apart,
+// and the largest difference.
+std::pair<uint64_t, int> difference(std::span<const uint32_t> a, std::span<const uint32_t> b) {
+    uint64_t pixels = 0;
+    int largest = 0;
+    for (std::size_t i = 0; i < std::min(a.size(), b.size()); ++i) {
+        if (a[i] == b[i]) continue;
+        int most = 0;
+        for (int s = 0; s < 32; s += 8)
+            most = std::max(most, std::abs(static_cast<int>((a[i] >> s) & 0xFF) - static_cast<int>((b[i] >> s) & 0xFF)));
+        if (most > 2) ++pixels;
+        largest = std::max(largest, most);
+    }
+    return {pixels, largest};
+}
 
 bool for_board(int board, std::size_t index) { return board == kAllBoards || static_cast<std::size_t>(board) == index; }
 
@@ -249,8 +289,10 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
     };
     m.timing.on_frame_end = [&m, &o] {
         const uint64_t frame = m.timing.frames();
-        // The 3D is drawn in software: only when it will be seen.
-        if (o.screenshot || (o.probe_frame && frame == o.probe_frame)) {
+        // The 3D is drawn only when it will be seen.
+        using R = Options::Renderer;
+        const bool drawn = o.screenshot || (o.probe_frame && frame == o.probe_frame);
+        if (drawn && o.renderer != R::Gpu) { // in software
             const auto render_start = std::chrono::steady_clock::now();
             m.real3d.render(m.bus.real3d());
             const auto& s = m.real3d.stats();
@@ -266,8 +308,29 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             m.render_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - render_start).count();
             ++m.frames_rendered;
         }
+#ifdef SPIKEOUT_GPU
+        if (drawn && m.gpu) { // on the GPU, from the same scene
+            const auto start = std::chrono::steady_clock::now();
+            const m3::Real3d& mem = m.bus.real3d();
+            if (o.renderer == R::Gpu) m.builder.build(mem, m.scene);
+            m.gpu->render(mem, o.renderer == R::Gpu ? m.scene : m.real3d.scene(), &m.gpu_image);
+            m.gpu_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            ++m.gpu_frames;
+            if (o.renderer == R::Compare) {
+                const auto [pixels, largest] = difference(m.real3d.image(), m.gpu_image);
+                ++m.frames_compared;
+                if (pixels) ++m.frames_differing;
+                m.pixels_differing += pixels;
+                m.max_difference = std::max(m.max_difference, largest);
+                if (pixels > m.worst_pixels) {
+                    m.worst_pixels = pixels;
+                    m.worst_frame = frame;
+                }
+            }
+        }
+#endif
         if (o.probe_frame && frame == o.probe_frame && m.index == 0) print_probe(m.real3d, o.probe_x, o.probe_y, frame);
-        m.tilegen.composite(m.screen, m.real3d.image());
+        m.tilegen.composite(m.screen, o.renderer == R::Gpu ? std::span<const uint32_t>(m.gpu_image) : m.real3d.image());
         const auto sound_start = std::chrono::steady_clock::now();
         const std::span<const int16_t> pcm =
             m.sound.frame(m.bus.midi_out(), m.timing.frame_start(frame - 1), m.timing.frame_cycles());
@@ -307,6 +370,37 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             const size_t dot = path.find_last_of('.');
             tools::write_png(path.substr(0, dot) + "-" + std::to_string(frame) + path.substr(dot), m.screen,
                              m3::TilegenRenderer::kWidth, m3::TilegenRenderer::kHeight);
+            if (o.renderer == R::Compare && !m.gpu_image.empty()) { // and the GPU's, beside it
+                std::vector<uint32_t> gpu_screen(m.screen.size());
+                m.tilegen.composite(gpu_screen, m.gpu_image);
+                tools::write_png(path.substr(0, dot) + "-" + std::to_string(frame) + "-gpu" + path.substr(dot), gpu_screen,
+                                 m3::TilegenRenderer::kWidth, m3::TilegenRenderer::kHeight);
+                // Where the 3D differs: red, over the software picture dimmed.
+                std::vector<uint32_t> diff(m.screen.size());
+                const auto soft = m.real3d.image();
+                for (std::size_t i = 0; i < diff.size() && i < soft.size() && i < m.gpu_image.size(); ++i) {
+                    const auto [pixels, largest] = difference(soft.subspan(i, 1), std::span<const uint32_t>(m.gpu_image).subspan(i, 1));
+                    (void)largest;
+                    const uint32_t p = m.screen[i];
+                    diff[i] = pixels ? 0xFFFF0000u : 0xFF000000u | ((p >> 2) & 0x003F3F3Fu);
+                }
+                tools::write_png(path.substr(0, dot) + "-" + std::to_string(frame) + "-diff" + path.substr(dot), diff,
+                                 m3::TilegenRenderer::kWidth, m3::TilegenRenderer::kHeight);
+                // The two 3D pictures alone, colour and alpha (grey).
+                auto write_3d = [&](std::span<const uint32_t> img, const std::string& tag) {
+                    std::vector<uint32_t> rgb(img.size()), alpha(img.size());
+                    for (std::size_t i = 0; i < img.size(); ++i) {
+                        rgb[i] = 0xFF000000u | img[i];
+                        const uint32_t a = img[i] >> 24;
+                        alpha[i] = 0xFF000000u | a << 16 | a << 8 | a;
+                    }
+                    const std::string at = path.substr(0, dot) + "-" + std::to_string(frame);
+                    tools::write_png(at + "-3d" + tag + path.substr(dot), rgb, m3::TilegenRenderer::kWidth, m3::TilegenRenderer::kHeight);
+                    tools::write_png(at + "-3da" + tag + path.substr(dot), alpha, m3::TilegenRenderer::kWidth, m3::TilegenRenderer::kHeight);
+                };
+                write_3d(soft, "");
+                write_3d(m.gpu_image, "-gpu");
+            }
         }
     };
 }
@@ -420,6 +514,18 @@ void report(Machine& m, const Options& o) {
                         m.setup_ms / static_cast<double>(m.frames_rendered),
                         m.raster_ms / static_cast<double>(m.frames_rendered),
                         static_cast<unsigned long long>(m.frames_rendered));
+        if (m.gpu_frames)
+            std::printf("GPU renderer: %.2f ms a frame on average, read back (%llu frames)\n",
+                        1000.0 * m.gpu_seconds / static_cast<double>(m.gpu_frames),
+                        static_cast<unsigned long long>(m.gpu_frames));
+        if (m.frames_compared)
+            std::printf("GPU against software: %llu of %llu frames differ (a channel more than 2 apart), %llu pixels "
+                        "in all, %.1f a frame; the most in frame %llu (%llu pixels); largest difference %d\n",
+                        static_cast<unsigned long long>(m.frames_differing), static_cast<unsigned long long>(m.frames_compared),
+                        static_cast<unsigned long long>(m.pixels_differing),
+                        static_cast<double>(m.pixels_differing) / static_cast<double>(m.frames_compared),
+                        static_cast<unsigned long long>(m.worst_frame), static_cast<unsigned long long>(m.worst_pixels),
+                        m.max_difference);
         std::printf("  block culling (white, no scene) in %llu frames; spotlight on in %llu; scroll fog in %llu, "
                     "ambient fog in %llu; triangle setups with a microtexture %llu, translator map %llu, inverted "
                     "texture %llu\n",
@@ -550,6 +656,11 @@ int main(int argc, char** argv) {
         else if (arg == "--screenshot" && i + 1 < argc) o.screenshot = argv[++i];
         else if (arg == "--wav" && i + 1 < argc) o.wav = argv[++i];
         else if (arg == "--quads") o.quads = true;
+        else if (arg == "--renderer" && i + 1 < argc) {
+            const std::string r = argv[++i];
+            o.renderer = r == "gpu" ? Options::Renderer::Gpu : r == "compare" ? Options::Renderer::Compare
+                                                                             : Options::Renderer::Software;
+        }
         else if (arg == "--midi-burst") o.midi_burst = true;
         else if (arg == "--dma-instant") o.dma_instant = true;
         else if (arg == "--sound-volume" && i + 1 < argc) o.sound_volume = std::atoi(argv[++i]);
@@ -632,10 +743,38 @@ int main(int argc, char** argv) {
             });
     }
     tools::Turns turns(o.boards);
+    // The GPU (--renderer gpu or compare), without a window; the boards take
+    // turns, so they share it.
+#ifdef SPIKEOUT_GPU
+    gpu::Device gpu_device;
+    if (o.renderer != Options::Renderer::Software) {
+        if (gpu_device.open_headless()) {
+            std::printf("GPU: %s\n", gpu_device.driver());
+        } else {
+            std::fprintf(stderr, "gamerun: no GPU (%s)\n", gpu_device.error().c_str());
+            return 1;
+        }
+    }
+#else
+    if (o.renderer != Options::Renderer::Software) {
+        std::fprintf(stderr, "gamerun: built without the GPU renderer (SPIKEOUT_GPU)\n");
+        return 1;
+    }
+#endif
     std::vector<std::unique_ptr<Machine>> machines;
     for (std::size_t i = 0; i < o.boards; ++i) {
         machines.push_back(std::make_unique<Machine>(i, roms, functions));
         set_up(*machines.back(), o, game, ring.get(), turns);
+#ifdef SPIKEOUT_GPU
+        if (o.renderer != Options::Renderer::Software) {
+            auto& m = *machines.back();
+            m.gpu = std::make_unique<gpu::Real3dGpu>();
+            if (!m.gpu->open(gpu_device)) {
+                std::fprintf(stderr, "gamerun: GPU renderer: %s\n", m.gpu->error().c_str());
+                return 1;
+            }
+        }
+#endif
     }
 
     std::printf("%zu recompiled functions; running up to %lld blocks from %08x", functions.size(),

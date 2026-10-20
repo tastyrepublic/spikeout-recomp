@@ -1,0 +1,93 @@
+// Draws the Real3D's scene (m3::Real3dScene) on the GPU, as the software
+// renderer (m3::Real3dRenderer) draws it: the same passes and order
+// (background fog; per priority, and again for its high-priority polygons,
+// the opaque pass with decals, then each translucency layer against a copy
+// of the opaque depth; the layers mixed over the opaque picture), and
+// shaders that sample, light and fog as it does (src/gpu/shaders/scene.*).
+// Texture RAM is uploaded whole when the game has uploaded textures.
+//
+// The picture is `scale` times the Real3D's 496x384, 0xAARRGGBB with alpha
+// 0 where nothing was drawn, as the software renderer's.
+//
+// Not yet: quads drawn whole (--quads; they are two triangles), the probe,
+// and a translucent decal sees decals drawn in the opaque pass (the stencil
+// starts afresh in each translucency layer).
+#pragma once
+
+#include "runtime/real3d.hpp"
+#include "runtime/real3d_scene.hpp"
+
+#include <cstdint>
+#include <span>
+#include <string>
+#include <vector>
+
+struct SDL_GPUBuffer;
+struct SDL_GPUCopyPass;
+struct SDL_GPUGraphicsPipeline;
+struct SDL_GPUSampler;
+struct SDL_GPUTexture;
+struct SDL_GPUTransferBuffer;
+
+namespace gpu {
+
+class Device;
+
+class Real3dGpu {
+public:
+    static constexpr int kWidth = 496, kHeight = 384;
+
+    bool open(Device& device, int scale = 1);
+    ~Real3dGpu();
+    const std::string& error() const { return error_; }
+
+    // Draws the scene, with texture RAM from `mem`. With `pixels`, waits
+    // for the GPU and reads the picture back into it.
+    void render(const m3::Real3d& mem, const m3::Real3dScene& scene, std::vector<uint32_t>* pixels = nullptr) {
+        render(scene, mem.texture_ram(), mem.textures_uploaded(), pixels);
+    }
+    // The same from a copy of texture RAM (2048 x 2048), uploaded when
+    // `texture_version` differs from the last frame's.
+    void render(const m3::Real3dScene& scene, std::span<const uint16_t> texture_ram, uint64_t texture_version,
+                std::vector<uint32_t>* pixels = nullptr);
+
+    SDL_GPUTexture* image() const { return output_; }
+    int width() const { return kWidth * scale_; }
+    int height() const { return kHeight * scale_; }
+
+private:
+    struct Draw {
+        uint32_t first, count; // vertices
+        uint16_t viewport;
+        bool decal;
+    };
+    // One priority (or its high-priority half): the opaque pass and the two
+    // translucency layers.
+    struct Group {
+        std::vector<Draw> passes[3];
+    };
+
+    void build(const m3::Real3dScene& scene);
+    bool upload(SDL_GPUBuffer*& buffer, SDL_GPUTransferBuffer*& transfer, uint32_t& capacity, const void* data,
+                uint32_t size, uint32_t usage, SDL_GPUCopyPass* copy);
+
+    Device* device_ = nullptr;
+    int scale_ = 1;
+    std::string error_;
+
+    SDL_GPUGraphicsPipeline *fog_ = nullptr, *opaque_[2] = {}, *trans_[2] = {}, *copy_ = nullptr, *composite_ = nullptr;
+    SDL_GPUSampler* nearest_ = nullptr;
+    SDL_GPUTexture *colour_ = nullptr, *layers_[2] = {}, *depth_copy_ = nullptr, *depth_ = nullptr, *trans_depth_ = nullptr,
+                   *output_ = nullptr, *texture_ram_ = nullptr;
+    SDL_GPUBuffer *vertex_buffer_ = nullptr, *polygon_buffer_ = nullptr, *viewport_buffer_ = nullptr;
+    SDL_GPUTransferBuffer *vertex_upload_ = nullptr, *polygon_upload_ = nullptr, *viewport_upload_ = nullptr,
+                          *texture_upload_ = nullptr, *download_ = nullptr;
+    uint32_t vertex_capacity_ = 0, polygon_capacity_ = 0, viewport_capacity_ = 0;
+    // Which texture RAM the GPU has (render's texture_version).
+    uint64_t texture_version_ = UINT64_MAX;
+
+    std::vector<uint8_t> vertices_, polygons_, viewports_; // this frame's, as uploaded
+    std::vector<Group> groups_;
+};
+
+} // namespace gpu

@@ -100,7 +100,9 @@ first time). `boottest` runs the recompiled boot code from the reset vector to t
 jump into RAM and checks what it did; `gamerun` keeps going into the game
 and reports where it stops (`--screenshot`, `--shot-every N` save the
 screen as PNG; `--wav FILE` records the sound board; `--press coin@1200 --press start@1300` presses inputs at
-given frames, to play through menus without a window). Generated code is
+given frames, to play through menus without a window; `--renderer gpu` draws the
+3D on the GPU, `--renderer compare` draws it both ways and reports the
+differences). Generated code is
 derived from your ROMs: it stays in the build directory and is never
 committed.
 
@@ -112,10 +114,11 @@ leaves it out):
 build/spikeout path/to/spikeofe
 ```
 
-It shows the 2D layers and the 3D (drawn in software for now: filtered
-textures, per-pixel lighting and specular, level-of-detail fades; the window
-itself is drawn through the GPU with Vulkan or Metal when there is one,
-`--no-gpu` for SDL's 2D renderer) and plays
+It shows the 2D layers and the 3D (filtered textures, per-pixel lighting
+and specular, level-of-detail fades), drawn on the GPU with Vulkan or Metal
+when there is one (`--render-scale N` draws the 3D N times as large;
+`--soft-3d` draws it in software, `--no-gpu` uses SDL's 2D renderer for the
+window too), and plays
 the sound effects and music (`--mute` for silence). Keys: `5` coin, `1`
 start, `F2` test, `F1` service, arrows, `Z` beat, `X` charge, `C` jump, `V`
 shift; hold `Tab` to run as fast as possible, `F12` for a screenshot, `Esc`
