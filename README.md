@@ -49,12 +49,14 @@ ctest --test-dir build --output-on-failure
 
 The first configure downloads SDL 3 and the shader compilers (glslang,
 SPIRV-Cross). On Linux, SDL needs the X11 or Wayland and audio development
-packages; on Debian or Ubuntu:
+packages; on Debian or Ubuntu (SDL's list, from its `docs/README-linux.md`):
 
 ```sh
-sudo apt-get install libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev \
-  libxkbcommon-dev libwayland-dev wayland-protocols libegl1-mesa-dev libdrm-dev libgbm-dev \
-  libasound2-dev libpulse-dev
+sudo apt-get install libasound2-dev libpulse-dev libaudio-dev libfribidi-dev libjack-dev libsndio-dev \
+  libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev \
+  libxkbcommon-dev libdrm-dev libgbm-dev libgl1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev \
+  libdbus-1-dev libibus-1.0-dev libudev-dev libthai-dev libusb-1.0-0-dev \
+  libpipewire-0.3-dev libwayland-dev libdecor-0-dev liburing-dev
 ```
 
 ## Checking your ROM set
