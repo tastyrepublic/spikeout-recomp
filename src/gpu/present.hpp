@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <initializer_list>
 #include <span>
 #include <string>
@@ -62,6 +63,10 @@ public:
     // the GPU (any size; gpu::Real3dGpu::image), letterboxed.
     void present_layers(std::span<const uint32_t> bottom, std::span<const uint32_t> top, SDL_GPUTexture* three_d,
                         int width, int height);
+
+    // Drawn over each picture, in its command buffer, onto the window's
+    // texture (width x height pixels): the menu.
+    std::function<void(SDL_GPUCommandBuffer*, SDL_GPUTexture*, uint32_t, uint32_t)> overlay;
 
 private:
     void resize(int width, int height);

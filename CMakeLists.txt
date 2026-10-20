@@ -215,6 +215,66 @@ if(SPIKEOUT_GPU)
         list(APPEND shader_sources ${cpp})
     endforeach()
 
+    # The in-game menu: RmlUi (MIT) with FreeType (FreeType License) for its
+    # text, drawn through RmlUi's SDL GPU renderer (third_party/rmlui_sdl_gpu).
+    # Its page, style and fonts (assets/) are embedded in the program.
+    set(FT_DISABLE_ZLIB ON CACHE BOOL "" FORCE)
+    set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
+    set(FT_DISABLE_PNG ON CACHE BOOL "" FORCE)
+    set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
+    set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
+    set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
+    FetchContent_Declare(freetype
+        GIT_REPOSITORY https://github.com/freetype/freetype.git
+        GIT_TAG VER-2-14-2
+        GIT_SHALLOW TRUE
+        SYSTEM)
+    FetchContent_MakeAvailable(freetype)
+    if(NOT TARGET Freetype::Freetype)
+        add_library(Freetype::Freetype ALIAS freetype)
+    endif()
+    set(CMAKE_DISABLE_FIND_PACKAGE_Freetype ON) # RmlUi takes the one above
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(RMLUI_SAMPLES OFF CACHE BOOL "" FORCE)
+    set(RMLUI_FONT_ENGINE "freetype" CACHE STRING "" FORCE)
+    set(RMLUI_PRECOMPILED_HEADERS OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(rmlui
+        GIT_REPOSITORY https://github.com/mikke89/RmlUi.git
+        GIT_TAG 6.3
+        GIT_SHALLOW TRUE
+        SYSTEM)
+    FetchContent_MakeAvailable(rmlui)
+
+    set(ui_out ${CMAKE_BINARY_DIR}/ui)
+    file(MAKE_DIRECTORY ${ui_out})
+    set(ui_sources)
+    foreach(entry menu_rml:ui/menu.rml menu_rcss:ui/menu.rcss font_medium:fonts/BarlowCondensed-Medium.ttf
+                  font_semibold:fonts/BarlowCondensed-SemiBold.ttf font_bold_italic:fonts/BarlowCondensed-BoldItalic.ttf)
+        string(REPLACE ":" ";" parts ${entry})
+        list(GET parts 0 name)
+        list(GET parts 1 file)
+        set(cpp ${ui_out}/${name}.cpp)
+        add_custom_command(
+            OUTPUT ${cpp}
+            COMMAND ${CMAKE_COMMAND} -DNAME=${name} -DIN=${CMAKE_SOURCE_DIR}/assets/${file} -DOUT=${cpp}
+                    -P ${CMAKE_SOURCE_DIR}/cmake/embed_file.cmake
+            DEPENDS ${CMAKE_SOURCE_DIR}/assets/${file} ${CMAKE_SOURCE_DIR}/cmake/embed_file.cmake
+            COMMENT "Embedding ${file}"
+            VERBATIM)
+        list(APPEND ui_sources ${cpp})
+    endforeach()
+    add_library(rmlui_sdl_gpu STATIC third_party/rmlui_sdl_gpu/RmlUi_Renderer_SDL_GPU.cpp)
+    target_include_directories(rmlui_sdl_gpu SYSTEM PUBLIC third_party/rmlui_sdl_gpu)
+    target_link_libraries(rmlui_sdl_gpu PUBLIC RmlUi::RmlUi SDL3::SDL3)
+    if(MSVC)
+        target_compile_options(rmlui_sdl_gpu PRIVATE /w)
+    else()
+        target_compile_options(rmlui_sdl_gpu PRIVATE -w)
+    endif()
+    add_library(m3ui src/ui/menu.cpp ${ui_sources})
+    target_include_directories(m3ui PUBLIC src)
+    target_link_libraries(m3ui PUBLIC SDL3::SDL3 PRIVATE rmlui_sdl_gpu RmlUi::RmlUi spikeout_warnings)
+
     add_library(m3gpu src/gpu/present.cpp src/gpu/real3d_gpu.cpp ${shader_sources})
     target_include_directories(m3gpu PUBLIC src)
     target_link_libraries(m3gpu PUBLIC SDL3::SDL3 m3runtime PRIVATE spikeout_warnings)
@@ -283,7 +343,7 @@ if(SPIKEOUT_ROM_DIR)
         add_executable(spikeout tools/spikeout.cpp)
         target_link_libraries(spikeout PRIVATE game_ram boot_rom SDL3::SDL3 spikeout_warnings)
         if(SPIKEOUT_GPU)
-            target_link_libraries(spikeout PRIVATE m3gpu)
+            target_link_libraries(spikeout PRIVATE m3gpu m3ui)
             target_compile_definitions(spikeout PRIVATE SPIKEOUT_GPU)
         endif()
     endif()

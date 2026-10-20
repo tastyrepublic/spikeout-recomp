@@ -220,6 +220,7 @@ void Presenter::draw(SDL_GPUCommandBuffer* cmd, SDL_GPUGraphicsPipeline* pipelin
     SDL_BindGPUFragmentSamplers(pass, 0, bindings, n);
     SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
     SDL_EndGPURenderPass(pass);
+    if (overlay) overlay(cmd, swapchain, sw, sh);
     SDL_SubmitGPUCommandBuffer(cmd);
 }
 

@@ -1,0 +1,137 @@
+/* The in-game menu's style. After vf3-recomp's assets/ui/menu.rcss (MIT,
+   Copyright (c) 2026 mr-finster), in Spikeout's red and orange.
+
+   Sizes are in dp: the menu sets 1dp = 1/720 of the window's height. One
+   column with a fixed space for each part, so nothing overlaps whatever the
+   page: top 24 + title 53 + crumb 28 + rows 14 x 32 = 448 + note 8 + 80 (4
+   lines) + hint 8 + 22 + version 4 + 18 = 693dp of 720. A page longer than
+   14 rows scrolls, keeping the selected row in view; a long value is cut,
+   never drawn over its label. */
+
+body {
+	width: 100%;
+	height: 100%;
+	font-family: "Barlow Condensed";
+	font-weight: 600;
+	font-size: 24dp;
+	color: #f1e6e0;
+}
+
+div { display: block; }
+
+#shade {
+	position: absolute;
+	left: 0; top: 0; right: 0; bottom: 0;
+	decorator: horizontal-gradient(#100404f2 #10040450);
+}
+
+#panel {
+	position: absolute;
+	left: 9%;
+	top: 24dp;
+	width: 520dp;
+}
+
+#title {
+	font-size: 46dp;
+	font-weight: bold;
+	font-style: italic;
+	color: #ff6a1f;
+	height: 48dp;
+	line-height: 48dp;
+	padding-bottom: 2dp;
+	border-bottom: 3dp #ff6a1f;
+}
+
+#crumb {
+	height: 24dp;
+	line-height: 24dp;
+	margin-bottom: 4dp;
+	font-size: 18dp;
+	font-weight: 500;
+	color: #c99a8a;
+	white-space: nowrap;
+	overflow: hidden;
+}
+
+#rows {
+	max-height: 448dp;
+	overflow-y: hidden;
+}
+
+.row {
+	display: flex;
+	height: 29dp;
+	line-height: 29dp;
+	padding: 0 16dp;
+	margin-bottom: 3dp;
+	font-size: 23dp;
+	color: #e6d3cc;
+	white-space: nowrap;
+	transition: padding-left 0.12s cubic-out;
+}
+
+.row .label {
+	flex: 1 0 auto;
+	margin-right: 18dp;
+}
+
+.row .value {
+	flex: 0 1 auto;
+	overflow: hidden;
+	color: #ff9a3c;
+	text-align: right;
+}
+
+.row.selected {
+	decorator: horizontal-gradient(#ff8a2c #e8251f);
+	color: #1a0705;
+	padding-left: 28dp;
+}
+
+.row.selected .value { color: #1a0705; }
+
+.row .arrow { color: #c99a8a; }
+.row.selected .arrow { color: #1a0705; }
+
+.row.info {
+	height: 26dp;
+	line-height: 26dp;
+	font-size: 19dp;
+	font-weight: 500;
+	margin-bottom: 0;
+}
+
+.row.info .value { color: #f1e6e0; }
+
+#note {
+	margin-top: 8dp;
+	height: 80dp;
+	line-height: 20dp;
+	overflow: hidden;
+	font-size: 18dp;
+	font-weight: 500;
+	color: #c99a8a;
+}
+
+#hint {
+	margin-top: 8dp;
+	height: 22dp;
+	line-height: 22dp;
+	font-size: 17dp;
+	font-weight: 500;
+	color: #c99a8a;
+	white-space: nowrap;
+}
+
+.key { color: #f1e6e0; }
+
+#ver {
+	margin-top: 4dp;
+	height: 18dp;
+	line-height: 18dp;
+	font-size: 15dp;
+	font-weight: 500;
+	color: #8a6a60;
+	white-space: nowrap;
+}

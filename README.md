@@ -124,8 +124,20 @@ in a bigger window, smoothed edges, supersampled, in a smaller one;
 window too), and plays
 the sound effects and music (`--mute` for silence). Keys: `5` coin, `1`
 start, `F2` test, `F1` service, arrows, `Z` beat, `X` charge, `C` jump, `V`
-shift; hold `Tab` to run as fast as possible, `F12` for a screenshot, `Esc`
-to quit. Both `spikeout` and `gamerun` take `--quads` (draw quads whole,
+shift (player 2: `6`, `2`, `I J K L`, `A S D F`); hold `Tab` to run as fast
+as possible, `F12` for a screenshot. Pads: d-pad or stick, A beat, X charge,
+B jump, Y shift, Start, Back coin (the first pad is player 1's, the second
+player 2's).
+
+`Esc` (or a pad's Guide button, its touchpad, or Back + Start) pauses the
+game and opens the menu: Display (render scale, antialiasing, quads drawn
+whole, GPU or software 3D, fullscreen), Sound (effects and music volume),
+Controls (each player's keys, rebound with Enter), Game (reset, the arcade's
+test menu, a service credit) and Quit. The choices are kept in
+`settings.ini`, in the user's data folder (`%APPDATA%`, `~/Library/Application
+Support`, `~/.local/share`), or next to the program when a file named
+`portable.txt` is there; options on the command line win for that run.
+Both `spikeout` and `gamerun` take `--quads` (draw quads whole,
 Supermodel's quad rendering, slower) and `--midi-burst` (send the sound
 board its commands with Supermodel's timing instead of the serial line's);
 `--sound-volume N` and `--music-volume N` (percent, 0-200) set the sound
@@ -153,6 +165,9 @@ Details in [docs/netplay.md](docs/netplay.md).
 - [minimp3](https://github.com/lieff/minimp3) by lieff (CC0, vendored in `third_party/minimp3`) — decodes the music board's MPEG audio.
 - [SDL 3](https://github.com/libsdl-org/SDL) (zlib license) for the window and the GPU, downloaded at build time if not installed.
 - [glslang](https://github.com/KhronosGroup/glslang) (BSD-3-Clause and others) and [SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross) (Apache-2.0), downloaded at build time to compile the GPU shaders.
+- [RmlUi](https://github.com/mikke89/RmlUi) (MIT) and [FreeType](https://freetype.org) (FTL), downloaded at build time, for the in-game menu; RmlUi's SDL GPU renderer is vendored in `third_party/rmlui_sdl_gpu` (MIT, loading images as BMP instead of through SDL_image).
+- [vf3-recomp](https://github.com/mr-finster/vf3-recomp) by mr-finster (MIT) — the menu's design and style (`src/ui/menu.cpp`, `assets/ui`).
+- [Barlow Condensed](https://github.com/jpt/barlow) by the Barlow Project Authors (SIL Open Font License, `assets/fonts`) — the menu's typeface.
 - MAME's 315-5881 decryption by Andreas Naive, Olivier Galibert and David Haywood (BSD-3-Clause; tables and algorithm in `src/runtime/crypt315_5881.cpp`, with their notice), as also used by Supermodel.
 
 See [docs/REFERENCES.md](docs/REFERENCES.md) for how sources are used.

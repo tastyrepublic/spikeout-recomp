@@ -61,8 +61,10 @@ Each milestone ends with something you can run and check.
 - [x] MIDI link timed by the board's serial chip (`m3::Usart8251`, 31,250 baud): IRQ 0x40 is its TxRDY, each byte reaches the sound board 320 µs after the last (Supermodel's burst stays as `--midi-burst`)
 - [x] DSB2 MPEG music board (`m3::Dsb2`: its 68000, the serial line at 31,250 baud, the decoder's commands, MPEG Layer II through minimp3): the music plays
 - [x] Supermodel's mix: music with SCSP 1 at the front, SCSP 2 at the rear, averaged to stereo; separate sound and music volumes (`--sound-volume`, `--music-volume`)
-- [ ] Speaker setup in the settings menu: stereo, or the cabinet's front and rear pairs on separate outputs (4.0 surround or two devices; the board already renders four channels); sound and music volume sliders
-- [ ] Keyboard (done in `spikeout`: coin, start, test, service, joystick, buttons), gamepad and arcade stick mapping
+- [x] Settings menu in `spikeout` (`src/ui/`, RmlUi over the paused game, after vf3-recomp's): display, sound and music volume, controls, game; kept in `settings.ini`
+- [ ] Speaker setup in the settings menu: stereo, or the cabinet's front and rear pairs on separate outputs (4.0 surround or two devices; the board already renders four channels)
+- [x] Keyboard (two players, rebindable in the menu) and gamepads (fixed layout)
+- [ ] Rebindable pad buttons; arcade stick mapping
 
 ## 5. Local multiplayer
 
