@@ -4,9 +4,11 @@
 // RAM is sampled as the software renderer does it, in 8-bit integer steps,
 // so the two pictures can be compared closely.
 //
-// Built twice: with OPAQUE, the opaque pass (colour, clearing both
-// translucency layers, and depth for the translucent passes); without, a
-// translucency layer.
+// Built four times: with OPAQUE, the opaque pass (colour, clearing both
+// translucency layers, and depth for the translucent passes), without, a
+// translucency layer; each with QUADS too, for quads drawn whole (their
+// attributes and depth from all four corners; writing the depth costs the
+// GPU its early depth test, so only those draws use it).
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #include "scene_common.glsl"
@@ -15,10 +17,14 @@ layout(location = 0) in vec2 uv;
 layout(location = 1) in float shade;
 layout(location = 2) in vec3 normal;
 layout(location = 3) flat in uint polygon;
+layout(location = 4) flat in uint quad;
 
 layout(set = 2, binding = 0) uniform usampler2D texture_ram; // 2048 x 2048, 16 bits a texel
 layout(std430, set = 2, binding = 1) readonly buffer Polygons { Polygon polygons[]; };
 layout(std430, set = 2, binding = 2) readonly buffer Viewports { Viewport viewports[]; };
+#ifdef QUADS
+layout(std430, set = 2, binding = 3) readonly buffer Quads { Quad quads[]; };
+#endif
 layout(std140, set = 3, binding = 0) uniform Frame {
     float scale; // render pixels per screen pixel
 };
@@ -178,7 +184,7 @@ vec4 sample_texture(Polygon p, float u, float v, float distance) {
 
 // The sun (or fixed shade), ambient, spotlight and specular, then fog, at
 // pixel centre (cx, cy) of the 496x384 screen, `distance` along the view.
-void light_and_fog(Polygon p, float cx, float cy, float distance, inout vec3 rgb, inout float a) {
+void light_and_fog(Polygon p, float cx, float cy, float distance, vec3 normal, float shade, inout vec3 rgb, inout float a) {
     const Viewport V = viewports[p.flags.z];
     float lobe = 0.0, lobe_fog = 0.0;
     if (V.spot2.z != 0.0) {
@@ -223,16 +229,88 @@ void light_and_fog(Polygon p, float cx, float cy, float distance, inout vec3 rgb
     }
 }
 
+#ifdef QUADS
+// A quad's attributes at this pixel from all four corners: mean value
+// coordinates of the pixel in the corners' screen positions, made
+// perspective-correct with each corner's 1 / distance (the software
+// renderer's quad_weights; Supermodel's R3DShaderQuads.h). False outside
+// the quad.
+bool quad_attributes(Polygon p, inout vec2 tc, inout float sh, inout vec3 n, inout float inv_distance) {
+    const Quad q = quads[quad];
+    const Viewport V = viewports[p.flags.z];
+    const vec2 at = gl_FragCoord.xy / scale; // in screen pixels, as the corners
+    float vx[4], vy[4], r[4], iw[4];
+    for (int i = 0; i < 4; ++i) {
+        const float w = -q.position[i].z;
+        iw[i] = 1.0 / w;
+        const float sx = V.rect.x + ((q.position[i].x / w) - V.frustum.x) / (V.frustum.y - V.frustum.x) * V.rect.z;
+        const float sy = V.rect.y + (V.frustum.w - (q.position[i].y / w)) / (V.frustum.w - V.frustum.z) * V.rect.w;
+        vx[i] = sx - at.x;
+        vy[i] = sy - at.y;
+        r[i] = sqrt(vx[i] * vx[i] + vy[i] * vy[i]);
+        if (r[i] < 1e-6) { // on a corner
+            tc = q.texture[i].xy;
+            sh = q.texture[i].z;
+            n = q.normal[i].xyz;
+            inv_distance = iw[i];
+            return true;
+        }
+    }
+    float t[4];
+    for (int i = 0; i < 4; ++i) {
+        const int j = (i + 1) & 3;
+        const float area = vx[i] * vy[j] - vx[j] * vy[i];
+        t[i] = area == 0.0 ? 0.0 : (r[i] * r[j] - (vx[i] * vx[j] + vy[i] * vy[j])) / area;
+    }
+    float u[4], weight[4], u_sum = 0.0, p_sum = 0.0;
+    int signs = 0;
+    for (int i = 0; i < 4; ++i) {
+        const int prev = (i + 3) & 3;
+        u[i] = (t[prev] + t[i]) / r[i];
+        signs += t[prev] < -t[i] ? -1 : 1;
+    }
+    if (signs == 0) return false;
+    for (int i = 0; i < 4; ++i) {
+        weight[i] = u[i] * iw[i];
+        p_sum += weight[i];
+        u_sum += u[i];
+    }
+    if (p_sum == 0.0 || u_sum == 0.0 || isnan(p_sum)) return false;
+    const float w = p_sum / u_sum;
+    if (!(w > 0.0)) return false;
+    tc = vec2(0.0);
+    sh = 0.0;
+    n = vec3(0.0);
+    for (int i = 0; i < 4; ++i) {
+        const float k = weight[i] / p_sum;
+        tc += k * q.texture[i].xy;
+        sh += k * q.texture[i].z;
+        n += k * q.normal[i].xyz;
+    }
+    inv_distance = w;
+    return true;
+}
+#endif
+
 void main() {
     const Polygon p = polygons[polygon];
     const uint flags = p.flags.x;
-    const float distance = 1.0 / gl_FragCoord.w;
+    vec2 tc = uv;
+    float sh = shade, inv_distance = gl_FragCoord.w;
+    vec3 n = normal;
+    float depth = gl_FragCoord.z;
+#ifdef QUADS
+    if (!quad_attributes(p, tc, sh, n, inv_distance)) discard; // outside the quad
+    depth = kNear * ((flags & kFlagLayered) != 0u ? kDecalBias : 1.0) * inv_distance;
+    gl_FragDepth = depth;
+#endif
+    const float distance = 1.0 / inv_distance;
     const bool textured = (flags & kFlagTextured) != 0u, contour = (flags & kFlagContour) != 0u,
                texture_alpha = (flags & kFlagTextureAlpha) != 0u;
     vec3 rgb = p.colour.rgb;
     float texel_alpha = 1.0;
     if (textured) {
-        const vec4 t = sample_texture(p, uv.x, uv.y, distance);
+        const vec4 t = sample_texture(p, tc.x, tc.y, distance);
         rgb *= t.rgb;
         texel_alpha = t.a;
         if (contour && texel_alpha < 32.0 / 255.0) discard; // alpha test: cut out
@@ -249,12 +327,12 @@ void main() {
 #endif
     if (a < 1.0 / 32.0) discard;
     const vec2 c = gl_FragCoord.xy / scale;
-    light_and_fog(p, c.x, c.y, distance, rgb, a);
+    light_and_fog(p, c.x, c.y, distance, n, sh, rgb, a);
 #ifdef OPAQUE
     colour = vec4(rgb, 1.0);
     layer0 = vec4(0.0);
     layer1 = vec4(0.0);
-    depth_out = vec4(gl_FragCoord.z);
+    depth_out = vec4(depth);
 #else
     colour = vec4(rgb, a);
 #endif

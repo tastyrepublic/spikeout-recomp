@@ -217,29 +217,7 @@ void Real3dRenderer::set_up(const Real3dScene::Polygon& poly) {
         // from the other three draws exactly as its two triangles: only
         // bent quads, or ones mapped non-linearly, need the quad path.
         if (ok) {
-            const EyeVertex &p0q = e[0], &p1q = e[1], &p2q = e[2], &p3q = e[3];
-            const float ax = p1q.x - p0q.x, ay = p1q.y - p0q.y, az = p1q.z - p0q.z;
-            const float bx = p2q.x - p0q.x, by = p2q.y - p0q.y, bz = p2q.z - p0q.z;
-            const float cx3 = p3q.x - p0q.x, cy3 = p3q.y - p0q.y, cz3 = p3q.z - p0q.z;
-            // p3 = p0 + s a + t b (least squares), then the leftover off that plane.
-            const float aa = ax * ax + ay * ay + az * az, ab = ax * bx + ay * by + az * bz,
-                        bb = bx * bx + by * by + bz * bz, ac = ax * cx3 + ay * cy3 + az * cz3,
-                        bc = bx * cx3 + by * cy3 + bz * cz3;
-            const float det = aa * bb - ab * ab;
-            bool linear = false;
-            if (det != 0) {
-                const float s = (ac * bb - bc * ab) / det, t = (bc * aa - ac * ab) / det;
-                const float rx = cx3 - s * ax - t * bx, ry = cy3 - s * ay - t * by, rz = cz3 - s * az - t * bz;
-                const float extent = std::max({aa, bb, cx3 * cx3 + cy3 * cy3 + cz3 * cz3});
-                linear = rx * rx + ry * ry + rz * rz <= extent * 1e-8f;
-                for (size_t c = 0; c < 6 && linear; ++c) {
-                    const float predicted = q.attr[0][c] + s * (q.attr[1][c] - q.attr[0][c]) + t * (q.attr[2][c] - q.attr[0][c]);
-                    const float scale = std::max({std::abs(q.attr[0][c]), std::abs(q.attr[1][c]), std::abs(q.attr[2][c]),
-                                                  std::abs(q.attr[3][c]), 1.0f});
-                    linear = std::abs(predicted - q.attr[3][c]) <= scale * 1e-4f;
-                }
-            }
-            if (!linear) {
+            if (!Real3dScene::quad_is_linear(e)) {
                 quad = static_cast<int32_t>(quads_.size());
                 quads_.push_back(q);
             }

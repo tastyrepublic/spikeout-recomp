@@ -450,6 +450,7 @@ int main(int argc, char** argv) {
     std::unique_ptr<gpu::Real3dGpu> real3d_gpu;
     if (on_gpu && boards == 1 && gpu_3d) {
         real3d_gpu = std::make_unique<gpu::Real3dGpu>();
+        real3d_gpu->set_quads(quads);
         if (real3d_gpu->open(*gpu_device, render_scale)) {
             shared.gpu_3d = true;
         } else {
@@ -565,7 +566,7 @@ int main(int argc, char** argv) {
         if (on_gpu && shared.gpu_3d) {
             if (textures && !gpu_frame.bottom.empty()) {
                 real3d_gpu->render(gpu_frame.scene, *textures, textures_version);
-                presenter->present_layers(gpu_frame.bottom, gpu_frame.top, real3d_gpu->image(), kWidth, kHeight);
+                presenter->present_layers(gpu_frame.bottom, gpu_frame.top, real3d_gpu->display_image(), kWidth, kHeight);
             } else {
                 presenter->present(shown, width, height);
             }

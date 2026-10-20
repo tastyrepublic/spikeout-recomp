@@ -770,6 +770,7 @@ int main(int argc, char** argv) {
         if (o.renderer != Options::Renderer::Software) {
             auto& m = *machines.back();
             m.gpu = std::make_unique<gpu::Real3dGpu>();
+            m.gpu->set_quads(o.quads);
             if (!m.gpu->open(gpu_device)) {
                 std::fprintf(stderr, "gamerun: GPU renderer: %s\n", m.gpu->error().c_str());
                 return 1;

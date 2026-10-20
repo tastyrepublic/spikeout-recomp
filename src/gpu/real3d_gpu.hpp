@@ -9,8 +9,14 @@
 // The picture is `scale` times the Real3D's 496x384, 0xAARRGGBB with alpha
 // 0 where nothing was drawn, as the software renderer's.
 //
-// Not yet: quads drawn whole (--quads; they are two triangles), the probe,
-// and a translucent decal sees decals drawn in the opaque pass (the stencil
+// With set_quads, quads that aren't flat and linearly mapped are drawn whole
+// (the software renderer's --quads). For the window the picture is also kept
+// premultiplied with mipmaps (display_image), so it can be shown smaller than
+// drawn with every drawn pixel counted: --render-scale above the window's
+// size is supersampling antialiasing.
+//
+// Not yet: the probe,
+// and a translucent decal seeing decals drawn in the opaque pass (the stencil
 // starts afresh in each translucency layer).
 #pragma once
 
@@ -51,7 +57,13 @@ public:
     void render(const m3::Real3dScene& scene, std::span<const uint16_t> texture_ram, uint64_t texture_version,
                 std::vector<uint32_t>* pixels = nullptr);
 
+    // Quads drawn whole (default: as two triangles).
+    void set_quads(bool on) { quads_on_ = on; }
+
+    // The picture as read back (straight alpha), and for showing:
+    // premultiplied alpha, with mipmaps.
     SDL_GPUTexture* image() const { return output_; }
+    SDL_GPUTexture* display_image() const { return display_; }
     int width() const { return kWidth * scale_; }
     int height() const { return kHeight * scale_; }
 
@@ -59,7 +71,7 @@ private:
     struct Draw {
         uint32_t first, count; // vertices
         uint16_t viewport;
-        bool decal;
+        bool decal, quad; // a decal; quads drawn whole
     };
     // One priority (or its high-priority half): the opaque pass and the two
     // translucency layers.
@@ -75,18 +87,22 @@ private:
     int scale_ = 1;
     std::string error_;
 
-    SDL_GPUGraphicsPipeline *fog_ = nullptr, *opaque_[2] = {}, *trans_[2] = {}, *copy_ = nullptr, *composite_ = nullptr;
+    // opaque_ and trans_ by [quad * 2 + decal].
+    SDL_GPUGraphicsPipeline *fog_ = nullptr, *opaque_[4] = {}, *trans_[4] = {}, *copy_ = nullptr, *composite_ = nullptr,
+                            *premultiply_ = nullptr;
     SDL_GPUSampler* nearest_ = nullptr;
     SDL_GPUTexture *colour_ = nullptr, *layers_[2] = {}, *depth_copy_ = nullptr, *depth_ = nullptr, *trans_depth_ = nullptr,
-                   *output_ = nullptr, *texture_ram_ = nullptr;
-    SDL_GPUBuffer *vertex_buffer_ = nullptr, *polygon_buffer_ = nullptr, *viewport_buffer_ = nullptr;
+                   *output_ = nullptr, *display_ = nullptr, *texture_ram_ = nullptr;
+    SDL_GPUBuffer *vertex_buffer_ = nullptr, *polygon_buffer_ = nullptr, *viewport_buffer_ = nullptr, *quad_buffer_ = nullptr;
     SDL_GPUTransferBuffer *vertex_upload_ = nullptr, *polygon_upload_ = nullptr, *viewport_upload_ = nullptr,
-                          *texture_upload_ = nullptr, *download_ = nullptr;
-    uint32_t vertex_capacity_ = 0, polygon_capacity_ = 0, viewport_capacity_ = 0;
+                          *quad_upload_ = nullptr, *texture_upload_ = nullptr, *download_ = nullptr;
+    uint32_t vertex_capacity_ = 0, polygon_capacity_ = 0, viewport_capacity_ = 0, quad_capacity_ = 0;
+    uint32_t display_levels_ = 1;
+    bool quads_on_ = false;
     // Which texture RAM the GPU has (render's texture_version).
     uint64_t texture_version_ = UINT64_MAX;
 
-    std::vector<uint8_t> vertices_, polygons_, viewports_; // this frame's, as uploaded
+    std::vector<uint8_t> vertices_, polygons_, viewports_, quads_; // this frame's, as uploaded
     std::vector<Group> groups_;
 };
 

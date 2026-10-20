@@ -67,11 +67,11 @@ private:
     void resize(int width, int height);
     bool upload(SDL_GPUCommandBuffer* cmd, std::initializer_list<std::span<const uint32_t>> frames, int width, int height);
     void draw(SDL_GPUCommandBuffer* cmd, SDL_GPUGraphicsPipeline* pipeline, std::initializer_list<SDL_GPUTexture*> inputs,
-              int width, int height);
+              int width, int height, uint32_t smooth_input = UINT32_MAX); // that input filtered
 
     Device* device_ = nullptr;
     SDL_GPUGraphicsPipeline *pipeline_ = nullptr, *screen_pipeline_ = nullptr;
-    SDL_GPUSampler* sampler_ = nullptr;
+    SDL_GPUSampler *sampler_ = nullptr, *smooth_ = nullptr; // nearest; linear with mipmaps (the 3D)
     SDL_GPUTexture* textures_[2] = {}; // the frame, or the layers below and above the 3D
     SDL_GPUTransferBuffer* upload_ = nullptr;
     int width_ = 0, height_ = 0;

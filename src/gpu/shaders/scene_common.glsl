@@ -22,6 +22,15 @@ struct Viewport {
     vec4 spot_fog_colour;
 };
 
+// A quad drawn whole (--quads): its corners in eye space, their texture
+// position and fixed shade, and their normals.
+struct Quad {
+    vec4 position[4]; // x, y, z, -
+    vec4 texture[4];  // u, v, shade, -
+    vec4 normal[4];
+};
+const uint kNoQuad = 0xFFFFFFFFu;
+
 const uint kFlagLit = 1u, kFlagFixedShading = 2u, kFlagSpecular = 4u, kFlagSmooth = 8u, kFlagTextured = 16u,
            kFlagContour = 32u, kFlagTextureAlpha = 64u, kFlagPolyAlpha = 128u, kFlagLayered = 256u,
            kFlagMicro = 512u, kFlagInverted = 1024u;

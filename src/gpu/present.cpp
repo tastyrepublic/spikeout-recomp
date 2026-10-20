@@ -124,7 +124,12 @@ bool Presenter::open(Device& device) {
     sampler.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
     sampler.address_mode_u = sampler.address_mode_v = sampler.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
     sampler_ = SDL_CreateGPUSampler(device.get(), &sampler);
-    return pipeline_ && screen_pipeline_ && sampler_;
+    // The 3D: filtered, and averaged down through its mipmaps when the
+    // window is smaller than it was drawn.
+    sampler.min_filter = sampler.mag_filter = SDL_GPU_FILTER_LINEAR;
+    sampler.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_LINEAR;
+    smooth_ = SDL_CreateGPUSampler(device.get(), &sampler);
+    return pipeline_ && screen_pipeline_ && sampler_ && smooth_;
 }
 
 Presenter::~Presenter() {
@@ -133,7 +138,8 @@ Presenter::~Presenter() {
     SDL_WaitForGPUIdle(d);
     for (SDL_GPUGraphicsPipeline* p : {pipeline_, screen_pipeline_})
         if (p) SDL_ReleaseGPUGraphicsPipeline(d, p);
-    if (sampler_) SDL_ReleaseGPUSampler(d, sampler_);
+    for (SDL_GPUSampler* s : {sampler_, smooth_})
+        if (s) SDL_ReleaseGPUSampler(d, s);
     for (SDL_GPUTexture* t : textures_)
         if (t) SDL_ReleaseGPUTexture(d, t);
     if (upload_) SDL_ReleaseGPUTransferBuffer(d, upload_);
@@ -182,7 +188,7 @@ bool Presenter::upload(SDL_GPUCommandBuffer* cmd, std::initializer_list<std::spa
 }
 
 void Presenter::draw(SDL_GPUCommandBuffer* cmd, SDL_GPUGraphicsPipeline* pipeline,
-                     std::initializer_list<SDL_GPUTexture*> inputs, int width, int height) {
+                     std::initializer_list<SDL_GPUTexture*> inputs, int width, int height, uint32_t smooth_input) {
     SDL_GPUTexture* swapchain = nullptr;
     Uint32 sw = 0, sh = 0;
     if (!SDL_WaitAndAcquireGPUSwapchainTexture(cmd, device_->window(), &swapchain, &sw, &sh) || !swapchain) {
@@ -207,7 +213,10 @@ void Presenter::draw(SDL_GPUCommandBuffer* cmd, SDL_GPUGraphicsPipeline* pipelin
     SDL_BindGPUGraphicsPipeline(pass, pipeline);
     SDL_GPUTextureSamplerBinding bindings[3]{};
     Uint32 n = 0;
-    for (SDL_GPUTexture* t : inputs) bindings[n++] = {t, sampler_};
+    for (SDL_GPUTexture* t : inputs) {
+        bindings[n] = {t, n == smooth_input ? smooth_ : sampler_};
+        ++n;
+    }
     SDL_BindGPUFragmentSamplers(pass, 0, bindings, n);
     SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
     SDL_EndGPURenderPass(pass);
@@ -234,7 +243,7 @@ void Presenter::present_layers(std::span<const uint32_t> bottom, std::span<const
         SDL_SubmitGPUCommandBuffer(cmd);
         return;
     }
-    draw(cmd, screen_pipeline_, {textures_[0], three_d, textures_[1]}, width, height);
+    draw(cmd, screen_pipeline_, {textures_[0], three_d, textures_[1]}, width, height, 1);
 }
 
 } // namespace gpu

@@ -19,7 +19,8 @@ TEST_CASE("gpu: the shaders compiled to SPIR-V and Metal source") {
     for (const gpu::ShaderCode* s :
          {&gpu::shaders::present_vert, &gpu::shaders::present_frag, &gpu::shaders::scene_vert, &gpu::shaders::scene_frag,
           &gpu::shaders::scene_opaque_frag, &gpu::shaders::background_fog_frag, &gpu::shaders::depth_copy_frag,
-          &gpu::shaders::composite_frag, &gpu::shaders::screen_frag}) {
+          &gpu::shaders::composite_frag, &gpu::shaders::screen_frag, &gpu::shaders::scene_quads_frag,
+          &gpu::shaders::scene_opaque_quads_frag, &gpu::shaders::premultiply_frag}) {
         CHECK(s->spirv_size > 20);
         CHECK_EQ(s->spirv_size % 4, 0u);
         CHECK_EQ(word(*s, 0), 0x07230203u); // the SPIR-V magic number

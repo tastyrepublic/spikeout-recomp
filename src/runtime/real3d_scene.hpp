@@ -126,6 +126,11 @@ struct Real3dScene {
     };
     BackgroundFog background_fog() const;
 
+    // Whether a quad (its four vertices) is flat with its attributes linear
+    // across it: then mean value coordinates draw it exactly as its two
+    // triangles, and only other quads need drawing whole (--quads).
+    static bool quad_is_linear(const Vertex* e);
+
     // The viewports as read, for reports.
     struct ViewportInfo {
         int priority;

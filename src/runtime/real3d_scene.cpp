@@ -96,6 +96,33 @@ Real3dScene::BackgroundFog Real3dScene::background_fog() const {
     return fog;
 }
 
+bool Real3dScene::quad_is_linear(const Vertex* e) {
+    const float attr[4][6] = {{e[0].u, e[0].v, e[0].shade, e[0].nx, e[0].ny, e[0].nz},
+                              {e[1].u, e[1].v, e[1].shade, e[1].nx, e[1].ny, e[1].nz},
+                              {e[2].u, e[2].v, e[2].shade, e[2].nx, e[2].ny, e[2].nz},
+                              {e[3].u, e[3].v, e[3].shade, e[3].nx, e[3].ny, e[3].nz}};
+    const Vertex &p0q = e[0], &p1q = e[1], &p2q = e[2], &p3q = e[3];
+    const float ax = p1q.x - p0q.x, ay = p1q.y - p0q.y, az = p1q.z - p0q.z;
+    const float bx = p2q.x - p0q.x, by = p2q.y - p0q.y, bz = p2q.z - p0q.z;
+    const float cx3 = p3q.x - p0q.x, cy3 = p3q.y - p0q.y, cz3 = p3q.z - p0q.z;
+    // p3 = p0 + s a + t b (least squares), then the leftover off that plane.
+    const float aa = ax * ax + ay * ay + az * az, ab = ax * bx + ay * by + az * bz, bb = bx * bx + by * by + bz * bz,
+                ac = ax * cx3 + ay * cy3 + az * cz3, bc = bx * cx3 + by * cy3 + bz * cz3;
+    const float det = aa * bb - ab * ab;
+    if (det == 0) return false;
+    const float s = (ac * bb - bc * ab) / det, t = (bc * aa - ac * ab) / det;
+    const float rx = cx3 - s * ax - t * bx, ry = cy3 - s * ay - t * by, rz = cz3 - s * az - t * bz;
+    const float extent = std::max({aa, bb, cx3 * cx3 + cy3 * cy3 + cz3 * cz3});
+    bool linear = rx * rx + ry * ry + rz * rz <= extent * 1e-8f;
+    for (size_t c = 0; c < 6 && linear; ++c) {
+        const float predicted = attr[0][c] + s * (attr[1][c] - attr[0][c]) + t * (attr[2][c] - attr[0][c]);
+        const float scale =
+            std::max({std::abs(attr[0][c]), std::abs(attr[1][c]), std::abs(attr[2][c]), std::abs(attr[3][c]), 1.0f});
+        linear = std::abs(predicted - attr[3][c]) <= scale * 1e-4f;
+    }
+    return linear;
+}
+
 float Real3dSceneBuilder::culling_float(uint32_t addr) const { return as_float(mem_->culling(addr)); }
 
 void Real3dSceneBuilder::build(const Real3d& mem, Real3dScene& scene) {

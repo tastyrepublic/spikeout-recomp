@@ -11,6 +11,7 @@ layout(location = 1) in vec2 uv_in;    // texels
 layout(location = 2) in float shade_in;
 layout(location = 3) in vec3 normal_in;
 layout(location = 4) in uint polygon_in;
+layout(location = 5) in uint quad_in; // the quad drawn whole it belongs to, or kNoQuad
 
 layout(std430, set = 0, binding = 0) readonly buffer Polygons { Polygon polygons[]; };
 layout(std430, set = 0, binding = 1) readonly buffer Viewports { Viewport viewports[]; };
@@ -19,6 +20,7 @@ layout(location = 0) out vec2 uv;
 layout(location = 1) out float shade;
 layout(location = 2) out vec3 normal;
 layout(location = 3) flat out uint polygon;
+layout(location = 4) flat out uint quad;
 
 void main() {
     const Polygon p = polygons[polygon_in];
@@ -32,4 +34,5 @@ void main() {
     shade = shade_in;
     normal = normal_in;
     polygon = polygon_in;
+    quad = quad_in;
 }

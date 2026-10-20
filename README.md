@@ -118,7 +118,8 @@ build/spikeout path/to/spikeofe
 
 It shows the 2D layers and the 3D (filtered textures, per-pixel lighting
 and specular, level-of-detail fades), drawn on the GPU with Vulkan or Metal
-when there is one (`--render-scale N` draws the 3D N times as large;
+when there is one (`--render-scale N` draws the 3D N times as large: sharper
+in a bigger window, smoothed edges, supersampled, in a smaller one;
 `--soft-3d` draws it in software, `--no-gpu` uses SDL's 2D renderer for the
 window too), and plays
 the sound effects and music (`--mute` for silence). Keys: `5` coin, `1`

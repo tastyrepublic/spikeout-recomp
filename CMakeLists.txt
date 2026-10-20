@@ -178,10 +178,10 @@ if(SPIKEOUT_GPU)
     set(shader_dir ${CMAKE_SOURCE_DIR}/src/gpu/shaders)
     set(shader_out ${CMAKE_BINARY_DIR}/shaders)
     file(MAKE_DIRECTORY ${shader_out})
-    # FILE or FILE@DEFINE: a variant built with DEFINE set, named
-    # file_define_stage (scene.frag@OPAQUE -> scene_opaque_frag).
-    set(shaders present.vert present.frag scene.vert scene.frag scene.frag@OPAQUE
-        background_fog.frag depth_copy.frag composite.frag screen.frag)
+    # FILE, or FILE@DEFINE@...: a variant built with those defines set,
+    # named file_define..._stage (scene.frag@OPAQUE -> scene_opaque_frag).
+    set(shaders present.vert present.frag scene.vert scene.frag scene.frag@OPAQUE scene.frag@QUADS
+        scene.frag@OPAQUE@QUADS background_fog.frag depth_copy.frag composite.frag screen.frag premultiply.frag)
     file(GLOB shader_includes ${shader_dir}/*.glsl)
     set(shader_sources)
     foreach(entry ${shaders})
@@ -191,13 +191,12 @@ if(SPIKEOUT_GPU)
         string(REGEX MATCH "(vert|frag)$" stage ${shader})
         set(defines)
         set(name ${base})
-        list(LENGTH parts n)
-        if(n GREATER 1)
-            list(GET parts 1 define)
-            set(defines -D${define})
+        list(REMOVE_AT parts 0)
+        foreach(define ${parts})
+            list(APPEND defines -D${define})
             string(TOLOWER ${define} lower)
-            set(name ${base}_${lower})
-        endif()
+            set(name ${name}_${lower})
+        endforeach()
         set(name ${name}_${stage})
         set(spv ${shader_out}/${name}.spv)
         set(msl ${shader_out}/${name}.msl)
