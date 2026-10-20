@@ -47,6 +47,16 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+The first configure downloads SDL 3 and the shader compilers (glslang,
+SPIRV-Cross). On Linux, SDL needs the X11 or Wayland and audio development
+packages; on Debian or Ubuntu:
+
+```sh
+sudo apt-get install libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev \
+  libxkbcommon-dev libwayland-dev wayland-protocols libegl1-mesa-dev libdrm-dev libgbm-dev \
+  libasound2-dev libpulse-dev
+```
+
 ## Checking your ROM set
 
 Unzip your `spikeofe.zip` into a folder, then:
@@ -103,7 +113,9 @@ build/spikeout path/to/spikeofe
 ```
 
 It shows the 2D layers and the 3D (drawn in software for now: filtered
-textures, per-pixel lighting and specular, level-of-detail fades) and plays
+textures, per-pixel lighting and specular, level-of-detail fades; the window
+itself is drawn through the GPU with Vulkan or Metal when there is one,
+`--no-gpu` for SDL's 2D renderer) and plays
 the sound effects and music (`--mute` for silence). Keys: `5` coin, `1`
 start, `F2` test, `F1` service, arrows, `Z` beat, `X` charge, `C` jump, `V`
 shift; hold `Tab` to run as fast as possible, `F12` for a screenshot, `Esc`
@@ -133,7 +145,8 @@ Details in [docs/netplay.md](docs/netplay.md).
 - Motorola/IBM *PowerPC 603e RISC Microprocessor User's Manual* and *Programming Environments Manual*.
 - [Moira](https://github.com/dirkwhoffmann/Moira) by Dirk W. Hoffmann (MIT, vendored in `third_party/moira`) — the 68000 core that runs the network board's firmware and the sound and music boards' programs.
 - [minimp3](https://github.com/lieff/minimp3) by lieff (CC0, vendored in `third_party/minimp3`) — decodes the music board's MPEG audio.
-- [SDL 3](https://github.com/libsdl-org/SDL) (zlib license) for the window, downloaded at build time if not installed.
+- [SDL 3](https://github.com/libsdl-org/SDL) (zlib license) for the window and the GPU, downloaded at build time if not installed.
+- [glslang](https://github.com/KhronosGroup/glslang) (BSD-3-Clause and others) and [SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross) (Apache-2.0), downloaded at build time to compile the GPU shaders.
 - MAME's 315-5881 decryption by Andreas Naive, Olivier Galibert and David Haywood (BSD-3-Clause; tables and algorithm in `src/runtime/crypt315_5881.cpp`, with their notice), as also used by Supermodel.
 
 See [docs/REFERENCES.md](docs/REFERENCES.md) for how sources are used.
