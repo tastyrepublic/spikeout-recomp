@@ -2,10 +2,12 @@
 
 #include "ppc/disasm.hpp"
 #include "ppc/instruction.hpp"
+#include "ppc/timing.hpp"
 
 #include <algorithm>
 #include <cstdio>
 #include <string_view>
+#include <vector>
 
 namespace recomp {
 
@@ -125,7 +127,11 @@ private:
     void block(const Block& b) {
         ++stats_.blocks;
         out_ += label(b.start) + ":\n";
-        line("c.tick(" + hex(b.start) + ");");
+        std::vector<ppc::Instruction> code;
+        for (uint32_t pc = b.start; pc < b.end; pc += 4) code.push_back(ppc::decode(image_.read32(pc).value_or(0)));
+        const uint32_t cycles = ppc::block_cycles(code);
+        stats_.cycles += cycles;
+        line("c.tick(" + hex(b.start) + ", " + std::to_string(cycles) + ");");
         for (uint32_t pc = b.start; pc < b.end; pc += 4) {
             const uint32_t raw = image_.read32(pc).value_or(0);
             const Instruction in = ppc::decode(raw);

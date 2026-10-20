@@ -36,6 +36,7 @@ Each milestone ends with something you can run and check.
 - [x] Return sites: a resumed task can return into a function it called from before it yielded (`resume_at`, about 7,000 sites)
 - [x] The attract mode runs: logo, title, INSERT COIN, BASIC OPERATION (16,633 frames with no missing code)
 - [x] Gameplay: coin, start, fighter select and the first stage with the fighters in 3D (`gamerun --press`), 11,000 frames with no missing code. Fixed on the way: FPSCR[FPRF] after FP arithmetic (the fighters were NaN), returns past several calls (the scheduler nested until the stack overflowed)
+- [x] 603e cycle counts per block (`ppc::block_cycles`: dispatch, units, register dependencies) instead of 8 cycles a block; the attract mode's title-to-demo load now takes about as long as on a real board's recording
 - [ ] Reference interpreter for code that the static pass misses, with logging so it can be added to the recompiled set
 - [ ] **Goal:** reaches the attract loop, verified against Supermodel's behavior
 

@@ -52,21 +52,24 @@ void Mpc106::reset() {
     auto put = [&](uint32_t reg, uint32_t value) { // little-endian, as on PCI
         for (uint32_t i = 0; i < 4; ++i) regs_[reg + i] = static_cast<uint8_t>(value >> (8 * i));
     };
-    // Supermodel, Src/Model3/MPC10x.cpp, CMPC10x::Reset() for the MPC106.
+    // Reset values from the MPC106 user's manual (MPC106UM/AD Rev. 2, Table
+    // 3-10, the register tables, and the addendum's ODCR), as register values.
+    // Supermodel's (MPC10x.cpp) are the same numbers stored the other way
+    // round: halves swapped, and some single bytes one register off.
     put(0x00, 0x00021057); // vendor 0x1057 (Motorola), device 0x0002 (MPC106)
     put(0x04, 0x00800006); // command, status
-    put(0x08, 0x00060000); // revision 0, class: host bridge
-    put(0x0C, 0x00000800);
-    put(0x70, 0x00CD0000);
-    put(0xA8, 0x0010FF00);
-    put(0xAC, 0x060C000C);
-    put(0xB8, 0x04000000);
-    put(0xC0, 0x00000100);
-    put(0xE0, 0x00420FFF);
-    put(0xE8, 0x00200000);
-    put(0xF0, 0x0000FF02);
-    put(0xF4, 0x00030000);
-    put(0xFC, 0x00000010);
+    put(0x08, 0x06000000); // revision (chip-specific: unknown, 0), class 0x06 bridge, subclass 0 host
+    put(0x0C, 0x00000008); // cache line size 8 words
+    put(0x70, 0xCD000000); // PMCR1 0, PMCR2 0, ODCR (0x73) 0xCD
+    put(0xA8, 0xFF000010); // PICR1
+    put(0xAC, 0x000C060C); // PICR2
+    put(0xB8, 0x00040000); // ECC counter, trigger 0; alternate OS-visible 1 (0xBA) XIO_MODE
+    put(0xC0, 0x00000001); // ErrEnR1: 60x bus error enable
+    put(0xE0, 0x0FFF0042); // ESCR1
+    put(0xE8, 0x00000020); // ESCR2
+    put(0xF0, 0xFF020000); // MCCR1 (bits 19-16 from reset configuration pins: 0 here)
+    put(0xF4, 0x00000003); // MCCR2
+    put(0xFC, 0x00100000); // MCCR4
 }
 
 uint8_t Mpc106::read_data(uint32_t offset) const {
@@ -156,7 +159,7 @@ uint8_t Bus::io_read(uint32_t reg) {
     case 0x00: return io_bank_;
     case 0x04:
         if ((io_bank_ & 1) == 0) return inputs.bank0;
-        return static_cast<uint8_t>((inputs.bank1 & ~0x20) | (eeprom_.read_do() ? 0x20 : 0));
+        return static_cast<uint8_t>((inputs.bank1 & ~0x20) | (eeprom_.read_do(now()) ? 0x20 : 0));
     case 0x08: return inputs.controls;
     case 0x0C: return inputs.controls2;
     default:   return 0xFF; // nothing pressed, no analog inputs
@@ -165,7 +168,7 @@ uint8_t Bus::io_read(uint32_t reg) {
 
 void Bus::io_write(uint32_t reg, uint8_t value) {
     if ((reg & 0x3F) == 0x00) {
-        eeprom_.write_pins(value & 0x40, value & 0x80, value & 0x20); // CS, CLK, DI
+        eeprom_.write_pins(value & 0x40, value & 0x80, value & 0x20, now()); // CS, CLK, DI
         io_bank_ = value;
     }
     // 0x10 drive board, 0x14 lamps, 0x24 serial: outputs, nothing to do yet
@@ -275,6 +278,16 @@ void Bus::system_write(uint32_t reg, uint8_t value) {
 
 constexpr uint32_t kDmaIrq = 0x100;       // non-maskable
 constexpr uint32_t kMercuryPciId = 0x16C311DB;
+constexpr uint64_t kPciHz = 33'000'000;   // one 32-bit word a clock at best
+
+void Bus::run_dma(uint64_t cycle) {
+    if (!dma_.busy || cycle < dma_.done_at) return;
+    dma_.busy = false;
+    if (dma_.config & 1) { // IRQ on completion only when asked for
+        dma_.status |= 1;
+        irq_.assert_irq(kDmaIrq);
+    }
+}
 
 uint32_t Bus::real3d_register(uint32_t reg) const {
     if (reg == 0) return 0xFDFFFFFF | (ping_pong_ ? 0x02000000u : 0u);
@@ -284,7 +297,7 @@ uint32_t Bus::real3d_register(uint32_t reg) const {
 
 uint8_t Bus::dma_read8(uint32_t reg) const {
     switch (reg) {
-    case 0x0C: return dma_.status; // bit 7 busy (never: copies finish at once), bit 0 IRQ pending
+    case 0x0C: return static_cast<uint8_t>(dma_.status | (dma_.busy ? 0x80 : 0)); // bit 7 busy, bit 0 IRQ pending
     case 0x0E: return dma_.config;
     default:   return 0;
     }
@@ -309,18 +322,21 @@ void Bus::dma_write32(uint32_t reg, uint32_t value) {
     switch (reg) {
     case 0x00: dma_.src = value; break;
     case 0x04: dma_.dest = value; break;
-    case 0x08: // length in words: copy now
+    case 0x08: { // length in words: the data moves now, the copy completes when the bus would have carried it
         for (uint32_t n = value; n != 0; --n) {
             const uint32_t word = read32(dma_.src);
             write32(dma_.dest, (dma_.config & 0x80) ? bswap32(word) : word);
             dma_.src += 4;
             dma_.dest += 4;
         }
-        if (dma_.config & 1) { // IRQ on completion only when asked for
-            dma_.status |= 1;
-            irq_.assert_irq(kDmaIrq);
-        }
+        const uint64_t t = now();
+        const uint64_t start = dma_.busy ? std::max(t, dma_.done_at) : t; // after one still going
+        dma_.done_at = start + (dma_timed ? uint64_t{value} * ppc::CpuState::kCoreClockHz / kPciHz : 0);
+        dma_.busy = true;
+        run_dma(t);
+        if (on_due_change) on_due_change(on_due_change_user);
         break;
+    }
     case 0x10: // command
         if (value & 0x20000000) dma_.data = kMercuryPciId;                     // ID
         else if (value & 0x80000000) dma_.data = real3d_register(value & 0x3F); // read a status register
@@ -426,6 +442,7 @@ void Bus::write_slow(uint32_t addr, uint32_t value, uint32_t size) {
         const uint32_t reg = region->offset(addr) & 0xFC, v = bswap32(value);
         tile_regs_[reg / 4] = v;
         if (reg == kTileIrqAck) ack_irq(v & 0xFF);
+        if (reg == 0x0C) real3d_.tilegen_draw_frame(mercury_mode()); // the tile generator draws a frame (Supermodel)
         return;
     }
     case Device::System: // byte registers; wider writes reach several of them
@@ -437,7 +454,7 @@ void Bus::write_slow(uint32_t addr, uint32_t value, uint32_t size) {
             io_write(region->offset(addr) + i, static_cast<uint8_t>(value >> (8 * (size - 1 - i))));
         return;
     case Device::Real3dCommand:
-        real3d_.write_command();
+        real3d_.write_command(mercury_mode());
         return;
     case Device::Real3dCullingLow:
     case Device::Real3dCullingHigh:

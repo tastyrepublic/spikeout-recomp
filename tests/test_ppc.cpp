@@ -3,8 +3,10 @@
 #include "ppc/cpu_state.hpp"
 #include "ppc/disasm.hpp"
 #include "ppc/instruction.hpp"
+#include "ppc/timing.hpp"
 
 #include <string>
+#include <vector>
 
 using ppc::decode;
 using ppc::Op;
@@ -150,4 +152,35 @@ TEST_CASE("cpu state: CR helpers and reset") {
     CHECK_EQ(s.pc, 0xFFF00100u);
     CHECK_EQ(s.pvr, 0x00071202u);
     CHECK(s.msr & ppc::CpuState::kMsrIP);
+}
+
+namespace {
+
+uint32_t cycles(std::initializer_list<uint32_t> raws) {
+    std::vector<ppc::Instruction> block;
+    for (uint32_t raw : raws) block.push_back(decode(raw));
+    return ppc::block_cycles(block);
+}
+
+constexpr uint32_t addi(uint32_t d, uint32_t a, uint32_t imm) { return 14u << 26 | d << 21 | a << 16 | imm; }
+constexpr uint32_t lwz(uint32_t d, uint32_t a, uint32_t off) { return 32u << 26 | d << 21 | a << 16 | off; }
+constexpr uint32_t divw(uint32_t d, uint32_t a, uint32_t b) { return 31u << 26 | d << 21 | a << 16 | b << 11 | 491u << 1; }
+constexpr uint32_t fmadds(uint32_t d, uint32_t a, uint32_t c, uint32_t b) {
+    return 59u << 26 | d << 21 | a << 16 | b << 11 | c << 6 | 29u << 1;
+}
+
+} // namespace
+
+TEST_CASE("timing: one integer unit, two dispatches a cycle to different units") {
+    CHECK_EQ(cycles({addi(3, 0, 1)}), 1u);
+    CHECK_EQ(cycles({addi(3, 0, 1), addi(4, 0, 1), addi(5, 0, 1), addi(6, 0, 1)}), 4u); // the IU, one a cycle
+    CHECK_EQ(cycles({addi(3, 0, 1), lwz(4, 1, 8), addi(5, 0, 1), lwz(6, 1, 12)}), 2u); // IU and LSU side by side
+}
+
+TEST_CASE("timing: results wait for their latency, long operations hold their unit") {
+    CHECK_EQ(cycles({lwz(3, 1, 8), addi(4, 3, 1)}), 3u); // load-use: the add waits two cycles
+    CHECK_EQ(cycles({divw(3, 4, 5)}), 37u);
+    CHECK_EQ(cycles({fmadds(1, 2, 3, 4), fmadds(5, 1, 3, 4), fmadds(6, 5, 3, 4)}), 7u); // a chain: 3 cycles each
+    CHECK_EQ(cycles({fmadds(1, 2, 3, 4), fmadds(5, 6, 3, 4), fmadds(7, 8, 3, 4)}), 3u); // independent: pipelined
+    CHECK_EQ(cycles({0x7C0004AC /* sync */, addi(3, 0, 1)}), 4u); // the add waits for the sync
 }

@@ -64,6 +64,7 @@ private:
         EgState state = EgState::Release;
         int ar = 0, d1r = 0, d2r = 0, rr = 0, dl = 0;
         bool hold = false;
+        bool below_dl = false; // put into decay 1 by the loop start (LPSLNK) under DL: never decay 2
     };
     struct Slot {
         std::array<uint16_t, 16> data{};
@@ -111,10 +112,11 @@ private:
     std::array<Slot, 32> slots_{};
     std::array<int16_t, 64> ring_{};
     uint8_t bufptr_ = 0;
+    uint32_t noise_ = 1; // noise source state (SSCTL 1)
     Dsp dsp_;
 
     std::array<int, 3> timer_{0xFFFF, 0xFFFF, 0xFFFF};
-    uint8_t irq_tima_ = 0, irq_timbc_ = 0, irq_midi_ = 0;
+
     uint16_t mcieb_ = 0, mcipd_ = 0;
 
     std::array<uint8_t, 256> midi_{};

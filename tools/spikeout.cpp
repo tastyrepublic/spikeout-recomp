@@ -1,7 +1,7 @@
 // spikeout: the recompiled game in a window (SDL3).
 //
 //   spikeout <rom_dir> [--scale N] [--netboard sim] [--frames N] [--mute] [--quads]
-//                     [--midi-burst] [--sound-volume N] [--music-volume N]
+//                     [--midi-burst] [--dma-instant] [--sound-volume N] [--music-volume N]
 //
 // The game runs on its own thread, paced to the Model 3's 57.524 Hz; the
 // window shows the tile generator's 2D layers and the Real3D's picture
@@ -19,7 +19,8 @@
 // --frames N quits after N frames and writes the last one to
 // spikeout-<N>.png (for testing). --quads draws quads whole, as Supermodel's
 // "quad rendering" option (slower in software). --midi-burst sends the sound
-// board its bytes with Supermodel's timing instead of the serial chip's.
+// board its bytes with Supermodel's timing instead of the serial chip's;
+// --dma-instant finishes Real3D DMA copies at once (Supermodel, MAME).
 // --sound-volume and --music-volume set the sound effects (the two SCSPs) and
 // the music board apart, in percent (0-200, default 100).
 //
@@ -71,6 +72,7 @@ struct Shared {
     uint64_t max_frames = 0; // 0: run until the window is closed
     bool quads = false;      // draw quads whole (slower)
     bool midi_burst = false; // Supermodel's MIDI timing
+    bool dma_instant = false; // Real3D DMA done at once (Supermodel, MAME)
     Sound* sound = nullptr; // nullptr: muted
 };
 
@@ -189,6 +191,7 @@ void run_game(const m3::RomSet& roms, bool real_netboard, Shared& shared) {
     tools::set_rtc_to_host(bus);
     if (real_netboard) bus.use_netboard(std::make_unique<m3::CommBoard>());
     bus.midi_burst = shared.midi_burst;
+    bus.dma_timed = !shared.dma_instant;
 
     recomp::Context c(bus, functions);
     recomp::FrameTiming timing;
@@ -256,7 +259,7 @@ int main(int argc, char** argv) {
     int scale = 2;
     bool real_netboard = true;
     uint64_t max_frames = 0;
-    bool mute = false, quads = false, midi_burst = false;
+    bool mute = false, quads = false, midi_burst = false, dma_instant = false;
     int sound_volume = 100, music_volume = 100;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -265,6 +268,7 @@ int main(int argc, char** argv) {
         else if (arg == "--frames" && i + 1 < argc) max_frames = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--quads") quads = true;
         else if (arg == "--midi-burst") midi_burst = true;
+        else if (arg == "--dma-instant") dma_instant = true;
         else if (arg == "--mute") mute = true;
         else if (arg == "--sound-volume" && i + 1 < argc) sound_volume = std::atoi(argv[++i]);
         else if (arg == "--music-volume" && i + 1 < argc) music_volume = std::atoi(argv[++i]);
@@ -272,7 +276,7 @@ int main(int argc, char** argv) {
     }
     if (!dir) {
         std::fprintf(stderr, "usage: spikeout <rom_dir> [--scale N] [--netboard sim|real] [--frames N] [--mute] [--quads]\n"
-                             "                [--midi-burst] [--sound-volume N] [--music-volume N]\n");
+                             "                [--midi-burst] [--dma-instant] [--sound-volume N] [--music-volume N]\n");
         return 2;
     }
     const m3::RomSet roms = m3::load_rom_set(m3::games::kSpikeoutFinalEdition, dir);
@@ -302,6 +306,7 @@ int main(int argc, char** argv) {
     shared.max_frames = max_frames;
     shared.quads = quads;
     shared.midi_burst = midi_burst;
+    shared.dma_instant = dma_instant;
     std::unique_ptr<Sound> sound;
     if (!mute) sound = std::make_unique<Sound>(roms, sound_volume, music_volume);
     shared.sound = sound.get();

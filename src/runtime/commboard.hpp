@@ -48,6 +48,10 @@ struct CommBoardOptions {
     bool host_sees_other_bank = false;
     uint64_t cpu_hz = 10'000'000;   // 40 MHz crystal / 4: unverified (MAME: 10 MHz "random")
     uint64_t irq5_hz = 100;         // MAME's timer, "where is this timing from?"
+    // IRQ 5 locked to the main board's frame: this many a frame, evenly
+    // spaced from the frame's end (0: irq5_hz instead). See the .cpp.
+    uint32_t irq5_per_frame = 1;
+    double main_frame_hz = 57.524160;
     uint64_t main_hz = 166'000'000; // the main board's CPU clock
     uint16_t link_status = 5;       // receive/transmit status reads: both sources return 5
 };
@@ -66,6 +70,7 @@ public:
     void write16(uint32_t addr, uint16_t data) override;
     void write32(uint32_t addr, uint32_t data) override;
     void sync(uint64_t main_cycles) override;
+    void end_frame() override;
     std::string describe() const override;
 
     // ---- Inspection (reports, tests, tracing the firmware) ----
@@ -134,6 +139,8 @@ private:
     bool in_reset_ = true;
     uint8_t irq_lines_ = 0; // bit n: level n asserted
     uint64_t next_irq5_ = 0;
+    uint64_t frame_irq5_next_ = UINT64_MAX, frame_irq5_period_ = 0; // the rest of this frame's IRQ 5s
+    uint32_t frame_irq5_left_ = 0;
 
     uint16_t recv_offset_ = 0, recv_size_ = 0, send_offset_ = 0, send_size_ = 0;
     bool receive_enabled_ = false; // 0x14 = 0x80

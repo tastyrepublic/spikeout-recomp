@@ -81,7 +81,7 @@ uint64_t Context::cycle_of_tb(uint64_t tb) const {
 // ---- Events and interrupts ----
 
 void Context::slow_tick(uint32_t pc) {
-    if (blocks > block_limit_) throw OutOfBudget(pc);
+    if (blocks > block_limit_ || cycles_ >= cycle_limit_) throw OutOfBudget(pc);
 
     if (scheduler_ && cycles() >= scheduler_due_) scheduler_due_ = scheduler_->update(*this);
     const uint64_t tb = time_base();
@@ -103,11 +103,14 @@ void Context::slow_tick(uint32_t pc) {
         }
     }
 
-    uint64_t next = block_limit_ + 1;
-    if (scheduler_) next = std::min(next, block_of_cycle(scheduler_due_));
-    next = std::min(next, block_of_cycle(cycle_of_tb(dec_due_tb_)));
-    if ((cpu.msr & kMsrEE) && (bus.irq().line() || dec_pending_)) next = blocks + 1;
-    next_check_ = std::max(next, blocks + 1);
+    // Every block costs at least a cycle, so looking again within the
+    // blocks left catches the block limit in time.
+    const uint64_t blocks_left = block_limit_ >= blocks ? block_limit_ - blocks : 0;
+    uint64_t next = std::min(cycle_limit_, blocks_left >= UINT64_MAX - cycles_ ? UINT64_MAX : cycles_ + blocks_left + 1);
+    if (scheduler_) next = std::min(next, scheduler_due_);
+    next = std::min(next, cycle_of_tb(dec_due_tb_));
+    if ((cpu.msr & kMsrEE) && (bus.irq().line() || dec_pending_)) next = cycles_ + 1;
+    next_check_ = std::max(next, cycles_ + 1);
 }
 
 const FunctionEntry* Context::find(uint32_t addr) const {

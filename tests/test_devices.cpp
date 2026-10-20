@@ -196,6 +196,8 @@ struct EepromPins {
 TEST_CASE("eeprom: writes need EWEN; READ gives the dummy 0 then D15 first") {
     RomSet roms;
     Bus bus(roms);
+    uint64_t now = 0;
+    bus.set_clock([](const void* t) { return *static_cast<const uint64_t*>(t); }, &now);
     EepromPins pins{bus};
 
     pins.send(0b1'01'000101'1011111011101111, 25); // WRITE 5, 0xBEEF while writes are disabled
@@ -207,8 +209,10 @@ TEST_CASE("eeprom: writes need EWEN; READ gives the dummy 0 then D15 first") {
     pins.send(0b1'01'000101'1011111011101111, 25);
     pins.deselect();
     CHECK_EQ(bus.eeprom().words()[5], 0xBEEFu);
-    pins.send(0, 1); // CS up again: busy (DO low), then ready
-    for (int i = 0; i < Eeprom93C46::kBusyReads; ++i) CHECK(!pins.dout());
+    pins.send(0, 1); // CS up again: busy (DO low) for the 1.75 ms programming cycle, then ready
+    now = Eeprom93C46::kWriteUs * 166 - 1;
+    CHECK(!pins.dout());
+    now = Eeprom93C46::kWriteUs * 166;
     CHECK(pins.dout());
     pins.deselect();
 
@@ -652,4 +656,144 @@ TEST_CASE("real3d: a viewport and a red quad, drawn the same with one thread or 
     CHECK_EQ(one.image()[192 * 496 + 248 + 60], 0u);
     CHECK((std::vector<uint32_t>(one.image().begin(), one.image().end()) ==
            std::vector<uint32_t>(four.image().begin(), four.image().end())));
+}
+
+TEST_CASE("real3d: block culling is taken when the command port and the tile generator both signal a frame") {
+    Real3d r;
+    r.write_command(4); // one signal only
+    CHECK(!r.block_culling());
+    r.tilegen_draw_frame(4); // both, before the flip: Mercury bit 2 now
+    CHECK(r.block_culling());
+    r.tilegen_draw_frame(0);
+    r.write_command(0);
+    CHECK(!r.block_culling());
+    // After the flip the signals count at VBlank.
+    r.ping_pong_flipped();
+    r.write_command(4);
+    r.tilegen_draw_frame(4);
+    CHECK(!r.block_culling());
+    r.begin_vblank(4);
+    CHECK(r.block_culling());
+    // A frame with only the tile generator's signal keeps the last setting.
+    r.ping_pong_flipped();
+    r.tilegen_draw_frame(0);
+    r.begin_vblank(0);
+    CHECK(r.block_culling());
+}
+
+TEST_CASE("bus: a Real3D DMA copy moves its data at once and completes at PCI speed, then its IRQ") {
+    RomSet roms;
+    Bus bus(roms);
+    uint64_t now = 1000;
+    bus.set_clock([](const void* t) { return *static_cast<const uint64_t*>(t); }, &now);
+    bus.write32(0x1000, 0x11223344);
+    bus.write32(0x1004, 0x55667788);
+    bus.write8(0xC200000E, 0x81);              // byte-swap, IRQ on completion
+    bus.write32(0xC2000000, bswap32(0x1000));  // source
+    bus.write32(0xC2000004, bswap32(0x2000));  // destination (RAM, to see it)
+    bus.write32(0xC2000008, bswap32(330));     // 330 words: 1,660 CPU cycles at 33 MHz
+    CHECK_EQ(bus.read32(0x2000), 0x44332211u); // the data is there
+    CHECK_EQ(bus.read8(0xC200000C) & 0x81u, 0x80u); // busy, no IRQ yet
+    CHECK_EQ(bus.dma_due(), uint64_t{1000 + 1660});
+    bus.run_devices(1000 + 1659);
+    CHECK_EQ(bus.irq().state() & 0x100u, 0u);
+    bus.run_devices(1000 + 1660);
+    CHECK_EQ(bus.read8(0xC200000C) & 0x81u, 0x01u); // done, IRQ pending
+    CHECK((bus.irq().state() & 0x100u) != 0);
+    bus.dma_timed = false; // Supermodel and MAME: done at once
+    bus.write32(0xC2000008, bswap32(330));
+    CHECK_EQ(bus.read8(0xC200000C) & 0x80u, 0u);
+}
+
+TEST_CASE("mpc106: reset values and byte order as the user's manual gives them") {
+    RomSet roms;
+    Bus bus(roms);
+    // Big-endian mode, map B (MPC106UM 3.2.1.2): the address and the data go
+    // in byte-swapped; register 0xA8 then holds 0xAABBCCDD (0xAB to 0xA8).
+    bus.write32(0xFEC00000, bswap32(0x800000A8));
+    CHECK_EQ(bus.read32(0xFEE00000), 0x100000FFu); // PICR1's reset value 0xFF000010, as lwz sees it
+    bus.write32(0xFEE00000, 0xDDCCBBAA);
+    CHECK_EQ(bus.read8(0xFEE00000), 0xDDu); // register byte 0xA8
+    CHECK_EQ(bus.read8(0xFEE00003), 0xAAu); // register byte 0xAB
+    // Class code 0x06 (bridge) in byte 0x0B; cache line size 8 in 0x0C; ErrEnR1 0x01.
+    bus.write32(0xFEC00000, bswap32(0x80000008));
+    CHECK_EQ(bus.read8(0xFEE00003), 0x06u);
+    bus.write32(0xFEC00000, bswap32(0x8000000C));
+    CHECK_EQ(bus.read8(0xFEE00000), 0x08u);
+    bus.write32(0xFEC00000, bswap32(0x800000C0));
+    CHECK_EQ(bus.read8(0xFEE00000), 0x01u);
+}
+
+TEST_CASE("scsp: SCIPD takes only bit 5 from a write; timer C and per-sample interrupts use bit 7's level") {
+    std::vector<uint8_t> ram(Scsp::kRamSize, 0);
+    Scsp scsp(ram, true);
+    scsp.write16(0x420, 0xFFFF); // only the CPU interrupt (bit 5) is set
+    CHECK_EQ(scsp.common_reg(0x420) & 0x7FFu, 0x020u);
+    scsp.write16(0x420, 0x0000); // writing 0 does nothing
+    CHECK_EQ(scsp.common_reg(0x420) & 0x7FFu, 0x020u);
+    scsp.write16(0x422, 0x0020); // SCIRE clears it
+    CHECK_EQ(scsp.common_reg(0x420) & 0x020u, 0u);
+    // Bit 7's level column (here 5) serves timers B and C, MIDI out and each sample.
+    scsp.write16(0x424, 1 << 7);
+    scsp.write16(0x426, 0);
+    scsp.write16(0x428, 1 << 7);
+    scsp.write16(0x41E, 0x400); // the per-sample interrupt
+    CHECK_EQ(scsp.irq_level(), 0);
+    scsp.tick_timers();
+    CHECK_EQ(scsp.irq_level(), 5);
+}
+
+TEST_CASE("scsp: a rate of 0 holds the envelope whatever the key-rate scale; SSCTL noise plays") {
+    std::vector<uint8_t> ram(Scsp::kRamSize, 0);
+    Scsp scsp(ram, true);
+    scsp.write16(0x04, 0);
+    scsp.write16(0x06, 16);
+    scsp.write16(0x08, 0x001F);           // AR 31, D1R 0, D2R 0
+    scsp.write16(0x0A, 0xE << 10 | 0x1F); // KRS 0xE (the most scaling), DL 0, RR 31
+    scsp.write16(0x10, 7 << 11);          // octave 7: the most key-rate scale
+    scsp.write16(0x16, 0xE000);           // DISDL 7
+    scsp.write16(0x00, 0x1800 | 1 << 7 | 1 << 5); // SSCTL 1 (noise), key on, loop
+    int32_t l = 0, r = 0, loud = 0;
+    for (int i = 0; i < 4000; ++i) scsp.sample(l, r); // attack, then decay 1 at rate 0
+    for (int i = 0; i < 2000; ++i) {
+        scsp.sample(l, r);
+        loud = std::max(loud, std::abs(l));
+    }
+    CHECK(loud > 4000); // noise, still at full level: D1R 0 doesn't decay it
+    scsp.write16(0x00, 0x1000 | 1 << 7 | 1 << 5); // key off: it releases and ends
+    for (int i = 0; i < 3000; ++i) scsp.sample(l, r);
+    CHECK_EQ(scsp.active_slots(), 0);
+}
+
+TEST_CASE("commboard: IRQ 5 locked to the main board's frames") {
+    // SSP 0xFF00, start at 0x100 (enable interrupts, loop); IRQ 5 (0x74 ->
+    // 0x200) acknowledges and returns.
+    std::vector<uint16_t> rom(0x110, 0x4E71);
+    auto put32 = [&](uint32_t addr, uint32_t v) {
+        rom[addr / 2] = static_cast<uint16_t>(v >> 16);
+        rom[addr / 2 + 1] = static_cast<uint16_t>(v);
+    };
+    put32(0x00, 0x0000FF00);
+    put32(0x04, 0x00000100);
+    put32(0x74, 0x00000200);
+    const uint16_t main_loop[] = {0x46FC, 0x2000, 0x60FE};               // move.w #$2000,sr; bra.s *
+    const uint16_t handler[] = {0x33FC, 0xFFFF, 0x0004, 0x0040, 0x4E73}; // move.w #$ffff,$40040; rte
+    for (std::size_t i = 0; i < 3; ++i) rom[0x100 / 2 + i] = main_loop[i];
+    for (std::size_t i = 0; i < 5; ++i) rom[0x200 / 2 + i] = handler[i];
+
+    CommBoardOptions opts;
+    opts.irq5_per_frame = 2;
+    CommBoard board(nullptr, opts);
+    for (uint32_t i = 0; i < rom.size(); ++i) board.write32(0xC0020000 + 4 * i, brx(rom[i]));
+    board.write32(0xC0010180, brx(1));
+    const uint64_t frame = 2'885'790; // main board cycles in a frame
+    board.sync(frame);
+    CHECK_EQ(board.irqs_taken[5], 0u); // not on a timer
+    board.end_frame();                 // the frame's first
+    board.sync(frame + frame / 4);
+    CHECK_EQ(board.irqs_taken[5], 1u);
+    board.sync(frame + frame * 3 / 4); // the second, half a frame on
+    CHECK_EQ(board.irqs_taken[5], 2u);
+    board.sync(3 * frame);             // no more until the next frame ends
+    CHECK_EQ(board.irqs_taken[5], 2u);
 }

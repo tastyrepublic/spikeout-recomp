@@ -76,15 +76,19 @@ public:
     uint64_t first_nan_bits = 0;
 
     // ---- Clock ----
-    // Recompiled code doesn't count cycles: time is the number of basic
-    // blocks run, times `cycles_per_block` CPU cycles. That keeps every run
-    // with the same inputs exactly the same (save states, rollback netplay).
+    // Each basic block adds the 603e cycles the lifter worked out for it
+    // (ppc::block_cycles: dispatch, units and register dependencies, every
+    // access a cache hit). Counted, not measured, so every run with the same
+    // inputs is exactly the same (save states, rollback netplay).
     uint64_t blocks = 0;
-    uint32_t cycles_per_block = 8;
-    uint64_t cycles() const { return blocks * cycles_per_block; }
-    // Stop with OutOfBudget after `n` more blocks.
+    uint64_t cycles() const { return cycles_; }
+    // Stop with OutOfBudget after `n` more blocks, or `n` more cycles.
     void limit_blocks(uint64_t n) {
         block_limit_ = blocks + n;
+        recheck();
+    }
+    void limit_cycles(uint64_t n) {
+        cycle_limit_ = cycles_ + n;
         recheck();
     }
     // Board timing (frames, interrupts): called whenever it's due.
@@ -113,7 +117,7 @@ public:
 
     // Something changed that may let an interrupt in (MSR, the IRQ line):
     // look again at the start of the next block.
-    void recheck() { next_check_ = blocks + 1; }
+    void recheck() { next_check_ = cycles_; }
     void msr_changed() { recheck(); }
 
     uint64_t external_interrupts = 0;    // taken
@@ -128,12 +132,15 @@ public:
     void write32(uint32_t addr, uint32_t v) { bus.write32(addr, v); }
     void write64(uint32_t addr, uint64_t v) { bus.write64(addr, v); }
 
-    // Start of every basic block: one compare unless something is due
-    // (an event, an interrupt to deliver, the block limit).
-    void tick(uint32_t pc) {
+    // Start of every basic block, with the block's cost: one compare unless
+    // something is due (an event, an interrupt to deliver, a limit). The
+    // block's cycles count once it runs, after any interrupt taken first.
+    void tick(uint32_t pc, uint32_t block_cycles) {
         cpu.pc = pc;
         recent[recent_pos++ & (recent.size() - 1)] = pc;
-        if (++blocks >= next_check_) slow_tick(pc);
+        ++blocks;
+        if (cycles_ >= next_check_) slow_tick(pc);
+        cycles_ += block_cycles;
     }
 
     // The last blocks run, oldest first: where a stopped run came from.
@@ -207,7 +214,6 @@ public:
 
 private:
     void slow_tick(uint32_t pc);
-    uint64_t block_of_cycle(uint64_t cycle) const { return (cycle + cycles_per_block - 1) / cycles_per_block; }
     uint64_t cycle_of_tb(uint64_t tb) const;
 
     std::span<const FunctionEntry> functions_;
@@ -215,8 +221,10 @@ private:
     std::array<uint32_t, 4096> return_stack_{};
     size_t return_depth_ = 0;
 
-    uint64_t next_check_ = 1;
+    uint64_t cycles_ = 0;
+    uint64_t next_check_ = 0; // cycle at which tick() calls slow_tick()
     uint64_t block_limit_ = UINT64_MAX - 1;
+    uint64_t cycle_limit_ = UINT64_MAX;
     Scheduler* scheduler_ = nullptr;
     uint64_t scheduler_due_ = UINT64_MAX; // cycle
 

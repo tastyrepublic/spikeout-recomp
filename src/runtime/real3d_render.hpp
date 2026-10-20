@@ -58,6 +58,7 @@ public:
         uint32_t models_in_polygon_ram = 0, hidden_nodes = 0, lod_rejected = 0, frustum_culled = 0, faded_out = 0;
         uint32_t spotlights = 0; // viewports with the spotlight on
         uint32_t scroll_fog = 0, ambient_fog = 0;                // drawn this frame (0 or 1)
+        bool block_culled = false; // the Real3D's block culling was on: white, no scene
         uint32_t micro_polys = 0, translator_polys = 0, inverted_polys = 0;
         double setup_ms = 0, raster_ms = 0; // walking the scene and setting up triangles; drawing them
     };

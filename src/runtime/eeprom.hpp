@@ -14,8 +14,11 @@
 // after the last address bit of a READ, DO shows a dummy 0 until the next
 // clock, which brings D15 (Supermodel leaves the dummy out; shifting in an
 // extra 0 bit instead "causes problems", their notes say). Programming time:
-// after a write, raising CS shows busy (DO = 0) for a while, then ready;
-// here that is a number of DO reads (as in Supermodel), not real time.
+// after a write or erase, raising CS shows busy (DO = 0) until the chip's
+// self-timed cycle ends, in time on the CPU's clock: MAME's generic 93Cxx
+// times (1.75 ms a word, 1 ms an erase, 8 ms for all words), since the
+// board's part (a "93C46A") and so its datasheet aren't known; any of them
+// takes milliseconds. Supermodel shows busy for 5 DO reads.
 #pragma once
 
 #include <array>
@@ -26,17 +29,19 @@ namespace m3 {
 
 class Eeprom93C46 {
 public:
-    Eeprom93C46() { erase_all(); }
+    explicit Eeprom93C46(uint64_t cpu_hz = 166'000'000) : cpu_hz_(cpu_hz) { erase_all(); }
 
-    void write_pins(bool cs, bool clk, bool di);
-    bool read_do();
+    // `now`: the CPU's time in cycles.
+    void write_pins(bool cs, bool clk, bool di, uint64_t now = 0);
+    bool read_do(uint64_t now = 0);
 
     // Contents (persisting them across runs is up to the frontend).
     std::span<uint16_t, 64> words() { return words_; }
     std::span<const uint16_t, 64> words() const { return words_; }
     void erase_all() { words_.fill(0xFFFF); } // a blank chip reads all ones
 
-    static constexpr int kBusyReads = 5; // DO reads of "busy" after a write or erase
+    // Self-timed programming cycles, in microseconds.
+    static constexpr uint64_t kWriteUs = 1750, kEraseUs = 1000, kAllUs = 8000;
 
 private:
     std::array<uint16_t, 64> words_{};
@@ -49,7 +54,9 @@ private:
     uint16_t out_ = 0;        // word being shifted out
     int out_bits_ = 0;
     uint8_t addr_ = 0;
-    int busy_ = 0;
+    uint64_t cpu_hz_;
+    uint64_t busy_until_ = 0; // cycle the programming cycle ends
+    void program(uint64_t now, uint64_t us) { busy_until_ = now + us * cpu_hz_ / 1'000'000; }
 };
 
 } // namespace m3

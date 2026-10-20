@@ -22,14 +22,15 @@ uint64_t FrameTiming::due() const {
 
 uint64_t FrameTiming::update(Context& c) {
     for (;;) {
-        // The sound link's serial chip and the frame's events, in time order.
-        const uint64_t frame_due = due(), midi_due = c.bus.midi_due();
-        if (c.cycles() < std::min(frame_due, midi_due)) break;
-        if (midi_due < frame_due) {
-            c.bus.run_midi(midi_due);
+        // The bus devices' events (the sound link's serial chip, Real3D DMA)
+        // and the frame's, in time order.
+        const uint64_t frame_due = due(), device_due = c.bus.device_due();
+        if (c.cycles() < std::min(frame_due, device_due)) break;
+        if (device_due < frame_due) {
+            c.bus.run_devices(device_due);
             continue;
         }
-        c.bus.run_midi(frame_due);
+        c.bus.run_devices(frame_due);
         switch (next_) {
         case Next::Midi: // Supermodel's timing: one more MIDI IRQ, while the game asks for them
             if (c.bus.midi_burst && (c.bus.midi_control() & 0x20) && (c.bus.irq().enable() & 0x40) && midi_irqs_ < kMaxMidiIrqs &&
@@ -60,11 +61,11 @@ uint64_t FrameTiming::update(Context& c) {
             midi_irqs_ = 0;
             next_ = Next::Midi;
             if (on_frame_end) on_frame_end();
-            c.bus.real3d().begin_vblank(); // after the frame is drawn: buffered updates land now
+            c.bus.real3d_begin_vblank(); // after the frame is drawn: buffered updates land now
             break;
         }
     }
-    return std::min(due(), c.bus.midi_due());
+    return std::min(due(), c.bus.device_due());
 }
 
 } // namespace recomp

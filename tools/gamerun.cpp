@@ -68,6 +68,14 @@ struct Press {
     int bit = 0;
 };
 
+// --poke ADDR=VALUE@FRAME[:N]: write a byte of RAM at the end of N frames
+// (default 1) from FRAME, for experiments (a setting the game reads, say).
+struct Poke {
+    uint32_t addr = 0;
+    uint8_t value = 0;
+    uint64_t frame = 0, frames = 1;
+};
+
 // Where each input is, active low (hardware-notes.md, Inputs).
 bool input_bit(const std::string& name, int& bank, int& bit) {
     static const struct {
@@ -111,7 +119,8 @@ int main(int argc, char** argv) {
     int sound_volume = 100, music_volume = 100;
     uint64_t probe_frame = 0;
     std::vector<Press> presses;
-    bool show_text = false, real_netboard = true, force_master = false, quads = false, midi_burst = false;
+    std::vector<Poke> pokes;
+    bool show_text = false, real_netboard = true, force_master = false, quads = false, midi_burst = false, dma_instant = false;
     std::size_t net_trace = 0;
     int64_t blocks = 200'000'000;
     for (int i = 1; i < argc; ++i) {
@@ -127,6 +136,7 @@ int main(int argc, char** argv) {
         else if (arg == "--wav" && i + 1 < argc) wav = argv[++i];
         else if (arg == "--quads") quads = true;
         else if (arg == "--midi-burst") midi_burst = true;
+        else if (arg == "--dma-instant") dma_instant = true;
         else if (arg == "--sound-volume" && i + 1 < argc) sound_volume = std::atoi(argv[++i]);
         else if (arg == "--music-volume" && i + 1 < argc) music_volume = std::atoi(argv[++i]);
         else if (arg == "--shot-every" && i + 1 < argc) shot_every = std::strtoull(argv[++i], nullptr, 0);
@@ -135,6 +145,21 @@ int main(int argc, char** argv) {
             if (std::sscanf(argv[++i], "%d,%d@%llu", &probe_x, &probe_y, &frame) == 3) probe_frame = frame;
         }
         else if (arg == "--tilegen-trace" && i + 1 < argc) tilegen_trace = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--poke" && i + 1 < argc) {
+            Poke k;
+            unsigned addr = 0, value = 0;
+            unsigned long long frame = 0, frames = 1;
+            const int n = std::sscanf(argv[++i], "%x=%x@%llu:%llu", &addr, &value, &frame, &frames);
+            if (n < 3) {
+                std::fprintf(stderr, "gamerun: --poke ADDR=VALUE@FRAME[:N] (hex address and value)\n");
+                return 2;
+            }
+            k.addr = addr;
+            k.value = static_cast<uint8_t>(value);
+            k.frame = frame;
+            k.frames = n == 4 ? frames : 1;
+            pokes.push_back(k);
+        }
         else if (arg == "--press" && i + 1 < argc) {
             // NAME@FRAME[:N]: hold NAME for N frames (default 6) from FRAME.
             const std::string spec = argv[++i];
@@ -156,9 +181,9 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "usage: gamerun <rom_dir> [--blocks N] [--text] [--dump-tile FILE]\n"
                              "               [--netboard sim|real] [--net-trace N] [--net-disasm FILE]\n"
                              "               [--screenshot FILE.png] [--shot-every N] [--wav FILE.wav]\n"
-                             "               [--probe X,Y@FRAME] [--quads] [--midi-burst]\n"
+                             "               [--probe X,Y@FRAME] [--quads] [--midi-burst] [--dma-instant]\n"
                              "               [--sound-volume N] [--music-volume N]\n"
-                             "               [--press NAME@FRAME[:N]]...\n");
+                             "               [--press NAME@FRAME[:N]]... [--poke ADDR=VALUE@FRAME[:N]]...\n");
         return 2;
     }
     const m3::GameSpec& game = m3::games::kSpikeoutFinalEdition;
@@ -172,6 +197,7 @@ int main(int argc, char** argv) {
 
     m3::Bus bus(roms);
     bus.midi_burst = midi_burst;
+    bus.dma_timed = !dma_instant;
     bus.set_security_key(game.security_key);
     tools::set_rtc_to_host(bus);
     for (uint8_t& b : bus.ram()) b = 0xA5;
@@ -199,7 +225,7 @@ int main(int argc, char** argv) {
     std::vector<int16_t> audio;
     int peak = 0;
     double energy = 0, sound_seconds = 0, render_seconds = 0, setup_ms = 0, raster_ms = 0;
-    uint64_t frames_rendered = 0, frames_spotlit = 0, frames_scroll_fog = 0, frames_ambient_fog = 0;
+    uint64_t frames_rendered = 0, frames_spotlit = 0, frames_scroll_fog = 0, frames_ambient_fog = 0, frames_block_culled = 0;
     uint64_t micro_tris = 0, translator_tris = 0, inverted_tris = 0;
     timing.on_display_line = [&](uint32_t line) {
         if (line == 0) tilegen.begin_frame();
@@ -213,6 +239,7 @@ int main(int argc, char** argv) {
             setup_ms += real3d.stats().setup_ms;
             raster_ms += real3d.stats().raster_ms;
             if (real3d.stats().spotlights) ++frames_spotlit;
+            if (real3d.stats().block_culled) ++frames_block_culled;
             {
                 const auto& s = real3d.stats();
                 frames_scroll_fog += s.scroll_fog;
@@ -234,6 +261,8 @@ int main(int argc, char** argv) {
             peak = std::max(peak, std::abs(static_cast<int>(s)));
             energy += static_cast<double>(s) * s;
         }
+        for (const Poke& k : pokes)
+            if (timing.frames() >= k.frame && timing.frames() < k.frame + k.frames) bus.write8(k.addr, k.value);
         // --press: inputs held for the coming frame (active low).
         uint8_t in[2] = {0xFF, 0xFF};
         for (const Press& p : presses)
@@ -270,9 +299,61 @@ int main(int argc, char** argv) {
     const long long ran = static_cast<long long>(c.blocks);
 
     std::printf("Stopped: %s\n", why.c_str());
-    std::printf("Ran %lld blocks in %.2f s (%.0f million blocks/s)\n", ran, seconds,
-                static_cast<double>(ran) / seconds / 1e6);
+    std::printf("Ran %lld blocks in %.2f s (%.0f million blocks/s), %.2f 603e cycles a block\n", ran, seconds,
+                static_cast<double>(ran) / seconds / 1e6,
+                ran > 0 ? static_cast<double>(c.cycles()) / static_cast<double>(ran) : 0.0);
     std::printf("PC %08x  LR %08x  CTR %08x  MSR %08x  CR %08x\n", c.cpu.pc, c.cpu.lr, c.cpu.ctr, c.cpu.msr, c.cpu.cr);
+    // Address translation as the game set it up (the runtime treats every
+    // address as physical; these show whether that holds).
+    {
+        using A = m3::Jtag::Asic;
+        const m3::Jtag& j = bus.jtag();
+        std::printf("Real3D mode words (JTAG): Mercury %08x  Venus %08x  Earth %08x  Mars %08x  Jupiter %08x\n",
+                    j.modeword(A::Mercury), j.modeword(A::Venus), j.modeword(A::Earth), j.modeword(A::Mars),
+                    j.modeword(A::Jupiter));
+    }
+    std::printf("MMU: SDR1 %08x  HID0 %08x\n", c.cpu.sdr1, c.cpu.hid0);
+    for (int i = 0; i < 4; ++i)
+        std::printf("  IBAT%d %08x %08x   DBAT%d %08x %08x\n", i, c.cpu.ibat[2 * i], c.cpu.ibat[2 * i + 1], i,
+                    c.cpu.dbat[2 * i], c.cpu.dbat[2 * i + 1]);
+    std::printf("  SR");
+    for (uint32_t sr : c.cpu.sr) std::printf(" %08x", sr);
+    std::printf("\n");
+    // The page tables in RAM: the one SDR1 gives (HTABORG, HTABMASK), which
+    // Spikeout's instruction TLB miss handler searches, and the one 128 KB
+    // above it its data handlers search. Every valid PTE's page, from its
+    // group and API, against the page it maps to.
+    for (const uint32_t org : {c.cpu.sdr1 & 0xFFFF0000u, (c.cpu.sdr1 & 0xFFFF0000u) + 0x20000}) {
+        const uint32_t groups = ((c.cpu.sdr1 & 0x1FF) + 1) * 1024; // 64-byte groups of 8 PTEs
+        uint32_t valid = 0, identity = 0, shown = 0;
+        uint32_t lo = UINT32_MAX, hi = 0;
+        for (uint32_t g = 0; g < groups && org + (g + 1) * 64 <= bus.ram().size(); ++g)
+            for (uint32_t k = 0; k < 8; ++k) {
+                const uint32_t at = org + g * 64 + k * 8;
+                const uint32_t w0 = bus.read32(at), w1 = bus.read32(at + 4);
+                if (!(w0 >> 31)) continue;
+                ++valid;
+                const uint32_t vsid = (w0 >> 7) & 0xFFFFFF, h = (w0 >> 6) & 1, api = w0 & 0x3F;
+                const uint32_t hash = h ? ~g : g;
+                const uint32_t page = (api << 10) | ((hash ^ vsid) & 0x3FF); // 16-bit page index
+                int seg = -1;
+                for (int s = 0; s < 16; ++s)
+                    if ((c.cpu.sr[s] & 0xFFFFFF) == vsid) seg = s;
+                const uint32_t pa = w1 & 0xFFFFF000u;
+                const uint32_t ea = seg < 0 ? 0 : static_cast<uint32_t>(seg) << 28 | page << 12;
+                if (seg >= 0 && ea == pa) {
+                    ++identity;
+                    lo = std::min(lo, ea);
+                    hi = std::max(hi, ea + 0xFFF);
+                } else if (shown++ < 8) {
+                    std::printf("  PTE at %06x: VSID %06x (segment %d) page %04x -> %08x, WIMG %x PP %u\n", at, vsid, seg,
+                                page, pa, (w1 >> 3) & 0xF, w1 & 3);
+                }
+            }
+        std::printf("Page table at %08x: %u valid PTEs, %u map their page to itself (%08x-%08x)\n", org, valid, identity,
+                    lo == UINT32_MAX ? 0 : lo, hi);
+    }
+
     std::printf("Frames %llu (%.2f s of game time); interrupts taken: %llu external, %llu decrementer; "
                 "IRQ enable %02x, pending %02x\n",
                 static_cast<unsigned long long>(timing.frames()),
@@ -298,9 +379,11 @@ int main(int argc, char** argv) {
                         1000.0 * render_seconds / static_cast<double>(frames_rendered),
                         setup_ms / static_cast<double>(frames_rendered), raster_ms / static_cast<double>(frames_rendered),
                         static_cast<unsigned long long>(frames_rendered));
-        std::printf("  spotlight on in %llu frames; scroll fog in %llu, ambient fog in %llu; triangle setups with a "
-                    "microtexture %llu, translator map %llu, inverted texture %llu\n",
-                    static_cast<unsigned long long>(frames_spotlit), static_cast<unsigned long long>(frames_scroll_fog),
+        std::printf("  block culling (white, no scene) in %llu frames; spotlight on in %llu; scroll fog in %llu, "
+                    "ambient fog in %llu; triangle setups with a microtexture %llu, translator map %llu, inverted "
+                    "texture %llu\n",
+                    static_cast<unsigned long long>(frames_block_culled), static_cast<unsigned long long>(frames_spotlit),
+                    static_cast<unsigned long long>(frames_scroll_fog),
                     static_cast<unsigned long long>(frames_ambient_fog), static_cast<unsigned long long>(micro_tris),
                     static_cast<unsigned long long>(translator_tris), static_cast<unsigned long long>(inverted_tris));
         const auto& st = real3d.stats();

@@ -95,15 +95,35 @@ void CommBoard::sync(uint64_t main_cycles) {
 
 void CommBoard::run_until(uint64_t target) {
     const uint64_t irq5_period = options_.cpu_hz / options_.irq5_hz;
+    const bool timed = options_.irq5_per_frame == 0;
     while (!in_reset_ && cpu_cycles() < target) {
-        const uint64_t stop = std::min(target, next_irq5_);
+        const uint64_t stop = std::min({target, timed ? next_irq5_ : UINT64_MAX, frame_irq5_next_});
         cpu_->executeUntil(static_cast<moira::i64>(stop));
-        if (cpu_cycles() >= next_irq5_) {
+        if (timed && cpu_cycles() >= next_irq5_) {
             set_irq(5, true);
             next_irq5_ += irq5_period;
         }
+        if (cpu_cycles() >= frame_irq5_next_) {
+            set_irq(5, true);
+            frame_irq5_next_ = --frame_irq5_left_ ? frame_irq5_next_ + frame_irq5_period_ : UINT64_MAX;
+        }
         deliver_receive();
     }
+}
+
+// IRQ 5 locked to the main board's frames: the first at the end of each
+// frame (the board has caught up to it), the others spread over the next.
+// Spikeout's link checks lock-step every frame (each cabinet's data must be
+// the one from exactly one frame before, "Sync_sys_broken" otherwise): with
+// MAME's free-running 100 Hz a lone master fails it within seconds, with
+// IRQ 5 once a frame it doesn't. What drives it on the board isn't known.
+void CommBoard::end_frame() {
+    if (in_reset_ || options_.irq5_per_frame == 0) return;
+    set_irq(5, true);
+    frame_irq5_left_ = options_.irq5_per_frame - 1;
+    frame_irq5_period_ =
+        static_cast<uint64_t>(static_cast<double>(options_.cpu_hz) / options_.main_frame_hz / options_.irq5_per_frame);
+    frame_irq5_next_ = frame_irq5_left_ ? cpu_cycles() + frame_irq5_period_ : UINT64_MAX;
 }
 
 void CommBoard::release_reset() {

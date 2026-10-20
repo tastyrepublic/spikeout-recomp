@@ -83,16 +83,20 @@ game). A handler that returns without `rfi` is an error.
 
 ### Clock and interrupts
 
-Recompiled code doesn't count cycles. Time is `Context::blocks`, the
-number of basic blocks run, times `cycles_per_block` (8 by default) CPU
-cycles at 166 MHz: every run with the same inputs is exactly the same,
-which save states and rollback netplay need. The time base and the
-decrementer run at 16.5 MHz (bus clock / 4) on that clock; DEC going from
-0 to -1 raises the decrementer exception (`0x900`).
+Time is counted in 603e cycles at 166 MHz. The lifter works out each
+basic block's cost when it generates it (`ppc::block_cycles`: two
+dispatches a cycle, in order, to the integer, floating-point, load/store,
+system and branch units, each instruction waiting for its source registers
+and its unit; latencies after the 603e user's manual; every access a cache
+hit) and passes it to `c.tick(pc, cycles)`. Counted, not measured: every
+run with the same inputs is exactly the same, which save states and
+rollback netplay need. The game averages about 4.3 cycles a block. The
+time base and the decrementer run at 16.5 MHz (bus clock / 4) on that
+clock; DEC going from 0 to -1 raises the decrementer exception (`0x900`).
 
 `Context::tick()` is one compare per block. It falls into the slow path
 only when something is due: a `Scheduler` event, the decrementer, the
-block limit, or an interrupt that may now be taken, because the IRQ line,
+block or cycle limit, or an interrupt that may now be taken, because the IRQ line,
 MSR (`mtmsr`, `rfi`) or the decrementer changed. External interrupts
 (`0x500`) are taken at a block start when the IRQ controller's line is up
 and MSR[EE] is set.

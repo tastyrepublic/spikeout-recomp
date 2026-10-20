@@ -18,6 +18,7 @@
 #include "runtime/rom.hpp"
 #include "runtime/usart8251.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <map>
@@ -169,6 +170,9 @@ public:
         real3d_.ping_pong_flipped();
     }
     bool ping_pong() const { return ping_pong_; }
+    // Start of VBlank, after the frame is drawn: the Real3D's buffered
+    // updates land now (with the Mercury mode word for its frame signals).
+    void real3d_begin_vblank() { real3d_.begin_vblank(mercury_mode()); }
     const Jtag& jtag() const { return jtag_; }
     // Tilegen registers (0xF1180000, 32-bit only), as the tile generator
     // sees them (little-endian: the bus byte-swaps, as Supermodel does).
@@ -209,6 +213,19 @@ public:
     // (for the board's scheduler).
     uint64_t midi_due() const { return midi_burst ? UINT64_MAX : midi_uart_.next_event(); }
     void run_midi(uint64_t cycle);
+    // A Real3D DMA copy completing (status bit 7 drops, the IRQ if asked for).
+    uint64_t dma_due() const { return dma_.busy ? dma_.done_at : UINT64_MAX; }
+    void run_dma(uint64_t cycle);
+    // Every device event on the bus, for the scheduler.
+    uint64_t device_due() const { return std::min(midi_due(), dma_due()); }
+    void run_devices(uint64_t cycle) {
+        run_midi(cycle);
+        run_dma(cycle);
+    }
+    // Real3D DMA: a copy takes at least the time the PCI bus needs to carry
+    // it (one 32-bit word per 33 MHz clock: 166/33 CPU cycles a word). False:
+    // finished at once, as in Supermodel and MAME.
+    bool dma_timed = true;
     // Called when midi_due() may have moved earlier (the runtime asks again).
     void (*on_due_change)(void* user) = nullptr;
     void* on_due_change_user = nullptr;
@@ -286,6 +303,8 @@ private:
     struct Dma {
         uint32_t src = 0, dest = 0, data = 0;
         uint8_t status = 0, config = 0;
+        bool busy = false;
+        uint64_t done_at = 0; // cycle the copy in progress completes
     } dma_;
 
     Mpc106 pci_;
@@ -299,7 +318,8 @@ private:
     const void* clock_user_ = nullptr;
     bool ping_pong_ = false;
     Jtag jtag_;
-    Eeprom93C46 eeprom_;
+    uint32_t mercury_mode() const { return jtag_.modeword(Jtag::Asic::Mercury); }
+    Eeprom93C46 eeprom_{ppc::CpuState::kCoreClockHz};
     uint8_t io_bank_ = 0;
     uint8_t io_read(uint32_t reg);
     void io_write(uint32_t reg, uint8_t value);

@@ -2,7 +2,7 @@
 
 namespace m3 {
 
-void Eeprom93C46::write_pins(bool cs, bool clk, bool di) {
+void Eeprom93C46::write_pins(bool cs, bool clk, bool di, uint64_t now) {
     const bool rising = !clk_ && clk;
     clk_ = clk;
     if (!cs) { // deselected: end of command; programming may still be going on
@@ -48,7 +48,7 @@ void Eeprom93C46::write_pins(bool cs, bool clk, bool di) {
             done_ = true;
             if (writable_) { // a refused write starts no programming cycle
                 words_[address] = 0xFFFF;
-                busy_ = kBusyReads;
+                program(now, kEraseUs);
             }
             return;
         case 0:
@@ -59,7 +59,7 @@ void Eeprom93C46::write_pins(bool cs, bool clk, bool di) {
                 done_ = true;
                 if (writable_) {
                     erase_all();
-                    busy_ = kBusyReads;
+                    program(now, kAllUs);
                 }
                 return;
             default: return;                   // WRAL: wait for the data
@@ -73,17 +73,13 @@ void Eeprom93C46::write_pins(bool cs, bool clk, bool di) {
         if (op == 1 && writable_) words_[a] = data;          // WRITE
         if (op == 0 && (a >> 4) == 1 && writable_) words_.fill(data); // WRAL
         done_ = true;
-        if (writable_) busy_ = kBusyReads;
+        if (writable_) program(now, op == 0 ? kAllUs : kWriteUs);
     }
 }
 
-bool Eeprom93C46::read_do() {
+bool Eeprom93C46::read_do(uint64_t now) {
     if (sending_) return do_;
-    if (busy_ > 0) { // still programming
-        --busy_;
-        return false;
-    }
-    return true; // ready
+    return now >= busy_until_; // busy (0) while programming, then ready
 }
 
 } // namespace m3

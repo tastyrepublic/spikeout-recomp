@@ -1,4 +1,4 @@
-// SCSP: see scsp.hpp. Adapted from Supermodel's Src/Sound/SCSP.cpp,
+﻿// SCSP: see scsp.hpp. Adapted from Supermodel's Src/Sound/SCSP.cpp,
 // SCSPLFO.cpp and SCSPDSP.cpp:
 //
 //   Supermodel, a Sega Model 3 Arcade Emulator.
@@ -155,7 +155,11 @@ const Tables& tables() {
     return t;
 }
 
+// An envelope rate with the key-rate scale added. A rate of 0 is no change
+// whatever the scale (the SCSP manual: "when AR = 00H the amount of change is
+// 0", likewise D1R, D2R, RR); Supermodel and MAME add the scale to it too.
 int rate_of(const std::array<int, 64>& table, int base, unsigned r) {
+    if (r == 0) return 0;
     return table[static_cast<std::size_t>(std::clamp(base + static_cast<int>(r << 1), 0, 63))];
 }
 
@@ -269,6 +273,7 @@ void Scsp::start_slot(Slot& slot) {
     compute_eg(slot);
     slot.eg.state = EgState::Attack;
     slot.eg.volume = 0x17F << kEgShift;
+    slot.eg.below_dl = false;
     compute_lfo(slot);
 }
 
@@ -295,7 +300,7 @@ int Scsp::eg_update(Slot& slot) {
         break;
     case EgState::Decay1:
         eg.volume = std::max(eg.volume - eg.d1r, 0);
-        if ((eg.volume >> (kEgShift + 5)) <= eg.dl) eg.state = EgState::Decay2;
+        if (!eg.below_dl && (eg.volume >> (kEgShift + 5)) <= eg.dl) eg.state = EgState::Decay2;
         break;
     case EgState::Decay2:
         if (f.d2r() == 0) return (eg.volume >> kEgShift) << (kShift - 10);
@@ -314,7 +319,6 @@ int Scsp::eg_update(Slot& slot) {
 
 int32_t Scsp::update_slot(Slot& slot, int16_t* ring_out) {
     const Fields f{slot.data};
-    if (f.ssctl() != 0) return 0; // noise and silence sources: not modelled (Supermodel neither)
     const Tables& t = tables();
 
     uint32_t step = slot.step;
@@ -344,9 +348,20 @@ int32_t Scsp::update_slot(Slot& slot, int16_t* ring_out) {
         addr2 &= mask;
     }
 
+    // SSCTL (the SCSP manual): 0 the waveform in memory, 1 noise from the
+    // slot's LFO noise oscillator, 2 all zeros, 3 not available. The noise
+    // algorithm isn't known (MAME uses random numbers): a fixed sequence
+    // here, so runs repeat. The slot otherwise runs as usual (pitch,
+    // envelope, levels). Supermodel and our earlier code played nothing
+    // and left the slot's envelope stopped.
     int32_t sample;
     const int32_t fpart = static_cast<int32_t>(slot.cur & ((1u << kShift) - 1));
-    if (f.pcm8b()) {
+    if (f.ssctl() == 1) {
+        noise_ = noise_ * 1103515245u + 12345u;
+        sample = static_cast<int16_t>(noise_ >> 16);
+    } else if (f.ssctl() != 0) {
+        sample = 0;
+    } else if (f.pcm8b()) {
         const int32_t p1 = static_cast<int8_t>(ram_[(slot.base + addr1) & (kRamSize - 1)]) * 256;
         const int32_t p2 = static_cast<int8_t>(ram_[(slot.base + addr2) & (kRamSize - 1)]) * 256;
         sample = (p1 * ((1 << kShift) - fpart) + p2 * fpart) >> kShift;
@@ -366,8 +381,13 @@ int32_t Scsp::update_slot(Slot& slot, int16_t* ring_out) {
 
     addr1 = slot.cur >> kShift;
     addr2 = slot.nxt >> kShift;
-    if (addr1 >= f.lsa() && !slot.back && f.lpslnk() && slot.eg.state == EgState::Attack)
+    if (addr1 >= f.lsa() && !slot.back && f.lpslnk() && slot.eg.state == EgState::Attack) {
+        // The SCSP manual (EG register, LPSLNK, Fig. 4.11): reaching the loop
+        // start under the decay level, the EG decays at D1R and never gets to
+        // decay 2.
         slot.eg.state = EgState::Decay1;
+        slot.eg.below_dl = (slot.eg.volume >> (kEgShift + 5)) <= slot.eg.dl;
+    }
 
     uint32_t* const pos[2] = {&slot.cur, &slot.nxt};
     const uint32_t addrs[2] = {addr1, addr2};
@@ -476,6 +496,8 @@ void Scsp::timer_reload(int t) {
 }
 
 void Scsp::tick_timers() {
+    // Each sample, and the MIDI output FIFO (nothing is sent) always empty.
+    if (master_) regs_[0x20 / 2] |= 0x600;
     for (int t = 0; t < 3; ++t) {
         int& count = timer_[static_cast<std::size_t>(t)];
         uint16_t& reg = regs_[0x18 / 2 + t];
@@ -493,15 +515,18 @@ void Scsp::tick_timers() {
 // a read empties it. Supermodel dropped the pending bit each time the level
 // was worked out, which with one byte at a time let the 68000 take the
 // interrupt again and read an empty FIFO.
+// The SCSP manual (interrupt control register): a level for each pending
+// and enabled source, from SCILV0-2 bit for bit; timers B and C, MIDI out
+// and the per-sample interrupt (bits 7-10) all take bit 7's level. Sources:
+// 3 MIDI in, 4 DMA end, 5 CPU (written), 6-8 timers A-C, 9 MIDI out empty,
+// 10 each sample (0-2 external inputs aren't connected here).
 int Scsp::irq_level() {
     if (!master_) return 0;
     if (midi_w_ != midi_r_) regs_[0x20 / 2] |= 8;
-    const uint16_t pend = regs_[0x20 / 2];
-    const uint16_t en = regs_[0x1E / 2];
+    const uint16_t active = regs_[0x20 / 2] & regs_[0x1E / 2] & 0x7FF;
     int level = 0;
-    if (pend & en & 0x40) level = irq_tima_;
-    if (pend & en & 0x180) level = std::max<int>(level, irq_timbc_);
-    if (pend & en & 0x8) level = std::max<int>(level, irq_midi_);
+    for (int b = 0; b <= 10; ++b)
+        if (active & (1u << b)) level = std::max<int>(level, decode_sci(std::min(b, 7)));
     return level;
 }
 
@@ -555,13 +580,6 @@ void Scsp::update_reg(uint32_t reg) {
             for (int t = 0; t < 3; ++t)
                 if (timer_[static_cast<std::size_t>(t)] == 0xFFFF) regs_[0x20 / 2] |= static_cast<uint16_t>(0x40 << t);
         }
-        break;
-    case 0x24:
-    case 0x26:
-    case 0x28:
-        irq_tima_ = decode_sci(6);
-        irq_timbc_ = decode_sci(7);
-        irq_midi_ = decode_sci(3);
         break;
     case 0x2A: mcieb_ = regs_[0x2A / 2]; break;
     case 0x2E: mcipd_ &= static_cast<uint16_t>(~regs_[0x2E / 2]); break;
@@ -645,6 +663,10 @@ void Scsp::write16(uint32_t addr, uint16_t v) {
         slots_[addr / 0x20].data[(addr & 0x1F) / 2] = v;
         update_slot_reg(static_cast<int>(addr / 0x20), addr & 0x1F);
     } else if (addr < 0x430) {
+        if ((addr & 0x3E) == 0x20) { // SCIPD: read-only but for bit 5; writing 1 there interrupts the CPU
+            regs_[0x20 / 2] = static_cast<uint16_t>(regs_[0x20 / 2] | (v & 0x20));
+            return;
+        }
         regs_[(addr & 0x3F) / 2] = v;
         update_reg(addr & 0x3F);
     } else if (addr >= 0x600 && addr < 0x680) {
@@ -661,6 +683,10 @@ void Scsp::write8(uint32_t addr, uint8_t v) {
     addr &= 0xFFF;
     if (addr >= 0x400 && addr < 0x430) { // don't read back registers made at read time
         uint16_t& w = regs_[(addr & 0x3E) / 2];
+        if ((addr & 0x3E) == 0x20) { // SCIPD: only bit 5 (a CPU interrupt) can be set
+            if (addr & 1) w = static_cast<uint16_t>(w | (v & 0x20));
+            return;
+        }
         w = (addr & 1) ? static_cast<uint16_t>((w & 0xFF00) | v) : static_cast<uint16_t>((w & 0x00FF) | v << 8);
         update_reg(addr & 0x3F);
         return;

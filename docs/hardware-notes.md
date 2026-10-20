@@ -250,8 +250,8 @@ cabinets, one player each — not several players on one board.
 bit 7, DI bit 5) and read in bit 5 of register `0x04`, bank 1
 (`m3::Eeprom93C46`). On a blank chip Spikeout writes its defaults: words
 0–2 are the signature "M3SEGA", then the settings, with a second copy of
-them from word `0x23`. With these settings the cabinet is a link master
-and, alone, runs without starting the network board's 68000.
+them from word `0x23`. With these settings the cabinet is stand-alone
+(link setting 0) and runs without starting the network board's 68000.
 
 ## Security board (`0xF0180000`, 315-5881)
 
@@ -277,10 +277,27 @@ The game writes the board's firmware into net RAM (`0xC0020000`, the
 68000's RAM at 0) and starts the 68000 through I/O register `0xC0`
 (`0xC0010180`). Facts from Spikeout's firmware:
 
-- Vectors: SSP `0xFF00`, PC `0x800`; IRQ 2 `0x22AA` (command from the main
-  board), IRQ 4 `0x2260` (transmit complete), IRQ 5 `0x2056` (periodic
-  tick: acknowledges and toggles the LEDs), IRQ 6 `0x20C0` (receive
-  complete; sets a "frame received" flag at `$611`).
+- Base registers: A6 `0xC0000` (I/O registers shared with the main
+  board), A5 `0x40000` (control), A4 `0x80000` (comm RAM).
+- Vectors at boot: SSP `0xFF00`, PC `0x800`; IRQ 2 `0x2000` (a command
+  from the main board: when idle it takes status 0 into `$60A` and the
+  command number from its bits 12-14 into `$60C`, then acknowledges at
+  `0x400A0`); IRQ 5 `0x202C` (tick: acknowledges at `0x40040`, sets `$608`,
+  counts `$604`, LEDs `0x40080` = `~$609`); levels 3, 4, 6 `rte`.
+- When the link starts, `0x1424` copies a vector set over levels 2-6: from
+  `0x22C0` IRQ 2 `0x22AA`, IRQ 4 `0x2260`, IRQ 5 `0x2056`, IRQ 6 `0x20C0`;
+  from `0x22D4` (the other role) IRQ 5 `0x208C` and IRQ 6 `0x21D0`. In this
+  mode IRQ 2 acknowledges and swaps the comm RAM bank (`0x40000`); IRQ 5
+  acknowledges, swaps the bank when `$60F` is set, puts `$600` byte-swapped
+  (`rol #8`) at comm RAM offset 6 and sets `$608`; IRQ 4 (transmit
+  complete) counts an error in `$61C` when transmit status (`0x19`) bit 1 is
+  set, then writes 5 to it and `0x82` to `0x2F`; IRQ 6 (receive complete)
+  looks at interrupt status (`0x83`) bits `0xA0` and `0x02` and receive
+  status (`0x11`) bits `0xB8`, counting errors in `$61D` / `$61E` by bit
+  `0x10`, writes 5 to `0x81`, and sets the "frame received" flag `$611`.
+- Each frame header the firmware writes to comm RAM (`0x126E`) is the link
+  role word `$400` at offset 0, a long (`$612`, `$613`) at 2, and the longs
+  `$500` and `$504` at 8 and 12, written with `move.l`, once in each bank.
 - Main loop `0x834`: waits for a command (set by the IRQ 2 handler from
   status 0), runs it from a table, writes the result to status 0 with bit
   15 cleared. Command 1 is the comm RAM test the game also does.
@@ -291,6 +308,23 @@ The game writes the board's firmware into net RAM (`0xC0020000`, the
   checking; `0xE000` at start), bit 11 "no carrier"; `0x2021 + 0x20 * n +
   index` when the ring is up. A slave arms its receiver and waits for a
   master's frame without sending; with none it reports no carrier.
+
+The game's side (Spikeout's code):
+
+- Driver: `0x105D8` holds the board in reset, `0x105E0` starts it
+  (`0xC0010180`), `0x10514` sets the link up (role to `$400`, node count x
+  frame size to `$402`, frame size to `$404`), `0x10390` checks the board
+  (reset, a command in status 0, start, poll status 1).
+- `0x6D644` decides at start-up: it reads the link setting, the byte at
+  `0x10019E` (`-32354(r13)`, which the test menu steps through 0-2); 0 is
+  stand-alone and the board stays in reset. Otherwise `0x6D24C` starts the
+  link, the role coming from a table at `0xB1A9C` indexed by the setting.
+- Its data buffers in comm RAM start at `0x100`, a frame of 3,072 bytes
+  per cabinet. Each frame, `0x6FD1C` checks the firmware's counter at
+  `0xC0000004` (`lhz`) moves, and `0x7425C` checks each cabinet's frame
+  counter is the game's own minus 1 (or 2): otherwise "Communication error
+  !! Please call service staff. (Sync_sys_broken)". The link runs in lock
+  step with the video frame.
 
 ## Network board (`0xC0000000`)
 

@@ -40,6 +40,7 @@ struct LiftStats {
     uint32_t functions = 0;
     uint32_t blocks = 0;
     uint32_t instructions = 0;
+    uint64_t cycles = 0;       // the blocks' 603e cycles, added up (ppc::block_cycles)
     uint32_t return_sites = 0; // places after a call the runtime can resume at
     std::map<std::string, uint32_t> unimplemented; // mnemonic -> count (they throw at run time)
 };

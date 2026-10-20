@@ -48,9 +48,28 @@ void Real3d::write_texture_fifo(uint32_t value) {
     if (fifo_.size() < kFifoWords) fifo_.push_back(swap(value));
 }
 
-void Real3d::write_command() {
+void Real3d::write_command(uint32_t mercury_mode) {
     command_written_ = true;
-    if (!flipped_) flush_textures(); // after the flip: at the start of VBlank
+    if (flipped_) return; // after the flip: at the start of VBlank
+    flush_textures();
+    if (tilegen_drew_) draw_frame(mercury_mode);
+}
+
+void Real3d::tilegen_draw_frame(uint32_t mercury_mode) {
+    tilegen_drew_ = true;
+    if (!flipped_ && command_written_) draw_frame(mercury_mode);
+}
+
+// Both signals for a frame: it takes the block culling bit then.
+void Real3d::draw_frame(uint32_t mercury_mode) {
+    tilegen_drew_ = command_written_ = false;
+    block_culling_ = (mercury_mode & 4) != 0;
+}
+
+// Signals from here on are for the next frame.
+void Real3d::ping_pong_flipped() {
+    flipped_ = true;
+    tilegen_drew_ = command_written_ = false;
 }
 
 void Real3d::write_culling_high(uint32_t offset, uint32_t value) {
@@ -116,12 +135,12 @@ void Real3d::apply(bool polygon, std::vector<uint32_t>& target) {
     buf = {};
 }
 
-void Real3d::begin_vblank() {
+void Real3d::begin_vblank(uint32_t mercury_mode) {
     apply(false, culling_hi_);
     apply(true, polygon_);
-    if (flipped_ && command_written_) flush_textures();
+    if (command_written_) flush_textures();
+    if (tilegen_drew_ && command_written_) draw_frame(mercury_mode);
     flipped_ = false;
-    command_written_ = false;
 }
 
 void Real3d::flush_textures() {

@@ -33,7 +33,8 @@ endif()
 # PowerPC 603e decoder and disassembler (the front end of the recompiler).
 add_library(ppc
     src/ppc/decoder.cpp
-    src/ppc/disasm.cpp)
+    src/ppc/disasm.cpp
+    src/ppc/timing.cpp)
 target_include_directories(ppc PUBLIC src)
 target_link_libraries(ppc PRIVATE spikeout_warnings)
 

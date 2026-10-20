@@ -392,7 +392,7 @@ TEST_CASE("frame timing: the sound link's serial chip paces IRQ 0x40, a byte eve
     CHECK_EQ(m.bus.irq().state() & 0x40, 0u);
     const uint64_t character = m.bus.midi_uart().character_cycles();
     CHECK_EQ(character, uint64_t{166'000'000} * 10 / 31'250); // 320 us
-    m.c.limit_blocks(character / 8 + 2);
+    m.c.limit_cycles(character + 2);
     try {
         m.run("spin");
     } catch (const recomp::OutOfBudget&) {
@@ -404,7 +404,7 @@ TEST_CASE("frame timing: the sound link's serial chip paces IRQ 0x40, a byte eve
     CHECK_EQ(m.bus.midi_out()[0].cycle, t0 + character);
     m.bus.write8(0xF0080004, 0x06); // transmitter off: TxRDY drops, the byte still goes out
     CHECK_EQ(m.bus.irq().state() & 0x40, 0u);
-    m.c.limit_blocks(character / 8 + 2);
+    m.c.limit_cycles(character + 2);
     try {
         m.run("spin");
     } catch (const recomp::OutOfBudget&) {
@@ -429,7 +429,7 @@ TEST_CASE("frame timing: display line and frame hooks, MIDI IRQs in VBlank (Supe
     m.bus.write8(0xF0080004, 0x27); // the game asks for MIDI IRQs
     m.bus.irq().set_enable(0x40);   // MSR[EE] is off: they stay pending
     // A little into the first VBlank: IRQ 0x40 has been raised.
-    m.c.limit_blocks(5000 / 8);
+    m.c.limit_cycles(5000);
     try {
         m.run("spin");
     } catch (const recomp::OutOfBudget&) {
@@ -439,7 +439,7 @@ TEST_CASE("frame timing: display line and frame hooks, MIDI IRQs in VBlank (Supe
     CHECK_EQ(m.bus.irq().state() & 0x40, 0u);
     CHECK_EQ(m.bus.midi_out().size(), size_t{1});
     // On through the first frame.
-    m.c.limit_blocks(timing.frame_cycles() / 8 + 100);
+    m.c.limit_cycles(timing.frame_cycles() + 100);
     try {
         m.run("spin");
     } catch (const recomp::OutOfBudget&) {

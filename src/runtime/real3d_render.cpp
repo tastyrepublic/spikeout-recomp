@@ -107,6 +107,11 @@ void Real3dRenderer::render(const Real3d& mem) {
     models_.clear();
     probe_hits_.clear();
     visits_ = 0;
+    if (mem.block_culling()) { // no 3D: Supermodel clears to white, over the layers below
+        std::fill(color_.begin(), color_.end(), 0xFFFFFFFFu);
+        stats_.block_culled = true;
+        return;
+    }
     walk_viewports(0x800000);
     // Set up every triangle, priority by priority, then draw them, each
     // thread taking every n-th line.

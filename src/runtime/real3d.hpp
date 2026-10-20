@@ -40,7 +40,6 @@ public:
     void write_polygon(uint32_t offset, uint32_t value);
     void write_config(uint32_t offset, uint32_t value) { config_[(offset / 4) & 3] = swap(value); }
     void write_texture_fifo(uint32_t value);
-    void write_command(); // the command port: the frame's uploads are done
 
     // Frame timing. Once the ping-pong bit flips the Real3D is drawing this
     // frame's scene, and the game starts on the next: until VBlank, writes
@@ -49,8 +48,18 @@ public:
     // configuration registers 0 and 8), applied at the start of VBlank
     // (Supermodel's Real3D.cpp, UpdateBlock). Textures written after the
     // flip are stored at VBlank too.
-    void ping_pong_flipped() { flipped_ = true; }
-    void begin_vblank();
+    //
+    // Two signals say a frame's data is complete (Supermodel): the command
+    // port (the CPU wrote it all) and the tile generator's register 0x0C
+    // (it draws a frame). When both come before the flip, or at VBlank for
+    // the ones after it, the frame takes the Mercury ASIC's mode word bit 2,
+    // block culling, which stops the 3D being drawn (`mercury_mode` is that
+    // mode word as the JTAG chain last set it).
+    void write_command(uint32_t mercury_mode); // the command port
+    void tilegen_draw_frame(uint32_t mercury_mode);
+    void ping_pong_flipped();
+    void begin_vblank(uint32_t mercury_mode);
+    bool block_culling() const { return block_culling_; }
 
     // Words as the Real3D sees them, by word address (0 outside memory).
     uint32_t culling(uint32_t addr) const;
@@ -84,11 +93,12 @@ private:
     void buffered_write(bool polygon, std::vector<uint32_t>& target, uint32_t word, uint32_t value);
     void apply(bool polygon, std::vector<uint32_t>& target);
     void flush_textures();
+    void draw_frame(uint32_t mercury_mode);
 
     std::span<const uint8_t> vrom_;
     std::vector<uint32_t> culling_lo_, culling_hi_, polygon_;
     UpdateBuffer high_buffer_, polygon_buffer_;
-    bool flipped_ = false, command_written_ = false;
+    bool flipped_ = false, command_written_ = false, tilegen_drew_ = false, block_culling_ = false;
     std::array<uint32_t, 4> config_{};
     std::vector<uint32_t> fifo_;
     std::vector<uint16_t> texture_;

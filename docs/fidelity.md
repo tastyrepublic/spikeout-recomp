@@ -9,20 +9,48 @@ board), and keep the old behavior selectable while it is being tested.
 
 ## Can be checked against documents
 
-- **MPC106 PCI bridge**: reset values (Supermodel marks register `0xB8`
-  "TO-DO: CHECK MANUAL") and the byte order of multi-byte config reads
-  (Supermodel stores little-endian and reads back big-endian; its own
-  comment calls that unreliable). Source: Motorola MPC106 user's manual.
-- **603e exceptions and timers**: SRR1 bits per exception, the MSR on
-  entry and `rfi`, decrementer behavior when written negative, time base
-  rate. Source: PowerPC 603e user's manual. (We already run the time base
-  and decrementer at the bus clock / 4, unlike Supermodel's per-game
-  scaling, and re-check the IRQ line when the enable mask is written.)
+- **Checked: MPC106 PCI bridge** against its user's manual (MPC106UM/AD
+  Rev. 2 and the addendum). Byte order: the registers are little-endian,
+  and in big-endian mode the byte the CPU puts at `CONFIG_DATA + i` is
+  register byte `offset + i` (the manual's worked examples), which is what
+  we do. Reset values now come from the manual: Supermodel's (and so our
+  old ones) are the same numbers laid out the other way round, halves
+  swapped (PICR1 `0xFF000010` read as `0x0010FF00`, MCCR1, ESCR1/2, MCCR2/4,
+  PICR2) and single bytes one register off (class code, cache line size,
+  ODCR `0xCD` at `0x73`, its `0xB8` "check manual" byte, which is the
+  alternate OS-visible register at `0xBA`, ErrEnR1 at `0xC0`). It made no
+  difference to Spikeout: its boot code writes every bridge register before
+  it reads one back, except the IDs and the revision, and its own writes
+  (`0x0FFF0042` to `0xE0`, `0x20` to `0xE8`, the ODCR at `0x73`) match the
+  manual's layout. Unknown: the chip's revision ID and MCCR1 bits 16-19
+  (configuration pins), both 0.
+- **Checked: 603e exceptions and timers** against the 603e user's manual:
+  SRR1[16-31] from the MSR with the cause above; on entry the MSR keeps
+  ME, IP and ILE, takes LE from ILE and clears the rest; `rfi` restores
+  MSR[16-23, 25-27, 30-31]; the trap bit; DEC raising an exception when
+  bit 0 goes from 0 to 1, by counting or by a write. The time base and
+  decrementer run at the bus clock / 4 (Supermodel scales them per game).
+- **Checked: address translation.** The game runs with MSR[IR, DR] on. Its
+  BATs map `FE000000`-`FFFFFFFF` and the tile generator's `F1000000` to
+  themselves; everything else goes through page tables, which it keeps in
+  two halves: instructions at SDR1's `0x740000`, data 128 KB above (its own
+  TLB miss handlers, installed over the boot ROM's at `0x1000`-`0x1200`,
+  are the 603e manual's with `addis 2` for data). Every valid entry maps a
+  page to itself (126 instruction pages; 1,743 data pages up to
+  `C2000FFF`), and every data access in the attract mode finds one, so
+  treating addresses as physical gives the hardware's results (`gamerun`
+  prints the BATs and both tables). Not modelled: the TLBs themselves (64
+  entries, 2-way): a model of the data TLB misses about 290 times a frame,
+  about 10,000 cycles in the miss handler, under 0.5% of the frame; and
+  the referenced/changed bits those handlers set in the tables.
 
 ## Needs real-board evidence
 
 - **IRQ acknowledge** through Tilegen register `0x10`: Supermodel clears
-  all 8 written bits, MAME only the low 4.
+  all 8 written bits, MAME only the low 4. Moot for Spikeout: it writes
+  `0x6E` once at start-up, when none of the upper bits is pending, and then
+  only `0x02`, `0x04` and `0x08`. It never acknowledges `0x01`, which stays
+  pending, outside the enable mask (`0x6E`), for the whole run.
 - **System register `0x1C`** reads `0xFF` because games "apparently expect"
   it; the real meaning is unknown.
 - **IRQ `0x02` at the start of line 383**: assumed from System 24 (Lost
@@ -30,17 +58,32 @@ board), and keep the old behavior selectable while it is being tested.
 - **Real3D ping-pong flip** at the line in Tilegen register `0x08`: stands
   in for "the Real3D finished the frame", which really depends on how long
   rendering takes.
-- **Real3D DMA**: copies finish instantly and the busy bit is never set;
-  the completion IRQ is wired as non-maskable (`0x100`) by choice; the ID
-  command answers Mercury's `0x16C311DB` (Supermodel: "make sure we're
-  returning the correct value") while PCI config space says `0x178611DB`.
+- **Real3D DMA** (improved): the data moves at once, but the copy only
+  completes (busy bit 7 drops, the IRQ if asked for) after the time the PCI
+  bus needs to carry it, one 32-bit word per 33 MHz clock at best; a copy
+  started while one is going follows it. Supermodel and MAME complete it at
+  once (`--dma-instant`; MAME holds busy 50 µs after a DMA command). This
+  is a lower bound: the real engine's rate isn't known. Spikeout copies
+  about 27 KB a frame (up to 375 KB while booting) and reads the status
+  register about 2.5 times a copy. The completion IRQ is non-maskable
+  (`0x100`), as both emulators have it (Supermodel: NMI; MAME: the SCSI
+  line, outside the enable mask). The ID command answers Mercury's
+  `0x16C311DB` while PCI config space says `0x178611DB` (Supermodel's
+  notes: Step 2.x games by AM3 expect this).
 - **JTAG**: whether system register bit 7 is really TRST; 3D-RAM boundary
   scan isn't emulated (only BYPASS).
 - **Frame loop**: Supermodel runs VBlank until IRQ `0x02` is acknowledged
   (emulator scheduling, not hardware); we don't, and should only if a game
   proves it needs it.
-- **Clock**: our time is basic blocks × cycles per block, not real CPU
-  cycles; how long code takes affects anything timed against the frame.
+- **Clock** (improved): each basic block costs the cycles a model of the
+  603e's dispatch and execution units gives it (`ppc::block_cycles`), not
+  a flat 8 a block (Supermodel counts one cycle an instruction at a lower
+  clock). Checked against a real board's recording of the attract mode:
+  the black load between the title and the first demo room lasts about
+  0.25 s there, 0.1 s with this model and 1.5 s with the flat count. Not
+  modelled: cache misses, the time device accesses take on the bus,
+  results that cross into the next block; all would make it slower, which
+  is the way it still differs.
 
 ## Clock, sound link and 2D
 
@@ -63,7 +106,10 @@ board), and keep the old behavior selectable while it is being tested.
   holding that byte back left the attract mode's music muted for 3.7 s).
 - **Tile generator**: lines are drawn at the start of each display line,
   as Supermodel does; the colour offset's channel order (red in the low
-  byte) is Supermodel's code, which its own comment contradicts; which
+  byte, Supermodel's code against its own comment) is confirmed by a real
+  board's recording: the title fades in from a white layer with offset
+  `0x00808000`, which is pure red this way and would be pure blue the
+  other, and the recording shows red; which
   layer the line mask's first 16 pixels belong to (overscan) is a guess in
   both emulators. Composite is 2D only: black, the layers below the 3D,
   the layers above.
@@ -131,8 +177,17 @@ lists every triangle at one pixel and what became of it, for comparing.
 Timing: writes to high culling RAM and polygon RAM after the ping-pong
 flip go into the update buffers in low culling RAM and are applied at
 VBlank, after the frame is drawn, as Supermodel does (`m3::Real3d`).
-Supermodel also waits for both the command port and the tile generator to
-say a frame is ready before drawing; we draw every frame.
+Frame signals, as current Supermodel has them: the command port (the CPU
+wrote the frame) and a write to tile generator register `0x0C` (it draws a
+frame). When both come before the flip, or at VBlank for the ones after,
+the frame takes block culling from the Mercury ASIC's mode word (bit 2,
+set through JTAG), which replaces the 3D with white, as Supermodel draws it.
+Both emulators, and we, still draw every frame. Spikeout sets block culling
+three times in the attract mode and the start of a game (boot, the "TEAM
+SPIKEOUT PRESENTS" title, the load before the stage), each time under a
+full-screen 2D layer, so it doesn't show. The Mars mode word never sets
+bit `0x40000`, so the sun stays clamped at 0 (Supermodel's sun clamp), as
+our lighting always has it. `gamerun` prints the five mode words.
 
 ## Sound board
 
@@ -170,11 +225,32 @@ the chip's documented register layout:
   delays commands instead of making the sound crackle. `gamerun` runs it a
   frame at a time after each main-board frame (as Supermodel does), so runs
   repeat exactly.
-- **Kept from Supermodel, unverified:** an overflowed timer stays at
-  `0xFF` and pending until reloaded (the chip's timers probably keep
-  counting); timers B and C share timer B's interrupt level; envelope rates
-  add the key-rate scale even when a rate is 0; noise and silence sources
-  (SSCTL) play nothing; the DSP's memory access only on odd steps.
+- **Checked against Sega's SCSP user's manual** (1997): timers count up
+  every 1-128 samples and interrupt at the overflow, `256 - TIM` counts
+  (5.805 ms from `00` at one a sample); timers B and C, MIDI out and the
+  per-sample interrupt share the level in bit 7 of SCILV0-2 (Supermodel's
+  "B and C share B's level"); MIDI input is pending until the FIFO is
+  empty; KRS `0xF` turns key-rate scaling off; LPSLNK holds the envelope at
+  its peak until the loop start. Fixed from it: SCIPD takes only bit 5 (the
+  CPU interrupt) from a write, where the whole word was stored; the level
+  comes from every pending, enabled source (bits 0-10, MIDI out empty and
+  each sample now pending too), not just MIDI and timers; LPSLNK reaching
+  the loop start under the decay level stays in decay 1 (Fig. 4.11).
+  Spikeout enables only MIDI in (level 3) and timers A (2) and B (1), so
+  its sound is unchanged.
+- **Real-hardware evidence through MAME:** acknowledging (SCIRE) a timer
+  that has overflowed and not been reloaded makes it pending again at once
+  (MAME's note, from Sakura Taisen on a Saturn), which is how we and
+  Supermodel have it; the timer stays at `0xFF` until reloaded.
+- **Also fixed from the manual:** a rate of 0 is no change whatever the
+  key-rate scale ("when AR = 00H the amount of change is 0"); Supermodel and
+  MAME added the scale to it. SSCTL 1 now plays noise and 2 silence through
+  the slot's usual envelope and levels (Supermodel played nothing and left
+  the slot's envelope stopped, so it never ended); the noise algorithm
+  isn't known (MAME: random numbers; here a fixed sequence). Spikeout keys
+  no noise slots, and its rate-0 stages already came out at 0, so its sound
+  is the same.
+- **Unverified:** the DSP's memory access only on odd steps.
 - **Outputs:** the board has two stereo outputs, SCSP 1 at the front (CN8,
   with the music) and SCSP 2 at the rear (CN7), from Supermodel's notes on
   the cabinet diagrams of other Model 3 games; Spikeout's own wiring isn't
@@ -220,8 +296,12 @@ black box modelled by its commands (Supermodel's decoding) and minimp3.
   we show it on DO after the last address bit, and D15 comes with the next
   clock, as the datasheet has it. A write refused because writes are
   disabled starts no programming cycle.
-- **EEPROM programming time** is a number of DO reads (5) showing busy, as
-  in Supermodel, not the datasheet's milliseconds; needs a time base.
+- **EEPROM programming time** (improved): busy in real time on the CPU's
+  clock, 1.75 ms a word, 1 ms an erase, 8 ms for all words (MAME's generic
+  93Cxx times; Supermodel: 5 DO reads, microseconds). The board's part is a
+  "93C46A" (MAME's board notes) of unknown make, and makers' datasheets
+  give 2-10 ms, so the exact time is still a guess; milliseconds isn't.
+  Writing a blank EEPROM's defaults now takes the game about 0.1 s more.
 - **Security board status** always reads 0 (never busy) and the first data
   read after a restart gives `0xFFFF` (Supermodel); the game polls the
   busy bit, so a real board takes time per word. Needs a real board.
@@ -270,9 +350,9 @@ ack). They **disagree** on comm RAM byte order seen by the PowerPC
 (MAME: both CPUs see the bank the 68000 selects).
 
 Our choices (`m3::CommBoardOptions`), still to confirm from the firmware
-or a real board: 68000 at 10 MHz; IRQ 5 every 10 ms (the firmware's IRQ 5
-handler acks it and toggles the LEDs, so it is a tick, not a frame
-signal); link status registers read 5; comm RAM byte order Supermodel's
+or a real board: 68000 at 10 MHz; IRQ 5 once per main-board frame (see
+below; MAME's free-running 100 Hz stays as `irq5_per_frame = 0`); link
+status registers read 5; comm RAM byte order Supermodel's
 (`^3`); both CPUs see the selected bank; I/O register 0 bit 0 set by the
 IRQ 2 ack (the game waits for it after each command, so it has to come
 from somewhere). The link chip: writing `0x80` to `0x1A` sends
@@ -283,3 +363,46 @@ from somewhere). The link chip: writing `0x80` to `0x1A` sends
 (interrupt status) and `0x10`/`0x11`, `0x18`/`0x19` (link status) and
 branch on bits of them: those branches are where to look for what the
 real chips report.
+
+What the firmware's handlers settle (`hardware-notes.md` has the detail):
+
+- **IRQ 2** is a command from the main board: at boot the handler reads
+  status 0 and takes the command from it, so it follows the host's write
+  to status 0 (`0x88`), as MAME and we have it.
+- **IRQ 5** is a tick (flag, counter, LEDs; in link mode it also swaps the
+  comm RAM bank and posts its counter at comm RAM offset 6). It has to be
+  locked to the video frame: the game checks lock-step every frame
+  (`0x7425C`: each cabinet's frame counter, offset 476 of its node, must
+  be the game's own minus 1, or "Communication error !! (Sync_sys_broken)"),
+  and with MAME's free-running 100 Hz a lone master shows that error in the
+  attract mode within 30 s, while with IRQ 5 once per frame (or four times,
+  Supermodel's number) it plays on (5,125 frames, into a stage). We raise
+  it at the end of each main-board frame (`CommBoardOptions::irq5_per_frame`,
+  1). What drives it on a real board (a video sync line?) isn't known.
+- **Link status 5** has none of the bits the handlers treat as errors
+  (receive `0xB8`, transmit `0x02`, interrupt status `0xA0`), and the
+  firmware itself writes 5 to the transmit status and to `0x81`, so 5
+  reads as "fine": consistent, though the other bits' meanings are still
+  unknown.
+- **Comm RAM byte order:** the game reads and writes comm RAM only with
+  byte-reversed 32-bit accesses (`lwbrx`/`stwbrx`), and the firmware copies
+  32-bit values the game gave it (`$500`, `$504`) into each frame header
+  with `move.l`. For those to arrive as the same value the board must
+  reverse all four bytes: Supermodel's `n ^ 3`, which we use. MAME's
+  `n ^ 2` would swap their halves. **Confirmed running the link:** the
+  game reads the firmware's tick counter with `lhz` from `0xC0000004`
+  (`0x6FD3C`), a big-endian halfword load, and the firmware stores it
+  byte-swapped (`rol #8`) at 68000 offset 6. With `n ^ 3` the game gets the
+  counter (`0x022A`, `0x022C`, ...); with `n ^ 2` it would get it
+  byte-swapped, and the firmware's `rol #8` would have no reason to be there.
+- **Banks:** in link mode IRQ 2 and IRQ 5 swap the bank, and the frame
+  header is written once in each bank. Which bank the main board sees is
+  still open: a ring of one runs the same either way (the same interrupts,
+  to the count, over 2,078 frames), so it needs two linked boards.
+- **A lone cabinet** with the default settings uploads the firmware,
+  checks the board and keeps it in reset; the link vectors are never
+  installed. The link setting is the byte at `0x10019E` (`-32354(r13)`; the
+  test menu steps it 0-2, 0 being stand-alone): with
+  `gamerun --poke 10019E=1@0:2000` the game starts the board, shows
+  "NETWORK CHECKING / THIS IS MASTER SITE", brings the ring of one up
+  (status 1 `0x2021`) and plays as a linked master.

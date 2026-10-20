@@ -125,8 +125,10 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
-    std::printf("ppcrecomp: %u functions, %u blocks, %u instructions, %u return sites -> %s", stats.functions, stats.blocks,
-                stats.instructions, stats.return_sites, out_path.c_str());
+    std::printf("ppcrecomp: %u functions, %u blocks, %u instructions (%.2f 603e cycles a block), %u return sites -> %s",
+                stats.functions, stats.blocks, stats.instructions,
+                stats.blocks ? static_cast<double>(stats.cycles) / stats.blocks : 0.0, stats.return_sites,
+                out_path.c_str());
     if (files.size() > 1) std::printf(" + %zu files", files.size() - 1);
     std::printf("\n");
     if (!stats.unimplemented.empty()) {
