@@ -144,7 +144,7 @@ uint level_sample(Polygon p, float u, float v, int l, bool contour) {
 vec4 sample_texture(Polygon p, float u, float v, float distance) {
     const bool contour = (p.flags.x & kFlagContour) != 0u;
     const int max_level = int(p.tex2.y);
-    const float raw_lod = distance > 0.0 ? p.values.z - 2.0 * fast_log2(distance) : 0.0;
+    const float raw_lod = distance > 0.0 ? p.values.z + 2.0 * fast_log2(distance) : 0.0;
     float lod = raw_lod;
     if (!(lod > 0.0)) lod = 0.0;
     lod = min(lod, float(max_level));

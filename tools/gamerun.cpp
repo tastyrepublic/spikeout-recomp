@@ -184,10 +184,11 @@ void print_probe(const m3::Real3dRenderer& r, int x, int y, uint64_t frame) {
                 r.probe().size());
     for (const auto& h : r.probe())
         std::printf("  polygon %06x [%08x %08x %08x %08x %08x %08x %08x] priority %d, %s format %d%s, alpha %.2f, "
-                    "texel alpha %.2f, 1/w %.4g, %s: %s\n",
+                    "texel alpha %.2f, 1/w %.4g, texture %ux%u level %.2f, %s: %s\n",
                     h.polygon, h.header[0], h.header[1], h.header[2], h.header[3], h.header[4], h.header[5],
                     h.header[6], h.priority, h.textured ? "textured" : "flat", h.format, h.contour ? " contour" : "",
-                    static_cast<double>(h.alpha), static_cast<double>(h.texel_alpha), static_cast<double>(h.w), h.pass,
+                    static_cast<double>(h.alpha), static_cast<double>(h.texel_alpha), static_cast<double>(h.w), h.tw, h.th,
+                    static_cast<double>(h.lod), h.pass,
                     h.outcome);
 }
 

@@ -326,7 +326,11 @@ void Real3dSceneBuilder::walk_node(uint32_t addr, int depth) {
                 draw_level(level + 1);
             }
         } else {
-            attribs_.alpha *= no_lod ? 1.0f : fade(3);
+            // The fade as it is: Supermodel snaps it to 1/32 steps only for
+            // the four-level table above.
+            float a = no_lod ? 1.0f : std::clamp(lod_entry(3, 1) * (lod_scale - delete_size(3)), 0.0f, 1.0f);
+            if (!(a == a)) a = 0;
+            attribs_.alpha *= a;
             walk_pointer(child, depth + 1);
         }
     }
@@ -509,9 +513,11 @@ void Real3dSceneBuilder::decode_model(size_t viewport, const ModelRef& model) {
             }
             const float side = back ? -1.0f : 1.0f;
             for (float& c : face) c *= side;
-            // Texture level: -log2((1/w)^2 * base), base = the plane's distance
-            // from the eye along its (scaled) normal * cot of the view * the
-            // polygon's texture NP (header 5, 10.14) (Supermodel, as the hardware).
+            // Texture level: -log2(base / distance^2) = lod_base + 2 log2(distance)
+            // (Supermodel's -log2(gl_FragCoord.w^2 * base), gl_FragCoord.w being
+            // 1 / distance), base = the plane's distance from the eye along its
+            // (scaled) normal * cot of the view * the polygon's texture NP
+            // (header 5, 10.14): one level coarser each time the distance doubles.
             const float plane_distance = -(p0[0] * face[0] + p0[1] * face[1] + p0[2] * face[2]) * face_scale;
             const float lod_scale = plane_distance * vp.cota * static_cast<float>(h[5] >> 8) / 16384.0f;
             const float lod_base = lod_scale > 0 ? -std::log2(lod_scale) : 0.0f;
@@ -553,7 +559,10 @@ void Real3dSceneBuilder::decode_model(size_t viewport, const ModelRef& model) {
             P.micro_min_lod = static_cast<int>((h[2] >> 2) & 3);
             P.translator = h[4] & 0x80;
             P.texture_alpha = (h[6] & 7) != 0;
-            P.poly_alpha = !(h[6] & 0x800000) || alpha < 1.0f;
+            // Translucent: the header's transparency on, or a node fading it
+            // (Supermodel's Mesh::Render). One discard bit halves the alpha
+            // but leaves an opaque polygon in the opaque pass.
+            P.poly_alpha = !(h[6] & 0x800000) || model.alpha < 1.0f;
             P.trans_layer = (h[6] & 0x20000) ? 1 : 0;
             P.high_priority = h[6] & 0x10;
             P.layered = h[6] & 0x8;

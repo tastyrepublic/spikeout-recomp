@@ -304,7 +304,7 @@ void Real3dRenderer::raster(int first, int step) {
                 auto note = [&](const char* outcome) {
                     if (!probing) return;
                     ProbeHit hit{T.address, {}, T.priority, T.format, T.textured, T.contour, T.alpha, texel_alpha,
-                                 w, kPassName[static_cast<int>(pass)], outcome};
+                                 w, T.lod_base + 2.0f * std::log2(1.0f / w), T.tw, T.th, kPassName[static_cast<int>(pass)], outcome};
                     for (uint32_t i = 0; i < 7; ++i) hit.header[i] = mem_->model(T.address + i);
                     probe_hits_.push_back(hit);
                 };
@@ -532,7 +532,7 @@ float fast_log2(float x) {
 // texBiLinear and GetTextureValue). Level i of a texture at (x, y) is stored
 // at (2048 - 2048 >> i, 1024 - 1024 >> i) + (x, y) >> i in its page.
 std::array<float, 4> Real3dRenderer::sample(const Triangle& T, float u, float v, float inv_w) const {
-    const float raw_lod = inv_w > 0 ? T.lod_base - 2.0f * fast_log2(inv_w) : 0.0f;
+    const float raw_lod = inv_w > 0 ? T.lod_base + 2.0f * fast_log2(inv_w) : 0.0f;
     float lod = raw_lod;
     if (!(lod > 0)) lod = 0; // and NaN
     lod = std::min(lod, static_cast<float>(T.max_level));

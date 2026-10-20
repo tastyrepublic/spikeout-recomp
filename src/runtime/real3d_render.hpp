@@ -79,6 +79,8 @@ public:
         int priority, format;
         bool textured, contour;
         float alpha, texel_alpha, w;
+        float lod; // the texture level chosen (before clamping to the levels there are)
+        uint32_t tw, th; // texture size
         const char* pass;
         const char* outcome;
     };

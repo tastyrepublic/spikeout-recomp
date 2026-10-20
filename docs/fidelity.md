@@ -168,6 +168,34 @@ empty NVRAM, so the demo runs the same):
   coordinates (Supermodel's optional quad rendering); by default they are
   two triangles, the same picture for flat, linearly mapped quads.
 
+Checked again line by line against Supermodel's New3D (shaders, polygon
+header, mesh pass selection, node walk, viewports, frame buffers) on
+2026-10-20; three fixes, in both renderers (they share the scene):
+
+- **Texture level, sign:** Supermodel's level is
+  `-log2(gl_FragCoord.w^2 * base)`, `gl_FragCoord.w` being 1 / distance,
+  so one level coarser each time the distance doubles. We had transcribed
+  it with the distance squared instead of its inverse: close-ups took a
+  coarser level than Supermodel (a fighter's face in the attract mode at
+  level 1 instead of 0, visibly blurred) and far surfaces a finer one. A
+  bug, so no switch for the old way.
+- **Pass of a polygon with one discard bit:** it is half as opaque, but
+  only the header's transparency bit and node alpha send a polygon to the
+  translucency layers (Supermodel's `Mesh::Render`); we also sent the
+  half-opaque ones.
+- **Fade without a four-level LOD table:** used as it is; Supermodel
+  snaps a fade to 0 or 1 within 1/32 of them only for four-level tables.
+
+Left as they are: Supermodel stores a polygon's transparency as a byte
+(`t * 255 / 32`, so `t = 1` falls under its 1/32 cut-off); we keep
+`t / 32`, as nothing says the hardware rounds that way. Supermodel wraps
+texel addresses within each mip level's part of a page, we within the
+whole texture sheet (a difference only for textures at a page's edge).
+Supermodel draws a model's polygons grouped by their attributes, for
+OpenGL; we draw them in memory order. Where a pixel centre lies exactly on
+an edge shared by two polygons, the software renderer draws both and the
+GPU (as OpenGL in Supermodel) one.
+
 Still different: Supermodel's lighting is its own estimate of the
 hardware (per-pixel; the real chips may light per vertex); the Step 1.5
 luminous rules; microtextures; translucency patterns; the polygon RAM's
