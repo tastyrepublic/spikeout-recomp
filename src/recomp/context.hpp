@@ -93,6 +93,11 @@ public:
         scheduler_due_ = 0;
         recheck();
     }
+    // A device's next event may have moved earlier: ask the scheduler again.
+    void reschedule() {
+        scheduler_due_ = 0;
+        recheck();
+    }
 
     // Time base and decrementer, at the bus clock / 4 (16.5 MHz with a
     // 166 MHz core). Each TBL read also moves the time base on by `tb_step`,

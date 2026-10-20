@@ -58,17 +58,37 @@ void SoundBoard::midi_in(uint8_t byte) {
     if (dsb_) dsb_->midi_in(byte);
 }
 
-void SoundBoard::render(int16_t* out, std::size_t frames) {
-    // The music board's output goes into both SCSPs' external inputs, where
-    // the game sets its level (MAME: "should be chained with SCSP EXTS").
+// The music board's output goes to the front with SCSP 1 (Supermodel: "the
+// default DSB board is supposed to be plugged and mixed with the front
+// output"), at the decoder's own volume. Not through the SCSPs' external
+// inputs: Spikeout never sets slots 16/17's effect levels, which carry
+// them, so the music would be silent.
+void SoundBoard::render(int16_t* out, std::size_t frames, int channels) {
+    auto clamp16 = [](int32_t v) { return static_cast<int16_t>(std::clamp(v, -32768, 32767)); };
     music_.assign(2 * frames, 0);
     if (dsb_) dsb_->render(music_.data(), frames);
     for (std::size_t i = 0; i < frames; ++i) {
-        int32_t l1, r1, l2, r2;
-        scsp1_.sample(l1, r1, music_[2 * i], music_[2 * i + 1]);
-        scsp2_.sample(l2, r2, music_[2 * i], music_[2 * i + 1]);
-        out[2 * i] = static_cast<int16_t>(std::clamp(l1 + l2, -32768, 32767));
-        out[2 * i + 1] = static_cast<int16_t>(std::clamp(r1 + r2, -32768, 32767));
+        int32_t fl, fr, rl, rr;
+        scsp1_.sample(fl, fr);
+        scsp2_.sample(rl, rr);
+        if (sound_volume_ != 100) {
+            fl = fl * sound_volume_ / 100;
+            fr = fr * sound_volume_ / 100;
+            rl = rl * sound_volume_ / 100;
+            rr = rr * sound_volume_ / 100;
+        }
+        fl += music_[2 * i] * music_volume_ / 100;
+        fr += music_[2 * i + 1] * music_volume_ / 100;
+        if (channels == 4) {
+            int16_t* o = out + 4 * i;
+            o[0] = clamp16(fl);
+            o[1] = clamp16(fr);
+            o[2] = clamp16(rl);
+            o[3] = clamp16(rr);
+        } else {
+            out[2 * i] = clamp16((fl + rl) / 2);
+            out[2 * i + 1] = clamp16((fr + rr) / 2);
+        }
         scsp1_.tick_timers();
         cpu_->setIPL(static_cast<moira::u8>(scsp1_.irq_level()));
         cpu_->executeUntil(static_cast<moira::i64>((samples_ + 1) * kCyclesPerSample));
@@ -83,11 +103,23 @@ const uint8_t* SoundBoard::sample_bank() const {
     return samples_rom_.data() + (samples_rom_.size() > offset ? offset : 0);
 }
 
+// An access to the interrupt registers or the MIDI FIFO can change the
+// interrupt line at once (an acknowledge, the last byte read), not only at
+// the next sample: a handler that returns within the sample would otherwise
+// be taken again.
+void SoundBoard::after_scsp1_access(uint32_t a) {
+    if ((a & 0xFFF) >= 0x400 && (a & 0xFFF) < 0x430) cpu_->setIPL(static_cast<moira::u8>(scsp1_.irq_level()));
+}
+
 uint8_t SoundBoard::read8(uint32_t a) {
     a &= 0xFFFFFF;
     switch (a >> 20) {
     case 0x0: return ram1_[a & (Scsp::kRamSize - 1)];
-    case 0x1: return scsp1_.read8(a);
+    case 0x1: {
+        const uint8_t v = scsp1_.read8(a);
+        after_scsp1_access(a);
+        return v;
+    }
     case 0x2: return ram2_[a & (Scsp::kRamSize - 1)];
     case 0x3: return scsp2_.read8(a);
     case 0x6: return program_.empty() ? 0 : program_[a & (program_.size() - 1)];
@@ -102,7 +134,11 @@ uint8_t SoundBoard::read8(uint32_t a) {
 
 uint16_t SoundBoard::read16(uint32_t a) {
     a &= 0xFFFFFE;
-    if ((a >> 20) == 0x1) return scsp1_.read16(a);
+    if ((a >> 20) == 0x1) {
+        const uint16_t v = scsp1_.read16(a);
+        after_scsp1_access(a);
+        return v;
+    }
     if ((a >> 20) == 0x3) return scsp2_.read16(a);
     return static_cast<uint16_t>(read8(a) << 8 | read8(a + 1));
 }
@@ -111,7 +147,10 @@ void SoundBoard::write8(uint32_t a, uint8_t v) {
     a &= 0xFFFFFF;
     switch (a >> 20) {
     case 0x0: ram1_[a & (Scsp::kRamSize - 1)] = v; break;
-    case 0x1: scsp1_.write8(a, v); break;
+    case 0x1:
+        scsp1_.write8(a, v);
+        after_scsp1_access(a);
+        break;
     case 0x2: ram2_[a & (Scsp::kRamSize - 1)] = v; break;
     case 0x3: scsp2_.write8(a, v); break;
     case 0x4:
@@ -124,7 +163,10 @@ void SoundBoard::write8(uint32_t a, uint8_t v) {
 void SoundBoard::write16(uint32_t a, uint16_t v) {
     a &= 0xFFFFFE;
     switch (a >> 20) {
-    case 0x1: scsp1_.write16(a, v); break;
+    case 0x1:
+        scsp1_.write16(a, v);
+        after_scsp1_access(a);
+        break;
     case 0x3: scsp2_.write16(a, v); break;
     case 0x4:
         if (a == 0x400000) ctrl_ = static_cast<uint8_t>(v);

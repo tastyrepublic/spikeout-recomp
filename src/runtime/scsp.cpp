@@ -448,10 +448,18 @@ void Scsp::sample(int32_t& left, int32_t& right, int16_t ext_left, int16_t ext_r
         l += (dsp_.exts[i] * t.lpan[enc]) >> kShift;
         r += (dsp_.exts[i] * t.rpan[enc]) >> kShift;
     }
-    // The mix is 18 bits; a 16-bit DAC takes the top 16 (an 18-bit one the
-    // same range, with two more bits).
-    left = clip16(l >> 2);
-    right = clip16(r >> 2);
+    // The mix is 18 bits; a 16-bit DAC takes the top 16. With DAC18B (0x400
+    // bit 8, which Spikeout sets) the 18 bits come out unscaled, as in
+    // Supermodel: four times the 16-bit level. That is Supermodel's balance
+    // against the music board; MAME scales it back to the 16-bit range,
+    // which leaves the sound effects 12 dB under the music.
+    if (regs_[0] & 0x100) {
+        left = std::clamp(l, -131072, 131071);
+        right = std::clamp(r, -131072, 131071);
+    } else {
+        left = clip16(l >> 2);
+        right = clip16(r >> 2);
+    }
 }
 
 // ---- Timers, interrupts, MIDI (master) ----
@@ -481,21 +489,19 @@ void Scsp::tick_timers() {
     }
 }
 
+// MIDI input is pending while the FIFO holds a byte (MAME), and stops when
+// a read empties it. Supermodel dropped the pending bit each time the level
+// was worked out, which with one byte at a time let the 68000 take the
+// interrupt again and read an empty FIFO.
 int Scsp::irq_level() {
     if (!master_) return 0;
-    uint16_t pend = regs_[0x20 / 2];
+    if (midi_w_ != midi_r_) regs_[0x20 / 2] |= 8;
+    const uint16_t pend = regs_[0x20 / 2];
     const uint16_t en = regs_[0x1E / 2];
-    if (midi_w_ != midi_r_) {
-        regs_[0x20 / 2] |= 8;
-        pend |= 8;
-    }
     int level = 0;
     if (pend & en & 0x40) level = irq_tima_;
     if (pend & en & 0x180) level = std::max<int>(level, irq_timbc_);
-    if (pend & en & 0x8) {
-        level = std::max<int>(level, irq_midi_);
-        regs_[0x20 / 2] &= static_cast<uint16_t>(~8);
-    }
+    if (pend & en & 0x8) level = std::max<int>(level, irq_midi_);
     return level;
 }
 
@@ -569,15 +575,19 @@ void Scsp::update_reg_read(uint32_t reg) {
     const bool low = (reg & 1) != 0 || (reg & 0x80) != 0; // bit 7 marks a word read
     reg &= 0x3E;
     switch (reg) {
-    case 0x04: { // MIDI input: the low byte takes a byte from the FIFO
-        uint8_t byte = static_cast<uint8_t>(regs_[2]);
-        if (low && master_) {
-            byte = midi_[midi_r_];
-            if (midi_r_ != midi_w_) ++midi_r_;
-        }
+    case 0x04: { // MIDI input: the oldest byte, and the FIFO's flags as it was
+        // The flags describe the FIFO before the read, so MIEMPTY says
+        // whether the byte read is real (MAME); reading the low byte then
+        // takes it.
         uint16_t flags = 0x0800; // MIDI output always empty
         if (midi_r_ == midi_w_) flags |= 0x0100;                        // MIEMPTY
         if (static_cast<uint8_t>(midi_w_ + 1) == midi_r_) flags |= 0x0200; // MIFULL
+        uint8_t byte = static_cast<uint8_t>(regs_[2]);
+        if (master_) byte = midi_[midi_r_];
+        if (low && master_ && midi_r_ != midi_w_) {
+            ++midi_r_;
+            if (midi_r_ == midi_w_) regs_[0x20 / 2] &= static_cast<uint16_t>(~8); // emptied: no longer pending
+        }
         regs_[2] = static_cast<uint16_t>(flags | byte);
         break;
     }

@@ -18,6 +18,7 @@
 #include "runtime/dsb2.hpp"
 #include "runtime/scsp.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -42,9 +43,19 @@ public:
     Dsb2* music() const { return dsb_.get(); }
     // A byte from the main board's MIDI port (to the music board too).
     void midi_in(uint8_t byte);
-    // Runs the board for `frames` output samples at 44.1 kHz, writing
-    // interleaved stereo (both SCSPs and the music board mixed).
-    void render(int16_t* out, std::size_t frames);
+    // Runs the board for `frames` output samples at 44.1 kHz, writing them
+    // interleaved. The board has two stereo outputs (Supermodel's reading of
+    // the cabinet diagrams): SCSP 1 at the front (CN8), with the music
+    // board's output mixed in, and SCSP 2 at the rear (CN7). `channels` 4
+    // gives front left, front right, rear left, rear right; 2 gives the
+    // average of front and rear, as Supermodel's stereo does.
+    void render(int16_t* out, std::size_t frames, int channels = 2);
+    // Volumes in percent, 0-200 (Supermodel's SoundVolume / MusicVolume):
+    // the two SCSPs, and the music board.
+    void set_volumes(int sound_percent, int music_percent) {
+        sound_volume_ = std::clamp(sound_percent, 0, 200);
+        music_volume_ = std::clamp(music_percent, 0, 200);
+    }
 
     // ---- Inspection ----
     uint32_t pc() const;
@@ -67,6 +78,7 @@ private:
     uint16_t read16(uint32_t a);
     void write8(uint32_t a, uint8_t v);
     void write16(uint32_t a, uint16_t v);
+    void after_scsp1_access(uint32_t a);
     const uint8_t* sample_bank() const;
 
     std::span<const uint8_t> program_, samples_rom_;
@@ -77,6 +89,7 @@ private:
     std::vector<int16_t> music_;
     uint8_t ctrl_ = 0;
     uint64_t samples_ = 0;
+    int sound_volume_ = 100, music_volume_ = 100;
 };
 
 } // namespace m3

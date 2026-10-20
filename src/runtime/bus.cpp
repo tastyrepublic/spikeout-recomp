@@ -125,11 +125,13 @@ uint8_t Bus::device_read(const Region& region, uint32_t addr) {
         return net()->read8(addr);
     case Device::Io:
         return io_read(region.offset(addr));
-    case Device::SoundUart: // Supermodel: 0x00 data (a region lock in Magical Truck), 0x83 control
-        switch (region.offset(addr) & 0xF) {
-        case 0x0: return 0x00;
-        case 0x4: return 0x83;
-        default:  return 0x00;
+    case Device::SoundUart: // nothing is received: data 0x00 (Supermodel: a region lock in Magical Truck)
+        if ((region.offset(addr) & 0xF) != 0x4) return 0x00;
+        if (midi_burst) return 0x83; // Supermodel
+        {
+            const uint8_t s = midi_uart_.status(now());
+            run_midi(now());
+            return s;
         }
     case Device::Rtc: { // a register in the top byte of each word; byte 1: battery OK
         const uint32_t off = region.offset(addr);
@@ -170,13 +172,43 @@ void Bus::io_write(uint32_t reg, uint8_t value) {
 }
 
 void Bus::midi_write(uint32_t reg, uint8_t value) {
-    if (reg == 0x0) { // data: to the sound board
-        midi_out_.push_back(value);
-        ++midi_bytes_;
-        irq_.deassert(0x40);
-    } else if (reg == 0x4) { // control
-        midi_ctrl_ = value;
-        if (!(value & 0x20)) irq_.deassert(0x40);
+    if (reg == 0x4) midi_ctrl_ = value;
+    if (midi_burst) {
+        if (reg == 0x0) { // data: to the sound board
+            midi_out_.push_back({value, now()});
+            ++midi_bytes_;
+            irq_.deassert(0x40);
+        } else if (reg == 0x4 && !(value & 0x20)) {
+            irq_.deassert(0x40);
+        }
+        return;
+    }
+    if (reg == 0x0) midi_uart_.write_data(value, now());
+    else if (reg == 0x4) midi_uart_.write_control(value, now());
+    else return;
+    run_midi(now());
+    if (on_due_change) on_due_change(on_due_change_user);
+}
+
+// Acknowledging clears pending bits; IRQ 0x40 is a level (the serial chip's
+// TxRDY pin) and stays pending while the pin is up. The game turns the
+// transmitter off when it has nothing to send, which is what a level needs.
+void Bus::ack_irq(uint32_t bits) {
+    irq_.deassert(bits);
+    if (!midi_burst && (bits & 0x40) && midi_uart_.txrdy_pin()) irq_.assert_irq(0x40);
+}
+
+void Bus::run_midi(uint64_t cycle) {
+    midi_uart_.run_to(cycle);
+    auto& sent = midi_uart_.sent();
+    midi_out_.insert(midi_out_.end(), sent.begin(), sent.end());
+    midi_bytes_ += sent.size();
+    sent.clear();
+    // IRQ 0x40 is the TxRDY pin.
+    const bool up = midi_uart_.txrdy_pin();
+    if (up != ((irq_.state() & 0x40) != 0)) {
+        if (up) irq_.assert_irq(0x40);
+        else irq_.deassert(0x40);
     }
 }
 
@@ -229,7 +261,7 @@ void Bus::system_write(uint32_t reg, uint8_t value) {
         crom_bank_ = ~crom_bank_reg_ & 0xF;
         break;
     case kSysIrqEnable: irq_.set_enable(value); break;
-    case kSysIrqState:  irq_.deassert(value); break;
+    case kSysIrqState:  ack_irq(value); break;
     case 0x0C: // JTAG: TCK bit 6, TMS bit 2, TDI bit 5, TRST bit 7
         jtag_.write(value & 0x40, value & 0x04, value & 0x20, value & 0x80);
         break;
@@ -393,7 +425,7 @@ void Bus::write_slow(uint32_t addr, uint32_t value, uint32_t size) {
         }
         const uint32_t reg = region->offset(addr) & 0xFC, v = bswap32(value);
         tile_regs_[reg / 4] = v;
-        if (reg == kTileIrqAck) irq_.deassert(v & 0xFF);
+        if (reg == kTileIrqAck) ack_irq(v & 0xFF);
         return;
     }
     case Device::System: // byte registers; wider writes reach several of them

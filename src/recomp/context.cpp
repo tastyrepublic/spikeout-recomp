@@ -29,6 +29,8 @@ Context::Context(m3::Bus& b, std::span<const FunctionEntry> functions) : bus(b),
     bus.irq().on_change_user = this;
     bus.irq().on_change = [](void* self) { static_cast<Context*>(self)->recheck(); };
     bus.set_clock([](const void* self) { return static_cast<const Context*>(self)->cycles(); }, this);
+    bus.on_due_change_user = this;
+    bus.on_due_change = [](void* self) { static_cast<Context*>(self)->reschedule(); };
 }
 
 // ---- Time base and decrementer ----

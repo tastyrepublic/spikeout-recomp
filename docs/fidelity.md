@@ -49,10 +49,18 @@ board), and keep the old behavior selectable while it is being tested.
   ignores writes), so runs repeat, and the game can set it; 12/24 hours,
   STOP, RESET and 30-second adjust follow the datasheet. BUSY is never
   set and the interrupt output isn't emulated.
-- **MIDI IRQ timing** is Supermodel's (every 1000 cycles at the start of
-  VBlank, at most 129) and so is the order (Supermodel first waits for IRQ
-  `0x02` to be acknowledged, which we don't). Real timing comes from the
-  sound board's 68000 taking each byte; needs the sound board.
+- **Done: MIDI IRQ timing** from the port's serial chip (`m3::Usart8251`,
+  the uPD71051): IRQ `0x40` is its TxRDY pin, a byte goes out every 320 µs
+  and reaches the sound board with that spacing. Evidence: Spikeout
+  programs the chip by the 8251 datasheet (reset sequence, mode `0x4E`) and
+  turns the transmitter off when its queue is empty, which only makes sense
+  if the IRQ is TxRDY. Supermodel raises the IRQ every 1000 cycles at the
+  start of VBlank (at most 129) and sends each byte at once; that stays
+  as `--midi-burst`. Assumed: CTS held low (MAME); IRQ `0x40` stays
+  pending while TxRDY is up, even when acknowledged. Turning the
+  transmitter off doesn't stop a byte already written (the 8251's
+  behaviour, and the game writes its last byte and turns it off at once:
+  holding that byte back left the attract mode's music muted for 3.7 s).
 - **Tile generator**: lines are drawn at the start of each display line,
   as Supermodel does; the colour offset's channel order (red in the low
   byte) is Supermodel's code, which its own comment contradicts; which
@@ -142,11 +150,19 @@ the chip's documented register layout:
   drops bit 0). Idle slots start released, so the first key-on starts them.
   The LFO noise table is a fixed sequence (Supermodel uses `rand()`), so
   runs repeat.
-- **MIDI timing:** the main board's port is a uPD71051 serial chip at
-  31,250 baud (MAME), so bytes arrive about 320 µs apart; we pass a frame's
-  bytes at the start of the sound board's frame, into a 256-byte FIFO, as
-  Supermodel does. The game's IRQ `0x40` pacing on the main board should
-  then come from the chip's transmitter, not the 1000-cycle burst.
+- **Done: MIDI timing:** each byte reaches the SCSP's FIFO when its stop bit
+  has gone out on the main board's serial line, 320 µs apart (`gamerun`
+  runs the sound board a frame behind the main board, each byte at the
+  same point of its frame; the window keeps their spacing on the audio
+  device's clock). Supermodel passes a frame's bytes at the start of the
+  sound board's frame. One byte at a time showed two bugs in the SCSP
+  taken from Supermodel, both fixed as MAME has it: the MIDI interrupt
+  stayed pending only until its level was next worked out, not while the
+  FIFO holds a byte; and the register read gave the FIFO's flags after
+  taking the byte, so the last byte read as "empty". The 68000's interrupt
+  line is also updated as soon as it touches the interrupt registers or the
+  FIFO, not only at the next sample, so a handler that returns quickly
+  isn't taken a second time (that read an empty FIFO as a byte).
 - **Sync:** in the window the sound board runs on the audio device's
   clock, as the real one runs on its own crystal, and takes each frame's
   MIDI bytes when the main board finishes the frame: a command plays up to
@@ -159,8 +175,11 @@ the chip's documented register layout:
   counting); timers B and C share timer B's interrupt level; envelope rates
   add the key-rate scale even when a rate is 0; noise and silence sources
   (SSCTL) play nothing; the DSP's memory access only on odd steps.
-- **Mixing:** the two SCSPs are summed into one stereo pair (on the
-  cabinet they may be front and rear speakers).
+- **Outputs:** the board has two stereo outputs, SCSP 1 at the front (CN8,
+  with the music) and SCSP 2 at the rear (CN7), from Supermodel's notes on
+  the cabinet diagrams of other Model 3 games; Spikeout's own wiring isn't
+  known. `SoundBoard::render` gives the four channels, or their average
+  as stereo (Supermodel's downmix), which is what plays for now.
 
 ## Music board (DSB2)
 
@@ -178,15 +197,20 @@ black box modelled by its commands (Supermodel's decoding) and minimp3.
   meaning of the decoder's volume and stereo commands (`0xB0`/`0xA1` and
   others: which speaker each sets is marked "?" there); a start address
   sent while a track plays makes the loop; decoder status always 1.
-- **Done (mixing):** the music goes into both SCSPs' external inputs
-  (EXTS 0/1), which mix it at slots 16/17's levels (their effect level, or
-  the direct level when that is 0, as MAME's SCSP does) and feed it to the
-  effect DSP. MAME notes the music "should be chained with SCSP EXTS", and
-  Spikeout's driver sets those levels as it plays: during the attract mode
-  SCSP 1's go `0x0000`, `0x7200`, `0x7000`, `0x6000` and SCSP 2's turn on
-  at `0x8000`. Supermodel and MAME add the music straight to the output,
-  which plays it about 12 dB over the sound effects. That it reaches both
-  chips is a choice (the driver sets levels on both).
+- **Mixing (Supermodel's):** the music is added to SCSP 1's output, the
+  front pair, at the decoder's volume. We first routed it through the
+  SCSPs' external inputs (MAME's note that it "should be chained with SCSP
+  EXTS"), but Spikeout never sets the effect levels of slots 16/17 that
+  carry those inputs: the "levels" seen there were sound effects playing on
+  voices 16/17, so the music came and went with them. The game starts the
+  attract mode's first track at 12.1 s, as "TEAM SPIKEOUT PRESENTS" fades
+  out (a real board's recording agrees), with every decoder volume at 0,
+  and sets them to `0x5A` in the same burst of commands.
+- **Balance:** unknown on a real cabinet (each board has its own output to
+  the amplifiers). Supermodel takes the SCSP's 18-bit output (DAC18B, which
+  Spikeout sets) unscaled, four times MAME's level, so its sound effects
+  sit 12 dB higher against the music than MAME's; we follow Supermodel.
+  `--sound-volume` / `--music-volume` set them apart.
 - Linear interpolation from 32 to 44.1 kHz.
 
 ## Settings EEPROM and security board

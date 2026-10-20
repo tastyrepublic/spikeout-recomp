@@ -47,8 +47,9 @@ inline void attach_music(m3::SoundBoard& board, const m3::RomSet& roms) {
                                                   roms.region(m3::RomRegionId::MpegMusic)));
 }
 
-// The sound board, fed each frame with the bytes the game sent to its MIDI
-// port and run for that frame's share of 44.1 kHz samples.
+// The sound board, run a frame behind the main board for that frame's share
+// of 44.1 kHz samples, each MIDI byte arriving at the same point of its
+// frame as it reached the end of the serial line.
 class FrameSound {
 public:
     explicit FrameSound(const m3::RomSet& roms)
@@ -56,16 +57,26 @@ public:
         attach_music(board, roms);
     }
 
-    // Takes the MIDI bytes the game sent during one frame (and empties the
-    // list); returns that frame's interleaved stereo samples (766 or 767).
-    std::span<const int16_t> frame(std::vector<uint8_t>& midi) {
-        for (uint8_t b : midi) board.midi_in(b);
-        midi.clear();
+    // Takes the MIDI bytes that arrived during the frame from cycle `start`
+    // (`cycles` long; the list is emptied); returns that frame's
+    // interleaved stereo samples (766 or 767).
+    std::span<const int16_t> frame(std::vector<m3::SerialByte>& midi, uint64_t start, uint64_t cycles) {
         due_ += static_cast<double>(m3::Scsp::kSampleRate) / recomp::FrameTiming::kRefreshHz;
         const auto n = static_cast<std::size_t>(due_);
         due_ -= static_cast<double>(n);
         buffer_.resize(2 * n);
-        board.render(buffer_.data(), n);
+        std::size_t done = 0;
+        for (const m3::SerialByte& b : midi) {
+            const uint64_t into = b.cycle > start ? b.cycle - start : 0;
+            const auto at = static_cast<std::size_t>(std::min<uint64_t>(n, into * n / cycles));
+            if (at > done) {
+                board.render(buffer_.data() + 2 * done, at - done);
+                done = at;
+            }
+            board.midi_in(b.value);
+        }
+        midi.clear();
+        board.render(buffer_.data() + 2 * done, n - done);
         return buffer_;
     }
 

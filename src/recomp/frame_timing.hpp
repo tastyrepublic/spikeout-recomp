@@ -7,10 +7,13 @@
 // other two, as in Supermodel). At the end of the frame the network board
 // runs its frame, then `on_frame_end`.
 //
-// MIDI: at the start of VBlank, while the sound port asks for it (control
-// bit 0x20) and IRQ 0x40 is enabled, IRQ 0x40 is raised every 1000 cycles,
-// at most 129 times (Supermodel: it runs 1000 PowerPC cycles after each),
-// and the game sends the sound board a byte for each.
+// MIDI: the sound link's serial chip (`m3::Usart8251` in the bus) has its
+// own events, taken in time order with the frame's. With the bus's
+// `midi_burst` (Supermodel's timing) instead: at the start of VBlank, while
+// the sound port asks for it (control bit 0x20) and IRQ 0x40 is enabled,
+// IRQ 0x40 is raised every 1000 cycles, at most 129 times (Supermodel: it
+// runs 1000 PowerPC cycles after each), and the game sends the sound board
+// a byte for each.
 //
 // Not modelled yet: running VBlank until IRQ 0x02 is acknowledged (which
 // Supermodel does before the MIDI IRQs).
@@ -40,6 +43,7 @@ public:
     uint64_t frames() const { return frames_; } // completed
     uint64_t frame_cycles() const { return frame_cycles_; }
     uint64_t line_cycles() const { return line_cycles_; }
+    uint64_t frame_start(uint64_t frame) const { return frame * frame_cycles_; } // frame 0 starts at cycle 0
 
     // Called from inside the run (on the thread running the game).
     std::function<void(uint32_t line)> on_display_line; // start of display line 0-383

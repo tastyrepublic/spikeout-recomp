@@ -107,7 +107,11 @@ textures, per-pixel lighting and specular, level-of-detail fades) and plays
 the sound effects and music (`--mute` for silence). Keys: `5` coin, `1`
 start, `F2` test, `F1` service, arrows, `Z` beat, `X` charge, `C` jump, `V`
 shift; hold `Tab` to run as fast as possible, `F12` for a screenshot, `Esc`
-to quit.
+to quit. Both `spikeout` and `gamerun` take `--quads` (draw quads whole,
+Supermodel's quad rendering, slower) and `--midi-burst` (send the sound
+board its commands with Supermodel's timing instead of the serial line's);
+`--sound-volume N` and `--music-volume N` (percent, 0-200) set the sound
+effects and the music apart.
 
 ## Online play
 

@@ -1,5 +1,7 @@
 #include "recomp/frame_timing.hpp"
 
+#include <algorithm>
+
 namespace recomp {
 
 FrameTiming::FrameTiming(uint64_t cpu_hz)
@@ -19,10 +21,18 @@ uint64_t FrameTiming::due() const {
 }
 
 uint64_t FrameTiming::update(Context& c) {
-    while (c.cycles() >= due()) {
+    for (;;) {
+        // The sound link's serial chip and the frame's events, in time order.
+        const uint64_t frame_due = due(), midi_due = c.bus.midi_due();
+        if (c.cycles() < std::min(frame_due, midi_due)) break;
+        if (midi_due < frame_due) {
+            c.bus.run_midi(midi_due);
+            continue;
+        }
+        c.bus.run_midi(frame_due);
         switch (next_) {
-        case Next::Midi: // one more MIDI IRQ, while the game asks for them
-            if ((c.bus.midi_control() & 0x20) && (c.bus.irq().enable() & 0x40) && midi_irqs_ < kMaxMidiIrqs &&
+        case Next::Midi: // Supermodel's timing: one more MIDI IRQ, while the game asks for them
+            if (c.bus.midi_burst && (c.bus.midi_control() & 0x20) && (c.bus.irq().enable() & 0x40) && midi_irqs_ < kMaxMidiIrqs &&
                 (midi_irqs_ + 1) * kMidiIrqCycles < vblank_cycles_) {
                 c.bus.irq().assert_irq(0x40);
                 ++midi_irqs_;
@@ -54,7 +64,7 @@ uint64_t FrameTiming::update(Context& c) {
             break;
         }
     }
-    return due();
+    return std::min(due(), c.bus.midi_due());
 }
 
 } // namespace recomp

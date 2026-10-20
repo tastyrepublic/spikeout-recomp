@@ -108,9 +108,10 @@ int main(int argc, char** argv) {
     const char* wav = nullptr;
     uint64_t shot_every = 0, tilegen_trace = 0;
     int probe_x = -1, probe_y = -1;
+    int sound_volume = 100, music_volume = 100;
     uint64_t probe_frame = 0;
     std::vector<Press> presses;
-    bool show_text = false, real_netboard = true, force_master = false, quads = false;
+    bool show_text = false, real_netboard = true, force_master = false, quads = false, midi_burst = false;
     std::size_t net_trace = 0;
     int64_t blocks = 200'000'000;
     for (int i = 1; i < argc; ++i) {
@@ -125,6 +126,9 @@ int main(int argc, char** argv) {
         else if (arg == "--screenshot" && i + 1 < argc) screenshot = argv[++i];
         else if (arg == "--wav" && i + 1 < argc) wav = argv[++i];
         else if (arg == "--quads") quads = true;
+        else if (arg == "--midi-burst") midi_burst = true;
+        else if (arg == "--sound-volume" && i + 1 < argc) sound_volume = std::atoi(argv[++i]);
+        else if (arg == "--music-volume" && i + 1 < argc) music_volume = std::atoi(argv[++i]);
         else if (arg == "--shot-every" && i + 1 < argc) shot_every = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--probe" && i + 1 < argc) { // X,Y@FRAME
             unsigned long long frame = 0;
@@ -152,7 +156,9 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "usage: gamerun <rom_dir> [--blocks N] [--text] [--dump-tile FILE]\n"
                              "               [--netboard sim|real] [--net-trace N] [--net-disasm FILE]\n"
                              "               [--screenshot FILE.png] [--shot-every N] [--wav FILE.wav]\n"
-                             "               [--probe X,Y@FRAME] [--quads] [--press NAME@FRAME[:N]]...\n");
+                             "               [--probe X,Y@FRAME] [--quads] [--midi-burst]\n"
+                             "               [--sound-volume N] [--music-volume N]\n"
+                             "               [--press NAME@FRAME[:N]]...\n");
         return 2;
     }
     const m3::GameSpec& game = m3::games::kSpikeoutFinalEdition;
@@ -165,6 +171,7 @@ int main(int argc, char** argv) {
     const std::vector<recomp::FunctionEntry> functions = tools::game_functions();
 
     m3::Bus bus(roms);
+    bus.midi_burst = midi_burst;
     bus.set_security_key(game.security_key);
     tools::set_rtc_to_host(bus);
     for (uint8_t& b : bus.ram()) b = 0xA5;
@@ -188,6 +195,7 @@ int main(int argc, char** argv) {
     std::vector<uint32_t> screen(m3::TilegenRenderer::kWidth * m3::TilegenRenderer::kHeight);
     // The sound board, a frame at a time; --wav keeps what it played.
     tools::FrameSound sound(roms);
+    sound.board.set_volumes(sound_volume, music_volume);
     std::vector<int16_t> audio;
     int peak = 0;
     double energy = 0, sound_seconds = 0, render_seconds = 0, setup_ms = 0, raster_ms = 0;
@@ -219,7 +227,7 @@ int main(int argc, char** argv) {
         if (probe_frame && timing.frames() == probe_frame) print_probe(real3d, probe_x, probe_y, probe_frame);
         tilegen.composite(screen, real3d.image());
         const auto sound_start = std::chrono::steady_clock::now();
-        const std::span<const int16_t> pcm = sound.frame(bus.midi_out());
+        const std::span<const int16_t> pcm = sound.frame(bus.midi_out(), timing.frame_start(timing.frames() - 1), timing.frame_cycles());
         sound_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - sound_start).count();
         if (wav) audio.insert(audio.end(), pcm.begin(), pcm.end());
         for (int16_t s : pcm) {
@@ -278,13 +286,9 @@ int main(int argc, char** argv) {
                 sound.board.describe().c_str(), sound.board.active_slots(),
                 static_cast<unsigned long long>(sound.board.midi_dropped()), peak,
                 played > 0 ? std::sqrt(energy / (2 * played)) : 0.0, sound_seconds);
-    // The music reaches the speakers through the SCSPs' external inputs, at
-    // the levels the game sets on slots 16/17 (register 0x16 of each).
     if (const m3::Dsb2* music = sound.board.music())
-        std::printf("Music board: %s; its output peak %d, RMS %.0f; SCSP input levels %04x / %04x\n",
-                    music->describe().c_str(), music->music_peak,
-                    played > 0 ? std::sqrt(music->music_energy / (2 * played)) : 0.0,
-                    sound.board.scsp(0).slot_reg(16, 0x16), sound.board.scsp(1).slot_reg(16, 0x16));
+        std::printf("Music board: %s; its output peak %d, RMS %.0f\n", music->describe().c_str(), music->music_peak,
+                    played > 0 ? std::sqrt(music->music_energy / (2 * played)) : 0.0);
     if (wav && tools::write_wav(wav, audio, m3::Scsp::kSampleRate)) std::printf("Wrote %s\n", wav);
     if (c.first_nan_pc) // SPIKEOUT_FP_TRAP builds
         std::printf("First FP NaN: at %08x (%016llx)\n", c.first_nan_pc, static_cast<unsigned long long>(c.first_nan_bits));

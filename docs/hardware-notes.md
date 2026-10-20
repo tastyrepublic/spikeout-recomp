@@ -54,7 +54,8 @@ Per frame, Supermodel does:
 1. VBlank: run the CPU until IRQ `0x02` is acknowledged; while MIDI control
    bit `0x20` is set and IRQ `0x40` is enabled, raise `0x40` (sound board
    MIDI) repeatedly, ~1000 cycles apart; run the rest of VBlank; raise
-   IRQ `0x0D`.
+   IRQ `0x0D`. (We raise `0x40` from the serial chip instead; see the sound
+   board link below.)
 2. Active display: 384 lines. At the line in Tilegen register `0x08`
    (usually 238/239) the Real3D ping-pong status bit flips — games use it to
    pace rendering. At line 383 raise IRQ `0x02`.
@@ -145,20 +146,29 @@ white layer 2 with a colour offset moving from `0x00808000` to 0.
 
 ## Sound board link (`0xF0080000`)
 
-`+0` MIDI data (write: send byte to the sound board, clears IRQ `0x40`),
-`+4` MIDI control (bit `0x20` enables periodic MIDI IRQs; clearing it
-clears IRQ `0x40`). Reads: `0x00` and `0x83`. Spikeout queues its sound
-commands (`0x5830`, a 32-entry ring buffer) and sends them a byte per MIDI
-IRQ; without the IRQs the queue fills and the game waits. Supermodel
-raises IRQ `0x40` at the start of VBlank every 1000 cycles while bit
-`0x20` and the IRQ enable are set, at most 129 times; so do we.
-
 On the board the port is an NEC uPD71051 serial chip (8251-compatible,
-MAME's `model3.cpp`): a MIDI-rate line, 31,250 baud, about 3,100 bytes a
-second, into the first SCSP's MIDI input; the music board listens on the
-same line. The control writes are commands to that chip. Pacing the bytes
-by its transmit timing instead of Supermodel's burst is in
-[fidelity.md](fidelity.md).
+MAME's `model3.cpp`), clocked at 500 kHz (16 x 31,250 baud), its
+transmitter wired to the first SCSP's MIDI input; the music board listens
+on the same line. `+0` data, `+4` mode and commands (write) or status
+(read; Spikeout never reads it).
+
+Spikeout programs it by the 8251 datasheet: `0x00` three times (the
+documented reset sequence: a chip waiting for a mode takes them as a sync
+mode and its two sync characters), `0x40` (internal reset), mode `0x4E`
+(asynchronous, x16 clock, 8 data bits, no parity, 1 stop bit: 10 bits, 320
+µs a byte, 3,125 bytes a second), `0x37` (transmitter and receiver on, RTS,
+DTR, error reset). It then queues its sound commands (`0x5830`, a 32-entry
+ring buffer) and sends them a byte per IRQ `0x40`, writing `0x27`
+(transmitter on) when it has bytes and `0x06` (transmitter off) when the
+queue is empty. That is the behaviour of IRQ `0x40` being the chip's TxRDY
+pin, a level that is up while the transmitter is on and its buffer empty;
+turning the transmitter off is how the game stops it. The attract mode
+sends at most 33 bytes a frame, under the line's 54.
+
+Supermodel instead raises IRQ `0x40` at the start of VBlank every 1000
+cycles while bit `0x20` (RTS, in the commands above) and the IRQ enable are
+set, at most 129 times, and passes each byte on at once (`--midi-burst`
+here).
 
 ## Sound board
 
@@ -180,8 +190,9 @@ map (Supermodel and MAME agree):
 Spikeout's driver takes interrupts at levels 1 and 2 (the SCSP's timers)
 and 3 (MIDI input, one per byte). In the attract mode the SCSPs play only
 the sound effects, in bursts with each demo fight: the music is on the
-DSB2 board (a 68EC000 at 11 MHz and an MPEG decoder, in a metal box),
-which MAME notes should be mixed in through the SCSP's external input.
+DSB2 board (a 68EC000 at 11 MHz and an MPEG decoder, in a metal box).
+The game sets the SCSP's DAC18B (register `0x400` = `0x030F`): 18-bit
+output.
 
 ## Music board (DSB2, 837-12273)
 
@@ -205,9 +216,14 @@ start), `0x24`/`0x25` and three bytes the end, `0x74`/`0x75` plays,
 byte. Spikeout's tracks are MPEG-1 Layer II at 32 kHz; in the attract
 mode it starts one and then sets a loop on a second.
 
-The board's output goes into the SCSPs' external inputs (EXTS), so the
-sound driver sets the music's level and pan there, on slots 16/17
-(register `0x16`), and changes them as it plays.
+The board has its own audio output. MAME notes it "should be chained with
+SCSP EXTS", but Spikeout never sets the effect levels of SCSP slots 16/17,
+which would carry those inputs (it plays sound effects on those voices),
+so the music can't go that way; Supermodel mixes it with SCSP 1's front
+output. The decoder's volume bytes (`B2`/`A3` front, `B6`/`A7` rear,
+per Supermodel's notes) go to 0 as a track starts and then to the level
+the game asks for (`0x5A` for the attract mode's first track, right after
+"TEAM SPIKEOUT PRESENTS").
 
 ## RTC (`0xF0140000`, Epson RTC-72421)
 

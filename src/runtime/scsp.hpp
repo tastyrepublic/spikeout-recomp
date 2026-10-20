@@ -32,9 +32,10 @@ public:
     void write8(uint32_t addr, uint8_t v);
     void write16(uint32_t addr, uint16_t v);
 
-    // One output sample of this chip, 16-bit range. `ext_left`/`ext_right`
-    // are the external inputs (EXTS 0/1): mixed at slots 16/17's levels, and
-    // inputs to the effect DSP.
+    // One output sample of this chip: 16-bit range, or 18-bit with DAC18B
+    // (see the .cpp). `ext_left`/`ext_right` are the external inputs (EXTS
+    // 0/1): mixed at slots 16/17's levels, and inputs to the effect DSP.
+    // Nothing is connected to them on the Model 3 sound board.
     void sample(int32_t& left, int32_t& right, int16_t ext_left = 0, int16_t ext_right = 0);
     // Advance the timers by one sample (master).
     void tick_timers();

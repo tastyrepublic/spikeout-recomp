@@ -16,6 +16,7 @@
 #include "runtime/memory_map.hpp"
 #include "runtime/netboard.hpp"
 #include "runtime/rom.hpp"
+#include "runtime/usart8251.hpp"
 
 #include <array>
 #include <cstdint>
@@ -191,15 +192,26 @@ public:
     } inputs;
     Eeprom93C46& eeprom() { return eeprom_; }
 
-    // Sound board MIDI port (0xF0080000; Supermodel's Model3.cpp): +0 data
-    // (a write sends a byte to the sound board and clears IRQ 0x40), +4
-    // control (bit 0x20 asks for periodic MIDI IRQs, which the frame timing
-    // raises in VBlank; clearing it clears IRQ 0x40). Reads give 0x00 and
-    // 0x83. No sound board yet: the bytes are kept in midi_out() for one,
-    // and the frontend empties it.
+    // Sound board MIDI port (0xF0080000): the uPD71051 serial chip
+    // (`Usart8251`), +0 data, +4 mode/command (write) and status (read);
+    // IRQ 0x40 follows its TxRDY pin. The bytes that have gone out, with the
+    // cycle each arrived, collect in midi_out() for the frontend to empty.
+    //
+    // `midi_burst` selects Supermodel's timing instead: a byte goes out the
+    // moment it is written, and the frame timing raises IRQ 0x40 every 1000
+    // cycles at the start of VBlank while control bit 0x20 is set.
+    bool midi_burst = false;
     uint8_t midi_control() const { return midi_ctrl_; }
-    std::vector<uint8_t>& midi_out() { return midi_out_; }
+    std::vector<SerialByte>& midi_out() { return midi_out_; }
     uint64_t midi_bytes() const { return midi_bytes_; }
+    Usart8251& midi_uart() { return midi_uart_; }
+    // The serial chip's next change of state, and moving it on to `cycle`
+    // (for the board's scheduler).
+    uint64_t midi_due() const { return midi_burst ? UINT64_MAX : midi_uart_.next_event(); }
+    void run_midi(uint64_t cycle);
+    // Called when midi_due() may have moved earlier (the runtime asks again).
+    void (*on_due_change)(void* user) = nullptr;
+    void* on_due_change_user = nullptr;
 
     // Real-time clock (0xF0140000), on the emulated time. It starts at
     // 1970-01-01 00:00; a frontend sets it (rtc().set_time) from the host's
@@ -294,9 +306,11 @@ private:
     Real3d real3d_;
     Rtc72421 rtc_{ppc::CpuState::kCoreClockHz};
     uint8_t midi_ctrl_ = 0;
-    std::vector<uint8_t> midi_out_;
+    Usart8251 midi_uart_{ppc::CpuState::kCoreClockHz, 500'000};
+    std::vector<SerialByte> midi_out_;
     uint64_t midi_bytes_ = 0;
     void midi_write(uint32_t reg, uint8_t value);
+    void ack_irq(uint32_t bits);
     std::vector<uint8_t> security_ram_;
     Crypt315_5881 crypt_;
     bool security_first_read_ = true;

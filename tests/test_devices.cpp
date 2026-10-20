@@ -363,9 +363,10 @@ TEST_CASE("tilegen: 4- and 8-bit tiles, scroll, line mask, transparency, colour 
     CHECK_EQ(out[TilegenRenderer::kWidth], 0xFF000000u); // line 1 not drawn: black
 }
 
-TEST_CASE("sound: MIDI port bytes, control and IRQ 0x40") {
+TEST_CASE("sound: MIDI port bytes, control and IRQ 0x40 (Supermodel's timing)") {
     RomSet roms;
     Bus bus(roms);
+    bus.midi_burst = true;
     CHECK_EQ(bus.read8(0xF0080004), 0x83u);
     bus.irq().assert_irq(0x40);
     bus.write8(0xF0080004, 0x07); // periodic IRQs off: clears it
@@ -375,8 +376,65 @@ TEST_CASE("sound: MIDI port bytes, control and IRQ 0x40") {
     bus.irq().assert_irq(0x40);
     bus.write8(0xF0080000, 0xAE);
     CHECK_EQ(bus.irq().state() & 0x40, 0u);
-    CHECK((bus.midi_out() == std::vector<uint8_t>{0xAE}));
+    CHECK_EQ(bus.midi_out().size(), size_t{1});
+    CHECK_EQ(bus.midi_out()[0].value, 0xAEu);
     CHECK_EQ(bus.midi_bytes(), uint64_t{1});
+}
+
+TEST_CASE("usart8251: the datasheet reset sequence, mode, TxRDY and character times") {
+    Usart8251 u(166'000'000, 500'000);
+    // Three 0x00 (a sync mode and its two sync characters), then internal reset.
+    for (uint8_t v : {uint8_t{0x00}, uint8_t{0x00}, uint8_t{0x00}, uint8_t{0x40}}) u.write_control(v, 0);
+    u.write_control(0x4E, 0); // async, x16, 8N1
+    CHECK_EQ(u.mode(), 0x4Eu);
+    CHECK(!u.txrdy_pin()); // transmitter still off
+    CHECK_EQ(u.status(0), 0x85u); // TxRDY, TxEMPTY, DSR
+    u.write_control(0x27, 100);
+    CHECK(u.txrdy_pin());
+    u.write_data(0x12, 100);
+    CHECK(u.txrdy_pin()); // into the shifter at once
+    CHECK_EQ(u.status(100), 0x81u); // shifting: not empty
+    u.write_data(0x34, 200);
+    CHECK(!u.txrdy_pin());
+    const uint64_t ch = u.character_cycles();
+    CHECK_EQ(ch, uint64_t{53'120}); // 10 bits at 31,250 baud
+    CHECK_EQ(u.next_event(), 100 + ch);
+    u.run_to(100 + ch);
+    CHECK(u.txrdy_pin());
+    CHECK_EQ(u.sent().size(), size_t{1});
+    CHECK_EQ(u.sent()[0].cycle, 100 + ch);
+    u.run_to(100 + 2 * ch);
+    CHECK_EQ(u.sent().size(), size_t{2});
+    CHECK_EQ(u.sent()[1].value, 0x34u);
+    CHECK_EQ(u.next_event(), UINT64_MAX);
+    // 2 stop bits and parity: 12 bits; x64: a quarter of the rate.
+    u.write_control(0x40, 0);
+    u.write_control(0xDF, 0); // 2 stop, even parity, 8 bits, x64
+    CHECK_EQ(u.character_cycles(), uint64_t{166'000'000} * 64 * 12 / 500'000);
+    // The last byte written and the transmitter turned off at once (as
+    // Spikeout does): TxRDY drops, the byte still goes out.
+    u.write_control(0x27, 1'000'000);
+    u.write_data(0x56, 1'000'000);
+    u.write_data(0x78, 1'000'000);
+    u.write_control(0x06, 1'000'000);
+    CHECK(!u.txrdy_pin());
+    u.run_to(5'000'000);
+    CHECK_EQ(u.sent().size(), size_t{4});
+    CHECK_EQ(u.sent()[3].value, 0x78u);
+    CHECK_EQ(u.sent()[3].cycle, 1'000'000 + 2 * u.character_cycles());
+}
+
+TEST_CASE("sound: the MIDI port's IRQ 0x40 is the serial chip's TxRDY, a level") {
+    RomSet roms;
+    Bus bus(roms);
+    bus.write8(0xF0080004, 0x4E);
+    bus.write8(0xF0080004, 0x27);
+    CHECK((bus.irq().state() & 0x40) != 0);
+    bus.write8(0xF0100018, 0x40); // acknowledged (system register 0x18), but still ready
+    CHECK((bus.irq().state() & 0x40) != 0);
+    bus.write8(0xF0080004, 0x06);
+    CHECK_EQ(bus.irq().state() & 0x40, 0u);
+    CHECK_EQ(bus.read8(0xF0080004), 0x85u);
 }
 
 TEST_CASE("scsp: a looped 16-bit slot plays in the centre at full level, and fades out after key off") {
@@ -395,6 +453,10 @@ TEST_CASE("scsp: a looped 16-bit slot plays in the centre at full level, and fad
     for (int i = 0; i < 100; ++i) scsp.sample(l, r);
     CHECK_EQ(l, 0x4000);
     CHECK_EQ(r, 0x4000);
+    scsp.write16(0x400, 0x0100); // DAC18B: the 18-bit mix unscaled (Supermodel)
+    scsp.sample(l, r);
+    CHECK_EQ(l, 0x10000);
+    scsp.write16(0x400, 0);
     scsp.write16(0x00, 0x1000 | 1 << 5); // key off: release
     for (int i = 0; i < 1000; ++i) scsp.sample(l, r);
     CHECK_EQ(scsp.active_slots(), 0);

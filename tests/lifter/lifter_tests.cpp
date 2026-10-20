@@ -376,8 +376,48 @@ TEST_CASE("lifter: code can resume at a return site, with no call waiting there"
     CHECK_EQ(m.s.gpr[3], 15u);
 }
 
-TEST_CASE("frame timing: display line and frame hooks, MIDI IRQs in VBlank") {
+TEST_CASE("frame timing: the sound link's serial chip paces IRQ 0x40, a byte every 320 us") {
     Machine m;
+    recomp::FrameTiming timing;
+    m.c.set_scheduler(&timing);
+    m.bus.irq().set_enable(0x40); // MSR[EE] is off: it stays pending
+    m.bus.write8(0xF0080004, 0x4E); // mode: asynchronous, x16, 8 bits, no parity, 1 stop bit
+    CHECK_EQ(m.bus.irq().state() & 0x40, 0u);
+    m.bus.write8(0xF0080004, 0x27); // transmitter on: TxRDY
+    CHECK((m.bus.irq().state() & 0x40) != 0);
+    const uint64_t t0 = m.c.cycles();
+    m.bus.write8(0xF0080000, 0x90); // straight into the shifter: the buffer is free again
+    CHECK((m.bus.irq().state() & 0x40) != 0);
+    m.bus.write8(0xF0080000, 0x40); // waits in the buffer
+    CHECK_EQ(m.bus.irq().state() & 0x40, 0u);
+    const uint64_t character = m.bus.midi_uart().character_cycles();
+    CHECK_EQ(character, uint64_t{166'000'000} * 10 / 31'250); // 320 us
+    m.c.limit_blocks(character / 8 + 2);
+    try {
+        m.run("spin");
+    } catch (const recomp::OutOfBudget&) {
+    }
+    CHECK((m.bus.irq().state() & 0x40) != 0); // the second byte went into the shifter
+    CHECK_EQ(m.bus.midi_out().size(), size_t{1});
+    if (m.bus.midi_out().size() != 1) return;
+    CHECK_EQ(m.bus.midi_out()[0].value, 0x90u);
+    CHECK_EQ(m.bus.midi_out()[0].cycle, t0 + character);
+    m.bus.write8(0xF0080004, 0x06); // transmitter off: TxRDY drops, the byte still goes out
+    CHECK_EQ(m.bus.irq().state() & 0x40, 0u);
+    m.c.limit_blocks(character / 8 + 2);
+    try {
+        m.run("spin");
+    } catch (const recomp::OutOfBudget&) {
+    }
+    CHECK_EQ(m.bus.midi_out().size(), size_t{2});
+    if (m.bus.midi_out().size() != 2) return;
+    CHECK_EQ(m.bus.midi_out()[1].cycle, t0 + 2 * character);
+    CHECK_EQ(m.bus.irq().state() & 0x40, 0u);
+}
+
+TEST_CASE("frame timing: display line and frame hooks, MIDI IRQs in VBlank (Supermodel's timing)") {
+    Machine m;
+    m.bus.midi_burst = true;
     recomp::FrameTiming timing;
     m.c.set_scheduler(&timing);
     uint32_t lines = 0, frames = 0, last_line = 0;
