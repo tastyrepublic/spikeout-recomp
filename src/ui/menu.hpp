@@ -51,6 +51,9 @@ public:
     void shutdown();
     const std::string& error() const { return error_; }
     void set_footer(const std::string& text); // the small line at the bottom (version)
+    // The frame rate in the top right corner, shown with the menu closed
+    // too (empty: none).
+    void set_fps(const std::string& text);
 
     bool is_open() const { return open_; }
     void open(MenuPage root);
@@ -64,7 +67,7 @@ public:
 
     // Takes the event when the menu is open; true when it used it.
     bool handle_event(const SDL_Event& e);
-    // Draws the menu (when open) over the swapchain, in the command buffer
+    // Draws the menu (when open) and the frame rate over the swapchain, in the command buffer
     // the window's picture was drawn in (gpu::Presenter's overlay).
     void render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* swapchain, uint32_t width, uint32_t height);
 
@@ -85,6 +88,7 @@ private:
     std::unique_ptr<Impl> impl_;
     std::string error_;
     bool open_ = false;
+    bool fps_shown_ = false;
     std::vector<MenuPage> stack_;
     std::vector<int> selected_stack_;
     int selected_ = 0;

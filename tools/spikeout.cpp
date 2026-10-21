@@ -67,6 +67,7 @@
 #include "runtime/tilegen.hpp"
 #include "game_setup.hpp"
 #include "png_write.hpp"
+#include "arcade_settings.hpp"
 #include "settings.hpp"
 #ifdef SPIKEOUT_GPU
 #include "gpu/present.hpp"
@@ -86,6 +87,9 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <deque>
+#include <fstream>
+#include <functional>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -110,6 +114,13 @@ struct Screen {
     std::string stopped; // why the game stopped, once it has
     // Inputs, active low, as the I/O board shows them.
     std::atomic<uint8_t> bank0{0xFF}, bank1{0xFF}, controls{0xFF};
+    // The board's memory that a cabinet keeps switched off: the settings
+    // EEPROM (64 words) and the backup RAM (rankings). The game takes them as
+    // it starts and gives them back as it stops; the window keeps them in
+    // files (empty: none yet, a new board).
+    std::vector<uint16_t> eeprom;
+    std::vector<uint8_t> backup;
+    m3::Bus* bus = nullptr; // while the game runs (the menu reads the settings with the game paused)
 };
 
 // What the window and the game threads share.
@@ -313,6 +324,12 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
     m3::Bus bus(roms);
     bus.set_security_key(game.security_key);
     tools::set_rtc_to_host(bus);
+    {
+        std::lock_guard<std::mutex> guard(shared.lock);
+        if (out.eeprom.size() == 64) std::copy(out.eeprom.begin(), out.eeprom.end(), bus.eeprom().words().begin());
+        if (out.backup.size() == m3::Bus::kBackupRamSize) std::copy(out.backup.begin(), out.backup.end(), bus.backup_ram().begin());
+        out.bus = &bus;
+    }
     if (shared.real_netboard) bus.use_netboard(std::make_unique<m3::CommBoard>(ring ? ring->port(index) : nullptr));
     else if (ring) bus.use_netboard(std::make_unique<m3::SimNetBoard>(ring->port(index)));
     bus.midi_burst = shared.midi_burst;
@@ -435,6 +452,9 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
     turns.finish(index);
     std::lock_guard<std::mutex> guard(shared.lock);
     out.stopped = why.empty() ? "quit" : why;
+    out.eeprom.assign(bus.eeprom().words().begin(), bus.eeprom().words().end());
+    out.backup.assign(bus.backup_ram().begin(), bus.backup_ram().end());
+    out.bus = nullptr;
 }
 
 // The boards' screens side by side (2) or 2 x 2 (3, 4).
@@ -442,6 +462,46 @@ int grid_columns(std::size_t boards) { return boards == 1 ? 1 : 2; }
 int grid_rows(std::size_t boards) { return boards <= 2 ? 1 : 2; }
 
 std::string on_off(bool on) { return on ? "On" : "Off"; }
+
+// The boards' EEPROM and backup RAM, kept between runs as a cabinet keeps
+// them: nvram/board<N>.eeprom (64 words, high byte first) and
+// nvram/board<N>.backup in the data folder. A missing or short file: a new
+// board (the game sets its EEPROM up as it first starts).
+void load_nvram(const std::string& folder, Shared& shared, std::size_t boards) {
+    for (std::size_t b = 0; b < boards; ++b) {
+        Screen& s = shared.screens[b];
+        const std::string base = folder + "nvram/board" + std::to_string(b);
+        std::ifstream e(base + ".eeprom", std::ios::binary);
+        std::vector<char> bytes((std::istreambuf_iterator<char>(e)), std::istreambuf_iterator<char>());
+        s.eeprom.clear();
+        if (bytes.size() == 128)
+            for (std::size_t i = 0; i < 64; ++i)
+                s.eeprom.push_back(static_cast<uint16_t>(static_cast<uint8_t>(bytes[2 * i]) << 8 | static_cast<uint8_t>(bytes[2 * i + 1])));
+        std::ifstream r(base + ".backup", std::ios::binary);
+        s.backup.assign(std::istreambuf_iterator<char>(r), std::istreambuf_iterator<char>());
+        if (s.backup.size() != m3::Bus::kBackupRamSize) s.backup.clear();
+    }
+}
+
+void save_nvram(const std::string& folder, const Shared& shared, std::size_t boards) {
+    SDL_CreateDirectory((folder + "nvram").c_str());
+    for (std::size_t b = 0; b < boards; ++b) {
+        const Screen& s = shared.screens[b];
+        const std::string base = folder + "nvram/board" + std::to_string(b);
+        if (s.eeprom.size() == 64) {
+            std::ofstream e(base + ".eeprom", std::ios::binary | std::ios::trunc);
+            for (uint16_t w : s.eeprom) e.put(static_cast<char>(w >> 8)).put(static_cast<char>(w & 0xFF));
+        }
+        if (s.backup.size() == m3::Bus::kBackupRamSize) {
+            std::ofstream r(base + ".backup", std::ios::binary | std::ios::trunc);
+            r.write(reinterpret_cast<const char*>(s.backup.data()), static_cast<std::streamsize>(s.backup.size()));
+        }
+    }
+}
+
+// The effects' and the music's volumes (percent), under the overall one.
+int effects_volume(const tools::Settings& s) { return s.sound_volume * s.volume / 100; }
+int music_volume(const tools::Settings& s) { return s.music_volume * s.volume / 100; }
 
 } // namespace
 
@@ -554,7 +614,7 @@ int main(int argc, char** argv) {
     shared.dma_instant = dma_instant;
     shared.sleep_pacing = sleep_pacing;
     std::unique_ptr<Sound> sound;
-    if (!mute) sound = std::make_unique<Sound>(roms, settings.sound_volume, settings.music_volume);
+    if (!mute) sound = std::make_unique<Sound>(roms, effects_volume(settings), music_volume(settings));
     shared.sound = sound.get();
 
 #ifdef SPIKEOUT_GPU
@@ -650,6 +710,9 @@ int main(int argc, char** argv) {
         for (std::thread& g : games) g.join();
         games.clear();
     };
+    // The boards' EEPROM and backup RAM from the last run (not for test runs).
+    const std::string data_folder = tools::data_folder();
+    if (!test_run) load_nvram(data_folder, shared, boards);
     start_games();
 
     // Pads: the first two connected, for players 1 and 2.
@@ -672,13 +735,15 @@ int main(int argc, char** argv) {
     bool running = true;
     std::size_t reported = 0;
     auto fps_start = std::chrono::steady_clock::now();
-    uint64_t fps_frames = 0;
+    uint64_t fps_frames = 0, frames_shown = 0; // in the last second: frames run, and pictures shown
     // The arcade's test and service buttons, held for a moment from the menu.
     auto test_until = std::chrono::steady_clock::time_point{}, service_until = test_until;
 
     // A restart: the boards from power on, the settings kept.
-    auto reset_game = [&] {
+    // (`while_off`: done with the boards switched off, before they start again.)
+    auto reset_game = [&](const std::function<void()>& while_off = {}) {
         stop_games();
+        if (while_off) while_off();
         shared.quit = false;
         {
             std::lock_guard<std::mutex> guard(shared.lock);
@@ -754,21 +819,31 @@ int main(int argc, char** argv) {
                                SDL_SetWindowFullscreen(window, settings.fullscreen);
                                changed();
                            }});
+        p.items.push_back({"Show FPS",
+                           "The frames shown a second, in the top right corner (the arcade's are 57.5).",
+                           [&] { return on_off(settings.show_fps); },
+                           [&](int) {
+                               settings.show_fps = !settings.show_fps;
+                               if (!settings.show_fps) menu.set_fps("");
+                               changed();
+                           }});
         p.items.push_back(back_item());
         return p;
     };
     auto sound_page = [&] {
         ui::MenuPage p{"Sound", "", {}};
-        auto volume = [&](const char* label, const char* help, int& v) {
+        auto volume = [&](const char* label, const char* help, int& v, int most) {
             return ui::MenuItem{label, help, [&v] { return std::to_string(v) + "%"; },
-                                [&](int d) {
-                                    v = std::clamp(v + 10 * d, 0, 200);
-                                    if (sound) sound->set_volumes(settings.sound_volume, settings.music_volume);
+                                [&, most](int d) {
+                                    v = std::clamp(v + 10 * d, 0, most);
+                                    if (sound) sound->set_volumes(effects_volume(settings), music_volume(settings));
                                     changed();
                                 }};
         };
-        p.items.push_back(volume("Sound effects", "Hits, voices and effects: the sound board's two SCSPs.", settings.sound_volume));
-        p.items.push_back(volume("Music", "The music board's tunes.", settings.music_volume));
+        p.items.push_back(volume("Volume", "Everything: the effects and the music together.", settings.volume, 100));
+        p.items.push_back(
+            volume("Sound effects", "Hits, voices and effects: the sound board's two SCSPs.", settings.sound_volume, 200));
+        p.items.push_back(volume("Music", "The music board's tunes.", settings.music_volume, 200));
         p.items.push_back(back_item());
         return p;
     };
@@ -821,15 +896,76 @@ int main(int argc, char** argv) {
         p.items.push_back(back_item());
         return p;
     };
+    // The arcade's settings (tools::ArcadeSettings), edited in a copy of board
+    // 0's EEPROM, read as the page opens (the game paused); a change goes to
+    // every board's as the menu closes, and restarts the game, which reads
+    // them as it starts.
+    std::array<uint16_t, 64> arcade_words{};
+    bool arcade_changed = false;
+    auto arcade_page = [&] {
+        {
+            std::lock_guard<std::mutex> guard(shared.lock);
+            if (m3::Bus* b = shared.screens[0].bus)
+                std::copy(b->eeprom().words().begin(), b->eeprom().words().end(), arcade_words.begin());
+            else
+                arcade_words.fill(0xFFFF);
+        }
+        const bool valid = tools::ArcadeSettings{arcade_words}.valid();
+        ui::MenuPage p{"Arcade settings",
+                       valid ? "A change restarts the game when the menu closes."
+                             : "Not set up yet: the game sets them up as it first starts.",
+                       {}};
+        if (valid) {
+            p.items.push_back({"Difficulty", "How hard the enemies fight (the test menu's GAME DIFFICULTY).",
+                               [&] {
+                                   const int d = tools::ArcadeSettings{arcade_words}.difficulty();
+                                   return d >= 0 && d < 5 ? std::string(tools::ArcadeSettings::kDifficultyNames[static_cast<std::size_t>(d)])
+                                                          : std::string("-");
+                               },
+                               [&](int d) {
+                                   tools::ArcadeSettings s{arcade_words};
+                                   const int now = s.difficulty();
+                                   if (now < 0 || now > 4) return;
+                                   s.set_difficulty(std::clamp(now + d, 0, 4));
+                                   arcade_changed = true;
+                               }});
+            p.items.push_back({"Demo sound", "Sound in the demo between games (the test menu's ADVERTISE SOUND).",
+                               [&] { return on_off(tools::ArcadeSettings{arcade_words}.advertise_sound()); },
+                               [&](int) {
+                                   tools::ArcadeSettings s{arcade_words};
+                                   s.set_advertise_sound(!s.advertise_sound());
+                                   arcade_changed = true;
+                               }});
+        }
+        p.items.push_back(back_item());
+        return p;
+    };
+    // The settings into every board's EEPROM (the boards off), from the copy.
+    auto apply_arcade_settings = [&] {
+        const tools::ArcadeSettings from{arcade_words};
+        for (std::size_t b = 0; b < boards; ++b) {
+            Screen& s = shared.screens[b];
+            if (s.eeprom.size() != 64) continue;
+            tools::ArcadeSettings to{std::span<uint16_t, 64>(s.eeprom.data(), 64)};
+            if (!to.valid()) continue;
+            to.set_difficulty(from.difficulty());
+            to.set_advertise_sound(from.advertise_sound());
+        }
+        if (!test_run) save_nvram(data_folder, shared, boards);
+    };
     auto game_page = [&] {
         ui::MenuPage p{"Game", "", {}};
         p.items.push_back({"Reset game", "Restarts the game, as switching the arcade off and on.", {}, {}, [&] {
                                menu.close();
                                reset_game();
                            }});
+        p.items.push_back({"Arcade settings",
+                           "The arcade's own game settings: difficulty and the demo's sound. A change restarts the "
+                           "game when the menu closes.",
+                           {}, {}, [&] { menu.push(arcade_page()); }});
         p.items.push_back({"Arcade test menu",
                            "Opens the arcade's own test menu: its settings, the network link, the tests. In it, "
-                           "player 1's Start chooses and the test button (F2) moves.",
+                           "the service button (F1) moves and the test button (F2) chooses.",
                            {}, {}, [&] {
                                menu.close();
                                test_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
@@ -957,6 +1093,11 @@ int main(int argc, char** argv) {
                 tools::save_settings(settings_path, settings);
                 settings_changed = false;
             }
+            if (!menu_open && arcade_changed) {
+                arcade_changed = false;
+                shared.paused = false;
+                reset_game(apply_arcade_settings);
+            }
             menu_was_open = menu_open;
         }
 #endif
@@ -968,7 +1109,10 @@ int main(int argc, char** argv) {
                 Screen& s = shared.screens[b];
                 if (s.frame_number != shown_number[b]) {
                     place(b, s.frame);
-                    if (b == 0) fps_frames += s.frame_number - shown_number[b];
+                    if (b == 0) {
+                        fps_frames += s.frame_number - shown_number[b];
+                        ++frames_shown;
+                    }
                     shown_number[b] = s.frame_number;
                 }
                 if (!s.stopped.empty() && !(reported & (1u << b))) {
@@ -1004,8 +1148,18 @@ int main(int argc, char** argv) {
             char title[96];
             std::snprintf(title, sizeof title, "Spikeout: Final Edition  (%.1f fps)", static_cast<double>(fps_frames) / secs);
             SDL_SetWindowTitle(window, title);
+#ifdef SPIKEOUT_GPU
+            // Show FPS: the frames the window showed (the title: the frames the game ran).
+            if (menu_ready) {
+                char shown_rate[32] = "";
+                if (settings.show_fps)
+                    std::snprintf(shown_rate, sizeof shown_rate, "%.1f FPS", static_cast<double>(frames_shown) / secs);
+                menu.set_fps(shown_rate);
+            }
+#endif
             fps_start = now;
             fps_frames = 0;
+            frames_shown = 0;
         }
 #ifdef SPIKEOUT_GPU
         if (on_gpu && shared.gpu_3d && real3d_gpu) {
@@ -1039,6 +1193,7 @@ int main(int argc, char** argv) {
 #endif
     shared.paused = false;
     stop_games();
+    if (!test_run) save_nvram(data_folder, shared, boards);
     sound.reset();
     for (SDL_Gamepad* pad : gamepads) SDL_CloseGamepad(pad);
 #ifdef SPIKEOUT_GPU

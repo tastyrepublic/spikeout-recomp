@@ -62,6 +62,8 @@ Each milestone ends with something you can run and check.
 - [x] DSB2 MPEG music board (`m3::Dsb2`: its 68000, the serial line at 31,250 baud, the decoder's commands, MPEG Layer II through minimp3): the music plays
 - [x] Supermodel's mix: music with SCSP 1 at the front, SCSP 2 at the rear, averaged to stereo; separate sound and music volumes (`--sound-volume`, `--music-volume`)
 - [x] Settings menu in `spikeout` (`src/ui/`, RmlUi over the paused game, after vf3-recomp's): display, sound and music volume, controls, game; kept in `settings.ini`
+- [x] Show FPS, overall volume; the arcade's settings (difficulty, demo sound: `tools/arcade_settings.hpp`, the EEPROM's layout and checksum); EEPROM and backup RAM kept between runs
+- [ ] Region: Spikeout's test menu shows COUNTRY (EXPORT) but can't change it; where it comes from isn't known yet
 - [ ] Speaker setup in the settings menu: stereo, or the cabinet's front and rear pairs on separate outputs (4.0 surround or two devices; the board already renders four channels)
 - [x] Keyboard (two players, rebindable in the menu) and gamepads (fixed layout)
 - [ ] Rebindable pad buttons; arcade stick mapping

@@ -33,8 +33,9 @@ struct Settings {
     bool quads = false;    // quads drawn whole
     bool gpu_3d = true;    // the 3D on the GPU (else in software)
     bool fullscreen = false;
-    // Sound, in percent (0-200)
-    int sound_volume = 100, music_volume = 100;
+    bool show_fps = false; // the frames shown a second, in a corner
+    // Sound, in percent: overall (0-100), and the effects and music (0-200) under it
+    int volume = 100, sound_volume = 100, music_volume = 100;
     // Controls: two players' keys (SDL scancodes, 0: none)
     std::array<std::array<int, kActions>, 2> keys{{
         {SDL_SCANCODE_5, SDL_SCANCODE_1, SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT,
@@ -84,6 +85,8 @@ inline Settings load_settings(const std::string& path) {
     get_bool("quads", s.quads);
     get_bool("gpu_3d", s.gpu_3d);
     get_bool("fullscreen", s.fullscreen);
+    get_bool("show_fps", s.show_fps);
+    get("volume", s.volume, 0, 100);
     get("sound_volume", s.sound_volume, 0, 200);
     get("music_volume", s.music_volume, 0, 200);
     for (std::size_t p = 0; p < 2; ++p)
@@ -100,6 +103,8 @@ inline bool save_settings(const std::string& path, const Settings& s) {
     o << "quads = " << (s.quads ? 1 : 0) << "\n";
     o << "gpu_3d = " << (s.gpu_3d ? 1 : 0) << "\n";
     o << "fullscreen = " << (s.fullscreen ? 1 : 0) << "\n";
+    o << "show_fps = " << (s.show_fps ? 1 : 0) << "\n";
+    o << "volume = " << s.volume << "\n";
     o << "sound_volume = " << s.sound_volume << "\n";
     o << "music_volume = " << s.music_volume << "\n";
     for (std::size_t p = 0; p < 2; ++p)

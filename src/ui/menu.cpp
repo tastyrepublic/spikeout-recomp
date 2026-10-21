@@ -60,6 +60,7 @@ struct Menu::Impl {
     std::unique_ptr<RenderInterface_SDL_GPU> gfx;
     Rml::Context* ctx = nullptr;
     Rml::ElementDocument* doc = nullptr;
+    Rml::ElementDocument* fps = nullptr; // the frame rate (Menu::set_fps)
     MenuListener listener;
 };
 
@@ -72,6 +73,7 @@ void Menu::shutdown() {
         Rml::RemoveContext(impl_->ctx->GetName());
         impl_->ctx = nullptr;
         impl_->doc = nullptr;
+        impl_->fps = nullptr;
     }
     if (impl_->gfx) {
         Rml::Shutdown();
@@ -117,12 +119,28 @@ bool Menu::init(SDL_GPUDevice* device, SDL_Window* window) {
     impl_->listener.menu = this;
     impl_->doc->AddEventListener(Rml::EventId::Mouseover, &impl_->listener);
     impl_->doc->AddEventListener(Rml::EventId::Click, &impl_->listener);
+    // The frame rate, top right, over the game (and the menu).
+    impl_->fps = impl_->ctx->LoadDocumentFromMemory(
+        "<rml><head><style>body { width: 100%; height: 100%; font-family: \"Barlow Condensed\"; font-weight: 600; } "
+        "#fps { position: absolute; right: 16dp; top: 10dp; font-size: 26dp; color: #ffd34a; "
+        "font-effect: outline(2dp #000000); }</style></head><body><div id=\"fps\"></div></body></rml>");
     return true;
 }
 
 void Menu::set_footer(const std::string& text) {
     if (impl_->doc)
         if (Rml::Element* e = impl_->doc->GetElementById("ver")) e->SetInnerRML(escape(text));
+}
+
+void Menu::set_fps(const std::string& text) {
+    if (!impl_->fps) return;
+    if (text.empty()) {
+        impl_->fps->Hide();
+    } else {
+        if (Rml::Element* e = impl_->fps->GetElementById("fps")) e->SetInnerRML(escape(text));
+        impl_->fps->Show();
+    }
+    fps_shown_ = !text.empty();
 }
 
 void Menu::open(MenuPage root) {
@@ -392,7 +410,7 @@ bool Menu::handle_event(const SDL_Event& e) {
 }
 
 void Menu::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* swapchain, uint32_t width, uint32_t height) {
-    if (!open_ || !impl_->ctx) return;
+    if ((!open_ && !fps_shown_) || !impl_->ctx) return;
     impl_->ctx->SetDimensions(Rml::Vector2i(static_cast<int>(width), static_cast<int>(height)));
     impl_->ctx->SetDensityIndependentPixelRatio(static_cast<float>(height) / 720.0f);
     impl_->ctx->Update();

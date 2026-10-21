@@ -10,6 +10,7 @@
 #include "runtime/scsp.hpp"
 #include "runtime/soundboard.hpp"
 #include "runtime/tilegen.hpp"
+#include "../tools/arcade_settings.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -903,4 +904,31 @@ TEST_CASE("commboard: transmit complete waits for the frame being received") {
         CHECK_EQ(board.irqs_taken[6], 1u);
         CHECK_EQ(board.irqs_taken[4], 1u);
     }
+}
+
+TEST_CASE("arcade settings: the EEPROM checksum and both copies, as the game writes them") {
+    // The game's EEPROM after its test menu: the defaults, then the
+    // difficulty raised a step (the checksum and the count of saves change).
+    std::array<uint16_t, 64> w{};
+    const uint16_t first[] = {0x4d33, 0x5345, 0x4741, 0x26b5, 0xa210, 0x0401, 0x0001, 0x0001, 0x0101, 0x0101,
+                              0x0101, 0x0101, 0x0300, 0, 0, 0, 0x0002, 0x0100};
+    std::copy(std::begin(first), std::end(first), w.begin());
+    const uint16_t second[] = {0x0001, 0x0001, 0x0101, 0x0101, 0x0101, 0x0101, 0x0300, 0, 0, 0, 0x0002, 0x0100};
+    std::copy(std::begin(second), std::end(second), w.begin() + 35);
+    tools::ArcadeSettings s{w};
+    CHECK(s.valid());
+    CHECK_EQ(s.difficulty(), 2);
+    CHECK(s.advertise_sound());
+    w[6] = w[35] = 2; // (a save counted, as the game does)
+    s.set_difficulty(3);
+    CHECK_EQ(w[3], 0x62f0); // the game's own checksum for these words
+    CHECK_EQ(w[16], 3);
+    CHECK_EQ(w[45], 3);
+    s.set_difficulty(2);
+    s.set_advertise_sound(false);
+    CHECK_EQ(w[3], 0xbffa);
+    CHECK_EQ(w[46], 0x0000);
+    std::array<uint16_t, 64> blank;
+    blank.fill(0xFFFF);
+    CHECK(!tools::ArcadeSettings{blank}.valid());
 }

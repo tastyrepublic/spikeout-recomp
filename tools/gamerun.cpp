@@ -2,6 +2,7 @@
 // how far it gets.
 //
 //   gamerun <rom_dir> [--blocks N] [--text] [--dump-tile FILE] [--dump-textures FILE.png]
+//           [--dump-backup FILE]
 //           [--netboard sim|real] [--net-trace N] [--net-disasm FILE]
 //           [--screenshot FILE.png] [--shot-every N] [--press [B:]NAME@FRAME[:N]]...
 //           [--wav FILE.wav] [--probe X,Y@FRAME] [--quads]
@@ -15,6 +16,7 @@
 // what to work on next. --text prints the text on the tile layers (what
 // screen the game is on); --dump-tile writes the tile generator's RAM at the
 // end (characters, name tables, palette; derived from the ROMs).
+// --dump-backup writes the backup RAM (128 KB) at the end.
 // --dump-textures FILE.png writes the Real3D's texture RAM at the end as a
 // 2048x2048 picture, each texel read as T1RGB5 (the other formats show as
 // noise; derived from the ROMs).
@@ -127,6 +129,7 @@ struct Options {
     const char* dir = nullptr;
     const char* dump_tile = nullptr;
     const char* dump_textures = nullptr;
+    const char* dump_backup = nullptr;
     const char* net_disasm = nullptr;
     const char* screenshot = nullptr;
     const char* wav = nullptr;
@@ -674,6 +677,15 @@ void report(Machine& m, const Options& o) {
         if (f) std::fclose(f);
     }
 
+    if (o.dump_backup) {
+        const std::string path = board_path(o.dump_backup, m.index);
+        std::FILE* f = std::fopen(path.c_str(), "wb");
+        const auto ram = bus.backup_ram();
+        if (!f || std::fwrite(ram.data(), 1, ram.size(), f) != ram.size())
+            std::fprintf(stderr, "gamerun: cannot write %s\n", path.c_str());
+        if (f) std::fclose(f);
+    }
+
     if (o.dump_textures) {
         const std::string path = board_path(o.dump_textures, m.index);
         const auto ram = bus.real3d().texture_ram();
@@ -704,6 +716,7 @@ int main(int argc, char** argv) {
         if (arg == "--blocks" && i + 1 < argc) o.blocks = std::strtoll(argv[++i], nullptr, 0);
         else if (arg == "--dump-tile" && i + 1 < argc) o.dump_tile = argv[++i];
         else if (arg == "--dump-textures" && i + 1 < argc) o.dump_textures = argv[++i];
+        else if (arg == "--dump-backup" && i + 1 < argc) o.dump_backup = argv[++i];
         else if (arg == "--text") o.show_text = true;
         else if (arg == "--netboard" && i + 1 < argc) o.real_netboard = std::string(argv[++i]) == "real";
         else if (arg == "--net-trace" && i + 1 < argc) o.net_trace = std::strtoull(argv[++i], nullptr, 0);

@@ -343,6 +343,16 @@ black box modelled by its commands (Supermodel's decoding) and minimp3.
   "93C46A" (MAME's board notes) of unknown make, and makers' datasheets
   give 2-10 ms, so the exact time is still a guess; milliseconds isn't.
   Writing a blank EEPROM's defaults now takes the game about 0.1 s more.
+- **Kept between runs** (2026-10-21; as a cabinet, and Supermodel's NVRAM
+  folder): the window saves each board's EEPROM and backup RAM and gives
+  them back at the next start, so the operator's settings and the rankings
+  stay (before, every run was a new board). Test runs (`--frames`) and
+  `gamerun` still start blank, so they stay repeatable. The settings' layout
+  and checksum (CRC-16-CCITT of words 6-34 in word 3) were found through the
+  test menu (`tools/arcade_settings.hpp`); the window's Arcade settings page
+  writes them as the test menu does (both copies, the checksum, then a
+  restart; it leaves the count of saves, word 6, as it is), and the game
+  keeps them, as checked by reading them back after it starts.
 - **Security board status** always reads 0 (never busy) and the first data
   read after a restart gives `0xFFFF` (Supermodel); the game polls the
   busy bit, so a real board takes time per word. Needs a real board.
