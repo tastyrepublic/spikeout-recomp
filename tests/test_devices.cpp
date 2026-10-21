@@ -928,6 +928,22 @@ TEST_CASE("arcade settings: the EEPROM checksum and both copies, as the game wri
     s.set_advertise_sound(false);
     CHECK_EQ(w[3], 0xbffa);
     CHECK_EQ(w[46], 0x0000);
+    CHECK(!s.free_play());
+    s.set_free_play(true);
+    CHECK_EQ(w[11], 0x011B); // the test menu's COIN/CREDIT SETTING #27, FREE PLAY
+    CHECK_EQ(w[40], 0x011B);
+    CHECK(s.free_play());
+    s.set_free_play(false);
+    CHECK_EQ(w[11], 0x0101);
+    CHECK_EQ(s.country(), 3); // export, this set's
+    s.set_country(1);
+    CHECK_EQ(w[12], 0x0100);
+    CHECK_EQ(w[41], 0x0100);
+    s.set_country(3);
+    s.set_advertise_sound(true);
+    w[6] = w[35] = 1;
+    s.set_difficulty(2);
+    CHECK_EQ(w[3], 0x26b5); // back to the game's own defaults
     std::array<uint16_t, 64> blank;
     blank.fill(0xFFFF);
     CHECK(!tools::ArcadeSettings{blank}.valid());

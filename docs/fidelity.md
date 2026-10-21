@@ -353,6 +353,23 @@ black box modelled by its commands (Supermodel's decoding) and minimp3.
   writes them as the test menu does (both copies, the checksum, then a
   restart; it leaves the count of saves, word 6, as it is), and the game
   keeps them, as checked by reading them back after it starts.
+- **Free play** (2026-10-21): the operator's own COIN ASSIGNMENTS setting
+  #27, the low byte of EEPROM word 11 (found by writing values there and
+  reading the test menu: 1-26 coins and credits, 27 FREE PLAY on both
+  chutes). The menu's Free play sets 27, or back to 1 (the game's default, a
+  coin a credit): the attract mode then shows PRESS START BUTTON and FREE
+  PLAY, and Start starts with no credit, as on a cabinet set that way.
+- **Region** (2026-10-21): the country is the high byte of EEPROM word 12
+  (in RAM at `0x100198`), 1 Japan, 2 U.S.A., 3 export, 4 Australia. The
+  operator's test menu shows it but skips it; the game's own code has a
+  hidden COUNTRY SETTING page that steps it 1-4 (it skips 0 INTERNATIONAL and
+  5 KOREA, whose names it also holds), and MAME's notes give the region of
+  other Model 3 sets as fixed by their ROMs. This set writes 3 (export) into
+  a blank EEPROM. The menu's Region writes the byte as that page would: the
+  game then boots as that country (Japan shows its warning screen first; the
+  test menu shows JAPAN, U.S.A., EXPORT or AUSTRALIA) and keeps backup RAM
+  from another. A real board set this way would behave the same, but no
+  board of another region of this set is known to compare with.
 - **Security board status** always reads 0 (never busy) and the first data
   read after a restart gives `0xFFFF` (Supermodel); the game polls the
   busy bit, so a real board takes time per word. Needs a real board.

@@ -2,7 +2,7 @@
 // how far it gets.
 //
 //   gamerun <rom_dir> [--blocks N] [--text] [--dump-tile FILE] [--dump-textures FILE.png]
-//           [--dump-backup FILE]
+//           [--dump-backup FILE] [--eeprom FILE]
 //           [--netboard sim|real] [--net-trace N] [--net-disasm FILE]
 //           [--screenshot FILE.png] [--shot-every N] [--press [B:]NAME@FRAME[:N]]...
 //           [--wav FILE.wav] [--probe X,Y@FRAME] [--quads]
@@ -17,6 +17,8 @@
 // screen the game is on); --dump-tile writes the tile generator's RAM at the
 // end (characters, name tables, palette; derived from the ROMs).
 // --dump-backup writes the backup RAM (128 KB) at the end.
+// --eeprom FILE starts with that settings EEPROM (128 bytes, as the window's
+// nvram/board<N>.eeprom; else a blank one, which the game sets up).
 // --dump-textures FILE.png writes the Real3D's texture RAM at the end as a
 // 2048x2048 picture, each texel read as T1RGB5 (the other formats show as
 // noise; derived from the ROMs).
@@ -96,6 +98,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -130,6 +133,7 @@ struct Options {
     const char* dump_tile = nullptr;
     const char* dump_textures = nullptr;
     const char* dump_backup = nullptr;
+    const char* eeprom = nullptr; // --eeprom: the settings EEPROM to start with (128 bytes, high byte first)
     const char* net_disasm = nullptr;
     const char* screenshot = nullptr;
     const char* wav = nullptr;
@@ -279,6 +283,14 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
     bus.set_security_key(game.security_key);
     tools::set_rtc_to_host(bus);
     for (uint8_t& b : bus.ram()) b = 0xA5;
+    if (o.eeprom) {
+        std::ifstream in(o.eeprom, std::ios::binary);
+        uint8_t bytes[128] = {};
+        if (in.read(reinterpret_cast<char*>(bytes), sizeof bytes))
+            for (std::size_t i = 0; i < 64; ++i) bus.eeprom().words()[i] = static_cast<uint16_t>(bytes[2 * i] << 8 | bytes[2 * i + 1]);
+        else
+            std::fprintf(stderr, "gamerun: cannot read %s (128 bytes)\n", o.eeprom);
+    }
     if (o.real_netboard) {
         m3::CommBoardOptions options;
         options.irq5_on_e0 = o.irq5_on_e0;
@@ -717,6 +729,7 @@ int main(int argc, char** argv) {
         else if (arg == "--dump-tile" && i + 1 < argc) o.dump_tile = argv[++i];
         else if (arg == "--dump-textures" && i + 1 < argc) o.dump_textures = argv[++i];
         else if (arg == "--dump-backup" && i + 1 < argc) o.dump_backup = argv[++i];
+        else if (arg == "--eeprom" && i + 1 < argc) o.eeprom = argv[++i];
         else if (arg == "--text") o.show_text = true;
         else if (arg == "--netboard" && i + 1 < argc) o.real_netboard = std::string(argv[++i]) == "real";
         else if (arg == "--net-trace" && i + 1 < argc) o.net_trace = std::strtoull(argv[++i], nullptr, 0);
