@@ -181,7 +181,7 @@ if(SPIKEOUT_GPU)
     # FILE, or FILE@DEFINE@...: a variant built with those defines set,
     # named file_define..._stage (scene.frag@OPAQUE -> scene_opaque_frag).
     set(shaders present.vert present.frag scene.vert scene.frag scene.frag@OPAQUE scene.frag@QUADS
-        scene.frag@OPAQUE@QUADS scene.frag@QUADS@BOUNDED scene.frag@OPAQUE@QUADS@BOUNDED background_fog.frag depth_copy.frag composite.frag screen.frag)
+        scene.frag@OPAQUE@QUADS scene.frag@QUADS@BOUNDED scene.frag@OPAQUE@QUADS@BOUNDED background_fog.frag composite.frag screen.frag)
     file(GLOB shader_includes ${shader_dir}/*.glsl)
     set(shader_sources)
     foreach(entry ${shaders})

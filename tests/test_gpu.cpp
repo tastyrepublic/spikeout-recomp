@@ -18,7 +18,7 @@ uint32_t word(const gpu::ShaderCode& s, std::size_t i) {
 TEST_CASE("gpu: the shaders compiled to SPIR-V and Metal source") {
     for (const gpu::ShaderCode* s :
          {&gpu::shaders::present_vert, &gpu::shaders::present_frag, &gpu::shaders::scene_vert, &gpu::shaders::scene_frag,
-          &gpu::shaders::scene_opaque_frag, &gpu::shaders::background_fog_frag, &gpu::shaders::depth_copy_frag,
+          &gpu::shaders::scene_opaque_frag, &gpu::shaders::background_fog_frag,
           &gpu::shaders::composite_frag, &gpu::shaders::screen_frag, &gpu::shaders::scene_quads_frag,
           &gpu::shaders::scene_opaque_quads_frag, &gpu::shaders::scene_quads_bounded_frag,
           &gpu::shaders::scene_opaque_quads_bounded_frag}) {

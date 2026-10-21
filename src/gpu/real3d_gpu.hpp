@@ -92,8 +92,7 @@ private:
     std::string error_;
 
     // opaque_ and trans_ by [kind * 2 + decal].
-    SDL_GPUGraphicsPipeline *fog_ = nullptr, *opaque_[kKinds * 2] = {}, *trans_[kKinds * 2] = {}, *copy_ = nullptr,
-                            *composite_ = nullptr;
+    SDL_GPUGraphicsPipeline *fog_ = nullptr, *opaque_[kKinds * 2] = {}, *trans_[kKinds * 2] = {}, *composite_ = nullptr;
     SDL_GPUSampler* nearest_ = nullptr;
     SDL_GPUTexture *colour_ = nullptr, *layers_[2] = {}, *depth_copy_ = nullptr, *depth_ = nullptr, *trans_depth_ = nullptr,
                    *output_ = nullptr, *display_ = nullptr, *texture_ram_ = nullptr;

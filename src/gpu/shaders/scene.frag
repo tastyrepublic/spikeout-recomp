@@ -4,7 +4,7 @@
 // RAM is sampled as the software renderer does it, in 8-bit integer steps,
 // so the two pictures can be compared closely.
 //
-// Built four times: with OPAQUE, the opaque pass (colour, clearing both
+// Built in variants: with OPAQUE, the opaque pass (colour, clearing both
 // translucency layers, and depth for the translucent passes), without, a
 // translucency layer; each with QUADS too, for quads drawn whole (their
 // attributes and depth from all four corners; writing the depth costs the
@@ -26,11 +26,19 @@ layout(location = 2) in vec3 normal;
 layout(location = 3) flat in uint polygon;
 layout(location = 4) flat in uint quad;
 
+// (SDL's fragment set 2: the textures, then the storage buffers.)
 layout(set = 2, binding = 0) uniform usampler2D texture_ram; // 2048 x 2048, 16 bits a texel
-layout(std430, set = 2, binding = 1) readonly buffer Polygons { Polygon polygons[]; };
-layout(std430, set = 2, binding = 2) readonly buffer Viewports { Viewport viewports[]; };
+#ifdef OPAQUE
+#define kStorage 1
+#else
+// The opaque pass's depth: a translucent pixel only in front of it.
+layout(set = 2, binding = 1) uniform sampler2D opaque_depth;
+#define kStorage 2
+#endif
+layout(std430, set = 2, binding = kStorage) readonly buffer Polygons { Polygon polygons[]; };
+layout(std430, set = 2, binding = kStorage + 1) readonly buffer Viewports { Viewport viewports[]; };
 #ifdef QUADS
-layout(std430, set = 2, binding = 3) readonly buffer Quads { Quad quads[]; };
+layout(std430, set = 2, binding = kStorage + 2) readonly buffer Quads { Quad quads[]; };
 #endif
 layout(std140, set = 3, binding = 0) uniform Frame {
     float scale; // render pixels per screen pixel
@@ -311,6 +319,12 @@ void main() {
     if (!quad_attributes(p, tc, sh, n, inv_distance)) discard; // outside the quad
     depth = kNear * ((flags & kFlagLayered) != 0u ? kDecalBias : 1.0) * inv_distance;
     gl_FragDepth = depth;
+#endif
+#ifndef OPAQUE
+    // Only nearer than the opaque pixel (the depth buffer, cleared, then
+    // keeps the nearest translucent one): as testing against a copy of the
+    // opaque depth would.
+    if (!(depth > texelFetch(opaque_depth, ivec2(gl_FragCoord.xy), 0).r)) discard;
 #endif
     const float distance = 1.0 / inv_distance;
     const bool textured = (flags & kFlagTextured) != 0u, contour = (flags & kFlagContour) != 0u,

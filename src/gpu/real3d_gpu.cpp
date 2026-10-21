@@ -192,17 +192,21 @@ bool Real3dGpu::open(Device& device, int scale) {
     using R = Device::Resources;
     SDL_GPUShader* fullscreen = device.shader(shaders::present_vert, Device::Stage::Vertex, {});
     SDL_GPUShader* scene_vs = device.shader(shaders::scene_vert, Device::Stage::Vertex, R{.storage_buffers = 3});
-    const R scene_resources{.samplers = 1, .uniform_buffers = 1, .storage_buffers = 2};
-    const R quad_resources{.samplers = 1, .uniform_buffers = 1, .storage_buffers = 3};
-    SDL_GPUShader* opaque_fs = device.shader(shaders::scene_opaque_frag, Device::Stage::Fragment, scene_resources);
-    SDL_GPUShader* trans_fs = device.shader(shaders::scene_frag, Device::Stage::Fragment, scene_resources);
-    SDL_GPUShader* opaque_quads_fs = device.shader(shaders::scene_opaque_quads_frag, Device::Stage::Fragment, quad_resources);
-    SDL_GPUShader* trans_quads_fs = device.shader(shaders::scene_quads_frag, Device::Stage::Fragment, quad_resources);
+    // Fragment: texture RAM (translucent: and the opaque depth); polygons, viewports (quads: and quads).
+    const R opaque_resources{.samplers = 1, .uniform_buffers = 1, .storage_buffers = 2};
+    const R opaque_quad_resources{.samplers = 1, .uniform_buffers = 1, .storage_buffers = 3};
+    const R trans_resources{.samplers = 2, .uniform_buffers = 1, .storage_buffers = 2};
+    const R trans_quad_resources{.samplers = 2, .uniform_buffers = 1, .storage_buffers = 3};
+    SDL_GPUShader* opaque_fs = device.shader(shaders::scene_opaque_frag, Device::Stage::Fragment, opaque_resources);
+    SDL_GPUShader* trans_fs = device.shader(shaders::scene_frag, Device::Stage::Fragment, trans_resources);
+    SDL_GPUShader* opaque_quads_fs =
+        device.shader(shaders::scene_opaque_quads_frag, Device::Stage::Fragment, opaque_quad_resources);
+    SDL_GPUShader* trans_quads_fs = device.shader(shaders::scene_quads_frag, Device::Stage::Fragment, trans_quad_resources);
     SDL_GPUShader* opaque_bounded_fs =
-        device.shader(shaders::scene_opaque_quads_bounded_frag, Device::Stage::Fragment, quad_resources);
-    SDL_GPUShader* trans_bounded_fs = device.shader(shaders::scene_quads_bounded_frag, Device::Stage::Fragment, quad_resources);
+        device.shader(shaders::scene_opaque_quads_bounded_frag, Device::Stage::Fragment, opaque_quad_resources);
+    SDL_GPUShader* trans_bounded_fs =
+        device.shader(shaders::scene_quads_bounded_frag, Device::Stage::Fragment, trans_quad_resources);
     SDL_GPUShader* fog_fs = device.shader(shaders::background_fog_frag, Device::Stage::Fragment, R{.uniform_buffers = 1});
-    SDL_GPUShader* copy_fs = device.shader(shaders::depth_copy_frag, Device::Stage::Fragment, R{.samplers = 1});
     SDL_GPUShader* composite_fs = device.shader(shaders::composite_frag, Device::Stage::Fragment, R{.samplers = 3});
 
     // Pipelines.
@@ -269,8 +273,8 @@ bool Real3dGpu::open(Device& device, int scale) {
         return SDL_CreateGPUGraphicsPipeline(d, &info);
     };
     const std::initializer_list<SDL_GPUShader*> all_shaders = {
-        fullscreen,      scene_vs,         opaque_fs, trans_fs, opaque_quads_fs, trans_quads_fs,
-        opaque_bounded_fs, trans_bounded_fs, fog_fs,  copy_fs,  composite_fs};
+        fullscreen,        scene_vs,         opaque_fs, trans_fs, opaque_quads_fs, trans_quads_fs,
+        opaque_bounded_fs, trans_bounded_fs, fog_fs,   composite_fs};
     if (std::all_of(all_shaders.begin(), all_shaders.end(), [](SDL_GPUShader* s) { return s != nullptr; })) {
         const auto ge = SDL_GPU_COMPAREOP_GREATER_OR_EQUAL, gt = SDL_GPU_COMPAREOP_GREATER;
         const SDL_GPUTextureFormat r32 = SDL_GPU_TEXTUREFORMAT_R32_FLOAT;
@@ -285,7 +289,6 @@ bool Real3dGpu::open(Device& device, int scale) {
                                                      {kColourFormat, kColourFormat, kColourFormat, r32}, true, true, ge, decal);
                 trans_[kind * 2 + decal] = pipeline(scene_vs, trans_fss[kind], {kColourFormat}, true, true, gt, decal);
             }
-        copy_ = pipeline(fullscreen, copy_fs, {kColourFormat}, false, true, SDL_GPU_COMPAREOP_ALWAYS, false, false);
         // The picture, straight and premultiplied (for the window).
         composite_ = pipeline(fullscreen, composite_fs, {kColourFormat, kColourFormat}, false, false, ge, false);
     }
@@ -293,7 +296,7 @@ bool Real3dGpu::open(Device& device, int scale) {
         if (s) SDL_ReleaseGPUShader(d, s);
     const bool pipelines = std::all_of(std::begin(opaque_), std::end(opaque_), [](auto* p) { return p != nullptr; }) &&
                            std::all_of(std::begin(trans_), std::end(trans_), [](auto* p) { return p != nullptr; });
-    if (!fog_ || !pipelines || !copy_ || !composite_ || !nearest_ || !texture_upload_ || !download_) {
+    if (!fog_ || !pipelines || !composite_ || !nearest_ || !texture_upload_ || !download_) {
         error_ = device.error().empty() ? SDL_GetError() : device.error();
         return false;
     }
@@ -304,7 +307,7 @@ Real3dGpu::~Real3dGpu() {
     if (!device_ || !device_->get()) return;
     SDL_GPUDevice* d = device_->get();
     SDL_WaitForGPUIdle(d);
-    for (SDL_GPUGraphicsPipeline* p : {fog_, copy_, composite_})
+    for (SDL_GPUGraphicsPipeline* p : {fog_, composite_})
         if (p) SDL_ReleaseGPUGraphicsPipeline(d, p);
     for (SDL_GPUGraphicsPipeline* p : opaque_)
         if (p) SDL_ReleaseGPUGraphicsPipeline(d, p);
@@ -599,13 +602,15 @@ void Real3dGpu::render(const m3::Real3dScene& scene, std::span<const uint16_t> t
         SDL_PushGPUFragmentUniformData(cmd, 0, &frame, sizeof frame);
         SDL_GPUBuffer* storage[3] = {polygon_buffer_, viewport_buffer_, quad_buffer_};
         const SDL_GPUBufferBinding vertices{vertex_buffer_, 0};
-        const SDL_GPUTextureSamplerBinding texels{texture_ram_, nearest_};
+        // Texture RAM; and, for the translucent passes, the opaque depth.
+        const SDL_GPUTextureSamplerBinding samplers[2] = {{texture_ram_, nearest_}, {depth_copy_, nearest_}};
         // pipelines by [kind * 2 + decal].
-        auto draw = [&](SDL_GPURenderPass* pass, SDL_GPUGraphicsPipeline* const pipelines[kKinds * 2], const std::vector<Draw>& draws) {
+        auto draw = [&](SDL_GPURenderPass* pass, SDL_GPUGraphicsPipeline* const pipelines[kKinds * 2], const std::vector<Draw>& draws,
+                        bool translucent) {
             SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
             SDL_BindGPUVertexStorageBuffers(pass, 0, storage, 3);
             SDL_BindGPUFragmentStorageBuffers(pass, 0, storage, 3);
-            SDL_BindGPUFragmentSamplers(pass, 0, &texels, 1);
+            SDL_BindGPUFragmentSamplers(pass, 0, samplers, translucent ? 2 : 1);
             int bound = -1;
             for (const Draw& dr : draws) {
                 const int which = dr.kind * 2 + (dr.decal ? 1 : 0);
@@ -646,12 +651,14 @@ void Real3dGpu::render(const m3::Real3dScene& scene, std::span<const uint16_t> t
                 ds.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
                 ds.clear_stencil = 0;
                 SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(cmd, t, 4, &ds);
-                draw(pass, opaque_, g.passes[0]);
+                draw(pass, opaque_, g.passes[0], false);
                 SDL_EndGPURenderPass(pass);
             }
-            // Each translucency layer, against the opaque depth: layer 1
-            // first, in a depth buffer of its own that the copy fills; then
-            // layer 0 in the opaque pass's own (the copy saved).
+            // Each translucency layer, only in front of the opaque depth (its
+            // shader compares with the copy): layer 1 in a depth buffer of
+            // its own, cleared, which keeps the nearest translucent pixel;
+            // layer 0, after it, in the opaque pass's own (which also lets
+            // the GPU drop pixels behind the opaque ones early).
             for (int layer = 1; layer >= 0; --layer) {
                 if (g.passes[1 + layer].empty()) continue;
                 SDL_GPUColorTargetInfo t = colour_target(layers_[layer], false);
@@ -663,14 +670,7 @@ void Real3dGpu::render(const m3::Real3dScene& scene, std::span<const uint16_t> t
                 ds.stencil_load_op = SDL_GPU_LOADOP_CLEAR;
                 ds.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
                 SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(cmd, &t, 1, &ds);
-                if (layer == 1) {
-                    SDL_BindGPUGraphicsPipeline(pass, copy_);
-                    set_full_view(pass);
-                    const SDL_GPUTextureSamplerBinding depth{depth_copy_, nearest_};
-                    SDL_BindGPUFragmentSamplers(pass, 0, &depth, 1);
-                    SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
-                }
-                draw(pass, trans_, g.passes[1 + layer]);
+                draw(pass, trans_, g.passes[1 + layer], true);
                 SDL_EndGPURenderPass(pass);
             }
         }
