@@ -137,6 +137,14 @@ test menu, a service credit) and Quit. The choices are kept in
 `settings.ini`, in the user's data folder (`%APPDATA%`, `~/Library/Application
 Support`, `~/.local/share`), or next to the program when a file named
 `portable.txt` is there; options on the command line win for that run.
+
+Each frame is shown as soon as it is due, in the GPU's mailbox mode where
+it has one (no tearing; `--fifo` for plain vsync, which on some Windows
+setups shows only every second or third refresh). Between frames the game
+thread waits busy, one core's worth, because a sleeping thread let Windows
+slow the CPU and made frames late; `--sleep-pacing` saves that power. A
+render scale and antialiasing the GPU can't draw in 17 ms drop frames:
+on a GTX 1080, 2x with 2x antialiasing keeps every frame.
 Both `spikeout` and `gamerun` take `--quads` (draw quads whole,
 Supermodel's quad rendering, slower) and `--midi-burst` (send the sound
 board its commands with Supermodel's timing instead of the serial line's);

@@ -2,9 +2,12 @@
 //
 //   spikeout <rom_dir> [--scale N] [--netboard sim] [--frames N] [--mute] [--quads]
 //                     [--midi-burst] [--dma-instant] [--sound-volume N] [--music-volume N]
-//                     [--boards N] [--no-gpu] [--soft-3d] [--render-scale N]
+//                     [--boards N] [--no-gpu] [--soft-3d] [--render-scale N] [--fifo]
+//                     [--sleep-pacing]
 //
-// The game runs on its own thread, paced to the Model 3's 57.524 Hz; the
+// The game runs on its own thread, paced to the Model 3's 57.524 Hz (waiting
+// busy between frames; --sleep-pacing sleeps, saving power but letting the
+// CPU slow down, which made some frames late); the
 // window shows the tile generator's 2D layers and the Real3D's picture. The
 // sound and music boards play through the default audio device (--mute: not
 // at all).
@@ -39,7 +42,10 @@
 // 3D is drawn there too (gpu::Real3dGpu), one board only; --soft-3d (or the
 // menu) keeps it in software. The render scale draws the 3D N times as large
 // each way (Auto: as large as the window shows it), antialiasing that again
-// and averages it down (the 2D layers stay 496x384).
+// and averages it down (the 2D layers stay 496x384). Each frame is shown as
+// it finishes, its 3D drawn once, presented in mailbox mode where the GPU
+// has it (no tearing; --fifo: plain vsync, which on some Windows setups
+// shows only every second or third refresh; gpu::Device::open).
 //
 // --frames N quits after N frames and writes the last one to
 // spikeout-<N>.png (for testing). --quads draws quads whole, as Supermodel's
@@ -77,6 +83,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <condition_variable>
 #include <cstdlib>
 #include <deque>
 #include <memory>
@@ -116,6 +123,7 @@ struct Shared {
     std::atomic<bool> quads{false}; // draw quads whole
     bool midi_burst = false;        // Supermodel's MIDI timing
     bool dma_instant = false;       // Real3D DMA done at once (Supermodel, MAME)
+    bool sleep_pacing = false;      // board 0 sleeps between frames, not waits busy
     Sound* sound = nullptr;         // nullptr: muted
 
     // The 3D drawn by the GPU (one board): the game thread leaves each
@@ -129,6 +137,11 @@ struct Shared {
     // Texture RAM as of the last upload, and which upload that was.
     std::shared_ptr<const std::vector<uint16_t>> textures;
     uint64_t textures_version = 0;
+
+    // Frames the boards have finished (all of them together): the window
+    // waits on it, to show each frame as it is done.
+    uint64_t frames_done = 0;
+    std::condition_variable frame_done;
 };
 
 // The input bits a player's actions are (bank 0: coin, start; the controls byte).
@@ -325,6 +338,36 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             turns.pass(index);
         }
     };
+    // Board 0 paces them all to the Model 3's refresh: it holds each finished
+    // frame until it is due, so frames reach the window evenly spaced however
+    // long each took to run. (Tab runs free; after it, or the menu, pacing
+    // starts again from there.)
+    bool repace = false;
+    auto pace = [&] {
+        if (index != 0) return;
+        if (shared.fast || repace) {
+            start = clock::now();
+            paced_from = timing.frames();
+            repace = shared.fast;
+            return;
+        }
+        const auto due = start + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(
+                                     static_cast<double>(timing.frames() - paced_from) / recomp::FrameTiming::kRefreshHz));
+        auto now = clock::now();
+        if (now - due > std::chrono::milliseconds(250)) { // too far behind: don't try to catch up
+            start = now;
+            paced_from = timing.frames();
+            return;
+        }
+        // Waited out busy (yielding): a thread that sleeps most of each frame
+        // lets the CPU clock its core down (Windows' balanced power plan),
+        // and one frame in twenty then ran 15-27 ms instead of 5, showing as
+        // a hitch. --sleep-pacing sleeps (saves power; sleeping also wakes up
+        // to a millisecond or two late, so the last of it is waited out).
+        if (shared.sleep_pacing && due - now > std::chrono::milliseconds(2))
+            std::this_thread::sleep_until(due - std::chrono::milliseconds(2));
+        while (clock::now() < due) std::this_thread::yield();
+    };
     m3::Real3dSceneBuilder builder;
     Shared::GpuFrame gpu_frame;
     uint64_t textures_seen = UINT64_MAX;
@@ -340,6 +383,7 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
                 textures_seen = mem.textures_uploaded();
                 textures = std::make_shared<const std::vector<uint16_t>>(mem.texture_ram().begin(), mem.texture_ram().end());
             }
+            pace();
             std::lock_guard<std::mutex> guard(shared.lock);
             std::swap(shared.gpu_frame, gpu_frame);
             if (textures) {
@@ -352,17 +396,22 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             real3d.render(bus.real3d());
             tilegen.composite(screen, real3d.image());
             textures_seen = UINT64_MAX; // (the GPU, if turned on again, takes texture RAM afresh)
+            pace();
             std::lock_guard<std::mutex> guard(shared.lock);
             out.frame.swap(screen);
             out.frame_number = timing.frames();
         }
+        {
+            std::lock_guard<std::mutex> guard(shared.lock);
+            ++shared.frames_done;
+        }
+        shared.frame_done.notify_one();
         if (shared.sound && index == 0) shared.sound->send(bus.midi_out());
         else bus.midi_out().clear();
         if (linked && timing.frames() < tools::kLinkSettingFrames) bus.write8(tools::kLinkSettingAddr, link_setting);
         // The menu: held here, between frames, until it closes.
-        bool was_paused = false;
         while (shared.paused && !shared.quit) {
-            was_paused = true;
+            repace = true;
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         bus.inputs.bank0 = out.bank0;
@@ -370,20 +419,6 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
         bus.inputs.controls = out.controls;
         if (shared.max_frames && timing.frames() >= shared.max_frames) shared.quit = true;
         if (shared.quit) throw Stop{};
-        if (index != 0) return; // board 0 paces them all
-        if (shared.fast || was_paused) { // run free, and pace from here when Tab is let go or the menu closes
-            start = clock::now();
-            paced_from = timing.frames();
-            return;
-        }
-        const auto due = start + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(
-                                     static_cast<double>(timing.frames() - paced_from) / recomp::FrameTiming::kRefreshHz));
-        const auto now = clock::now();
-        if (due > now) std::this_thread::sleep_until(due);
-        else if (now - due > std::chrono::milliseconds(250)) { // too far behind: don't try to catch up
-            start = now;
-            paced_from = timing.frames();
-        }
     };
 
     std::string why;
@@ -415,7 +450,8 @@ int main(int argc, char** argv) {
     int scale = 0, cli_render_scale = 0, cli_sound = -1, cli_music = -1;
     bool real_netboard = true;
     uint64_t max_frames = 0;
-    bool mute = false, cli_quads = false, midi_burst = false, dma_instant = false, use_gpu = true, cli_soft_3d = false;
+    bool mute = false, cli_quads = false, midi_burst = false, dma_instant = false, use_gpu = true, cli_soft_3d = false, fifo = false,
+         sleep_pacing = false;
     std::size_t boards = 1;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -430,6 +466,8 @@ int main(int argc, char** argv) {
         else if (arg == "--mute") mute = true;
         else if (arg == "--no-gpu") use_gpu = false;
         else if (arg == "--soft-3d") cli_soft_3d = true;
+        else if (arg == "--fifo") fifo = true;
+        else if (arg == "--sleep-pacing") sleep_pacing = true;
         else if (arg == "--render-scale" && i + 1 < argc) cli_render_scale = std::clamp(std::atoi(argv[++i]), 1, 6);
         else if (arg == "--sound-volume" && i + 1 < argc) cli_sound = std::clamp(std::atoi(argv[++i]), 0, 200);
         else if (arg == "--music-volume" && i + 1 < argc) cli_music = std::clamp(std::atoi(argv[++i]), 0, 200);
@@ -438,7 +476,8 @@ int main(int argc, char** argv) {
     if (!dir) {
         std::fprintf(stderr, "usage: spikeout <rom_dir> [--scale N] [--netboard sim|real] [--frames N] [--mute] [--quads]\n"
                              "                [--midi-burst] [--dma-instant] [--sound-volume N] [--music-volume N]\n"
-                             "                [--boards N] [--no-gpu] [--soft-3d] [--render-scale N]\n");
+                             "                [--boards N] [--no-gpu] [--soft-3d] [--render-scale N] [--fifo]\n"
+                             "                [--sleep-pacing]\n");
         return 2;
     }
     if (scale == 0) scale = boards == 1 ? 2 : 1;
@@ -478,8 +517,10 @@ int main(int argc, char** argv) {
     auto presenter = std::make_unique<gpu::Presenter>();
     bool on_gpu = false;
     if (use_gpu) {
-        on_gpu = gpu_device->open(window) && presenter->open(*gpu_device);
-        if (on_gpu) std::printf("spikeout: drawing with the GPU (%s)\n", gpu_device->driver());
+        on_gpu = gpu_device->open(window, fifo) && presenter->open(*gpu_device);
+        if (on_gpu)
+            std::printf("spikeout: drawing with the GPU (%s, %s)\n", gpu_device->driver(),
+                        gpu_device->mailbox() ? "mailbox" : "vsync");
         else {
             std::printf("spikeout: no GPU (%s); drawing with SDL's renderer\n", gpu_device->error().c_str());
             presenter.reset(); // gives the window back
@@ -511,6 +552,7 @@ int main(int argc, char** argv) {
     shared.quads = settings.quads;
     shared.midi_burst = midi_burst;
     shared.dma_instant = dma_instant;
+    shared.sleep_pacing = sleep_pacing;
     std::unique_ptr<Sound> sound;
     if (!mute) sound = std::make_unique<Sound>(roms, settings.sound_volume, settings.music_volume);
     shared.sound = sound.get();
@@ -530,9 +572,14 @@ int main(int argc, char** argv) {
         }
         return std::clamp(base * settings.antialiasing, 1, 8);
     };
+    // The game frame whose 3D the GPU last drew (0: none; draw it again). The
+    // window shows each frame for one or more of the display's refreshes and
+    // draws its 3D only once, for the first.
+    uint64_t drawn_number = 0;
     auto set_up_3d = [&] {
         const bool want = on_gpu && boards == 1 && settings.gpu_3d;
         const int s = wanted_scale();
+        drawn_number = 0;
         if (want && real3d_gpu && s == draw_scale) {
             real3d_gpu->set_quads(settings.quads);
             return;
@@ -644,6 +691,7 @@ int main(int argc, char** argv) {
         shown_number = {};
 #ifdef SPIKEOUT_GPU
         gpu_frame.number = 0;
+        drawn_number = 0;
 #endif
         reported = 0;
         start_games();
@@ -832,7 +880,17 @@ int main(int argc, char** argv) {
     std::size_t test_key = 0;
     auto test_key_due = std::chrono::steady_clock::time_point{};
 
+    uint64_t frames_seen = 0;
     while (running) {
+        // Each frame shown as soon as it is finished (and, with the game
+        // paused or stopped, the menu and events 50 times a second: longer
+        // than a frame, 17.4 ms).
+        {
+            std::unique_lock<std::mutex> guard(shared.lock);
+            shared.frame_done.wait_for(guard, std::chrono::milliseconds(20),
+                                       [&] { return shared.frames_done != frames_seen; });
+            frames_seen = shared.frames_done;
+        }
         if (test_key < test_keys.size() && shown_number[0] >= 300 && std::chrono::steady_clock::now() >= test_key_due) {
             SDL_Event key{};
             key.type = SDL_EVENT_KEY_DOWN;
@@ -952,7 +1010,10 @@ int main(int argc, char** argv) {
 #ifdef SPIKEOUT_GPU
         if (on_gpu && shared.gpu_3d && real3d_gpu) {
             if (textures && !gpu_frame.bottom.empty()) {
-                real3d_gpu->render(gpu_frame.scene, *textures, textures_version);
+                if (gpu_frame.number != drawn_number) {
+                    real3d_gpu->render(gpu_frame.scene, *textures, textures_version);
+                    drawn_number = gpu_frame.number;
+                }
                 presenter->present_layers(gpu_frame.bottom, gpu_frame.top, real3d_gpu->display_image(), kWidth, kHeight);
             } else {
                 presenter->present(shown, width, height);

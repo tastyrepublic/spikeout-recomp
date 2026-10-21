@@ -26,8 +26,9 @@ struct ShaderCode;
 class Device {
 public:
     // false (and error() says why) when there is no GPU SDL can use with
-    // shaders we have (Vulkan or Metal).
-    bool open(SDL_Window* window);
+    // shaders we have (Vulkan or Metal). Presents in mailbox mode when the
+    // window can (fifo: always plain vsync).
+    bool open(SDL_Window* window, bool fifo = false);
     // Without a window: drawing only off screen (gamerun).
     bool open_headless();
     ~Device();
@@ -35,6 +36,7 @@ public:
     SDL_GPUDevice* get() const { return device_; }
     SDL_Window* window() const { return window_; }
     const char* driver() const;
+    bool mailbox() const { return mailbox_; } // else FIFO: presenting waits for the display
     const std::string& error() const { return error_; }
 
     enum class Stage { Vertex, Fragment };
@@ -47,6 +49,7 @@ private:
     SDL_GPUDevice* device_ = nullptr;
     SDL_Window* window_ = nullptr;
     bool video_ = false; // open_headless started SDL's video
+    bool mailbox_ = false;
     std::string error_;
 };
 

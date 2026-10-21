@@ -11,7 +11,7 @@ namespace gpu {
 
 // ---- Device ----
 
-bool Device::open(SDL_Window* window) {
+bool Device::open(SDL_Window* window, bool fifo) {
     device_ = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_MSL, false, nullptr);
     if (!device_) {
         error_ = SDL_GetError();
@@ -24,6 +24,15 @@ bool Device::open(SDL_Window* window) {
         return false;
     }
     window_ = window;
+    // Mailbox where there is one: a picture waits for the display's next
+    // refresh (no tearing) but doesn't hold the window up. With plain vsync
+    // (FIFO) Vulkan on Windows can hand out a picture only every second or
+    // third refresh (seen: 33 a second on a 99 Hz display), showing the game's
+    // 57.5 frames a second at half that. The window presents each game frame
+    // once, as it finishes, either way.
+    if (!fifo && SDL_WindowSupportsGPUPresentMode(device_, window, SDL_GPU_PRESENTMODE_MAILBOX))
+        mailbox_ = SDL_SetGPUSwapchainParameters(device_, window, SDL_GPU_SWAPCHAINCOMPOSITION_SDR,
+                                                 SDL_GPU_PRESENTMODE_MAILBOX);
     return true;
 }
 
