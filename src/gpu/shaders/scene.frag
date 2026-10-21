@@ -86,7 +86,8 @@ uint lerp8(uint a, uint b, uint w) {
 float fast_log2(float x) {
     const uint bits = floatBitsToUint(x);
     const float m = uintBitsToFloat((bits & 0x007FFFFFu) | 0x3F800000u);
-    return float(int((bits >> 23) & 0xFFu) - 127) + (-0.34484843 * m + 2.02466578) * m - 0.67487759;
+    // The polynomial is log2(m) + 1 for m in [1, 2), hence the exponent less 128.
+    return float(int((bits >> 23) & 0xFFu) - 128) + (-0.34484843 * m + 2.02466578) * m - 0.67487759;
 }
 
 // One texture axis: the two texels to blend and the second one's weight

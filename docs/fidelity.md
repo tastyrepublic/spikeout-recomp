@@ -186,6 +186,19 @@ header, mesh pass selection, node walk, viewports, frame buffers) on
 - **Fade without a four-level LOD table:** used as it is; Supermodel
   snaps a fade to 0 or 1 within 1/32 of them only for four-level tables.
 
+Found on 2026-10-21, comparing the character select screen with a
+Supermodel build (commit 77d28ee, the release in use) whose shader wrote each
+pixel's texture level, then its texture coordinates, then its raw texture
+colour, frame-matched by Spike's outline:
+
+- **Texture level, two too coarse:** levels and coordinates matched
+  Supermodel exactly, but the colours did not. Our quick log2 (both
+  renderers) took the float's exponent less 127 where its polynomial already
+  adds 1, so every log2 was 1 too high and every texture level 2 too coarse:
+  posters, trees and small lettering blurred next to Supermodel. With the
+  exponent less 128, Spike's pixels match Supermodel's to 0.25 of 255 on
+  average (2.5 before). A bug, so no switch for the old way.
+
 Left as they are: Supermodel stores a polygon's transparency as a byte
 (`t * 255 / 32`, so `t = 1` falls under its 1/32 cut-off); we keep
 `t / 32`, as nothing says the hardware rounds that way. Supermodel wraps

@@ -500,7 +500,10 @@ uint32_t lerp8(uint32_t a, uint32_t b, uint32_t w) {
 float fast_log2(float x) {
     const auto bits = std::bit_cast<uint32_t>(x);
     const float m = std::bit_cast<float>((bits & 0x007FFFFFu) | 0x3F800000u); // [1, 2)
-    return static_cast<float>(static_cast<int>((bits >> 23) & 0xFF) - 127) + (-0.34484843f * m + 2.02466578f) * m - 0.67487759f;
+    // The polynomial is log2(m) + 1 for m in [1, 2), hence the exponent less
+    // 128 (with 127, every log came out 1 too high: textures two levels too
+    // coarse).
+    return static_cast<float>(static_cast<int>((bits >> 23) & 0xFF) - 128) + (-0.34484843f * m + 2.02466578f) * m - 0.67487759f;
 }
 
 } // namespace
