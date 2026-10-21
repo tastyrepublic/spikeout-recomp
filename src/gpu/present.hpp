@@ -67,6 +67,14 @@ public:
     void present_layers(std::span<const uint32_t> bottom, std::span<const uint32_t> top, SDL_GPUTexture* three_d,
                         int width, int height);
 
+    // The looks over the picture (shaders/look.glsl): CRT colours (0 off,
+    // then kCrtColourNames' monitors, Supermodel's) and a screen filter
+    // (0 off, 1 scanlines, 2 CRT).
+    static constexpr const char* kCrtColourNames[] = {"Off", "Sega arcade (9300 K)", "Sony PVM (9300 K)",
+                                                      "NTSC Japan (9300 K)", "NTSC US (6500 K)", "PAL (6500 K)"};
+    static constexpr const char* kFilterNames[] = {"Off", "Scanlines", "CRT"};
+    void set_look(int crt_colours, int filter);
+
     // Drawn over each picture, in its command buffer, onto the window's
     // texture (width x height pixels): the menu.
     std::function<void(SDL_GPUCommandBuffer*, SDL_GPUTexture*, uint32_t, uint32_t)> overlay;
@@ -83,6 +91,10 @@ private:
     SDL_GPUTexture* textures_[2] = {}; // the frame, or the layers below and above the 3D
     SDL_GPUTransferBuffer* upload_ = nullptr;
     int width_ = 0, height_ = 0;
+    int crt_colours_ = 0, filter_ = 0;
+    // The filter's gain, for the picture's size and lines it was worked out for.
+    float gain_ = 1;
+    int gain_height_ = 0, gain_width_ = 0, gain_lines_ = 0, gain_filter_ = 0;
 };
 
 } // namespace gpu

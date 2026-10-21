@@ -3,8 +3,10 @@
 // m3::TilegenRenderer::composite). The 2D layers are 496x384, sampled
 // sharp; the 3D (premultiplied alpha, gpu::Real3dGpu::display_image) may be
 // drawn larger and is filtered, averaged down with its mipmaps where the
-// window is smaller than it: supersampling.
+// window is smaller than it: supersampling. Then the looks (look.glsl).
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "look.glsl"
 
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 colour;
@@ -18,5 +20,5 @@ void main() {
     vec3 p = b != vec4(0.0) ? b.rgb : vec3(0.0); // nothing drawn below: black
     p = q.rgb + p * (1.0 - q.a); // over what is below
     if (t != vec4(0.0)) p = t.rgb;
-    colour = vec4(p, 1.0);
+    colour = vec4(look(p), 1.0);
 }

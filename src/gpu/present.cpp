@@ -5,7 +5,9 @@
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <iterator>
 
 namespace gpu {
 
@@ -91,7 +93,7 @@ namespace {
 SDL_GPUGraphicsPipeline* fullscreen_pipeline(Device& device, const ShaderCode& fragment, uint32_t samplers) {
     SDL_GPUDevice* d = device.get();
     SDL_GPUShader* vs = device.shader(shaders::present_vert, Device::Stage::Vertex, {});
-    SDL_GPUShader* fs = device.shader(fragment, Device::Stage::Fragment, {.samplers = samplers});
+    SDL_GPUShader* fs = device.shader(fragment, Device::Stage::Fragment, {.samplers = samplers, .uniform_buffers = 1});
     SDL_GPUGraphicsPipeline* pipeline = nullptr;
     if (vs && fs) {
         SDL_GPUColorTargetDescription target{};
@@ -121,7 +123,62 @@ SDL_GPUTexture* frame_texture(SDL_GPUDevice* d, int width, int height) {
     return SDL_CreateGPUTexture(d, &tex);
 }
 
+// shaders/look.glsl's uniforms.
+struct LookUniform {
+    float matrix[3][4];
+    float area[4];
+    float filter[4];
+};
+
+// The CRT colours' monitors (Supermodel's Src/Graphics/SuperAA.cpp, from Dan
+// Mons' colour_matrix_adaptations): gamma (0: sRGB's curve) and the matrix to
+// sRGB, by rows.
+struct CrtColours {
+    float gamma, m[9];
+};
+constexpr CrtColours kCrtColours[] = {
+    {0, {1, 0, 0, 0, 1, 0, 0, 0, 1}},
+    {2.5f, // ARI (D93) -> sRGB: a Japanese arcade monitor
+     {1.3272128334714093f, -0.3802108879412366f, -0.1003607696463202f, -0.0241848600268417f, 0.9544506228550125f,
+      0.0807358585208939f, -0.0239585810555497f, -0.0409736005706461f, 1.4076563728858242f}},
+    {2.25f, // Sony PVM-20M2U (D93) -> sRGB
+     {0.9241392201737613f, -0.0690701363506526f, -0.0084279079392561f, 0.0231962420140721f, 0.9729221778325590f,
+      0.0148832015024337f, -0.0054875731998806f, 0.0098220960740544f, 1.3383896683854550f}},
+    {0, // BT.601 525 lines, D93 (Japan) -> sRGB
+     {0.7822490684754086f, 0.0506168576073398f, 0.0137752498011040f, 0.0147968947158740f, 0.9741745313046067f,
+      0.0220301953285839f, -0.0013501205469208f, -0.0044076726925543f, 1.3484819844991036f}},
+    {0, // BT.601 525 lines (US) -> sRGB
+     {0.9395420637732393f, 0.0501813568598678f, 0.0102765793668928f, 0.0177722231435608f, 0.9657928624969044f,
+      0.0164349143595347f, -0.0016215999431855f, -0.0043697496597356f, 1.0059913496029214f}},
+    {0, // BT.601 625 lines (Europe, Australia) -> sRGB
+     {1.0440432087628346f, -0.0440432087628348f, 0.0000000000000001f, 0.0f, 1.0000000000000002f, 0.0f, 0.0f,
+      0.0117933782840052f, 0.9882066217159947f}},
+};
+
+// The screen filter's glass at a window pixel (as look.glsl), its three colours.
+void glass_at(int filter, int x, int y, float w, float h, float lines, float out[3]) {
+    const bool crt = filter == 2;
+    const float per_line = h / lines;
+    const float depth = (crt ? 0.45f : 0.6f) * std::clamp((per_line - 1.5f) / 1.5f, 0.0f, 1.0f);
+    const int period = std::max(1, static_cast<int>(std::lround(per_line)));
+    const float f = period == 2 ? static_cast<float>(y % 2) * 0.5f
+                                : (static_cast<float>(y % period) + 0.5f) / static_cast<float>(period);
+    const float row = 1 - depth * (1 - std::sin(f * 3.14159265f));
+    out[0] = out[1] = out[2] = row;
+    if (!crt) return;
+    for (int c = 0; c < 3; ++c)
+        if (c != x % 3) out[c] *= 0.78f;
+    const float dx = (static_cast<float>(x) + 0.5f) / w * 2 - 1, dy = (static_cast<float>(y) + 0.5f) / h * 2 - 1;
+    const float d = std::min(1.0f, (dx * dx + dy * dy) / 2);
+    for (int c = 0; c < 3; ++c) out[c] *= 1 - 0.22f * d * d;
+}
+
 } // namespace
+
+void Presenter::set_look(int crt_colours, int filter) {
+    crt_colours_ = std::clamp(crt_colours, 0, static_cast<int>(std::size(kCrtColours)) - 1);
+    filter_ = std::clamp(filter, 0, 2);
+}
 
 bool Presenter::open(Device& device) {
     device_ = &device;
@@ -227,6 +284,40 @@ void Presenter::draw(SDL_GPUCommandBuffer* cmd, SDL_GPUGraphicsPipeline* pipelin
         ++n;
     }
     SDL_BindGPUFragmentSamplers(pass, 0, bindings, n);
+    // The looks. The filter's gain (its glass averaged over the picture, as
+    // vf3-recomp's) keeps the picture about as bright: worked out again when
+    // the picture's size changes.
+    const int pw = static_cast<int>(vp.w), ph = static_cast<int>(vp.h);
+    if (filter_ && (pw != gain_width_ || ph != gain_height_ || height != gain_lines_ || filter_ != gain_filter_)) {
+        double sum = 0;
+        int count = 0;
+        for (int y = 0; y < ph; y += 3)
+            for (int x = 0; x < pw; x += 7) {
+                float g[3];
+                glass_at(filter_, x, y, vp.w, vp.h, static_cast<float>(height), g);
+                sum += g[0] + g[1] + g[2];
+                count += 3;
+            }
+        gain_ = sum > 0 ? std::min(1.4f, static_cast<float>(count / sum)) : 1.0f;
+        gain_width_ = pw;
+        gain_height_ = ph;
+        gain_lines_ = height;
+        gain_filter_ = filter_;
+    }
+    LookUniform look{};
+    const CrtColours& crt = kCrtColours[crt_colours_];
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) look.matrix[r][c] = crt.m[r * 3 + c];
+    look.matrix[0][3] = crt.gamma;
+    look.area[0] = vp.x;
+    look.area[1] = vp.y;
+    look.area[2] = vp.w;
+    look.area[3] = vp.h;
+    look.filter[0] = static_cast<float>(filter_);
+    look.filter[1] = static_cast<float>(height);
+    look.filter[2] = filter_ ? gain_ : 1.0f;
+    look.filter[3] = crt_colours_ ? 1.0f : 0.0f;
+    SDL_PushGPUFragmentUniformData(cmd, 0, &look, sizeof look);
     SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
     SDL_EndGPURenderPass(pass);
     if (overlay) overlay(cmd, swapchain, sw, sh);

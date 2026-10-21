@@ -131,13 +131,17 @@ player 2's).
 
 `Esc` (or a pad's Guide button, its touchpad, or Back + Start) pauses the
 game and opens the menu: Display (render scale, antialiasing, quads drawn
-whole, GPU or software 3D, fullscreen, show FPS), Sound (overall, effects
-and music volume), Controls (each player's keys, rebound with Enter), Game
-(reset, the arcade's settings: difficulty and demo sound, the arcade's test
-menu, a service credit) and Quit. The choices are kept in `settings.ini`, in
-the user's data folder (`%APPDATA%`, `~/Library/Application Support`,
-`~/.local/share`), or next to the program when a file named `portable.txt`
-is there; options on the command line win for that run. As a cabinet does,
+whole, GPU or software 3D, CRT colours, screen filter, fullscreen, show
+FPS), Sound (overall, effects and music volume; speakers: stereo, or the
+cabinet's front and rear pairs apart, on one output of four channels or on
+two outputs; `spikeout --list-audio` shows the channels each output has),
+Controls (each player's keys, rebound with Enter), Game (reset, the
+arcade's settings: difficulty, region, free play and demo sound, the
+arcade's test menu, a service credit) and Quit. The choices are kept in
+`settings.ini`, in the user's data folder (`%APPDATA%`, `~/Library/Application
+Support`, `~/.local/share`), or next to the program when a file named
+`portable.txt` is there; options on the command line win for that run. As a
+cabinet does,
 each board keeps its settings EEPROM and backup RAM (the rankings) between
 runs, in `nvram/` there.
 

@@ -225,19 +225,58 @@ void read_inputs(Shared& shared, std::size_t focus, const tools::Settings& setti
 // serial line gave them: each plays at its arrival time plus an offset,
 // set a frame ahead of the device whenever a byte would be late (or far
 // ahead, running fast with Tab).
+// The sound outputs (Settings::speakers): the cabinet's front and rear pairs
+// mixed into stereo, both on one output of four channels (front left and
+// right, rear left and right: SDL's quad; SDL fits them to an output of
+// other channels, mixing them down on a stereo one), or each pair on an
+// output of its own (named; empty: the default).
+struct SpeakerSetup {
+    int mode = 0; // 0 stereo, 1 four channels, 2 two outputs
+    std::string front, rear;
+};
+
+// An output by its name (empty or not there: the default).
+SDL_AudioDeviceID audio_device(const std::string& name) {
+    SDL_AudioDeviceID found = SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
+    if (name.empty()) return found;
+    int n = 0;
+    SDL_AudioDeviceID* ids = SDL_GetAudioPlaybackDevices(&n);
+    for (int i = 0; i < n; ++i)
+        if (const char* d = SDL_GetAudioDeviceName(ids[i]); d && name == d) found = ids[i];
+    SDL_free(ids);
+    return found;
+}
+
 class Sound {
 public:
-    Sound(const m3::RomSet& roms, int sound_volume, int music_volume)
+    Sound(const m3::RomSet& roms, int sound_volume, int music_volume, const SpeakerSetup& speakers)
         : board_(roms.region(m3::RomRegionId::SoundProgram), roms.region(m3::RomRegionId::SoundSamples)) {
         tools::attach_music(board_, roms);
         board_.set_volumes(sound_volume, music_volume);
-        const SDL_AudioSpec spec{SDL_AUDIO_S16, 2, m3::Scsp::kSampleRate};
-        stream_ = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, &Sound::feed, this);
-        if (stream_) SDL_ResumeAudioStreamDevice(stream_);
-        else std::fprintf(stderr, "spikeout: no sound: %s\n", SDL_GetError());
+        open(speakers);
     }
-    ~Sound() {
-        if (stream_) SDL_DestroyAudioStream(stream_); // stops the callbacks first
+    ~Sound() { close(); }
+
+    // The outputs again (the board keeps playing).
+    void open(const SpeakerSetup& speakers) {
+        close();
+        mode_ = speakers.mode;
+        const int channels = mode_ == 1 ? 4 : 2;
+        const SDL_AudioSpec spec{SDL_AUDIO_S16, channels, m3::Scsp::kSampleRate};
+        stream_ = SDL_OpenAudioDeviceStream(audio_device(mode_ == 0 ? "" : speakers.front), &spec, &Sound::feed, this);
+        if (!stream_) {
+            std::fprintf(stderr, "spikeout: no sound: %s\n", SDL_GetError());
+            return;
+        }
+        if (mode_ == 2) { // the rear pair, fed from the front's callback
+            const SDL_AudioSpec rear{SDL_AUDIO_S16, 2, m3::Scsp::kSampleRate};
+            rear_ = SDL_OpenAudioDeviceStream(audio_device(speakers.rear), &rear, nullptr, nullptr);
+            if (!rear_) std::fprintf(stderr, "spikeout: no rear output: %s\n", SDL_GetError());
+        }
+        if (!paused_) {
+            SDL_ResumeAudioStreamDevice(stream_);
+            if (rear_) SDL_ResumeAudioStreamDevice(rear_);
+        }
     }
 
     // From the game thread: the MIDI bytes that arrived during a frame
@@ -255,9 +294,12 @@ public:
     }
     // Silent and still while the game is paused (the menu).
     void pause(bool on) {
-        if (!stream_) return;
-        if (on) SDL_PauseAudioStreamDevice(stream_);
-        else SDL_ResumeAudioStreamDevice(stream_);
+        paused_ = on;
+        for (SDL_AudioStream* s : {stream_, rear_}) {
+            if (!s) continue;
+            if (on) SDL_PauseAudioStreamDevice(s);
+            else SDL_ResumeAudioStreamDevice(s);
+        }
     }
 
 private:
@@ -273,9 +315,16 @@ private:
         static_cast<Sound*>(self)->play(stream, additional);
     }
 
+    void close() {
+        if (stream_) SDL_DestroyAudioStream(stream_); // stops the callbacks first
+        if (rear_) SDL_DestroyAudioStream(rear_);
+        stream_ = rear_ = nullptr;
+    }
+
     void play(SDL_AudioStream* stream, int bytes) {
-        const auto frames = static_cast<std::size_t>(bytes + 3) / 4;
-        buffer_.resize(2 * frames);
+        const int channels = mode_ == 1 ? 4 : 2, rendered = mode_ == 0 ? 2 : 4;
+        const auto frames = static_cast<std::size_t>(bytes + 2 * channels - 1) / static_cast<std::size_t>(2 * channels);
+        buffer_.resize(static_cast<std::size_t>(rendered) * frames);
         std::size_t done = 0;
         std::lock_guard<std::mutex> guard(lock_);
         while (done < frames) {
@@ -298,11 +347,30 @@ private:
                 board_.midi_in(midi_.front().value);
                 midi_.pop_front();
             }
-            board_.render(buffer_.data() + 2 * done, until - done);
+            board_.render(buffer_.data() + static_cast<std::size_t>(rendered) * done, until - done, rendered);
             done = until;
         }
         played_ += frames;
-        SDL_PutAudioStreamData(stream, buffer_.data(), static_cast<int>(frames * 4));
+        if (mode_ != 2) {
+            SDL_PutAudioStreamData(stream, buffer_.data(), static_cast<int>(frames * 2 * static_cast<std::size_t>(channels)));
+            return;
+        }
+        // Two outputs: the front pair here, the rear pair to the other one
+        // (its own clock: what it hasn't played after a few frames is dropped,
+        // so it can't fall behind).
+        front_.resize(2 * frames);
+        rear_buffer_.resize(2 * frames);
+        for (std::size_t i = 0; i < frames; ++i) {
+            front_[2 * i] = buffer_[4 * i];
+            front_[2 * i + 1] = buffer_[4 * i + 1];
+            rear_buffer_[2 * i] = buffer_[4 * i + 2];
+            rear_buffer_[2 * i + 1] = buffer_[4 * i + 3];
+        }
+        SDL_PutAudioStreamData(stream, front_.data(), static_cast<int>(frames * 4));
+        if (rear_) {
+            if (SDL_GetAudioStreamQueued(rear_) > static_cast<int>(4 * kLead * 4)) SDL_ClearAudioStream(rear_);
+            SDL_PutAudioStreamData(rear_, rear_buffer_.data(), static_cast<int>(frames * 4));
+        }
     }
 
     m3::SoundBoard board_;
@@ -311,8 +379,11 @@ private:
     uint64_t played_ = 0; // samples
     double offset_ = 0;   // device samples minus emulated samples
     bool anchored_ = false;
-    std::vector<int16_t> buffer_;
-    SDL_AudioStream* stream_ = nullptr;
+    std::vector<int16_t> buffer_, front_, rear_buffer_;
+    SDL_AudioStream* stream_ = nullptr; // (with the callback)
+    SDL_AudioStream* rear_ = nullptr;   // two outputs: the rear pair's
+    int mode_ = 0;                      // SpeakerSetup::mode
+    bool paused_ = false;
 };
 
 // Board `index`: run until quit. Board 0 paces the run (the others take
@@ -511,7 +582,7 @@ int main(int argc, char** argv) {
     bool real_netboard = true;
     uint64_t max_frames = 0;
     bool mute = false, cli_quads = false, midi_burst = false, dma_instant = false, use_gpu = true, cli_soft_3d = false, fifo = false,
-         sleep_pacing = false;
+         sleep_pacing = false, list_audio = false;
     std::size_t boards = 1;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -528,16 +599,36 @@ int main(int argc, char** argv) {
         else if (arg == "--soft-3d") cli_soft_3d = true;
         else if (arg == "--fifo") fifo = true;
         else if (arg == "--sleep-pacing") sleep_pacing = true;
+        else if (arg == "--list-audio") list_audio = true;
         else if (arg == "--render-scale" && i + 1 < argc) cli_render_scale = std::clamp(std::atoi(argv[++i]), 1, 6);
         else if (arg == "--sound-volume" && i + 1 < argc) cli_sound = std::clamp(std::atoi(argv[++i]), 0, 200);
         else if (arg == "--music-volume" && i + 1 < argc) cli_music = std::clamp(std::atoi(argv[++i]), 0, 200);
         else if (!dir) dir = argv[i];
     }
+    if (list_audio) { // the sound outputs, with the channels each has (front and rear apart need 4)
+        if (!SDL_Init(SDL_INIT_AUDIO)) return 1;
+        int n = 0;
+        SDL_AudioDeviceID* ids = SDL_GetAudioPlaybackDevices(&n);
+        for (int i = 0; i < n; ++i) {
+            SDL_AudioSpec spec{};
+            int frames = 0;
+            const bool known = SDL_GetAudioDeviceFormat(ids[i], &spec, &frames);
+            std::printf("%s: %d channels\n", SDL_GetAudioDeviceName(ids[i]), known ? spec.channels : 0);
+        }
+        SDL_free(ids);
+        SDL_AudioSpec spec{};
+        int frames = 0;
+        if (SDL_GetAudioDeviceFormat(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, &frames))
+            std::printf("(the default output: %d channels)\n", spec.channels);
+        SDL_Quit();
+        return 0;
+    }
     if (!dir) {
         std::fprintf(stderr, "usage: spikeout <rom_dir> [--scale N] [--netboard sim|real] [--frames N] [--mute] [--quads]\n"
                              "                [--midi-burst] [--dma-instant] [--sound-volume N] [--music-volume N]\n"
                              "                [--boards N] [--no-gpu] [--soft-3d] [--render-scale N] [--fifo]\n"
-                             "                [--sleep-pacing]\n");
+                             "                [--sleep-pacing]\n"
+                             "       spikeout --list-audio\n");
         return 2;
     }
     if (scale == 0) scale = boards == 1 ? 2 : 1;
@@ -578,6 +669,7 @@ int main(int argc, char** argv) {
     bool on_gpu = false;
     if (use_gpu) {
         on_gpu = gpu_device->open(window, fifo) && presenter->open(*gpu_device);
+        if (on_gpu) presenter->set_look(settings.crt_colours, settings.screen_filter);
         if (on_gpu)
             std::printf("spikeout: drawing with the GPU (%s, %s)\n", gpu_device->driver(),
                         gpu_device->mailbox() ? "mailbox" : "vsync");
@@ -614,7 +706,8 @@ int main(int argc, char** argv) {
     shared.dma_instant = dma_instant;
     shared.sleep_pacing = sleep_pacing;
     std::unique_ptr<Sound> sound;
-    if (!mute) sound = std::make_unique<Sound>(roms, effects_volume(settings), music_volume(settings));
+    auto speaker_setup = [&] { return SpeakerSetup{settings.speakers, settings.front_output, settings.rear_output}; };
+    if (!mute) sound = std::make_unique<Sound>(roms, effects_volume(settings), music_volume(settings), speaker_setup());
     shared.sound = sound.get();
 
 #ifdef SPIKEOUT_GPU
@@ -819,6 +912,26 @@ int main(int argc, char** argv) {
                                SDL_SetWindowFullscreen(window, settings.fullscreen);
                                changed();
                            }});
+        p.items.push_back({"CRT colours",
+                           "The colours as an arcade monitor showed them (Supermodel's CRT colours): Sega arcade is a "
+                           "Japanese cabinet's, bluer whites and richer reds; then a Sony studio monitor and the TV "
+                           "standards of Japan, the US and Europe. Off: the game's colours as they are.",
+                           [&] { return std::string(gpu::Presenter::kCrtColourNames[settings.crt_colours]); },
+                           [&](int d) {
+                               settings.crt_colours = (settings.crt_colours + d + 6) % 6;
+                               presenter->set_look(settings.crt_colours, settings.screen_filter);
+                               changed();
+                           }});
+        p.items.push_back({"Screen filter",
+                           "Scanlines: the dark lines between the arcade monitor's rows. CRT: those, its red, green "
+                           "and blue stripes and slightly darker corners. The lines need a large window or "
+                           "fullscreen to show.",
+                           [&] { return std::string(gpu::Presenter::kFilterNames[settings.screen_filter]); },
+                           [&](int d) {
+                               settings.screen_filter = (settings.screen_filter + d + 3) % 3;
+                               presenter->set_look(settings.crt_colours, settings.screen_filter);
+                               changed();
+                           }});
         p.items.push_back({"Show FPS",
                            "The frames shown a second, in the top right corner (the arcade's are 57.5).",
                            [&] { return on_off(settings.show_fps); },
@@ -844,6 +957,60 @@ int main(int argc, char** argv) {
         p.items.push_back(
             volume("Sound effects", "Hits, voices and effects: the sound board's two SCSPs.", settings.sound_volume, 200));
         p.items.push_back(volume("Music", "The music board's tunes.", settings.music_volume, 200));
+        // The outputs SDL has, by name ("" the default), and how many channels one has.
+        auto outputs = [] {
+            std::vector<std::string> names{""};
+            int n = 0;
+            SDL_AudioDeviceID* ids = SDL_GetAudioPlaybackDevices(&n);
+            for (int i = 0; i < n; ++i)
+                if (const char* d = SDL_GetAudioDeviceName(ids[i])) names.emplace_back(d);
+            SDL_free(ids);
+            return names;
+        };
+        auto channels = [](const std::string& name) {
+            SDL_AudioSpec spec{};
+            int frames = 0;
+            return SDL_GetAudioDeviceFormat(audio_device(name), &spec, &frames) ? spec.channels : 0;
+        };
+        auto reopen = [&] {
+            if (sound) sound->open(speaker_setup());
+            changed();
+        };
+        static constexpr const char* kSpeakerNames[] = {"Stereo", "Four channels", "Two outputs"};
+        p.items.push_back(
+            {"Speakers",
+             "The cabinet's front pair (first sound chip, music) and rear pair (second chip). Stereo mixes them. Four "
+             "channels: both pairs to one output, for quad, 5.1 or 7.1 speakers set up in your system (else mixed to stereo). "
+             "Two outputs: each pair to an output of its own.",
+             [&] {
+                 std::string v = kSpeakerNames[settings.speakers];
+                 if (settings.speakers == 1) {
+                     const int c = channels(settings.front_output);
+                     if (c > 0 && c < 4) v += " (" + std::to_string(c) + " here: mixed)";
+                 }
+                 return v;
+             },
+             [&](int d) {
+                 settings.speakers = (settings.speakers + d + 3) % 3;
+                 reopen();
+                 menu.refresh();
+             }});
+        auto output_item = [&](const char* label, const char* help, std::string& chosen) {
+            return ui::MenuItem{label, help,
+                                [&chosen] { return chosen.empty() ? std::string("Default") : chosen; },
+                                [&, outputs](int d) {
+                                    const std::vector<std::string> names = outputs();
+                                    std::size_t at = 0;
+                                    for (std::size_t i = 0; i < names.size(); ++i)
+                                        if (names[i] == chosen) at = i;
+                                    const auto n = static_cast<int>(names.size());
+                                    chosen = names[static_cast<std::size_t>((static_cast<int>(at) + d + n) % n)];
+                                    if (settings.speakers != 0) reopen();
+                                }};
+        };
+        p.items.push_back(output_item("Front output", "Where the front pair (or all four channels) goes.", settings.front_output));
+        p.items.push_back(output_item("Rear output", "Where the rear pair goes, with front and rear on two outputs.",
+                                      settings.rear_output));
         p.items.push_back(back_item());
         return p;
     };
@@ -929,6 +1096,30 @@ int main(int argc, char** argv) {
                                    s.set_difficulty(std::clamp(now + d, 0, 4));
                                    arcade_changed = true;
                                }});
+            p.items.push_back({"Region",
+                               "The arcade's country: Japan, U.S.A., Export (this ROM set's own) or Australia. The "
+                               "game's own setting, which its test menu shows but doesn't let the operator change.",
+                               [&] {
+                                   const int c = tools::ArcadeSettings{arcade_words}.country();
+                                   return c >= 1 && c <= 4 ? std::string(tools::ArcadeSettings::kCountryNames[static_cast<std::size_t>(c)])
+                                                           : std::string("-");
+                               },
+                               [&](int d) {
+                                   tools::ArcadeSettings s{arcade_words};
+                                   const int now = s.country();
+                                   if (now < 1 || now > 4) return;
+                                   s.set_country(std::clamp(now + d, 1, 4));
+                                   arcade_changed = true;
+                               }});
+            p.items.push_back({"Free play",
+                               "Start and continue without coins: the arcade's own COIN/CREDIT SETTING #27. Off, "
+                               "back to its default, a coin a credit.",
+                               [&] { return on_off(tools::ArcadeSettings{arcade_words}.free_play()); },
+                               [&](int) {
+                                   tools::ArcadeSettings s{arcade_words};
+                                   s.set_free_play(!s.free_play());
+                                   arcade_changed = true;
+                               }});
             p.items.push_back({"Demo sound", "Sound in the demo between games (the test menu's ADVERTISE SOUND).",
                                [&] { return on_off(tools::ArcadeSettings{arcade_words}.advertise_sound()); },
                                [&](int) {
@@ -950,6 +1141,8 @@ int main(int argc, char** argv) {
             if (!to.valid()) continue;
             to.set_difficulty(from.difficulty());
             to.set_advertise_sound(from.advertise_sound());
+            if (from.country() >= 1 && from.country() <= 4) to.set_country(from.country());
+            if (from.free_play() != to.free_play()) to.set_free_play(from.free_play());
         }
         if (!test_run) save_nvram(data_folder, shared, boards);
     };
@@ -960,7 +1153,7 @@ int main(int argc, char** argv) {
                                reset_game();
                            }});
         p.items.push_back({"Arcade settings",
-                           "The arcade's own game settings: difficulty and the demo's sound. A change restarts the "
+                           "The arcade's own settings: difficulty, region, free play and the demo's sound. A change restarts the "
                            "game when the menu closes.",
                            {}, {}, [&] { menu.push(arcade_page()); }});
         p.items.push_back({"Arcade test menu",
@@ -980,9 +1173,9 @@ int main(int argc, char** argv) {
     auto root_page = [&] {
         ui::MenuPage p{"", "", {}};
         p.items.push_back({"Resume", "Back to the game.", {}, {}, [&] { menu.close(); }});
-        p.items.push_back({"Display", "Render scale, antialiasing, quads, the 3D renderer and fullscreen.", {}, {},
+        p.items.push_back({"Display", "Render scale, antialiasing, quads, the 3D renderer, CRT colours, screen filter, fullscreen.", {}, {},
                            [&] { menu.push(display_page()); }});
-        p.items.push_back({"Sound", "The sound effects' and the music's volumes.", {}, {}, [&] { menu.push(sound_page()); }});
+        p.items.push_back({"Sound", "The volumes, and the speakers: stereo, or the cabinet's front and rear apart.", {}, {}, [&] { menu.push(sound_page()); }});
         p.items.push_back({"Controls", "Each player's keys, and the pads.", {}, {}, [&] { menu.push(controls_page()); }});
         p.items.push_back({"Game", "Reset, the arcade's test menu, a service credit.", {}, {}, [&] { menu.push(game_page()); }});
         p.items.push_back({"Quit", "Saves the settings and closes the game.", {}, {}, [&] {

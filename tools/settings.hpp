@@ -34,6 +34,12 @@ struct Settings {
     bool gpu_3d = true;    // the 3D on the GPU (else in software)
     bool fullscreen = false;
     bool show_fps = false; // the frames shown a second, in a corner
+    // Speakers (SpeakerSetup in spikeout.cpp): 0 stereo, 1 front and rear on one
+    // output of four channels, 2 each pair on an output of its own (by name)
+    int speakers = 0;
+    std::string front_output, rear_output;
+    int crt_colours = 0;   // the window's looks (gpu::Presenter::set_look): 0 off, 1-5 monitors
+    int screen_filter = 0; // 0 off, 1 scanlines, 2 CRT
     // Sound, in percent: overall (0-100), and the effects and music (0-200) under it
     int volume = 100, sound_volume = 100, music_volume = 100;
     // Controls: two players' keys (SDL scancodes, 0: none)
@@ -86,6 +92,11 @@ inline Settings load_settings(const std::string& path) {
     get_bool("gpu_3d", s.gpu_3d);
     get_bool("fullscreen", s.fullscreen);
     get_bool("show_fps", s.show_fps);
+    get("crt_colours", s.crt_colours, 0, 5);
+    get("speakers", s.speakers, 0, 2);
+    if (auto it = v.find("front_output"); it != v.end()) s.front_output = it->second;
+    if (auto it = v.find("rear_output"); it != v.end()) s.rear_output = it->second;
+    get("screen_filter", s.screen_filter, 0, 2);
     get("volume", s.volume, 0, 100);
     get("sound_volume", s.sound_volume, 0, 200);
     get("music_volume", s.music_volume, 0, 200);
@@ -104,6 +115,11 @@ inline bool save_settings(const std::string& path, const Settings& s) {
     o << "gpu_3d = " << (s.gpu_3d ? 1 : 0) << "\n";
     o << "fullscreen = " << (s.fullscreen ? 1 : 0) << "\n";
     o << "show_fps = " << (s.show_fps ? 1 : 0) << "\n";
+    o << "speakers = " << s.speakers << "\n";
+    o << "front_output = " << s.front_output << "\n";
+    o << "rear_output = " << s.rear_output << "\n";
+    o << "crt_colours = " << s.crt_colours << "\n";
+    o << "screen_filter = " << s.screen_filter << "\n";
     o << "volume = " << s.volume << "\n";
     o << "sound_volume = " << s.sound_volume << "\n";
     o << "music_volume = " << s.music_volume << "\n";
