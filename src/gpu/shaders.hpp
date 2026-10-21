@@ -22,7 +22,8 @@ struct ShaderCode {
 namespace shaders {
 extern const ShaderCode present_vert, present_frag;
 extern const ShaderCode scene_vert, scene_frag, scene_opaque_frag, scene_quads_frag, scene_opaque_quads_frag;
-extern const ShaderCode background_fog_frag, depth_copy_frag, composite_frag, screen_frag, premultiply_frag;
+extern const ShaderCode scene_quads_bounded_frag, scene_opaque_quads_bounded_frag;
+extern const ShaderCode background_fog_frag, depth_copy_frag, composite_frag, screen_frag;
 } // namespace shaders
 
 } // namespace gpu

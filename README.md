@@ -143,8 +143,10 @@ it has one (no tearing; `--fifo` for plain vsync, which on some Windows
 setups shows only every second or third refresh). Between frames the game
 thread waits busy, one core's worth, because a sleeping thread let Windows
 slow the CPU and made frames late; `--sleep-pacing` saves that power. A
-render scale and antialiasing the GPU can't draw in 17 ms drop frames:
-on a GTX 1080, 2x with 2x antialiasing keeps every frame.
+render scale and antialiasing the GPU can't draw in 17 ms drop frames
+(`gamerun --gpu-time N` measures it): on a GTX 1080, with quads drawn
+whole, 4x with 2x antialiasing missed 1 frame in 2,200 of attract mode and
+play.
 Both `spikeout` and `gamerun` take `--quads` (draw quads whole,
 Supermodel's quad rendering, slower) and `--midi-burst` (send the sound
 board its commands with Supermodel's timing instead of the serial line's);

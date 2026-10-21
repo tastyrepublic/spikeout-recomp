@@ -68,10 +68,14 @@ public:
     int height() const { return kHeight * scale_; }
 
 private:
+    // What a draw is: triangles, quads drawn whole, or quads drawn whole
+    // with a depth bound (all corners beyond the near plane).
+    enum Kind : uint8_t { kTriangles, kQuads, kBoundedQuads, kKinds };
     struct Draw {
         uint32_t first, count; // vertices
         uint16_t viewport;
-        bool decal, quad; // a decal; quads drawn whole
+        bool decal;
+        Kind kind;
     };
     // One priority (or its high-priority half): the opaque pass and the two
     // translucency layers.
@@ -87,9 +91,9 @@ private:
     int scale_ = 1;
     std::string error_;
 
-    // opaque_ and trans_ by [quad * 2 + decal].
-    SDL_GPUGraphicsPipeline *fog_ = nullptr, *opaque_[4] = {}, *trans_[4] = {}, *copy_ = nullptr, *composite_ = nullptr,
-                            *premultiply_ = nullptr;
+    // opaque_ and trans_ by [kind * 2 + decal].
+    SDL_GPUGraphicsPipeline *fog_ = nullptr, *opaque_[kKinds * 2] = {}, *trans_[kKinds * 2] = {}, *copy_ = nullptr,
+                            *composite_ = nullptr;
     SDL_GPUSampler* nearest_ = nullptr;
     SDL_GPUTexture *colour_ = nullptr, *layers_[2] = {}, *depth_copy_ = nullptr, *depth_ = nullptr, *trans_depth_ = nullptr,
                    *output_ = nullptr, *display_ = nullptr, *texture_ram_ = nullptr;

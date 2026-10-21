@@ -23,9 +23,10 @@ struct Viewport {
 };
 
 // A quad drawn whole (--quads): its corners in eye space, their texture
-// position and fixed shade, and their normals.
+// position and fixed shade, and their normals; position[0].w its depth bound
+// (0: none; scene.vert).
 struct Quad {
-    vec4 position[4]; // x, y, z, -
+    vec4 position[4]; // x, y, z, - (the first: the depth bound)
     vec4 texture[4];  // u, v, shade, -
     vec4 normal[4];
 };

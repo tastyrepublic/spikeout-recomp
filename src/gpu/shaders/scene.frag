@@ -8,10 +8,17 @@
 // translucency layers, and depth for the translucent passes), without, a
 // translucency layer; each with QUADS too, for quads drawn whole (their
 // attributes and depth from all four corners; writing the depth costs the
-// GPU its early depth test, so only those draws use it).
+// GPU its early depth test, so only those draws use it). QUADS with BOUNDED
+// too: quads whose depth is never nearer than the one they are drawn at
+// (scene.vert gives each its nearest corner's), which lets the GPU test
+// depth early again, against that bound.
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #include "scene_common.glsl"
+
+#ifdef BOUNDED
+layout(depth_less) out float gl_FragDepth;
+#endif
 
 layout(location = 0) in vec2 uv;
 layout(location = 1) in float shade;

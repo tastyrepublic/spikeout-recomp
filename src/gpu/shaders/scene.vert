@@ -1,7 +1,7 @@
 // A scene vertex: eye space to the polygon's viewport. Clip w is the
 // distance along the view, and depth kNear / distance (decals a little
 // nearer), so the depth buffer holds what the software renderer compares:
-// larger is nearer.
+// larger is nearer. (Depth z / w greater than 1 is clipped: the near plane.)
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #include "scene_common.glsl"
@@ -15,6 +15,7 @@ layout(location = 5) in uint quad_in; // the quad drawn whole it belongs to, or 
 
 layout(std430, set = 0, binding = 0) readonly buffer Polygons { Polygon polygons[]; };
 layout(std430, set = 0, binding = 1) readonly buffer Viewports { Viewport viewports[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Quads { Quad quads[]; };
 
 layout(location = 0) out vec2 uv;
 layout(location = 1) out float shade;
@@ -30,6 +31,11 @@ void main() {
     const float y = (2.0 * position.y - (f.z + f.w) * w) / (f.w - f.z);
     const float bias = (p.flags.x & kFlagLayered) != 0u ? kDecalBias : 1.0;
     gl_Position = vec4(x, y, kNear * bias, w);
+    // A quad drawn whole wholly beyond the near plane: at its depth bound
+    // (its nearest corner's, at most 1; Real3dGpu::build), constant over it,
+    // which its own depth (scene.frag@QUADS@BOUNDED) never exceeds. It is
+    // clipped as before: no corner is nearer than the near plane.
+    if (quad_in != kNoQuad && quads[quad_in].position[0].w > 0.0) gl_Position.z = quads[quad_in].position[0].w * w;
     uv = uv_in;
     shade = shade_in;
     normal = normal_in;
