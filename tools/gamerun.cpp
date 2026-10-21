@@ -6,6 +6,7 @@
 //           [--screenshot FILE.png] [--shot-every N] [--press [B:]NAME@FRAME[:N]]...
 //           [--wav FILE.wav] [--probe X,Y@FRAME] [--quads]
 //           [--boards N] [--slice LINES] [--link-latency CYCLES] [--renderer software|gpu|compare]
+//           [--gpu-scale N] [--gpu-time N]
 //
 // Built only when CMake's SPIKEOUT_ROM_DIR is set. A run ends at the first
 // thing the runtime can't do yet (code that wasn't found, an exception, a
@@ -61,7 +62,11 @@
 // how far apart the pictures are, with each screenshot's GPU version beside
 // it (FILE-<frame>-gpu.png). --gpu-time SCALE (with --screenshot) also draws
 // each frame on the GPU at that render scale, not read back, and reports how
-// long the GPU took a frame (the screenshots stay the software renderer's).
+// long the GPU took a frame (drawn 8 times running, so its clock stays up;
+// the screenshots stay the software renderer's).
+// --gpu-scale N draws the GPU's 3D at render scale N (the screenshots take
+// every Nth pixel); the report gives a hash of every GPU picture, full size,
+// for checking that a change to the GPU renderer draws exactly the same.
 #include "games/games.hpp"
 #include "ppc/disasm.hpp"
 #include "ppc/instruction.hpp"
@@ -99,6 +104,7 @@
 namespace {
 
 constexpr int kAllBoards = -1;
+constexpr int kGpuTimeRepeats = 8; // --gpu-time draws each frame this many times
 
 struct Press {
     std::string name;
@@ -142,6 +148,7 @@ struct Options {
     // --renderer: the 3D in software, on the GPU, or both, compared.
     enum class Renderer { Software, Gpu, Compare } renderer = Renderer::Software;
     int gpu_time_scale = 0; // --gpu-time: the GPU's time a frame at this render scale
+    int gpu_scale = 1;      // --gpu-scale: the GPU renderer's render scale (gpu, compare)
     bool irq5_on_e0 = true, send_waits_for_receive = m3::CommBoardOptions().send_waits_for_receive,
          host_sees_other_bank = false;
     double link_cycles_per_byte = m3::CommBoardOptions().link_cycles_per_byte;
@@ -237,6 +244,8 @@ struct Machine {
     m3::Real3dScene scene;
     std::vector<uint32_t> gpu_image;
     double gpu_seconds = 0, gpu_worst = 0;
+    uint64_t gpu_worst_frame = 0, gpu_slow = 0; // (slow: over a frame, 17.4 ms)
+    uint64_t gpu_hash = 0xCBF29CE484222325ull; // of every picture read back, full size (--gpu-scale)
     uint64_t gpu_frames = 0, frames_compared = 0, frames_differing = 0, pixels_differing = 0;
     uint64_t worst_frame = 0, worst_pixels = 0;
     int max_difference = 0;
@@ -324,15 +333,29 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             const auto start = std::chrono::steady_clock::now();
             const m3::Real3d& mem = m.bus.real3d();
             if (o.renderer == R::Gpu) m.builder.build(mem, m.scene);
-            if (o.gpu_time_scale) { // drawn and waited for, not read back
-                m.gpu->render(mem, m.real3d.scene());
+            if (o.gpu_time_scale) { // drawn and waited for, not read back; several times, to keep the GPU busy (its clock up)
+                for (int i = 0; i < kGpuTimeRepeats; ++i) m.gpu->render(mem, m.real3d.scene());
                 SDL_WaitForGPUIdle(m.gpu_device);
             } else {
                 m.gpu->render(mem, o.renderer == R::Gpu ? m.scene : m.real3d.scene(), &m.gpu_image);
+                for (uint32_t p : m.gpu_image) m.gpu_hash = (m.gpu_hash ^ p) * 0x100000001B3ull; // FNV-1a, a word at a time
+                if (o.gpu_scale > 1) { // every scale-th pixel, for the screenshots
+                    const int s = o.gpu_scale, w = m3::TilegenRenderer::kWidth, h = m3::TilegenRenderer::kHeight;
+                    std::vector<uint32_t> small(static_cast<size_t>(w) * h);
+                    for (int y = 0; y < h; ++y)
+                        for (int x = 0; x < w; ++x)
+                            small[static_cast<size_t>(y) * w + x] = m.gpu_image[static_cast<size_t>(y * s) * (w * s) + x * s];
+                    m.gpu_image.swap(small);
+                }
             }
-            const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() /
+                                (o.gpu_time_scale ? kGpuTimeRepeats : 1);
             m.gpu_seconds += took;
-            m.gpu_worst = std::max(m.gpu_worst, took);
+            if (took > m.gpu_worst) {
+                m.gpu_worst = took;
+                m.gpu_worst_frame = frame;
+            }
+            if (took > 1.0 / recomp::FrameTiming::kRefreshHz) ++m.gpu_slow;
             ++m.gpu_frames;
             if (o.renderer == R::Compare) {
                 const auto [pixels, largest] = difference(m.real3d.image(), m.gpu_image);
@@ -533,11 +556,15 @@ void report(Machine& m, const Options& o) {
                         m.raster_ms / static_cast<double>(m.frames_rendered),
                         static_cast<unsigned long long>(m.frames_rendered));
         if (m.gpu_frames)
-            std::printf("GPU renderer: %.2f ms a frame on average, %.2f at most, %s (%llu frames)\n",
+            std::printf("GPU renderer: %.2f ms a frame on average, %.2f at most (frame %llu), %llu over 17.4 ms, %s (%llu frames)\n",
                         1000.0 * m.gpu_seconds / static_cast<double>(m.gpu_frames), 1000.0 * m.gpu_worst,
+                        static_cast<unsigned long long>(m.gpu_worst_frame), static_cast<unsigned long long>(m.gpu_slow),
                         o.gpu_time_scale ? ("at render scale " + std::to_string(o.gpu_time_scale) + ", waited for").c_str()
                                          : "read back",
                         static_cast<unsigned long long>(m.gpu_frames));
+        if (m.gpu_frames && !o.gpu_time_scale)
+            std::printf("GPU pictures: hash %016llx (render scale %d)\n", static_cast<unsigned long long>(m.gpu_hash),
+                        o.gpu_scale);
         if (m.frames_compared)
             std::printf("GPU against software: %llu of %llu frames differ (a channel more than 2 apart), %llu pixels "
                         "in all, %.1f a frame; the most in frame %llu (%llu pixels); largest difference %d\n",
@@ -691,6 +718,7 @@ int main(int argc, char** argv) {
         else if (arg == "--wav" && i + 1 < argc) o.wav = argv[++i];
         else if (arg == "--quads") o.quads = true;
         else if (arg == "--gpu-time" && i + 1 < argc) o.gpu_time_scale = std::clamp(std::atoi(argv[++i]), 1, 8);
+        else if (arg == "--gpu-scale" && i + 1 < argc) o.gpu_scale = std::clamp(std::atoi(argv[++i]), 1, 8);
         else if (arg == "--renderer" && i + 1 < argc) {
             const std::string r = argv[++i];
             o.renderer = r == "gpu" ? Options::Renderer::Gpu : r == "compare" ? Options::Renderer::Compare
@@ -806,7 +834,7 @@ int main(int argc, char** argv) {
             m.gpu = std::make_unique<gpu::Real3dGpu>();
             m.gpu->set_quads(o.quads);
             m.gpu_device = gpu_device.get();
-            if (!m.gpu->open(gpu_device, std::max(1, o.gpu_time_scale))) {
+            if (!m.gpu->open(gpu_device, o.gpu_time_scale ? o.gpu_time_scale : o.gpu_scale)) {
                 std::fprintf(stderr, "gamerun: GPU renderer: %s\n", m.gpu->error().c_str());
                 return 1;
             }
