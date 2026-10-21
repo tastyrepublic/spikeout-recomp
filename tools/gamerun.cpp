@@ -1,7 +1,7 @@
 // gamerun: run the recompiled boot ROM into the recompiled game and report
 // how far it gets.
 //
-//   gamerun <rom_dir> [--blocks N] [--text] [--dump-tile FILE]
+//   gamerun <rom_dir> [--blocks N] [--text] [--dump-tile FILE] [--dump-textures FILE.png]
 //           [--netboard sim|real] [--net-trace N] [--net-disasm FILE]
 //           [--screenshot FILE.png] [--shot-every N] [--press [B:]NAME@FRAME[:N]]...
 //           [--wav FILE.wav] [--probe X,Y@FRAME] [--quads]
@@ -14,6 +14,9 @@
 // what to work on next. --text prints the text on the tile layers (what
 // screen the game is on); --dump-tile writes the tile generator's RAM at the
 // end (characters, name tables, palette; derived from the ROMs).
+// --dump-textures FILE.png writes the Real3D's texture RAM at the end as a
+// 2048x2048 picture, each texel read as T1RGB5 (the other formats show as
+// noise; derived from the ROMs).
 //
 // The network board is its own 68000 running the firmware the game uploads
 // (m3::CommBoard); --netboard sim uses the simulation instead. --net-trace N
@@ -56,7 +59,9 @@
 // --renderer gpu draws the 3D on the GPU instead (gpu::Real3dGpu, read back
 // for the screenshots); --renderer compare draws it both ways and reports
 // how far apart the pictures are, with each screenshot's GPU version beside
-// it (FILE-<frame>-gpu.png).
+// it (FILE-<frame>-gpu.png). --gpu-time SCALE (with --screenshot) also draws
+// each frame on the GPU at that render scale, not read back, and reports how
+// long the GPU took a frame (the screenshots stay the software renderer's).
 #include "games/games.hpp"
 #include "ppc/disasm.hpp"
 #include "ppc/instruction.hpp"
@@ -73,6 +78,8 @@
 #ifdef SPIKEOUT_GPU
 #include "gpu/present.hpp"
 #include "gpu/real3d_gpu.hpp"
+
+#include <SDL3/SDL_gpu.h>
 #endif
 
 #include <algorithm>
@@ -113,6 +120,7 @@ struct Poke {
 struct Options {
     const char* dir = nullptr;
     const char* dump_tile = nullptr;
+    const char* dump_textures = nullptr;
     const char* net_disasm = nullptr;
     const char* screenshot = nullptr;
     const char* wav = nullptr;
@@ -133,6 +141,7 @@ struct Options {
     bool net_watch = false;
     // --renderer: the 3D in software, on the GPU, or both, compared.
     enum class Renderer { Software, Gpu, Compare } renderer = Renderer::Software;
+    int gpu_time_scale = 0; // --gpu-time: the GPU's time a frame at this render scale
     bool irq5_on_e0 = true, send_waits_for_receive = m3::CommBoardOptions().send_waits_for_receive,
          host_sees_other_bank = false;
     double link_cycles_per_byte = m3::CommBoardOptions().link_cycles_per_byte;
@@ -222,11 +231,12 @@ struct Machine {
     // the software renderer's (pixels with a channel more than 2 apart).
 #ifdef SPIKEOUT_GPU
     std::unique_ptr<gpu::Real3dGpu> gpu;
+    SDL_GPUDevice* gpu_device = nullptr;
 #endif
     m3::Real3dSceneBuilder builder;
     m3::Real3dScene scene;
     std::vector<uint32_t> gpu_image;
-    double gpu_seconds = 0;
+    double gpu_seconds = 0, gpu_worst = 0;
     uint64_t gpu_frames = 0, frames_compared = 0, frames_differing = 0, pixels_differing = 0;
     uint64_t worst_frame = 0, worst_pixels = 0;
     int max_difference = 0;
@@ -314,8 +324,15 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             const auto start = std::chrono::steady_clock::now();
             const m3::Real3d& mem = m.bus.real3d();
             if (o.renderer == R::Gpu) m.builder.build(mem, m.scene);
-            m.gpu->render(mem, o.renderer == R::Gpu ? m.scene : m.real3d.scene(), &m.gpu_image);
-            m.gpu_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            if (o.gpu_time_scale) { // drawn and waited for, not read back
+                m.gpu->render(mem, m.real3d.scene());
+                SDL_WaitForGPUIdle(m.gpu_device);
+            } else {
+                m.gpu->render(mem, o.renderer == R::Gpu ? m.scene : m.real3d.scene(), &m.gpu_image);
+            }
+            const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            m.gpu_seconds += took;
+            m.gpu_worst = std::max(m.gpu_worst, took);
             ++m.gpu_frames;
             if (o.renderer == R::Compare) {
                 const auto [pixels, largest] = difference(m.real3d.image(), m.gpu_image);
@@ -516,8 +533,10 @@ void report(Machine& m, const Options& o) {
                         m.raster_ms / static_cast<double>(m.frames_rendered),
                         static_cast<unsigned long long>(m.frames_rendered));
         if (m.gpu_frames)
-            std::printf("GPU renderer: %.2f ms a frame on average, read back (%llu frames)\n",
-                        1000.0 * m.gpu_seconds / static_cast<double>(m.gpu_frames),
+            std::printf("GPU renderer: %.2f ms a frame on average, %.2f at most, %s (%llu frames)\n",
+                        1000.0 * m.gpu_seconds / static_cast<double>(m.gpu_frames), 1000.0 * m.gpu_worst,
+                        o.gpu_time_scale ? ("at render scale " + std::to_string(o.gpu_time_scale) + ", waited for").c_str()
+                                         : "read back",
                         static_cast<unsigned long long>(m.gpu_frames));
         if (m.frames_compared)
             std::printf("GPU against software: %llu of %llu frames differ (a channel more than 2 apart), %llu pixels "
@@ -628,6 +647,19 @@ void report(Machine& m, const Options& o) {
         if (f) std::fclose(f);
     }
 
+    if (o.dump_textures) {
+        const std::string path = board_path(o.dump_textures, m.index);
+        const auto ram = bus.real3d().texture_ram();
+        std::vector<uint32_t> picture(ram.size());
+        for (std::size_t i = 0; i < ram.size(); ++i) {
+            const uint32_t t = ram[i];
+            auto c5 = [](uint32_t v) { return (v << 3) | (v >> 2); };
+            picture[i] = 0xFF000000u | c5((t >> 10) & 0x1F) << 16 | c5((t >> 5) & 0x1F) << 8 | c5(t & 0x1F);
+        }
+        if (!tools::write_png(path, picture, 2048, static_cast<int>(ram.size() / 2048)))
+            std::fprintf(stderr, "gamerun: cannot write %s\n", path.c_str());
+    }
+
     std::printf("\nDevices accessed that aren't emulated yet:\n");
     if (bus.unhandled().empty()) std::printf("  none\n");
     for (const auto& [region, u] : bus.unhandled())
@@ -644,6 +676,7 @@ int main(int argc, char** argv) {
         const std::string arg = argv[i];
         if (arg == "--blocks" && i + 1 < argc) o.blocks = std::strtoll(argv[++i], nullptr, 0);
         else if (arg == "--dump-tile" && i + 1 < argc) o.dump_tile = argv[++i];
+        else if (arg == "--dump-textures" && i + 1 < argc) o.dump_textures = argv[++i];
         else if (arg == "--text") o.show_text = true;
         else if (arg == "--netboard" && i + 1 < argc) o.real_netboard = std::string(argv[++i]) == "real";
         else if (arg == "--net-trace" && i + 1 < argc) o.net_trace = std::strtoull(argv[++i], nullptr, 0);
@@ -657,6 +690,7 @@ int main(int argc, char** argv) {
         else if (arg == "--screenshot" && i + 1 < argc) o.screenshot = argv[++i];
         else if (arg == "--wav" && i + 1 < argc) o.wav = argv[++i];
         else if (arg == "--quads") o.quads = true;
+        else if (arg == "--gpu-time" && i + 1 < argc) o.gpu_time_scale = std::clamp(std::atoi(argv[++i]), 1, 8);
         else if (arg == "--renderer" && i + 1 < argc) {
             const std::string r = argv[++i];
             o.renderer = r == "gpu" ? Options::Renderer::Gpu : r == "compare" ? Options::Renderer::Compare
@@ -748,7 +782,7 @@ int main(int argc, char** argv) {
     // turns, so they share it.
 #ifdef SPIKEOUT_GPU
     gpu::Device gpu_device;
-    if (o.renderer != Options::Renderer::Software) {
+    if (o.renderer != Options::Renderer::Software || o.gpu_time_scale) {
         if (gpu_device.open_headless()) {
             std::printf("GPU: %s\n", gpu_device.driver());
         } else {
@@ -757,7 +791,7 @@ int main(int argc, char** argv) {
         }
     }
 #else
-    if (o.renderer != Options::Renderer::Software) {
+    if (o.renderer != Options::Renderer::Software || o.gpu_time_scale) {
         std::fprintf(stderr, "gamerun: built without the GPU renderer (SPIKEOUT_GPU)\n");
         return 1;
     }
@@ -767,11 +801,12 @@ int main(int argc, char** argv) {
         machines.push_back(std::make_unique<Machine>(i, roms, functions));
         set_up(*machines.back(), o, game, ring.get(), turns);
 #ifdef SPIKEOUT_GPU
-        if (o.renderer != Options::Renderer::Software) {
+        if (o.renderer != Options::Renderer::Software || o.gpu_time_scale) {
             auto& m = *machines.back();
             m.gpu = std::make_unique<gpu::Real3dGpu>();
             m.gpu->set_quads(o.quads);
-            if (!m.gpu->open(gpu_device)) {
+            m.gpu_device = gpu_device.get();
+            if (!m.gpu->open(gpu_device, std::max(1, o.gpu_time_scale))) {
                 std::fprintf(stderr, "gamerun: GPU renderer: %s\n", m.gpu->error().c_str());
                 return 1;
             }
