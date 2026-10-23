@@ -7,7 +7,7 @@
 //           [--screenshot FILE.png] [--shot-every N] [--press [B:]NAME@FRAME[:N]]...
 //           [--wav FILE.wav] [--probe X,Y@FRAME] [--quads]
 //           [--boards N] [--slice LINES] [--link-latency CYCLES] [--renderer software|gpu|compare]
-//           [--gpu-scale N] [--gpu-time N]
+//           [--gpu-scale N] [--gpu-time N] [--parallel] [--no-2d] [--no-sound]
 //
 // Built only when CMake's SPIKEOUT_ROM_DIR is set. A run ends at the first
 // thing the runtime can't do yet (code that wasn't found, an exception, a
@@ -33,7 +33,13 @@
 // runs on its own thread, but only one at a time: they take turns every
 // --slice display lines (default 8), in board order, so a run is the same
 // every time. A packet arrives once the receiver's clock reaches the time it
-// was sent (plus --link-latency main board cycles, default 0). Each board's
+// was sent (plus --link-latency main board cycles, default 0). --parallel
+// runs the boards at once instead, meeting every slice, where the link's
+// packets go on (still the same every run; the latency at least a slice).
+// --no-2d and --no-sound leave out the tile generator's drawing and the
+// sound and music boards: the game runs the same without them (nothing
+// reads them back), as a remote player's cabinet would.
+// Each board's
 // link setting is its own: set it with --poke (board 0 master, board 1
 // slave: `--poke 0:10019E=1@0:2000 --poke 1:10019E=2@0:2000`). --blocks
 // counts for each board. Files from boards after the first get "-bN" before
@@ -150,6 +156,9 @@ struct Options {
     std::size_t boards = 1;
     uint32_t slice = 8;
     uint64_t link_latency = 0;
+    bool parallel = false; // --parallel: the boards run at once (tools::Turns, m3::LinkRing deferred)
+    // --no-2d, --no-sound: what a remote cabinet needn't run (the game the same without them)
+    bool no_2d = false, no_sound = false;
     uint64_t link_trace = 0;
     bool net_watch = false;
     // --renderer: the 3D in software, on the GPU, or both, compared.
@@ -314,9 +323,9 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
     // The 2D layers, a line at a time; each finished frame is kept for --screenshot.
     // With several boards, the turn passes on every o.slice lines, the
     // network board caught up first so what it sent is on the link.
-    m.timing.on_display_line = [&m, &turns, slice = o.slice](uint32_t line) {
-        if (line == 0) m.tilegen.begin_frame();
-        m.tilegen.draw_line(m.bus, static_cast<int>(line));
+    m.timing.on_display_line = [&m, &turns, slice = o.slice, no_2d = o.no_2d](uint32_t line) {
+        if (line == 0 && !no_2d) m.tilegen.begin_frame();
+        if (!no_2d) m.tilegen.draw_line(m.bus, static_cast<int>(line));
         if (turns.boards() > 1 && line % slice == slice - 1) {
             m.bus.netboard().sync(m.c.cycles());
             turns.pass(m.index);
@@ -386,9 +395,10 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         }
 #endif
         if (o.probe_frame && frame == o.probe_frame && m.index == 0) print_probe(m.real3d, o.probe_x, o.probe_y, frame);
-        m.tilegen.composite(m.screen, o.renderer == R::Gpu ? std::span<const uint32_t>(m.gpu_image) : m.real3d.image());
+        if (!o.no_2d) m.tilegen.composite(m.screen, o.renderer == R::Gpu ? std::span<const uint32_t>(m.gpu_image) : m.real3d.image());
         const auto sound_start = std::chrono::steady_clock::now();
-        const std::span<const int16_t> pcm =
+        if (o.no_sound) m.bus.midi_out().clear();
+        const std::span<const int16_t> pcm = o.no_sound ? std::span<const int16_t>() :
             m.sound.frame(m.bus.midi_out(), m.timing.frame_start(frame - 1), m.timing.frame_cycles());
         m.sound_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - sound_start).count();
         if (o.wav) m.audio.insert(m.audio.end(), pcm.begin(), pcm.end());
@@ -758,6 +768,9 @@ int main(int argc, char** argv) {
         else if (arg == "--boards" && i + 1 < argc) o.boards = std::max<std::size_t>(1, std::strtoull(argv[++i], nullptr, 0));
         else if (arg == "--slice" && i + 1 < argc) o.slice = std::max<uint32_t>(1, static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 0)));
         else if (arg == "--link-latency" && i + 1 < argc) o.link_latency = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--parallel") o.parallel = true;
+        else if (arg == "--no-2d") o.no_2d = true;
+        else if (arg == "--no-sound") o.no_sound = true;
         else if (arg == "--link-trace" && i + 1 < argc) o.link_trace = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--probe" && i + 1 < argc) { // X,Y@FRAME
             unsigned long long frame = 0;
@@ -831,7 +844,18 @@ int main(int argc, char** argv) {
                 std::printf("\n");
             });
     }
-    tools::Turns turns(o.boards);
+    // Parallel: the boards run at once, meeting every slice; the link's
+    // packets go on there, so they take at least a slice to arrive.
+    const bool parallel = o.parallel && o.boards > 1;
+    if (parallel) {
+        const uint64_t slice_cycles =
+            (recomp::FrameTiming().frame_cycles() * o.slice + recomp::FrameTiming::kLines - 1) / recomp::FrameTiming::kLines;
+        ring->set_deferred(true);
+        ring->set_latency(std::max(o.link_latency, slice_cycles));
+        std::printf("Parallel: the link's latency %llu main board cycles (a slice of %u lines)\n",
+                    static_cast<unsigned long long>(std::max(o.link_latency, slice_cycles)), o.slice);
+    }
+    tools::Turns turns(o.boards, parallel, parallel ? std::function<void()>([&ring] { ring->exchange(); }) : std::function<void()>());
     // The GPU (--renderer gpu or compare), without a window; the boards take
     // turns, so they share it.
 #ifdef SPIKEOUT_GPU
@@ -871,7 +895,7 @@ int main(int argc, char** argv) {
     std::printf("%zu recompiled functions; running up to %lld blocks from %08x", functions.size(),
                 static_cast<long long>(o.blocks), machines[0]->c.cpu.pc);
     if (o.boards > 1)
-        std::printf(" on each of %zu linked boards, taking turns every %u lines", o.boards, o.slice);
+        std::printf(" on each of %zu linked boards, %s every %u lines", o.boards, parallel ? "running at once, meeting" : "taking turns", o.slice);
     std::printf("\n\n");
 
     if (o.boards == 1) {

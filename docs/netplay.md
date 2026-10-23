@@ -54,6 +54,42 @@ restored to the last confirmed frame and re-simulated (GGPO style).
 3. **Render separation.** Re-simulated frames are never drawn or heard.
 4. **Desync detection.** Peers exchange a state hash every N frames.
 
+### Measured: four boards on one PC (2026-10-21)
+
+Spikeout is one player per cabinet, linked lock-step every frame, so four
+players are four boards, and Mode B runs all of them on every PC. On an
+i7-8700K (6 cores), `gamerun`, 4 linked boards (board 0 master), attract
+mode, emulation only:
+
+| Run | Speed |
+|---|---|
+| 1 board, as now (2D drawn, sound boards run) | 1.95x real time |
+| 1 board, `--no-2d --no-sound` | 4.34x |
+| 4 boards taking turns (one thread at a time) | 0.35x |
+| 4 boards, `--parallel` (at once, meeting every 8 lines) | 1.30x |
+| 4 boards, `--parallel --no-2d --no-sound` | 2.53x |
+
+- **Parallel boards** (`tools::Turns` parallel, `m3::LinkRing` deferred):
+  every board runs a slice at once; what they send is held and handed on in
+  board order when all have reached the slice's end, so a packet takes at
+  least a slice (8 lines, about 0.33 ms) to arrive. The ring still comes up
+  (status 1 `0x2081`-`0x2084`, about 1,375 packets each way in 17.8 s), and
+  three runs gave identical reports (each board's CPU registers, cycles,
+  EEPROM, network state). The slice length matters little (4 lines 1.21x,
+  16-64 lines about 1.35x): the boards wait for the slowest at each meeting.
+- **A remote cabinet needs no 2D or sound**: the tile generator's drawing and
+  the sound and music boards only make pictures and sound, which the game
+  never reads back. Without them the game's state is identical (the same
+  report line for line) and a board runs more than twice as fast.
+
+So on this PC a session (the local board drawn and heard, the others not)
+runs at roughly 2x real time: enough for delay-based play (inputs sent a few
+frames ahead, nothing re-run), and for rollback of a frame or so. Deeper
+rollback, slower machines (a Steam Deck) and spectators re-running the game
+need more: cheap save states, then profiling the game's own emulation. Local
+play on one network (LAN, a hotspot; no internet needed) can instead use
+Mode A, a board per device at single-board cost.
+
 ## Session model (Mode B)
 
 - 2–4 players plus spectators, peer-to-peer UDP with relay fallback.
@@ -68,7 +104,8 @@ restored to the last confirmed frame and re-simulated (GGPO style).
 2. Run two boards in one process with a virtual link → local 2-player.
    This proves the link emulation without any networking. **Done in
    `gamerun --boards N`** (2–4, `m3::LinkRing`; one thread per board,
-   taking turns every `--slice` lines, the same every run). Still to do:
+   taking turns every `--slice` lines, the same every run; `--parallel`
+   runs them at once, still the same every run, measured above). Still to do:
    the window frontend (one window or split screen per player, inputs per
    board).
 3. Mode A over LAN, checked against Supermodel's link behavior.

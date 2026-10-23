@@ -68,6 +68,13 @@ private:
 // boards take turns (gamerun --boards hands the turn round every few
 // lines), so a board can be up to a turn late to see a packet sent by a
 // board that ran after it, never early.
+//
+// Deferred (boards running at once): what a board sends waits in its own
+// outbox until exchange(), called with every board stopped (between two
+// slices), moves it on, in board order. With `latency` at least a slice,
+// nothing sent in a slice could have arrived in it anyway: the same every
+// run, whichever thread ran first. Each port then touches only its own
+// outbox and inbox while the boards run.
 class LinkRing {
 public:
     explicit LinkRing(std::size_t boards);
@@ -75,7 +82,9 @@ public:
     // Board i's end of the ring (each taken once).
     std::unique_ptr<NetLink> port(std::size_t i);
     void set_latency(uint64_t main_cycles) { state_->latency = main_cycles; }
-    uint64_t delivered() const { return state_->delivered; }
+    void set_deferred(bool on) { state_->deferred = on; }
+    void exchange();
+    uint64_t delivered() const;
     // Debug aid: called for each packet sent (board, its time, the data).
     void on_send(std::function<void(std::size_t, uint64_t, const std::vector<uint8_t>&)> fn) {
         state_->on_send = std::move(fn);
@@ -87,9 +96,11 @@ private:
         std::vector<uint8_t> data;
     };
     struct State {
-        std::vector<std::deque<Packet>> inbox; // by receiver
+        std::vector<std::deque<Packet>> inbox;  // by receiver
+        std::vector<std::deque<Packet>> outbox; // by sender (deferred)
+        std::vector<uint64_t> delivered;        // by receiver
         uint64_t latency = 0;
-        uint64_t delivered = 0;
+        bool deferred = false;
         std::function<void(std::size_t, uint64_t, const std::vector<uint8_t>&)> on_send;
     };
     class Port;

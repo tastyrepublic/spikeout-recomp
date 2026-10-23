@@ -45,16 +45,16 @@ public:
     Port(std::shared_ptr<State> state, std::size_t index) : state_(std::move(state)), index_(index) {}
 
     void send(const uint8_t* data, std::size_t size) override {
-        auto& next = state_->inbox[(index_ + 1) % state_->inbox.size()];
-        next.push_back({now_ + state_->latency, std::vector<uint8_t>(data, data + size)});
-        if (state_->on_send) state_->on_send(index_, now_, next.back().data);
+        auto& to = state_->deferred ? state_->outbox[index_] : state_->inbox[(index_ + 1) % state_->inbox.size()];
+        to.push_back({now_ + state_->latency, std::vector<uint8_t>(data, data + size)});
+        if (state_->on_send && !state_->deferred) state_->on_send(index_, now_, to.back().data);
     }
     std::vector<uint8_t> receive() override {
         auto& inbox = state_->inbox[index_];
         if (inbox.empty() || inbox.front().at > now_) return {};
         std::vector<uint8_t> packet = std::move(inbox.front().data);
         inbox.pop_front();
-        ++state_->delivered;
+        ++state_->delivered[index_];
         return packet;
     }
     bool loopback() const override { return state_->inbox.size() == 1; }
@@ -66,7 +66,30 @@ private:
     uint64_t now_ = 0;
 };
 
-LinkRing::LinkRing(std::size_t boards) : state_(std::make_shared<State>()) { state_->inbox.resize(std::max<std::size_t>(boards, 1)); }
+LinkRing::LinkRing(std::size_t boards) : state_(std::make_shared<State>()) {
+    const std::size_t n = std::max<std::size_t>(boards, 1);
+    state_->inbox.resize(n);
+    state_->outbox.resize(n);
+    state_->delivered.resize(n, 0);
+}
+
+void LinkRing::exchange() {
+    const std::size_t n = state_->inbox.size();
+    for (std::size_t from = 0; from < n; ++from) {
+        auto& out = state_->outbox[from];
+        for (Packet& p : out) {
+            if (state_->on_send) state_->on_send(from, p.at - state_->latency, p.data);
+            state_->inbox[(from + 1) % n].push_back(std::move(p));
+        }
+        out.clear();
+    }
+}
+
+uint64_t LinkRing::delivered() const {
+    uint64_t total = 0;
+    for (uint64_t d : state_->delivered) total += d;
+    return total;
+}
 
 std::unique_ptr<NetLink> LinkRing::port(std::size_t i) { return std::make_unique<Port>(state_, i % boards()); }
 

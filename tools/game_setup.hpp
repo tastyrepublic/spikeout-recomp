@@ -12,6 +12,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <ctime>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -93,16 +94,36 @@ private:
 // in order: each runs until it passes the turn on, then waits for it to
 // come back. A board that has stopped is skipped. Only one runs at a time,
 // so a run with the same inputs is the same every time.
+//
+// Parallel: all of them run at once, and pass() is a barrier: each waits
+// there until the others (those still running) have come to it; the last
+// to come runs `between` (the link's packets on: m3::LinkRing::exchange)
+// before they all go on. With the link's packets held until then, a run is
+// the same every time here too.
 class Turns {
 public:
-    explicit Turns(std::size_t boards) : done_(boards, false) {}
+    explicit Turns(std::size_t boards, bool parallel = false, std::function<void()> between = {})
+        : done_(boards, false), parallel_(parallel), between_(std::move(between)) {}
     std::size_t boards() const { return done_.size(); }
 
     void wait(std::size_t i) {
+        if (parallel_) return; // (all start together)
         std::unique_lock lock(mutex_);
         changed_.wait(lock, [&] { return turn_ == i; });
     }
     void pass(std::size_t i) {
+        if (parallel_) {
+            std::unique_lock lock(mutex_);
+            const uint64_t round = round_;
+            if (++arrived_ == running()) {
+                release();
+                lock.unlock();
+                changed_.notify_all();
+            } else {
+                changed_.wait(lock, [&] { return round_ != round; });
+            }
+            return;
+        }
         {
             std::lock_guard lock(mutex_);
             advance(i);
@@ -114,12 +135,22 @@ public:
         {
             std::lock_guard lock(mutex_);
             done_[i] = true;
-            advance(i);
+            if (parallel_) {
+                if (arrived_ > 0 && arrived_ == running()) release(); // the others were waiting on this one
+            } else {
+                advance(i);
+            }
         }
         changed_.notify_all();
     }
 
 private:
+    std::size_t running() const { return static_cast<std::size_t>(std::count(done_.begin(), done_.end(), false)); }
+    void release() { // (the lock held)
+        if (between_) between_();
+        arrived_ = 0;
+        ++round_;
+    }
     void advance(std::size_t i) {
         for (std::size_t k = 1; k <= done_.size(); ++k) {
             const std::size_t next = (i + k) % done_.size();
@@ -134,6 +165,10 @@ private:
     std::condition_variable changed_;
     std::size_t turn_ = 0;
     std::vector<bool> done_;
+    bool parallel_ = false;
+    std::function<void()> between_;
+    std::size_t arrived_ = 0; // parallel: at the barrier this round
+    uint64_t round_ = 0;
 };
 
 // The link setting (0 stand-alone, 1 master, 2 slave) is the byte at
