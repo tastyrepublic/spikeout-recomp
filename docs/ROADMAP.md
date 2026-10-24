@@ -78,8 +78,11 @@ Spikeout is one player per cabinet; multiplayer means linked boards.
 
 ## 6. Save states
 
-- [ ] Complete serializable machine state per board (CPU, RAM, video, sound, I/O, network board)
-- [ ] Save/load in under a millisecond; determinism tests (same inputs → same state hash)
+- [x] Complete serializable machine state per board (CPU, RAM, video, sound, I/O, network board): `m3::State`, each device's `state()`, `tools::board_state`; resumed at any basic block (the lifter's `*_blocks()` tables, `Context::resume_block`). `gamerun --save-state FILE@FRAME` / `--load-state FILE`; the window's F9 / F10 / `--load-state`
+- [x] Determinism: a run loaded from a state is the same to the byte as the one that saved it (RAM hashes, sound, screenshots and the next state all equal)
+- [x] Record and replay: `spikeout --record FILE`, `gamerun --replay FILE` (inputs every frame, RAM hashes to check)
+- [ ] Save/load in under a millisecond (a state is 29 MB, mostly Real3D memory: keep what changed, compress)
+- [ ] Linked boards (`LinkRing`) in a state; a recording that starts from a state
 
 ## 7. Online play
 

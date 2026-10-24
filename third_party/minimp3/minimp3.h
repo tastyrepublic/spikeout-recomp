@@ -1716,6 +1716,10 @@ int mp3dec_decode_frame(mp3dec_t *dec, const uint8_t *mp3, int mp3_bytes, mp3d_s
     const uint8_t *hdr;
     bs_t bs_frame[1];
     mp3dec_scratch_t scratch;
+    /* spikeout-recomp: cleared, so the decoder's state never takes in stack
+       garbage (synthesis carries some unwritten scratch into qmf_state, in
+       slots the output doesn't use): two runs leave equal save states. */
+    memset(&scratch, 0, sizeof(scratch));
 
     if (mp3_bytes > 4 && dec->header[0] == 0xff && hdr_compare(dec->header, mp3))
     {

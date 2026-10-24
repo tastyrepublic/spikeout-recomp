@@ -491,4 +491,27 @@ void Bus::write_slow(uint32_t addr, uint32_t value, uint32_t size) {
     }
 }
 
+void Bus::state(State& s) {
+    s.tag("bus");
+    s.fixed(ram_);
+    s.io(dma_.src), s.io(dma_.dest), s.io(dma_.data), s.io(dma_.status), s.io(dma_.config), s.io(dma_.busy);
+    s.io(dma_.done_at);
+    pci_.state(s);
+    irq_.state(s);
+    s.io(ping_pong_);
+    jtag_.state(s);
+    eeprom_.state(s);
+    s.io(io_bank_), s.io(inputs);
+    real3d_.state(s);
+    rtc_.state(s);
+    s.io(midi_ctrl_);
+    midi_uart_.state(s);
+    s.io(midi_out_), s.io(midi_bytes_);
+    s.fixed(security_ram_);
+    crypt_.state(s);
+    s.io(security_first_read_);
+    s.io(tile_regs_), s.fixed(tile_ram_), s.fixed(backup_ram_), s.io(crom_bank_), s.io(crom_bank_reg_);
+    netboard_->state(s);
+}
+
 } // namespace m3

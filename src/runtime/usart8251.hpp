@@ -26,10 +26,13 @@
 
 namespace m3 {
 
+class State;
+
 struct SerialByte {
     uint8_t value;
     uint64_t cycle; // when the far end has it
 };
+void state_fields(State& s, SerialByte& b); // save states
 
 class Usart8251 {
 public:
@@ -55,6 +58,8 @@ public:
 
     uint8_t mode() const { return mode_; }
     uint8_t command() const { return command_; }
+
+    void state(State& s); // save states (runtime/state.hpp)
 
 private:
     bool configured() const { return !expect_mode_ && sync_left_ == 0; } // past the mode (and sync characters)

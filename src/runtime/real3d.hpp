@@ -23,9 +23,12 @@
 #include <array>
 #include <cstdint>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace m3 {
+
+class State;
 
 class Real3d {
 public:
@@ -71,10 +74,17 @@ public:
 
     // Writes since the last flush (for tests and statistics).
     uint64_t textures_uploaded() const { return textures_uploaded_; }
+    // The texture RAM rows written since last asked, as runs (first row,
+    // rows); for a renderer that keeps a copy, to copy only those.
+    std::vector<std::pair<uint32_t, uint32_t>> take_written_rows();
     uint32_t config(int reg) const { return config_[static_cast<size_t>(reg) & 3]; }
 
     // Store one texture as the FIFO would (header and little-endian 16-bit data).
     void upload_texture(uint32_t header, std::span<const uint16_t> data);
+
+    // Save states (runtime/state.hpp). Loading marks all of texture RAM
+    // written (take_written_rows).
+    void state(State& s);
 
 private:
     static uint32_t swap(uint32_t v) { return (v >> 24) | ((v >> 8) & 0xFF00) | ((v << 8) & 0xFF0000) | (v << 24); }
@@ -105,6 +115,7 @@ private:
     std::vector<uint32_t> fifo_;
     std::vector<uint16_t> texture_;
     uint64_t textures_uploaded_ = 0;
+    std::vector<uint8_t> rows_written_ = std::vector<uint8_t>(kTextureHeight, 0); // take_written_rows
 };
 
 } // namespace m3

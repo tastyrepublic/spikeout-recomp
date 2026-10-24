@@ -18,7 +18,8 @@ layout(std140, set = 3, binding = 0) uniform Look {
     vec4 matrix[3]; // the colour matrix's rows (xyz); matrix[0].w the monitor's gamma (0: sRGB's curve)
     vec4 area;      // the picture in the window: x, y, width, height (pixels)
     vec4 screen;    // the filter's kind (0 none, 1 scanlines, 2 CRT), the picture's lines, the gain, CRT colours on (1)
-    vec4 wide;      // widescreen (screen.frag): the 3D's extension each side and the 2D's width, in screen pixels
+    vec4 wide;      // widescreen (screen.frag): the 3D's extension each side and the 2D's width, in screen pixels;
+                    // smooth motion: the layers below the 3D shifted (x, y, in their pixels)
 };
 
 float to_linear(float c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }

@@ -20,6 +20,7 @@
 // and full flags are kept; timers reload with all 8 bits; the LFO noise is
 // a fixed sequence, so runs repeat; no bounds overruns on odd addresses.
 #include "runtime/scsp.hpp"
+#include "runtime/state.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -780,6 +781,35 @@ void Scsp::dsp_step() {
     }
     --d.dec;
     d.mixs.fill(0);
+}
+
+// The chip's RAM is the sound board's to save. An LFO's tables are kept
+// as the row of the table they point to.
+void Scsp::state(State& s) {
+    s.tag(master_ ? "scsp1" : "scsp2");
+    auto row = [&s](const int*& p, const auto& rows) {
+        int32_t i = -1;
+        for (std::size_t k = 0; k < std::size(rows) && !s.loading(); ++k)
+            if (p == rows[k]) i = static_cast<int32_t>(k);
+        s.io(i);
+        if (s.loading()) p = i >= 0 && static_cast<std::size_t>(i) < std::size(rows) ? rows[i] : nullptr;
+    };
+    const Tables& t = tables();
+    s.io(regs_);
+    for (Slot& slot : slots_) {
+        s.io(slot.data), s.io(slot.active), s.io(slot.base), s.io(slot.cur), s.io(slot.nxt), s.io(slot.step);
+        Eg& eg = slot.eg;
+        s.io(slot.back), s.io(eg.volume), s.io(eg.state), s.io(eg.ar), s.io(eg.d1r), s.io(eg.d2r), s.io(eg.rr);
+        s.io(eg.dl), s.io(eg.hold), s.io(eg.below_dl);
+        for (Lfo* lfo : {&slot.plfo, &slot.alfo}) s.io(lfo->phase), s.io(lfo->step);
+        row(slot.plfo.table, t.plfo), row(slot.plfo.scale, t.pscales);
+        row(slot.alfo.table, t.alfo), row(slot.alfo.scale, t.ascales);
+    }
+    Dsp& d = dsp_;
+    s.io(d.rbp), s.io(d.rbl), s.io(d.coef), s.io(d.madrs), s.io(d.mpro), s.io(d.temp), s.io(d.mems), s.io(d.dec);
+    s.io(d.mixs), s.io(d.exts), s.io(d.efreg), s.io(d.stopped), s.io(d.last_step);
+    s.io(ring_), s.io(bufptr_), s.io(noise_), s.io(timer_), s.io(mcieb_), s.io(mcipd_);
+    s.io(midi_), s.io(midi_w_), s.io(midi_r_);
 }
 
 } // namespace m3

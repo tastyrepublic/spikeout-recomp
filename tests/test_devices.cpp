@@ -6,6 +6,7 @@
 #include "runtime/jtag.hpp"
 #include "runtime/netboard.hpp"
 #include "runtime/rom.hpp"
+#include "runtime/real3d_interp.hpp"
 #include "runtime/real3d_render.hpp"
 #include "runtime/scsp.hpp"
 #include "runtime/soundboard.hpp"
@@ -15,6 +16,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <vector>
 
 using namespace m3;
@@ -410,6 +412,33 @@ TEST_CASE("widescreen: the 2D layers' sides") {
     CHECK_EQ(out[300 * wide + e - 1], 0u);
 }
 
+TEST_CASE("tilegen: smooth motion finds the sky's move between frames") {
+    constexpr int w = TilegenRenderer::kWidth, h = TilegenRenderer::kHeight;
+    std::vector<uint32_t> before(w * h), now(w * h);
+    uint32_t noise = 7;
+    for (auto& p : before) {
+        noise = noise * 1103515245u + 12345u;
+        p = 0xFF000000u | (noise >> 8 & 0xFFFFFFu);
+    }
+    // The register's x scroll 3 to 6 (the screen 3 left), and the game a tile on: 11 left, 2 down (y 5 to 3).
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const int fx = std::clamp(x + 11, 0, w - 1), fy = std::clamp(y - 2, 0, h - 1);
+            now[static_cast<size_t>(y * w + x)] = before[static_cast<size_t>(fy * w + fx)];
+        }
+    int dx = 0, dy = 0;
+    CHECK(TilegenRenderer::find_move(before, now, 0x80050003u, 0x80030006u, dx, dy));
+    CHECK_EQ(dx, -11);
+    CHECK_EQ(dy, 2);
+    // Another picture altogether: no move.
+    std::vector<uint32_t> other(w * h);
+    for (auto& p : other) {
+        noise = noise * 1103515245u + 12345u;
+        p = 0xFF000000u | (noise >> 8 & 0xFFFFFFu);
+    }
+    CHECK(!TilegenRenderer::find_move(before, other, 0x80050003u, 0x80030006u, dx, dy));
+}
+
 TEST_CASE("tilegen: widescreen sides from looping lines") {
     TileRam ram;
     std::array<uint32_t, 64> regs{};
@@ -739,6 +768,16 @@ TEST_CASE("real3d: a viewport and a red quad, drawn the same with one thread or 
     CHECK_EQ(scene.vertices.size(), 4u);
     CHECK(scene.vertices[0].z < 0);
     CHECK(!scene.polygons[0].lit);
+    // Its model, as smooth motion finds it between frames: the same each time it's built.
+    CHECK_EQ(scene.models.size(), 1u);
+    CHECK_EQ(scene.models[0].address, 0x100u);
+    CHECK_EQ(scene.models[0].viewport, 0);
+    CHECK_EQ(scene.models[0].first_polygon, 0u);
+    CHECK_EQ(scene.models[0].polygon_count, 1u);
+    Real3dScene again;
+    Real3dSceneBuilder().build(mem, again);
+    CHECK_EQ(again.models.size(), 1u);
+    CHECK_EQ(again.models[0].path, scene.models[0].path);
     const size_t centre = 192 * 496 + 248;
     CHECK_EQ(one.image()[centre], 0xFFFF0000u); // red, lighting off
     CHECK_EQ(one.image()[0], 0u);               // nothing at the corner
@@ -747,6 +786,93 @@ TEST_CASE("real3d: a viewport and a red quad, drawn the same with one thread or 
     CHECK_EQ(one.image()[192 * 496 + 248 + 60], 0u);
     CHECK((std::vector<uint32_t>(one.image().begin(), one.image().end()) ==
            std::vector<uint32_t>(four.image().begin(), four.image().end())));
+}
+
+namespace {
+
+// A scene of one model (a triangle at x 1, 0, -1 in its own space) placed by
+// `matrix`; its vertices through it, as the scene builder leaves them.
+Real3dScene one_model(const Mat4& matrix, uint32_t address = 0x100) {
+    Real3dScene s;
+    s.viewports.resize(1);
+    Real3dScene::Polygon p{};
+    p.first_vertex = 0;
+    p.vertex_count = 3;
+    s.polygons.push_back(p);
+    for (const float x : {1.0f, 0.0f, -1.0f}) {
+        const float* m = matrix.m.data();
+        s.vertices.push_back({m[0] * x + m[12], m[1] * x + m[13], m[2] * x + m[14], 0, 0, 0, m[8], m[9], m[10]});
+    }
+    Real3dScene::Model model;
+    model.address = address;
+    model.matrix = matrix;
+    model.polygon_count = 1;
+    s.models.push_back(model);
+    return s;
+}
+
+Mat4 placed(float x, float z, float degrees) { // turned about y, then at (x, 0, z)
+    Mat4 m = Mat4::identity();
+    const float r = degrees * 3.14159265f / 180.0f;
+    m.m[0] = std::cos(r);
+    m.m[2] = -std::sin(r);
+    m.m[8] = std::sin(r);
+    m.m[10] = std::cos(r);
+    m.m[12] = x;
+    m.m[14] = z;
+    return m;
+}
+
+} // namespace
+
+TEST_CASE("smooth motion: models between two frames") {
+    Real3dScene out;
+    InterpStats stats;
+    // Moved: halfway there at t 0.5.
+    CHECK(interpolate(one_model(placed(0, -10, 0)), one_model(placed(2, -10, 0)), 0.5f, out, &stats));
+    CHECK_EQ(stats.blended, 1u);
+    CHECK(std::fabs(out.vertices[0].x - 2.0f) < 1e-4f); // the vertex at x 1: 0 + 1 in a, 2 + 1 in b
+    CHECK(std::fabs(out.vertices[0].z + 10.0f) < 1e-4f);
+    // Turned 60 degrees: 30 at t 0.5, the normal (its z axis) with it.
+    CHECK(interpolate(one_model(placed(0, -10, 0)), one_model(placed(0, -10, 60)), 0.5f, out, &stats));
+    CHECK(std::fabs(out.vertices[0].x - std::cos(0.5235988f)) < 1e-4f);
+    CHECK(std::fabs(out.vertices[0].z - (-10.0f - std::sin(0.5235988f))) < 1e-4f);
+    CHECK(std::fabs(out.vertices[0].nx - std::sin(0.5235988f)) < 1e-4f);
+    // Spun 150 degrees (a wheel: which way can't be told): halfway along, turned as in the newer frame.
+    CHECK(interpolate(one_model(placed(0, -10, 0)), one_model(placed(2, -10, 150)), 0.5f, out, &stats));
+    CHECK_EQ(stats.spun, 1u);
+    CHECK(std::fabs(out.vertices[0].x - (1.0f + std::cos(2.6179939f))) < 1e-4f);
+    CHECK(std::fabs(out.vertices[0].z - (-10.0f - std::sin(2.6179939f))) < 1e-4f);
+    // Too far in a frame (a cut, the only model): the newer frame as it is.
+    const Real3dScene far = one_model(placed(30, -10, 0));
+    CHECK(!interpolate(one_model(placed(0, -10, 0)), far, 0.5f, out, &stats));
+    CHECK(stats.cut);
+    CHECK_EQ(out.vertices[0].x, far.vertices[0].x);
+    // Not in the older frame (another model): as in the newer.
+    CHECK(!interpolate(one_model(placed(0, -10, 0), 0x200), one_model(placed(2, -10, 0)), 0.5f, out, &stats));
+    CHECK_EQ(stats.unmatched, 1u);
+
+    // A car and its wheel under it, the wheel another model each frame (a
+    // blur): the wheel moves with the car.
+    auto car = [](float x, uint32_t wheel) {
+        Real3dScene s = one_model(placed(x, -10, 0));
+        const Real3dScene w = one_model(placed(x, -10, 0), wheel);
+        s.polygons.push_back(w.polygons[0]);
+        s.polygons[1].first_vertex = 3;
+        s.vertices.insert(s.vertices.end(), w.vertices.begin(), w.vertices.end());
+        s.models.push_back(w.models[0]);
+        s.models[1].first_polygon = 1;
+        for (auto& m : s.models) {
+            m.depth = 3;
+            m.ancestors = {11, 22, 33}; // under the same nodes
+        }
+        s.models[1].ancestors[2] = 44; // (its own node)
+        return s;
+    };
+    CHECK(interpolate(car(0, 0x300), car(2, 0x400), 0.5f, out, &stats));
+    CHECK_EQ(stats.unmatched, 1u);
+    CHECK_EQ(stats.followed, 1u);
+    CHECK(std::fabs(out.vertices[3].x - 2.0f) < 1e-4f); // halfway with the car, not at 3
 }
 
 TEST_CASE("real3d: block culling is taken when the command port and the tile generator both signal a frame") {

@@ -3,8 +3,9 @@
 // 2011-2020 Bart Trzynadlowski, Nik Henson, Ian Curtis, Harry Tuttle, and
 // Spindizzi), see commboard.hpp.
 #include "runtime/commboard.hpp"
+#include "runtime/state.hpp"
 
-#include "Moira.h"
+#include "runtime/moira_state.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -35,7 +36,7 @@ constexpr uint32_t kIoIrqStatus = 0x82 / 2, kIoStatus0 = 0x88 / 2, kIoRun = 0xC0
 
 } // namespace
 
-class CommBoard::Cpu : public moira::Moira {
+class CommBoard::Cpu : public SavedMoira {
 public:
     explicit Cpu(CommBoard& board) : board_(board) {}
     moira::u8 read8(moira::u32 a) const override { return board_.cpu_read8(a); }
@@ -399,6 +400,17 @@ void CommBoard::write32(uint32_t addr, uint32_t data) {
         return;
     }
     for (uint32_t i = 0; i < 4; ++i) write8(addr + i, static_cast<uint8_t>(data >> (24 - 8 * i)));
+}
+
+void CommBoard::state(State& s) {
+    s.tag("commboard");
+    link_->state(s);
+    cpu_->cpu_state(s);
+    s.fixed(ram_), s.fixed(comm_), s.io(io_), s.io(ctrl_), s.io(commbank_);
+    s.io(in_reset_), s.io(irq_lines_), s.io(next_irq5_), s.io(frame_irq5_next_), s.io(frame_irq5_period_);
+    s.io(frame_irq5_left_), s.io(recv_offset_), s.io(recv_size_), s.io(send_offset_), s.io(send_size_);
+    s.io(receive_enabled_), s.io(receive_armed_), s.io(send_done_), s.io(send_irq_armed_), s.io(send_waiting_);
+    s.io(irqs_taken), s.io(packets_sent), s.io(packets_received);
 }
 
 } // namespace m3

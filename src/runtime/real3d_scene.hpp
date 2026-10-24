@@ -97,6 +97,27 @@ struct Real3dScene {
     std::vector<Viewport> viewports;
     std::vector<Polygon> polygons;
     std::vector<Vertex> vertices;
+
+    // Each model drawn, in drawing order, with what smooth motion needs to
+    // find it again in the next frame and move it between the two: its
+    // polygon data's address, a hash of the culling nodes above it (its place
+    // in the viewport's tree: one model drawn by several nodes is several
+    // models), its viewport, its matrix (model to eye space: its polygons'
+    // vertices are already through it) and its polygons.
+    // Its ancestors: the path's hash at each culling node down to it (the
+    // viewport's first), as far as kAncestors deep; a model not found in the
+    // other frame moves with the one found nearest it in the tree (a wheel
+    // with its car).
+    static constexpr int kAncestors = 24;
+    struct Model {
+        uint32_t address = 0, path = 0;
+        uint16_t viewport = 0;
+        Mat4 matrix;
+        uint32_t first_polygon = 0, polygon_count = 0;
+        std::array<uint32_t, kAncestors> ancestors{};
+        uint8_t depth = 0; // ancestors in use
+    };
+    std::vector<Model> models;
     bool block_culled = false; // the Real3D's block culling was on: white, no scene
 
     struct Stats {
@@ -160,6 +181,9 @@ private:
     struct ModelRef {
         Mat4 matrix;
         uint32_t addr = 0;
+        uint32_t path = 0; // the culling nodes above it, hashed (Real3dScene::Model)
+        std::array<uint32_t, Real3dScene::kAncestors> ancestors{};
+        uint8_t depth = 0;
         int tex_x = 0, tex_y = 0, page = 0; // texture offset and page flip of its node
         uint32_t colour_table = 0;
         float alpha = 1; // its nodes' fade (level of detail), times each polygon's
@@ -190,6 +214,8 @@ private:
     Mat4 coord_sys_; // the eye's rotation, for nodes that reset theirs
     Attribs attribs_;
     uint32_t matrix_base_ = 0, lod_table_ = 0, colour_table_ = 0;
+    uint32_t path_ = 0; // the culling nodes walked down through, hashed (FNV-1a of their addresses)
+    std::vector<uint32_t> ancestors_; // path_ at each of them, the viewport's first
     int extend_ = 0; // set_extend
     // The viewport's frustum planes (words 0x0C-0x13): left u, v; top u, w;
     // right u, v; bottom u, w.

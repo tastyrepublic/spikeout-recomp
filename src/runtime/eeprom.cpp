@@ -1,4 +1,5 @@
 #include "runtime/eeprom.hpp"
+#include "runtime/state.hpp"
 
 namespace m3 {
 
@@ -80,6 +81,13 @@ void Eeprom93C46::write_pins(bool cs, bool clk, bool di, uint64_t now) {
 bool Eeprom93C46::read_do(uint64_t now) {
     if (sending_) return do_;
     return now >= busy_until_; // busy (0) while programming, then ready
+}
+
+void Eeprom93C46::state(State& s) {
+    s.tag("eeprom");
+    s.io(words_);
+    s.io(cs_), s.io(clk_), s.io(do_), s.io(writable_), s.io(done_), s.io(sending_);
+    s.io(in_), s.io(in_bits_), s.io(out_), s.io(out_bits_), s.io(addr_), s.io(busy_until_);
 }
 
 } // namespace m3

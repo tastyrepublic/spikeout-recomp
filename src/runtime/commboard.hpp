@@ -93,6 +93,7 @@ public:
     void sync(uint64_t main_cycles) override;
     void end_frame() override;
     std::string describe() const override;
+    void state(State& s) override; // save states (runtime/state.hpp)
 
     // ---- Inspection (reports, tests, tracing the firmware) ----
     bool in_reset() const { return in_reset_; }

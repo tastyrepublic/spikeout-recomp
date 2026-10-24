@@ -51,6 +51,7 @@ add_library(m3runtime
     src/runtime/real3d.cpp
     src/runtime/real3d_render.cpp
     src/runtime/real3d_scene.cpp
+    src/runtime/real3d_interp.cpp
     src/runtime/scsp.cpp
     src/runtime/soundboard.cpp
     src/runtime/dsb2.cpp

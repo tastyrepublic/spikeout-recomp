@@ -45,6 +45,8 @@ public:
     uint64_t line_cycles() const { return line_cycles_; }
     uint64_t frame_start(uint64_t frame) const { return frame * frame_cycles_; } // frame 0 starts at cycle 0
 
+    void state(m3::State& s); // save states (runtime/state.hpp)
+
     // Called from inside the run (on the thread running the game).
     std::function<void(uint32_t line)> on_display_line; // start of display line 0-383
     std::function<void()> on_frame_end;

@@ -82,9 +82,12 @@ class Emitter {
 public:
     // `resume_sites`: return sites found so far, each with the first function
     // that has it (shared by the emitters of all files).
+    // `block_sites`: every block start found so far, with the first function
+    // that has it (save states resume at any block).
     Emitter(const analysis::CodeImage& image, const analysis::Analysis& an, const std::set<uint32_t>& compiled,
-            LiftStats& stats, std::map<uint32_t, uint32_t>& resume_sites)
-        : image_(image), an_(an), compiled_(compiled), stats_(stats), resume_sites_(resume_sites) {}
+            LiftStats& stats, std::map<uint32_t, uint32_t>& resume_sites, std::map<uint32_t, uint32_t>& block_sites)
+        : image_(image), an_(an), compiled_(compiled), stats_(stats), resume_sites_(resume_sites),
+          block_sites_(block_sites) {}
 
     void function(const Function& fn) {
         blocks_.clear();
@@ -100,16 +103,22 @@ public:
         body.swap(out_);
 
         out_ += head;
-        // Resuming at a return site (Context::call sets resume_at): go to it.
-        if (!sites_.empty()) {
-            out_ += "    if (c.resume_at) [[unlikely]] {\n        const uint32_t at = c.resume_at;\n"
-                    "        c.resume_at = 0;\n        switch (at) {\n";
-            for (const auto& [site, name] : sites_) {
-                out_ += "        case " + hex(site) + ": goto " + name + ";\n";
-                resume_sites_.emplace(site, fn.entry);
-            }
-            out_ += "        default: break;\n        }\n    }\n";
+        // Resuming at a return site (Context::call sets resume_at), or at any
+        // block (a save state loaded: Context::resume_block): go to it.
+        out_ += "    if (c.resume_at) [[unlikely]] {\n        const uint32_t at = c.resume_at;\n"
+                "        c.resume_at = 0;\n        switch (at) {\n";
+        std::set<uint32_t> cases;
+        for (const auto& [site, name] : sites_) {
+            out_ += "        case " + hex(site) + ": goto " + name + ";\n";
+            resume_sites_.emplace(site, fn.entry);
+            cases.insert(site);
         }
+        for (uint32_t start : fn.blocks) {
+            if (!cases.insert(start).second) continue;
+            out_ += "        case " + hex(start) + ": goto " + label(start) + ";\n";
+            block_sites_.emplace(start, fn.entry);
+        }
+        out_ += "        default: break;\n        }\n    }\n";
         if (fn.blocks.front() != fn.entry) out_ += "    goto " + label(fn.entry) + ";\n";
         out_ += body;
         out_ += "}\n";
@@ -592,6 +601,7 @@ private:
     const std::set<uint32_t>& compiled_;
     LiftStats& stats_;
     std::map<uint32_t, uint32_t>& resume_sites_;
+    std::map<uint32_t, uint32_t>& block_sites_;
     std::set<uint32_t> blocks_;
     std::map<uint32_t, std::string> sites_; // this function's return sites and their labels
     std::string out_;
@@ -632,10 +642,10 @@ std::vector<std::string> lift(const analysis::CodeImage& image, const analysis::
     }
 
     LiftStats stats;
-    std::map<uint32_t, uint32_t> resume_sites;
+    std::map<uint32_t, uint32_t> resume_sites, block_sites;
     std::vector<std::string> bodies;
     for (const auto& group : groups) {
-        Emitter emitter(image, an, compiled, stats, resume_sites);
+        Emitter emitter(image, an, compiled, stats, resume_sites, block_sites);
         for (uint32_t entry : group) emitter.function(an.functions.at(entry));
         bodies.push_back(emitter.take());
     }
@@ -650,9 +660,17 @@ std::vector<std::string> lift(const analysis::CodeImage& image, const analysis::
     stats.return_sites = static_cast<uint32_t>(resume_sites.size());
     std::string table = head + "\nconst recomp::FunctionEntry kFunctions[] = {\n";
     for (const auto& [addr, row] : rows) table += row;
-    table += "};\n" + tail;
+    table += "};\n";
+    // Every other block start, for save states only (Context::resume_block):
+    // kept apart, so a jump the analysis didn't foresee still stops the run.
+    table += "\nconst recomp::FunctionEntry kBlocks[] = {\n";
+    for (const auto& [start, fn] : block_sites)
+        if (!rows.contains(start)) table += "    {" + hex(start) + ", " + function_name(fn) + ", " + hex(start) + "},\n";
+    table += "    {0xffffffffu, nullptr, 0},\n};\n" + tail; // (never empty)
     table += "\nnamespace generated {\nstd::span<const recomp::FunctionEntry> " + options.name +
-             "_functions() { return " + options.name + "::kFunctions; }\n} // namespace generated\n";
+             "_functions() { return " + options.name + "::kFunctions; }\n" +
+             "std::span<const recomp::FunctionEntry> " + options.name + "_blocks() { return " + options.name +
+             "::kBlocks; }\n} // namespace generated\n";
 
     std::vector<std::string> files;
     files.push_back(std::move(table));

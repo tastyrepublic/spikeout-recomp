@@ -7,7 +7,7 @@
 //           [--screenshot FILE.png] [--shot-every N] [--press [B:]NAME@FRAME[:N]]...
 //           [--wav FILE.wav] [--probe X,Y@FRAME] [--quads]
 //           [--boards N] [--slice LINES] [--link-latency CYCLES] [--renderer software|gpu|compare]
-//           [--gpu-scale N] [--gpu-time N] [--wide E] [--parallel] [--no-2d] [--no-sound]
+//           [--gpu-scale N] [--gpu-time N] [--wide E] [--screen-time WxH] [--match-models] [--parallel] [--no-2d] [--no-sound]
 //
 // Built only when CMake's SPIKEOUT_ROM_DIR is set. A run ends at the first
 // thing the runtime can't do yet (code that wasn't found, an exception, a
@@ -16,6 +16,16 @@
 // what to work on next. --text prints the text on the tile layers (what
 // screen the game is on); --dump-tile writes the tile generator's RAM at the
 // end (characters, name tables, palette; derived from the ROMs).
+// --replay FILE plays a recording (spikeout --record; tools::Recording) from
+// power-on: its clock, EEPROM and backup RAM, its inputs each frame, main RAM
+// checked against its hashes (the report says if the run parted from it, and
+// where), to its end unless --blocks says otherwise.
+// --save-state FILE@FRAME saves the whole board at the end of FRAME (in the
+// first block after it outside an exception; tools::board_state), and
+// --load-state FILE runs on from such a state (or the window's, F9) instead
+// of from power-on; with --replay, the recording's inputs from there.
+// --blocks then counts from the state. Loaded, a run is the same as the one
+// that saved it, to the byte.
 // --dump-backup writes the backup RAM (128 KB) at the end. --dump-layers
 // writes each tile layer's whole 512x512 name table with every screenshot
 // (FILE-<frame>-L<n>.png).
@@ -84,7 +94,11 @@
 // picture as the window shows it too (FILE-<frame>-wide.png). The report
 // gives the 2D layers' drawing time a frame, and with --wide the time
 // making their sides (on average and the worst frame), as the window's game
-// thread spends them.
+// thread spends them. --screen-time WxH (with --wide and --screenshot)
+// times the window's screen pass at that size, drawn off screen, widescreen
+// and 4:3. --match-models builds each frame's scene and reports how many of
+// its models are found in the frame before's (smooth motion's matching: by
+// viewport, address and culling-node path).
 #include "games/games.hpp"
 #include "ppc/disasm.hpp"
 #include "ppc/instruction.hpp"
@@ -93,10 +107,12 @@
 #include "runtime/bus.hpp"
 #include "runtime/commboard.hpp"
 #include "runtime/rom.hpp"
+#include "runtime/real3d_interp.hpp"
 #include "runtime/real3d_render.hpp"
 #include "runtime/tilegen.hpp"
 #include "runtime/widescreen.hpp"
 #include "game_setup.hpp"
+#include "recording.hpp"
 #include "png_write.hpp"
 #include "wav_write.hpp"
 #ifdef SPIKEOUT_GPU
@@ -119,6 +135,7 @@
 #include <span>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -148,6 +165,10 @@ struct Options {
     const char* dump_tile = nullptr;
     const char* dump_textures = nullptr;
     const char* dump_backup = nullptr;
+    const tools::Recording* replay = nullptr; // --replay FILE
+    std::string save_state;                   // --save-state FILE@FRAME
+    uint64_t save_frame = 0;
+    const char* load_state = nullptr;         // --load-state FILE
     bool dump_layers = false;
     const char* eeprom = nullptr; // --eeprom: the settings EEPROM to start with (128 bytes, high byte first)
     const char* net_disasm = nullptr;
@@ -177,6 +198,13 @@ struct Options {
     int gpu_scale = 1;      // --gpu-scale: the GPU renderer's render scale (gpu, compare)
     int wide = 0;           // --wide: widescreen, the picture this many pixels wider each side (gpu)
     int screen_w = 0, screen_h = 0; // --screen-time WxH: the window's screen pass timed at that size
+    bool match_models = false;      // --match-models: smooth motion's matching of models between frames, reported
+    double gpu_profile_over = 0;    // --gpu-slow MS (with --gpu-time): the frames the GPU took longer than that, listed
+    bool gpu_hash_frames = false;   // --gpu-hash-frames: each GPU picture's hash, printed
+    uint64_t gpu_full_frame = 0;    // --gpu-full FRAME: that frame's GPU picture written whole (FILE-<frame>-full.png)
+    bool interp = false;            // --interp: smooth motion's pictures between frames, reported and drawn
+    bool interp_trace = false;      // --interp-trace FROM:TO: and each frame's, printed
+    uint64_t interp_trace_from = 0, interp_trace_to = 0;
     bool irq5_on_e0 = true, send_waits_for_receive = m3::CommBoardOptions().send_waits_for_receive,
          host_sees_other_bank = false;
     double link_cycles_per_byte = m3::CommBoardOptions().link_cycles_per_byte;
@@ -245,6 +273,10 @@ struct Machine {
     std::size_t index;
     m3::Bus bus;
     m3::CommBoard* comm = nullptr;
+    bool loaded = false; // --load-state: the run resumes where the state was saved
+    // --replay: the next recorded inputs and hash, hashes matched, the first frame not
+    size_t replay_input = 0, replay_hash = 0;
+    uint64_t replay_matched = 0, replay_parted = 0;
     recomp::Context c;
     recomp::FrameTiming timing;
     m3::TilegenRenderer tilegen;
@@ -257,6 +289,21 @@ struct Machine {
     double seconds = 0;
     int peak = 0;
     double energy = 0, sound_seconds = 0, render_seconds = 0, setup_ms = 0, raster_ms = 0;
+    // --match-models: each frame's scene, and its models found in the frame before's
+    m3::Real3dSceneBuilder match_builder;
+    m3::Real3dScene match_scene[2];
+    uint64_t match_models = 0, match_one = 0, match_several = 0, match_unmatched = 0, match_frames = 0;
+    uint64_t match_unmatched_ram = 0, match_unmatched_path = 0;
+    // --interp: the scene halfway from the frame before (smooth motion), and how it went
+    m3::Real3dScene interp_scene;
+    uint64_t interp_frames = 0, interp_cuts = 0, interp_models = 0, interp_blended = 0, interp_moved = 0;
+    uint64_t interp_nearest = 0, interp_ambiguous = 0, interp_worst_frame = 0, interp_followed = 0;
+    std::vector<uint32_t> sky_before; // the frame before's layers below the 3D, and its sky's scroll
+    uint32_t sky_scroll_before = 0;
+    uint64_t sky_frames = 0, sky_found = 0;
+    m3::InterpStats interp_worst_stats;
+    double interp_seconds = 0, interp_worst = 0;
+    uint64_t textures_seen = 0, texture_frames = 0; // frames in which the game uploaded textures
     // the 2D layers' drawing, and (--wide) their widescreen sides' making, every frame
     double tilegen_seconds = 0, wide_seconds = 0, wide_worst = 0;
     uint64_t tilegen_frames = 0, wide_frames = 0, wide_worst_frame = 0;
@@ -285,6 +332,9 @@ struct Machine {
     uint64_t screen_samples = 0;
 #endif
     double gpu_seconds = 0, gpu_worst = 0;
+    // --gpu-time: a frame drawn alone, its costs (ms, summed): the CPU's parts, the GPU's after
+    double profile_pack = 0, profile_upload = 0, profile_record = 0, profile_cpu = 0, profile_gpu = 0, profile_gpu_worst = 0;
+    uint64_t profile_frames = 0, profile_passes = 0, profile_draws = 0;
     uint64_t gpu_worst_frame = 0, gpu_slow = 0; // (slow: over a frame, 17.4 ms)
     uint64_t gpu_hash = 0xCBF29CE484222325ull; // of every picture read back, full size (--gpu-scale)
     uint64_t gpu_frames = 0, frames_compared = 0, frames_differing = 0, pixels_differing = 0;
@@ -310,13 +360,49 @@ std::pair<uint64_t, int> difference(std::span<const uint32_t> a, std::span<const
 
 bool for_board(int board, std::size_t index) { return board == kAllBoards || static_cast<std::size_t>(board) == index; }
 
+// --replay: the end of `frame`: the recorded inputs for the next, main RAM
+// checked against the recorded hash, and the run ended after the last.
+void replay_frame(Machine& m, const tools::Recording& rec, uint64_t frame) {
+    while (m.replay_input < rec.inputs.size() && rec.inputs[m.replay_input].first < frame) ++m.replay_input;
+    if (m.replay_input < rec.inputs.size() && rec.inputs[m.replay_input].first == frame) {
+        const auto& in = rec.inputs[m.replay_input].second;
+        m.bus.inputs.bank0 = in.bank0;
+        m.bus.inputs.bank1 = in.bank1;
+        m.bus.inputs.controls = in.controls;
+        m.bus.inputs.controls2 = in.controls2;
+    }
+    while (m.replay_hash < rec.hashes.size() && rec.hashes[m.replay_hash].first < frame) ++m.replay_hash;
+    if (m.replay_hash < rec.hashes.size() && rec.hashes[m.replay_hash].first == frame) {
+        if (tools::Recording::ram_hash(m.bus.ram()) == rec.hashes[m.replay_hash].second) {
+            ++m.replay_matched;
+        } else if (!m.replay_parted) {
+            m.replay_parted = frame;
+            std::printf("replay: main RAM differs from the recording's at frame %llu\n", static_cast<unsigned long long>(frame));
+        }
+    }
+    if (!rec.inputs.empty() && frame >= rec.inputs.back().first) m.c.limit_blocks(0); // the recording's end
+}
+
+// Save states: the sound board's part (none with --no-sound).
+std::function<void(m3::State&)> sound_state(Machine& m, const Options& o) {
+    if (o.no_sound) return {};
+    return [&m](m3::State& s) { m.sound.state(s); };
+}
+
 void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing* ring, tools::Turns& turns) {
     m3::Bus& bus = m.bus;
     bus.midi_burst = o.midi_burst;
     bus.dma_timed = !o.dma_instant;
     bus.set_security_key(game.security_key);
-    tools::set_rtc_to_host(bus);
-    for (uint8_t& b : bus.ram()) b = 0xA5;
+    if (o.replay) { // as the window started the recorded run: its clock, EEPROM and backup RAM, RAM as it was
+        bus.rtc().set_time(o.replay->clock, 0);
+        std::copy(o.replay->eeprom.begin(), o.replay->eeprom.end(), bus.eeprom().words().begin());
+        if (o.replay->backup.size() == m3::Bus::kBackupRamSize)
+            std::copy(o.replay->backup.begin(), o.replay->backup.end(), bus.backup_ram().begin());
+    } else {
+        tools::set_rtc_to_host(bus);
+        for (uint8_t& b : bus.ram()) b = 0xA5;
+    }
     if (o.eeprom) {
         std::ifstream in(o.eeprom, std::ios::binary);
         uint8_t bytes[128] = {};
@@ -339,8 +425,20 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
     } else if (ring) {
         bus.use_netboard(std::make_unique<m3::SimNetBoard>(ring->port(m.index)));
     }
-    m.c.limit_blocks(static_cast<uint64_t>(o.blocks));
     m.c.set_scheduler(&m.timing);
+    if (o.load_state) { // everything above that the game sees, as it was saved
+        try {
+            m3::State s(tools::read_file(o.load_state));
+            tools::board_state(s, m.c, m.timing, sound_state(m, o));
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "gamerun: %s: %s\n", o.load_state, e.what());
+            std::exit(1);
+        }
+        m.loaded = true;
+        std::printf("Loaded %s: frame %llu, block %08x\n", o.load_state, static_cast<unsigned long long>(m.timing.frames()),
+                    m.c.cpu.pc);
+    }
+    m.c.limit_blocks(static_cast<uint64_t>(o.blocks));
     m.real3d.set_probe(o.probe_x, o.probe_y);
     m.real3d.set_quads(o.quads);
     m.sound.board.set_volumes(o.sound_volume, o.music_volume);
@@ -365,6 +463,77 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
     };
     m.timing.on_frame_end = [&m, &o] {
         const uint64_t frame = m.timing.frames();
+        if (const uint64_t up = m.bus.real3d().textures_uploaded(); up != m.textures_seen) { // a frame that changed textures
+            m.textures_seen = up;
+            ++m.texture_frames;
+        }
+        if (o.match_models) { // each frame's models found in the frame before's (smooth motion)
+            std::swap(m.match_scene[0], m.match_scene[1]);
+            m.match_builder.build(m.bus.real3d(), m.match_scene[1]);
+            const auto& before = m.match_scene[0].models;
+            const auto& now = m.match_scene[1].models;
+            std::unordered_map<uint64_t, int> keys; // (viewport, address, path): how many models in the frame before
+            auto key = [](const m3::Real3dScene::Model& model) {
+                return static_cast<uint64_t>(model.viewport) << 48 ^ static_cast<uint64_t>(model.address) << 24 ^ model.path;
+            };
+            for (const auto& model : before) ++keys[key(model)];
+            for (const auto& model : now) {
+                const auto it = keys.find(key(model));
+                if (it == keys.end()) {
+                    ++m.match_unmatched;
+                    if (model.address < 0x100000) ++m.match_unmatched_ram; // a model the game writes (polygon RAM)
+                    bool moved = false; // the same model and viewport, under other nodes (a level of detail, a new path)
+                    for (const auto& b : before)
+                        if (b.address == model.address && b.viewport == model.viewport) {
+                            moved = true;
+                            break;
+                        }
+                    if (moved) ++m.match_unmatched_path;
+                }
+                else if (it->second == 1) ++m.match_one;
+                else ++m.match_several;
+            }
+            m.match_models += now.size();
+            if (!before.empty() && !now.empty()) ++m.match_frames;
+            if (o.interp && !before.empty() && !now.empty()) {
+                m3::InterpStats stats;
+                const auto start = std::chrono::steady_clock::now();
+                m3::interpolate(m.match_scene[0], m.match_scene[1], 0.5f, m.interp_scene, &stats);
+                const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+                m.interp_seconds += took;
+                if (took > m.interp_worst) {
+                    m.interp_worst = took;
+                    m.interp_worst_frame = frame;
+                    m.interp_worst_stats = stats;
+                }
+                ++m.interp_frames;
+                if (stats.cut) ++m.interp_cuts;
+                m.interp_models += stats.models;
+                m.interp_blended += stats.blended;
+                m.interp_moved += stats.moved;
+                m.interp_followed += stats.followed;
+                m.interp_nearest += stats.nearest;
+                m.interp_ambiguous += stats.ambiguous;
+                // The sky's move (layer 3 below the 3D, its register's scroll), as the window finds it.
+                const uint32_t sky = m.bus.tile_reg(0x6C);
+                int sky_x = 0, sky_y = 0;
+                bool sky_moved = false;
+                if ((sky & 0x80000000u) && !(sky & 0x8000) && !(m.bus.tile_reg(0x20) & 0x800) && !m.sky_before.empty()) {
+                    sky_moved = m3::TilegenRenderer::find_move(m.sky_before, m.tilegen.bottom(), m.sky_scroll_before, sky,
+                                                               sky_x, sky_y);
+                    ++m.sky_frames;
+                    if (sky_moved) ++m.sky_found;
+                }
+                m.sky_before.assign(m.tilegen.bottom().begin(), m.tilegen.bottom().end());
+                m.sky_scroll_before = sky;
+                if (o.interp_trace && frame >= o.interp_trace_from && frame < o.interp_trace_to)
+                    std::printf("frame %llu: %zu models, %zu blended, %zu not found (%zu followed), %zu moved, %zu spun; %zu nearest (%zu "
+                                "ambiguous, %zu compared)%s; %.3f ms; sky %s %d, %d\n",
+                                static_cast<unsigned long long>(frame), stats.models, stats.blended, stats.unmatched, stats.followed,
+                                stats.moved, stats.spun, stats.nearest, stats.ambiguous, stats.compared,
+                                stats.cut ? ", a cut" : "", 1000.0 * took, sky_moved ? "moved" : "(none)", sky_x, sky_y);
+            }
+        }
         // The 3D is drawn only when it will be seen.
         using R = Options::Renderer;
         const bool drawn = o.screenshot || (o.probe_frame && frame == o.probe_frame);
@@ -390,11 +559,48 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             const m3::Real3d& mem = m.bus.real3d();
             if (o.renderer == R::Gpu) m.builder.build(mem, m.scene);
             if (o.gpu_time_scale) { // drawn and waited for, not read back; several times, to keep the GPU busy (its clock up)
-                for (int i = 0; i < kGpuTimeRepeats; ++i) m.gpu->render(mem, m.real3d.scene());
+                if (m.builder.extend() > 0) m.builder.build(mem, m.scene); // (--wide: its scene opened out)
+                const m3::Real3dScene& timed = m.builder.extend() > 0 ? m.scene : m.real3d.scene();
+                for (int i = 0; i < kGpuTimeRepeats; ++i) m.gpu->render(mem, timed);
                 SDL_WaitForGPUIdle(m.gpu_device);
+                // And once alone: its CPU parts, and the GPU's time after (from idle).
+                const auto submitting = std::chrono::steady_clock::now();
+                m.gpu->render(mem, timed);
+                const auto submitted = std::chrono::steady_clock::now();
+                SDL_WaitForGPUIdle(m.gpu_device);
+                const double gpu_ms =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - submitted).count();
+                const auto& cost = m.gpu->cost();
+                m.profile_pack += cost.pack_ms;
+                m.profile_upload += cost.upload_ms;
+                m.profile_record += cost.record_ms;
+                m.profile_cpu += std::chrono::duration<double, std::milli>(submitted - submitting).count();
+                m.profile_gpu += gpu_ms;
+                m.profile_gpu_worst = std::max(m.profile_gpu_worst, gpu_ms);
+                if (o.gpu_profile_over > 0 && gpu_ms > o.gpu_profile_over)
+                    std::printf("frame %llu: the GPU %.2f ms; %zu polygons, %zu viewports, %d passes, %d draws\n",
+                                static_cast<unsigned long long>(frame), gpu_ms, timed.polygons.size(), timed.viewports.size(),
+                                cost.passes, cost.draws);
+                m.profile_passes += cost.passes;
+                m.profile_draws += cost.draws;
+                ++m.profile_frames;
             } else {
                 m.gpu->render(mem, o.renderer == R::Gpu ? m.scene : m.real3d.scene(), &m.gpu_image);
                 for (uint32_t p : m.gpu_image) m.gpu_hash = (m.gpu_hash ^ p) * 0x100000001B3ull; // FNV-1a, a word at a time
+                if (o.gpu_full_frame && frame == o.gpu_full_frame && o.screenshot) { // --gpu-full: the picture whole
+                    const std::string path = o.screenshot;
+                    const size_t dot = path.find_last_of('.');
+                    std::vector<uint32_t> rgb(m.gpu_image.size());
+                    for (std::size_t i = 0; i < rgb.size(); ++i) rgb[i] = 0xFF000000u | m.gpu_image[i];
+                    tools::write_png(path.substr(0, dot) + "-" + std::to_string(frame) + "-full" + path.substr(dot), rgb,
+                                     m.gpu->width(), m.gpu->height());
+                }
+                if (o.gpu_hash_frames) { // each picture's own hash, to find where two runs part
+                    uint64_t h = 0xCBF29CE484222325ull;
+                    for (uint32_t p : m.gpu_image) h = (h ^ p) * 0x100000001B3ull;
+                    std::printf("frame %llu: GPU picture %016llx\n", static_cast<unsigned long long>(frame),
+                                static_cast<unsigned long long>(h));
+                }
                 if (const int e = m.builder.extend(); e > 0) { // widescreen: kept whole, its middle for the rest
                     const int w = m3::TilegenRenderer::kWidth, h = m3::TilegenRenderer::kHeight;
                     m.gpu_wide = m.gpu_image;
@@ -468,6 +674,17 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
                 in[p.bank] = static_cast<uint8_t>(in[p.bank] & ~(1u << p.bit));
         m.bus.inputs.bank0 = in[0];
         m.bus.inputs.controls = in[1];
+        if (o.replay && m.index == 0) replay_frame(m, *o.replay, frame);
+        if (!o.save_state.empty() && frame == o.save_frame && m.index == 0) // --save-state: at the next block it can resume at
+            m.c.request_snapshot([&m, &o](uint32_t pc) {
+                m3::State s;
+                tools::board_state(s, m.c, m.timing, sound_state(m, o));
+                if (tools::write_file(o.save_state, s.data()))
+                    std::printf("Saved %s: frame %llu, block %08x, %zu bytes\n", o.save_state.c_str(),
+                                static_cast<unsigned long long>(m.timing.frames()), pc, s.data().size());
+                else
+                    std::fprintf(stderr, "gamerun: cannot write %s\n", o.save_state.c_str());
+            });
         // --net-watch: the network board's status registers, when they change.
         if (o.net_watch && m.comm) {
             const uint16_t s0 = m.comm->io(0x88), s1 = m.comm->io(0x8A);
@@ -486,6 +703,20 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         if (o.screenshot && o.shot_every && frame % o.shot_every == 0) {
             const std::string path = board_path(o.screenshot, m.index);
             const size_t dot = path.find_last_of('.');
+#ifdef SPIKEOUT_GPU
+            if (o.interp && m.gpu && m.builder.extend() == 0 && !m.match_scene[0].models.empty()) {
+                // --interp: the frame before and the picture halfway from it (the 2D layers this frame's)
+                auto write = [&](const m3::Real3dScene& scene, const char* tag) {
+                    std::vector<uint32_t> three_d, screen(m.screen.size());
+                    m.gpu->render(m.bus.real3d(), scene, &three_d);
+                    m.tilegen.composite(screen, three_d);
+                    tools::write_png(path.substr(0, dot) + "-" + std::to_string(frame) + tag + path.substr(dot), screen,
+                                     m3::TilegenRenderer::kWidth, m3::TilegenRenderer::kHeight);
+                };
+                write(m.match_scene[0], "-before");
+                write(m.interp_scene, "-mid");
+            }
+#endif
             if (const int e = m.builder.extend(); e > 0 && !m.gpu_wide.empty() && m.tilegen.extend() == e) {
                 // --wide: the widescreen picture as the window shows it
                 m.wide_bottom.build(m.tilegen.bottom(), m.tilegen.bottom_side(), e, m.bottom_wide);
@@ -597,6 +828,7 @@ void run(Machine& m, tools::Turns& turns) {
     turns.wait(m.index);
     const auto start = std::chrono::steady_clock::now();
     try {
+        if (m.loaded) m.c.resume_block(m.c.cpu.pc);
         m.c.call(m.c.cpu.pc);
         m.why = "the reset code returned";
     } catch (const recomp::OutOfBudget&) {
@@ -681,6 +913,10 @@ void report(Machine& m, const Options& o) {
                 static_cast<unsigned long long>(c.decrementer_interrupts), bus.irq().enable(), bus.irq().state());
 
     std::printf("Network board: %s\n", bus.netboard().describe().c_str());
+    if (o.replay && m.index == 0)
+        std::printf("Replay: %llu of %zu hashes matched the recording's%s\n", static_cast<unsigned long long>(m.replay_matched),
+                    o.replay->hashes.size(),
+                    m.replay_parted ? (", parted at frame " + std::to_string(m.replay_parted)).c_str() : " (the same run)");
     const double played = static_cast<double>(m.sound.board.samples());
     std::printf("Sound board: %s; %d slots playing, %llu MIDI bytes dropped; output peak %d, RMS %.0f; %.2f s to run it\n",
                 m.sound.board.describe().c_str(), m.sound.board.active_slots(),
@@ -695,6 +931,36 @@ void report(Machine& m, const Options& o) {
     }
     if (c.first_nan_pc) // SPIKEOUT_FP_TRAP builds
         std::printf("First FP NaN: at %08x (%016llx)\n", c.first_nan_pc, static_cast<unsigned long long>(c.first_nan_bits));
+    if (m.match_models) {
+        const double n = static_cast<double>(m.match_models);
+        std::printf("Models between frames: %llu over %llu frames; found in the frame before: %.2f%% once, %.2f%% several "
+                    "times (the same key), %.2f%% not\n",
+                    static_cast<unsigned long long>(m.match_models), static_cast<unsigned long long>(m.match_frames),
+                    100.0 * static_cast<double>(m.match_one) / n, 100.0 * static_cast<double>(m.match_several) / n,
+                    100.0 * static_cast<double>(m.match_unmatched) / n);
+        std::printf("  of those not found: %.2f%% in polygon RAM (written by the game), %.2f%% the same model under "
+                    "other nodes\n",
+                    100.0 * static_cast<double>(m.match_unmatched_ram) / static_cast<double>(std::max<uint64_t>(m.match_unmatched, 1)),
+                    100.0 * static_cast<double>(m.match_unmatched_path) / static_cast<double>(std::max<uint64_t>(m.match_unmatched, 1)));
+    }
+    if (m.interp_frames) {
+        const double n = static_cast<double>(std::max<uint64_t>(m.interp_models, 1));
+        std::printf("Smooth motion: %llu frames, %llu cuts (drawn as the frame); models blended %.2f%%, moved with a relative "
+                    "%.2f%%, moved too far %.2f%%; %.3f ms a picture on average, %.3f at most\n",
+                    static_cast<unsigned long long>(m.interp_frames), static_cast<unsigned long long>(m.interp_cuts),
+                    100.0 * static_cast<double>(m.interp_blended) / n, 100.0 * static_cast<double>(m.interp_followed) / n,
+                    100.0 * static_cast<double>(m.interp_moved) / n, 1000.0 * m.interp_seconds / static_cast<double>(m.interp_frames),
+                    1000.0 * m.interp_worst);
+        const m3::InterpStats& w = m.interp_worst_stats;
+        std::printf("  found as the nearest of the same model %.2f%% (ambiguous %.2f%%); the slowest frame %llu: %zu models, "
+                    "%zu nearest, %zu compared\n",
+                    100.0 * static_cast<double>(m.interp_nearest) / n, 100.0 * static_cast<double>(m.interp_ambiguous) / n,
+                    static_cast<unsigned long long>(m.interp_worst_frame), w.models, w.nearest, w.compared);
+        std::printf("  the sky's move found in %llu of %llu frames with a sky\n", static_cast<unsigned long long>(m.sky_found),
+                    static_cast<unsigned long long>(m.sky_frames));
+    }
+    std::printf("Textures: uploaded in %llu of %llu frames\n", static_cast<unsigned long long>(m.texture_frames),
+                static_cast<unsigned long long>(m.timing.frames()));
     if (m.tilegen_frames)
         std::printf("2D layers: %.3f ms a frame drawing them on average\n",
                     1000.0 * m.tilegen_seconds / static_cast<double>(m.tilegen_frames));
@@ -703,6 +969,13 @@ void report(Machine& m, const Options& o) {
                     1000.0 * m.wide_seconds / static_cast<double>(m.wide_frames), 1000.0 * m.wide_worst,
                     static_cast<unsigned long long>(m.wide_worst_frame));
 #ifdef SPIKEOUT_GPU
+    if (m.profile_frames) {
+        const double n = static_cast<double>(m.profile_frames);
+        std::printf("A frame drawn alone: the CPU %.2f ms (packing %.2f, uploading %.2f, recording %.2f), then the GPU %.2f "
+                    "(%.2f at most); %.1f passes, %.0f draws\n",
+                    m.profile_cpu / n, m.profile_pack / n, m.profile_upload / n, m.profile_record / n, m.profile_gpu / n,
+                    m.profile_gpu_worst, static_cast<double>(m.profile_passes) / n, static_cast<double>(m.profile_draws) / n);
+    }
     if (m.screen_samples)
         std::printf("Screen pass at %dx%d: %.3f ms widescreen, %.3f ms 4:3 (layers uploaded and shaded, on average over "
                     "%llu screenshots)\n",
@@ -869,9 +1142,30 @@ void report(Machine& m, const Options& o) {
 
 int main(int argc, char** argv) {
     Options o;
+    tools::Recording recording;
+    bool blocks_given = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg == "--blocks" && i + 1 < argc) o.blocks = std::strtoll(argv[++i], nullptr, 0);
+        if (arg == "--blocks" && i + 1 < argc) o.blocks = std::strtoll(argv[++i], nullptr, 0), blocks_given = true;
+        else if (arg == "--replay" && i + 1 < argc) {
+            std::string error;
+            if (!recording.load(argv[++i], error)) {
+                std::fprintf(stderr, "gamerun: %s\n", error.c_str());
+                return 1;
+            }
+            o.replay = &recording;
+        }
+        else if (arg == "--save-state" && i + 1 < argc) {
+            const std::string spec = argv[++i];
+            const size_t at = spec.find_last_of('@');
+            if (at == std::string::npos) {
+                std::fprintf(stderr, "gamerun: --save-state FILE@FRAME\n");
+                return 1;
+            }
+            o.save_state = spec.substr(0, at);
+            o.save_frame = std::strtoull(spec.c_str() + at + 1, nullptr, 0);
+        }
+        else if (arg == "--load-state" && i + 1 < argc) o.load_state = argv[++i];
         else if (arg == "--dump-tile" && i + 1 < argc) o.dump_tile = argv[++i];
         else if (arg == "--dump-textures" && i + 1 < argc) o.dump_textures = argv[++i];
         else if (arg == "--dump-backup" && i + 1 < argc) o.dump_backup = argv[++i];
@@ -893,6 +1187,19 @@ int main(int argc, char** argv) {
         else if (arg == "--gpu-time" && i + 1 < argc) o.gpu_time_scale = std::clamp(std::atoi(argv[++i]), 1, 8);
         else if (arg == "--gpu-scale" && i + 1 < argc) o.gpu_scale = std::clamp(std::atoi(argv[++i]), 1, 8);
         else if (arg == "--wide" && i + 1 < argc) o.wide = std::clamp(std::atoi(argv[++i]), 0, 400);
+        else if (arg == "--match-models") o.match_models = true;
+        else if (arg == "--gpu-slow" && i + 1 < argc) o.gpu_profile_over = std::atof(argv[++i]);
+        else if (arg == "--gpu-hash-frames") o.gpu_hash_frames = true;
+        else if (arg == "--gpu-full" && i + 1 < argc) o.gpu_full_frame = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--interp") o.interp = o.match_models = true;
+        else if (arg == "--interp-trace" && i + 1 < argc) {
+            const std::string range = argv[++i];
+            const size_t colon = range.find(':');
+            o.interp = o.match_models = o.interp_trace = true;
+            o.interp_trace_from = std::strtoull(range.c_str(), nullptr, 0);
+            o.interp_trace_to = colon == std::string::npos ? o.interp_trace_from + 1
+                                                           : std::strtoull(range.c_str() + colon + 1, nullptr, 0);
+        }
         else if (arg == "--screen-time" && i + 1 < argc) {
             const std::string size = argv[++i];
             const size_t x = size.find('x');
@@ -966,6 +1273,10 @@ int main(int argc, char** argv) {
                              "               [--press [B:]NAME@FRAME[:N]]... [--poke [B:]ADDR=VALUE@FRAME[:N]]...\n");
         return 2;
     }
+    if (o.replay) {
+        if (!blocks_given) o.blocks = INT64_MAX / 2; // (to the recording's end)
+        std::printf("replay: %zu frames of inputs, %zu hashes\n", o.replay->inputs.size(), o.replay->hashes.size());
+    }
     const m3::GameSpec& game = m3::games::kSpikeoutFinalEdition;
     const m3::RomSet roms = m3::load_rom_set(game, o.dir);
     if (!roms.complete()) {
@@ -974,6 +1285,7 @@ int main(int argc, char** argv) {
     }
 
     const std::vector<recomp::FunctionEntry> functions = tools::game_functions();
+    const std::vector<recomp::FunctionEntry> blocks = tools::game_blocks(); // (save states)
 
     std::unique_ptr<m3::LinkRing> ring;
     if (o.boards > 1) {
@@ -1023,6 +1335,7 @@ int main(int argc, char** argv) {
     std::vector<std::unique_ptr<Machine>> machines;
     for (std::size_t i = 0; i < o.boards; ++i) {
         machines.push_back(std::make_unique<Machine>(i, roms, functions));
+        machines.back()->c.set_blocks(blocks);
         set_up(*machines.back(), o, game, ring.get(), turns);
 #ifdef SPIKEOUT_GPU
         if (o.renderer != Options::Renderer::Software || o.gpu_time_scale) {
@@ -1030,7 +1343,7 @@ int main(int argc, char** argv) {
             m.gpu = std::make_unique<gpu::Real3dGpu>();
             m.gpu->set_quads(o.quads);
             m.gpu_device = gpu_device.get();
-            if (o.wide && o.renderer == Options::Renderer::Gpu && o.gpu_scale == 1 && !o.gpu_time_scale) {
+            if (o.wide && ((o.renderer == Options::Renderer::Gpu && o.gpu_scale == 1) || o.gpu_time_scale)) { // (--gpu-time: timed so)
                 m.builder.set_extend(o.wide);
                 m.tilegen.set_extend(o.wide);
             }

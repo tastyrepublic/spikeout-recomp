@@ -2,6 +2,7 @@
 //   Copyright 2011-2020 Bart Trzynadlowski, Nik Henson, Ian Curtis,
 //   Harry Tuttle, and Spindizzi. GPL-3.0-or-later.
 #include "runtime/jtag.hpp"
+#include "runtime/state.hpp"
 
 namespace m3 {
 
@@ -178,6 +179,15 @@ void Jtag::write(bool tck, bool tms, bool tdi, bool trst) {
     last_tck_ = tck;
     if (tck) rising_edge(tms, tdi);
     else falling_edge();
+}
+
+void Jtag::state(m3::State& s) {
+    s.tag("jtag");
+    for (Device& d : chain_) {
+        s.io(d.asic), s.io(d.kind), s.io(d.first_of_kind), s.io(d.id_code), s.io(d.modeword), s.io(d.shift);
+        s.io(d.length), s.io(d.instruction);
+    }
+    s.io(state_), s.io(tdo_), s.io(last_tck_), s.io(modewords_), s.io(mem_config_);
 }
 
 } // namespace m3

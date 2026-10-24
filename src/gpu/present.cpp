@@ -129,7 +129,7 @@ struct LookUniform {
     float matrix[3][4];
     float area[4];
     float filter[4];
-    float wide[4]; // widescreen (screen.frag): the 3D's extension each side, the 2D's width
+    float wide[4]; // widescreen (screen.frag): the 3D's extension each side, the 2D's width; smooth motion: the lower layers' shift
 };
 
 // The CRT colours' monitors (Supermodel's Src/Graphics/SuperAA.cpp, from Dan
@@ -324,6 +324,8 @@ void Presenter::draw(SDL_GPUCommandBuffer* cmd, SDL_GPUGraphicsPipeline* pipelin
     look.filter[3] = crt_colours_ ? 1.0f : 0.0f;
     look.wide[0] = static_cast<float>(extend);
     look.wide[1] = static_cast<float>(width);
+    look.wide[2] = shift_[0];
+    look.wide[3] = shift_[1];
     SDL_PushGPUFragmentUniformData(cmd, 0, &look, sizeof look);
     SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
     SDL_EndGPURenderPass(pass);
@@ -343,7 +345,7 @@ void Presenter::present(std::span<const uint32_t> pixels, int width, int height)
 }
 
 void Presenter::present_layers(std::span<const uint32_t> bottom, std::span<const uint32_t> top, SDL_GPUTexture* three_d,
-                               int width, int height, int extend) {
+                               int width, int height, int extend, float shift_x, float shift_y) {
     if (!screen_pipeline_ || !three_d) return;
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_->get());
     if (!cmd) return;
@@ -351,7 +353,10 @@ void Presenter::present_layers(std::span<const uint32_t> bottom, std::span<const
         SDL_SubmitGPUCommandBuffer(cmd);
         return;
     }
+    shift_[0] = shift_x;
+    shift_[1] = shift_y;
     draw(cmd, screen_pipeline_, {textures_[0], three_d, textures_[1]}, width, height, 1, extend);
+    shift_[0] = shift_[1] = 0;
 }
 
 } // namespace gpu

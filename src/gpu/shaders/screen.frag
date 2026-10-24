@@ -38,7 +38,9 @@ void main() {
     const float x = uv.x * full - extend; // where in the arcade's 496 pixels this is
     if (x < 0.0 && !reaches((extend + 0.5) / full)) q = vec4(0.0);
     if (x >= width && !reaches((extend + width - 0.5) / full)) q = vec4(0.0);
-    const vec4 b = texelFetch(bottom, at, 0), t = texelFetch(top, at, 0);
+    // (smooth motion: the layers below the 3D, the sky, where it was between two frames)
+    const ivec2 below = clamp(ivec2(floor(uv * vec2(size) + wide.zw)), ivec2(0), size - 1);
+    const vec4 b = texelFetch(bottom, below, 0), t = texelFetch(top, at, 0);
     vec3 p = b != vec4(0.0) ? b.rgb : vec3(0.0); // nothing drawn below: black
     p = q.rgb + p * (1.0 - q.a);                 // over what is below
     if (t != vec4(0.0)) p = t.rgb;

@@ -2,8 +2,9 @@
 // Supermodel's Src/Model3/SoundBoard.cpp (GPL-3.0-or-later, the Supermodel
 // Team), with MAME's 512 KB of RAM per SCSP.
 #include "runtime/soundboard.hpp"
+#include "runtime/state.hpp"
 
-#include <Moira.h>
+#include "runtime/moira_state.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -11,7 +12,7 @@
 
 namespace m3 {
 
-class SoundBoard::Cpu : public moira::Moira {
+class SoundBoard::Cpu : public SavedMoira {
 public:
     explicit Cpu(SoundBoard& board) : board_(board) {}
     moira::u8 read8(moira::u32 a) const override { return board_.read8(a); }
@@ -176,6 +177,18 @@ void SoundBoard::write16(uint32_t a, uint16_t v) {
         write8(a + 1, static_cast<uint8_t>(v));
         break;
     }
+}
+
+void SoundBoard::state(State& s) {
+    s.tag("sound board");
+    s.fixed(ram1_), s.fixed(ram2_);
+    scsp1_.state(s), scsp2_.state(s);
+    cpu_->cpu_state(s);
+    s.io(ctrl_), s.io(samples_), s.io(midi_bytes), s.io(irqs_taken);
+    bool music = dsb_ != nullptr;
+    s.io(music);
+    if (music != (dsb_ != nullptr)) throw std::runtime_error("save state: saved with the music board, or without it");
+    if (dsb_) dsb_->state(s);
 }
 
 } // namespace m3

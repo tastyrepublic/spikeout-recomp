@@ -19,6 +19,8 @@
 
 namespace m3 {
 
+class State;
+
 class Jtag {
 public:
     Jtag();
@@ -32,6 +34,8 @@ public:
     uint32_t modeword(Asic a) const { return modewords_[static_cast<std::size_t>(a)]; }
     // Mercury's memory configuration (3 words of 19 bits).
     uint32_t memory_config(uint32_t i) const { return mem_config_[i]; }
+
+    void state(m3::State& s); // save states (runtime/state.hpp)
 
 private:
     enum class State : uint8_t {

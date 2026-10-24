@@ -2,8 +2,9 @@
 // Supermodel's Src/Model3/DSB.cpp (GPL-3.0-or-later, the Supermodel Team;
 // based on code by R. Belmont); MPEG decoding is minimp3 (CC0).
 #include "runtime/dsb2.hpp"
+#include "runtime/state.hpp"
 
-#include <Moira.h>
+#include "runtime/moira_state.hpp"
 #include <minimp3.h>
 
 #include <algorithm>
@@ -16,7 +17,7 @@ struct Dsb2::Decoder {
     mp3dec_t dec;
 };
 
-class Dsb2::Cpu : public moira::Moira {
+class Dsb2::Cpu : public SavedMoira {
 public:
     explicit Cpu(Dsb2& board) : board_(board) {}
     moira::u8 read8(moira::u32 a) const override { return board_.read8(a); }
@@ -290,6 +291,21 @@ void Dsb2::render(int16_t* out, std::size_t frames) {
             next_sample(next_.data());
         }
     }
+}
+
+void Dsb2::state(State& s) {
+    s.tag("dsb2");
+    s.fixed(ram_);
+    cpu_->cpu_state(s);
+    mp3dec_t& dec = decoder_->dec;
+    s.io(dec.mdct_overlap), s.io(dec.qmf_state), s.io(dec.reserv), s.io(dec.free_format_bytes), s.io(dec.header);
+    s.io(dec.reserv_buf);
+    s.io(line_), s.io(rx_), s.io(rx_ready_), s.io(timer_irq_), s.io(next_rx_), s.io(next_timer_), s.io(control_);
+    s.io(state_), s.io(start_), s.io(end_), s.io(stereo_), s.io(volume_);
+    s.io(playing_), s.io(loop_), s.io(play_start_), s.io(play_end_), s.io(pos_);
+    s.io(pcm_), s.io(pcm_count_), s.io(pcm_pos_), s.io(pcm_channels_), s.io(stream_layer_), s.io(stream_hz_);
+    s.io(prev_), s.io(next_), s.io(frac_), s.io(samples_);
+    s.io(tracks_started), s.io(commands), s.io(irqs_taken);
 }
 
 } // namespace m3

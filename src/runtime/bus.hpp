@@ -11,6 +11,7 @@
 #include "runtime/crypt315_5881.hpp"
 #include "runtime/real3d.hpp"
 #include "runtime/rtc.hpp"
+#include "runtime/state.hpp"
 #include "runtime/eeprom.hpp"
 #include "runtime/jtag.hpp"
 #include "runtime/memory_map.hpp"
@@ -58,6 +59,7 @@ public:
     void write_data(uint32_t offset, uint8_t value);
 
     std::span<const uint8_t> registers() const { return regs_; }
+    void state(State& s) { s.io(addr_), s.io(regs_); }
 
 private:
     bool bridge_selected() const { return ((addr_ >> 8) & 0xFFFF) == 0; } // bus 0, device 0, function 0
@@ -88,6 +90,8 @@ public:
     uint32_t state() const { return state_; }
     uint32_t enable() const { return enable_; }
     bool line() const { return (state_ & enable_ & 0xFF) != 0 || state_ > 0xFF; }
+    // (Loading doesn't call on_change: the runtime looks again after a load.)
+    void state(State& s) { s.io(state_), s.io(enable_); }
 
     // Called whenever the line may have changed (the runtime rechecks it).
     void (*on_change)(void* user) = nullptr;
@@ -258,6 +262,11 @@ public:
     static constexpr uint32_t kTileRamBase = 0xF1000000;
     static constexpr uint32_t kTileRamSize = 0x120000;
     uint32_t crom_bank() const { return crom_bank_; }
+
+    // Save states (runtime/state.hpp): everything on the board but the CPU
+    // (recomp::Context) and the settings a frontend chose (midi_burst,
+    // dma_timed); the network board too.
+    void state(State& s);
 
     // Accesses to regions that aren't emulated yet, by region name
     // ("unmapped" for addresses no device decodes).

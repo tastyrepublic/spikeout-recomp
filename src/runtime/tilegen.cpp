@@ -3,6 +3,7 @@
 #include "runtime/bus.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 
 namespace m3 {
 
@@ -195,6 +196,55 @@ void TilegenRenderer::draw_line(std::span<const uint8_t> ram, const std::array<u
             sx += static_cast<int>(n);
         }
     }
+}
+
+bool TilegenRenderer::find_move(std::span<const uint32_t> before, std::span<const uint32_t> now, uint32_t scroll_before,
+                                uint32_t scroll_now, int& dx, int& dy) {
+    dx = dy = 0;
+    const auto size = static_cast<std::size_t>(kWidth) * kHeight;
+    if (before.size() < size || now.size() < size) return false;
+    // The registers' change, within (-8, 8): the screen moves the other way.
+    auto change = [](int a, int b, int bits) {
+        const int m = 1 << bits;
+        int d = ((b - a) % m + m) % m;
+        if (d >= m / 2) d -= m;
+        return d;
+    };
+    const int fine_x = -change(static_cast<int>(scroll_before & 0x3FF), static_cast<int>(scroll_now & 0x3FF), 10);
+    const int fine_y = -change(static_cast<int>((scroll_before >> 16) & 0x1FF), static_cast<int>((scroll_now >> 16) & 0x1FF), 9);
+    double best = 1e9;
+    int count_best = 0;
+    for (int ky = -4; ky <= 4; ++ky)
+        for (int kx = -4; kx <= 4; ++kx) {
+            const int mx = fine_x + 8 * kx, my = fine_y + 8 * ky;
+            if (std::abs(mx) > 40 || std::abs(my) > 40) continue;
+            long total = 0;
+            int count = 0;
+            for (int y = 40; y < kHeight - 40; y += 6) // (every 6th line, 4th pixel, away from the edges)
+                for (int x = 40; x < kWidth - 40; x += 4) {
+                    const uint32_t a = before[static_cast<std::size_t>((y - my) * kWidth + (x - mx))];
+                    const uint32_t b = now[static_cast<std::size_t>(y * kWidth + x)];
+                    if (!(a >> 24) || !(b >> 24)) continue;
+                    int d = 0;
+                    for (int s = 0; s < 24; s += 8)
+                        d = std::max(d, std::abs(static_cast<int>((a >> s) & 0xFF) - static_cast<int>((b >> s) & 0xFF)));
+                    total += d;
+                    ++count;
+                }
+            if (count < 200) continue; // (too little of it: no sky)
+            const double error = static_cast<double>(total) / count;
+            if (error < best) {
+                best = error;
+                count_best = count;
+                dx = mx;
+                dy = my;
+            }
+        }
+    if (count_best == 0 || best > 12) { // nothing lines up: no move
+        dx = dy = 0;
+        return false;
+    }
+    return true;
 }
 
 void TilegenRenderer::draw_map(std::span<const uint8_t> ram, const std::array<uint32_t, 64>& regs, int layer,

@@ -81,6 +81,11 @@ uint64_t Context::cycle_of_tb(uint64_t tb) const {
 // ---- Events and interrupts ----
 
 void Context::slow_tick(uint32_t pc) {
+    if (snapshot_ && resume_.empty()) {
+        const auto fn = std::move(snapshot_);
+        snapshot_ = nullptr;
+        fn(pc);
+    }
     if (blocks > block_limit_ || cycles_ >= cycle_limit_) throw OutOfBudget(pc);
 
     if (scheduler_ && cycles() >= scheduler_due_) scheduler_due_ = scheduler_->update(*this);
@@ -110,7 +115,29 @@ void Context::slow_tick(uint32_t pc) {
     if (scheduler_) next = std::min(next, scheduler_due_);
     next = std::min(next, cycle_of_tb(dec_due_tb_));
     if ((cpu.msr & kMsrEE) && (bus.irq().line() || dec_pending_)) next = cycles_ + 1;
+    if (snapshot_) next = cycles_ + 1; // (in an exception: look again at each block)
     next_check_ = std::max(next, cycles_ + 1);
+}
+
+void Context::state(m3::State& s) {
+    s.tag("ppc");
+    // CpuState has padding only after its last field.
+    static_assert(offsetof(ppc::CpuState, tb) == offsetof(ppc::CpuState, ear) + 4);
+    s.bytes(&cpu, offsetof(ppc::CpuState, reserve));
+    s.io(cpu.reserve);
+    // The block's tick has counted it: it counts again when it is resumed.
+    uint64_t before = blocks - 1;
+    s.io(before);
+    s.io(cycles_), s.io(returned_to), s.io(external_interrupts), s.io(decrementer_interrupts);
+    s.io(scheduler_due_), s.io(tb_offset_), s.io(dec_), s.io(dec_tb_), s.io(dec_due_tb_), s.io(dec_pending_);
+    if (s.loading()) {
+        blocks = before;
+        resume_.clear();
+        return_depth_ = 0;
+        resume_at = 0;
+        snapshot_ = nullptr;
+        next_check_ = cycles_; // the resumed block's tick does what this one did after the snapshot
+    }
 }
 
 const FunctionEntry* Context::find(uint32_t addr) const {
@@ -124,6 +151,20 @@ void Context::call(uint32_t addr) {
     if (!e) throw MissingCode(addr);
     resume_at = e->resume;
     e->fn(*this);
+}
+
+void Context::resume_block(uint32_t pc) {
+    const FunctionEntry* e = find(pc);
+    if (!e) {
+        auto it = std::lower_bound(blocks_.begin(), blocks_.end(), pc,
+                                   [](const FunctionEntry& b, uint32_t a) { return b.addr < a; });
+        if (it == blocks_.end() || it->addr != pc || !it->fn) throw MissingCode(pc);
+        e = &*it;
+    }
+    resume_at = e->resume; // (0: a function's entry)
+    e->fn(*this);
+    // Its frames are gone: each return goes on into the code it returns to.
+    for (;;) jump(returned_to);
 }
 
 bool Context::follow_return(uint32_t next) {

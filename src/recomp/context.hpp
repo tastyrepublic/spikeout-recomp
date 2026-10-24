@@ -14,6 +14,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -163,6 +164,26 @@ public:
     // the C++ stack only unwinds when the guest code returns.
     void jump(uint32_t addr) { call(addr); }
 
+    // Save states: every block start (the generated *_blocks() tables,
+    // sorted), to resume at.
+    void set_blocks(std::span<const FunctionEntry> table) { blocks_ = table; }
+    // Run on from the block at `pc` (cpu as loaded, outside any exception),
+    // with no C++ frames waiting above it: each guest return goes on into
+    // the caller's return site, as the CPU would, for as long as the game
+    // runs. Throws as call() does.
+    [[noreturn]] void resume_block(uint32_t pc);
+    // Calls `fn` at the start of the next block run outside any exception
+    // (where resume_block can start again), before anything else is done
+    // there; it may save the state then.
+    void request_snapshot(std::function<void(uint32_t pc)> fn) {
+        snapshot_ = std::move(fn);
+        recheck();
+    }
+    // The CPU, clock, time base and decrementer (the bus has the rest), as
+    // at the start of the block a snapshot is taken at. Loaded, the run
+    // goes on with resume_block(cpu.pc).
+    void state(m3::State& s);
+
     // After a call, the callee's blr went somewhere other than `next`, the
     // instruction after the call. If an outer call is waiting for that
     // address, returns true: the caller returns at once, and so do the
@@ -217,6 +238,8 @@ private:
     uint64_t cycle_of_tb(uint64_t tb) const;
 
     std::span<const FunctionEntry> functions_;
+    std::span<const FunctionEntry> blocks_;
+    std::function<void(uint32_t)> snapshot_;
     std::vector<uint32_t> resume_;
     std::array<uint32_t, 4096> return_stack_{};
     size_t return_depth_ = 0;

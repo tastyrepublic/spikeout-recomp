@@ -209,6 +209,20 @@ OpenGL; we draw them in memory order. Where a pixel centre lies exactly on
 an edge shared by two polygons, the software renderer draws both and the
 GPU (as OpenGL in Supermodel) one.
 
+The GPU renderer keeps memory order too, as it must to draw the same: an
+opaque polygon wins against one already there at the same depth, so the
+order settles ties. With quads drawn whole, triangles, quads and bounded
+quads alternated in that order, each change of kind a draw of its own (586
+draws a gameplay frame, the GPU's time mostly theirs); the triangles now
+go through the bounded quads' shader, their depth unchanged (28 draws, the
+GPU a third quicker, every `gamerun --gpu-scale` hash the same). Drawing
+each viewport's polygons kind by kind instead (`SPIKEOUT_BATCH_KINDS=1`,
+kept as an experiment) was a little quicker still but changed a tied pixel
+in 7 of 1218 frames (attract mode, render scale 3, quads); the owner chose
+memory order. The window also leaves out the 3D when the layers above it
+cover the whole picture (the stage the game draws behind its logo, the
+heaviest frames): nothing of it shows.
+
 Still different: Supermodel's lighting is its own estimate of the
 hardware (per-pixel; the real chips may light per vertex); the Step 1.5
 luminous rules; microtextures; translucency patterns; the polygon RAM's

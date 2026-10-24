@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
 
 namespace gpu {
@@ -223,13 +224,14 @@ bool Real3dGpu::open(Device& device, int scale, int extend) {
         {4, 0, SDL_GPU_VERTEXELEMENTFORMAT_UINT, offsetof(GpuVertex, polygon)},
         {5, 0, SDL_GPU_VERTEXELEMENTFORMAT_UINT, offsetof(GpuVertex, quad)},
     };
+    // (unwritten: the targets, by bit, the pipeline leaves as they are)
     auto pipeline = [&](SDL_GPUShader* vs, SDL_GPUShader* fs, std::initializer_list<SDL_GPUTextureFormat> targets,
-                        bool scene, bool depth, SDL_GPUCompareOp compare, bool decal, bool write_colour = true) {
+                        bool scene, bool depth, SDL_GPUCompareOp compare, bool decal, uint32_t unwritten = 0) {
         SDL_GPUColorTargetDescription descriptions[4]{};
         Uint32 n = 0;
         for (SDL_GPUTextureFormat f : targets) {
             descriptions[n].format = f;
-            if (!write_colour) {
+            if (unwritten & (1u << n)) {
                 descriptions[n].blend_state.enable_color_write_mask = true;
                 descriptions[n].blend_state.color_write_mask = 0;
             }
@@ -288,16 +290,22 @@ bool Real3dGpu::open(Device& device, int scale, int extend) {
             for (int decal = 0; decal < 2; ++decal) {
                 opaque_[kind * 2 + decal] = pipeline(scene_vs, opaque_fss[kind],
                                                      {kColourFormat, kColourFormat, kColourFormat, r32}, true, true, ge, decal);
+                // (the first group's: the translucency layers just cleared, not written again)
+                opaque_first_[kind * 2 + decal] = pipeline(
+                    scene_vs, opaque_fss[kind], {kColourFormat, kColourFormat, kColourFormat, r32}, true, true, ge, decal, 0b0110);
                 trans_[kind * 2 + decal] = pipeline(scene_vs, trans_fss[kind], {kColourFormat}, true, true, gt, decal);
             }
         // The picture, straight and premultiplied (for the window).
         composite_ = pipeline(fullscreen, composite_fs, {kColourFormat, kColourFormat}, false, false, ge, false);
+        // (not read back: only the window's)
+        composite_shown_ = pipeline(fullscreen, composite_fs, {kColourFormat, kColourFormat}, false, false, ge, false, 0b01);
     }
     for (SDL_GPUShader* s : all_shaders)
         if (s) SDL_ReleaseGPUShader(d, s);
     const bool pipelines = std::all_of(std::begin(opaque_), std::end(opaque_), [](auto* p) { return p != nullptr; }) &&
+                           std::all_of(std::begin(opaque_first_), std::end(opaque_first_), [](auto* p) { return p != nullptr; }) &&
                            std::all_of(std::begin(trans_), std::end(trans_), [](auto* p) { return p != nullptr; });
-    if (!fog_ || !pipelines || !composite_ || !nearest_ || !texture_upload_ || !download_) {
+    if (!fog_ || !pipelines || !composite_ || !composite_shown_ || !nearest_ || !texture_upload_ || !download_) {
         error_ = device.error().empty() ? SDL_GetError() : device.error();
         return false;
     }
@@ -308,9 +316,11 @@ Real3dGpu::~Real3dGpu() {
     if (!device_ || !device_->get()) return;
     SDL_GPUDevice* d = device_->get();
     SDL_WaitForGPUIdle(d);
-    for (SDL_GPUGraphicsPipeline* p : {fog_, composite_})
+    for (SDL_GPUGraphicsPipeline* p : {fog_, composite_, composite_shown_})
         if (p) SDL_ReleaseGPUGraphicsPipeline(d, p);
     for (SDL_GPUGraphicsPipeline* p : opaque_)
+        if (p) SDL_ReleaseGPUGraphicsPipeline(d, p);
+    for (SDL_GPUGraphicsPipeline* p : opaque_first_)
         if (p) SDL_ReleaseGPUGraphicsPipeline(d, p);
     for (SDL_GPUGraphicsPipeline* p : trans_)
         if (p) SDL_ReleaseGPUGraphicsPipeline(d, p);
@@ -425,7 +435,14 @@ void Real3dGpu::build(const m3::Real3dScene& scene) {
             put(e[3]);
         }
         const uint32_t count = p.vertex_count == 4 ? 6 : 3;
-        const Kind kind = quad == kNoQuad ? kTriangles : bounded[quad] ? kBoundedQuads : kQuads;
+        // With quads drawn whole, triangles go with the bounded quads (that
+        // shader takes them too, their depth unchanged): in the game's order
+        // the two alternate, and each change of pipeline was a draw of its
+        // own (586 draws a gameplay frame, 28 so; the GPU's time a third
+        // less, the pictures the same).
+        const Kind kind = quad == kNoQuad ? (quads_on_ ? kBoundedQuads : kTriangles)
+                          : bounded[quad] ? kBoundedQuads
+                                          : kQuads;
         if (!draws.empty() && draws.back().viewport == p.viewport && draws.back().decal == decal &&
             draws.back().kind == kind && draws.back().first + draws.back().count == first)
             draws.back().count += count;
@@ -433,6 +450,11 @@ void Real3dGpu::build(const m3::Real3dScene& scene) {
             draws.push_back({first, count, p.viewport, decal, kind});
     };
 
+    // (An experiment, kept: SPIKEOUT_BATCH_KINDS=1 draws each viewport's
+    // polygons kind by kind, fewer draws still, but out of the game's order:
+    // where two polygons tie for depth, the other one wins; a pixel in 7 of
+    // 1218 frames of the attract mode at render scale 3 with quads.)
+    static const bool batch_kinds = std::getenv("SPIKEOUT_BATCH_KINDS") != nullptr;
     size_t begin = 0;
     for (int priority = 0; priority < 4; ++priority) {
         size_t end = begin;
@@ -448,13 +470,19 @@ void Real3dGpu::build(const m3::Real3dScene& scene) {
                     size_t b = a;
                     while (b < end && polys[b].viewport == polys[a].viewport) ++b;
                     for (int decals = 0; decals < 2; ++decals)
-                        for (size_t i = a; i < b; ++i) {
-                            const m3::Real3dScene::Polygon& p = polys[i];
-                            if (p.high_priority != (high == 1) || p.layered != (decals == 1)) continue;
-                            const bool wanted = pass == 0 ? !p.poly_alpha
-                                                          : (p.texture_alpha || p.poly_alpha) && p.trans_layer == pass - 1;
-                            if (wanted) emit(g.passes[pass], i, decals == 1);
-                        }
+                        for (int kind = 0; kind < (batch_kinds ? kKinds : 1); ++kind)
+                            for (size_t i = a; i < b; ++i) {
+                                const m3::Real3dScene::Polygon& p = polys[i];
+                                if (p.high_priority != (high == 1) || p.layered != (decals == 1)) continue;
+                                if (batch_kinds) {
+                                    const uint32_t quad = quad_of[i];
+                                    const int k = quad == kNoQuad ? kTriangles : bounded[quad] ? kBoundedQuads : kQuads;
+                                    if (k != kind) continue;
+                                }
+                                const bool wanted = pass == 0 ? !p.poly_alpha
+                                                              : (p.texture_alpha || p.poly_alpha) && p.trans_layer == pass - 1;
+                                if (wanted) emit(g.passes[pass], i, decals == 1);
+                            }
                     a = b;
                 }
             groups_.push_back(std::move(g));
@@ -522,7 +550,12 @@ void Real3dGpu::render(const m3::Real3dScene& scene, std::span<const uint16_t> t
         SDL_GPUColorTargetInfo t[2] = {colour_target(output_, true, {1, 1, 1, 1}), colour_target(display_, true, {1, 1, 1, 1})};
         SDL_EndGPURenderPass(SDL_BeginGPURenderPass(cmd, t, 2, nullptr));
     } else {
+        using clock = std::chrono::steady_clock;
+        const auto packing = clock::now();
         build(scene);
+        const auto uploading = clock::now();
+        cost_ = {};
+        cost_.pack_ms = std::chrono::duration<double, std::milli>(uploading - packing).count();
         SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
         upload(vertex_buffer_, vertex_upload_, vertex_capacity_, vertices_.data(), static_cast<uint32_t>(vertices_.size()),
                SDL_GPU_BUFFERUSAGE_VERTEX, copy);
@@ -532,7 +565,10 @@ void Real3dGpu::render(const m3::Real3dScene& scene, std::span<const uint16_t> t
                static_cast<uint32_t>(viewports_.size()), SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, copy);
         upload(quad_buffer_, quad_upload_, quad_capacity_, quads_.data(), static_cast<uint32_t>(quads_.size()),
                SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, copy);
-        if (texture_version_ != texture_version && texture_ram.size() == m3::Real3d::kTextureWidth * m3::Real3d::kTextureHeight) { // texture RAM, whole
+        size_t rows_changed = 0; // (more than the whole of it: a whole upload)
+        for (const auto& run : changed_rows_) rows_changed += run.second;
+        if ((texture_version_ != texture_version || rows_changed > m3::Real3d::kTextureHeight) &&
+            texture_ram.size() == m3::Real3d::kTextureWidth * m3::Real3d::kTextureHeight) { // texture RAM, whole
             if (void* p = SDL_MapGPUTransferBuffer(d, texture_upload_, true)) {
                 const auto ram = texture_ram;
                 std::memcpy(p, ram.data(), ram.size_bytes());
@@ -546,9 +582,38 @@ void Real3dGpu::render(const m3::Real3dScene& scene, std::span<const uint16_t> t
                 to.d = 1;
                 SDL_UploadToGPUTexture(copy, &from, &to, true);
                 texture_version_ = texture_version;
+                changed_rows_.clear();
+            }
+        } else if (!changed_rows_.empty() && texture_ram.size() == m3::Real3d::kTextureWidth * m3::Real3d::kTextureHeight) {
+            // Only the rows changed, one after another in the transfer buffer.
+            if (auto* p = static_cast<uint8_t*>(SDL_MapGPUTransferBuffer(d, texture_upload_, true))) {
+                constexpr size_t kRow = m3::Real3d::kTextureWidth;
+                size_t at = 0;
+                for (const auto& [first, rows] : changed_rows_) {
+                    std::memcpy(p + at * 2, texture_ram.data() + size_t{first} * kRow, size_t{rows} * kRow * 2);
+                    at += size_t{rows} * kRow;
+                }
+                SDL_UnmapGPUTransferBuffer(d, texture_upload_);
+                at = 0;
+                for (const auto& [first, rows] : changed_rows_) {
+                    SDL_GPUTextureTransferInfo from{};
+                    from.transfer_buffer = texture_upload_;
+                    from.offset = static_cast<Uint32>(at * 2);
+                    SDL_GPUTextureRegion to{};
+                    to.texture = texture_ram_;
+                    to.y = first;
+                    to.w = m3::Real3d::kTextureWidth;
+                    to.h = rows;
+                    to.d = 1;
+                    SDL_UploadToGPUTexture(copy, &from, &to, false);
+                    at += size_t{rows} * kRow;
+                }
+                changed_rows_.clear();
             }
         }
         SDL_EndGPUCopyPass(copy);
+        const auto recording = clock::now();
+        cost_.upload_ms = std::chrono::duration<double, std::milli>(recording - uploading).count();
 
         // The translucency layers start empty (cleared by the first group's
         // opaque pass, else here).
@@ -614,7 +679,7 @@ void Real3dGpu::render(const m3::Real3dScene& scene, std::span<const uint16_t> t
             SDL_BindGPUVertexStorageBuffers(pass, 0, storage, 3);
             SDL_BindGPUFragmentStorageBuffers(pass, 0, storage, 3);
             SDL_BindGPUFragmentSamplers(pass, 0, samplers, translucent ? 2 : 1);
-            int bound = -1;
+            int bound = -1, placed = -1;
             for (const Draw& dr : draws) {
                 const int which = dr.kind * 2 + (dr.decal ? 1 : 0);
                 if (bound != which) {
@@ -622,6 +687,12 @@ void Real3dGpu::render(const m3::Real3dScene& scene, std::span<const uint16_t> t
                     SDL_BindGPUGraphicsPipeline(pass, pipelines[bound]);
                     SDL_SetGPUStencilReference(pass, 0);
                 }
+                if (placed == dr.viewport) { // (its viewport and scissor already set)
+                    SDL_DrawGPUPrimitives(pass, dr.count, 1, dr.first, 0);
+                    ++cost_.draws;
+                    continue;
+                }
+                placed = -1;
                 const auto& v = scene.viewports[dr.viewport];
                 const float vx = v.x + static_cast<float>(extend_); // (widescreen: the screen moved right)
                 const SDL_GPUViewport vp{vx * s, v.y * s, v.width * s, v.height * s, 0, 1};
@@ -630,10 +701,12 @@ void Real3dGpu::render(const m3::Real3dScene& scene, std::span<const uint16_t> t
                           y0 = std::clamp(static_cast<int>(v.y * s), 0, height());
                 const int x1 = std::clamp(static_cast<int>((vx + v.width) * s), 0, width()),
                           y1 = std::clamp(static_cast<int>((v.y + v.height) * s), 0, height());
-                if (x0 >= x1 || y0 >= y1) continue;
+                if (x0 >= x1 || y0 >= y1) continue; // (off the picture: not drawn)
                 const SDL_Rect r{x0, y0, x1 - x0, y1 - y0};
                 SDL_SetGPUScissor(pass, &r);
+                placed = dr.viewport;
                 SDL_DrawGPUPrimitives(pass, dr.count, 1, dr.first, 0);
+                ++cost_.draws;
             }
         };
 
@@ -655,8 +728,9 @@ void Real3dGpu::render(const m3::Real3dScene& scene, std::span<const uint16_t> t
                 ds.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
                 ds.clear_stencil = 0;
                 SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(cmd, t, 4, &ds);
-                draw(pass, opaque_, g.passes[0], false);
+                draw(pass, first ? opaque_first_ : opaque_, g.passes[0], false);
                 SDL_EndGPURenderPass(pass);
+                ++cost_.passes;
             }
             // Each translucency layer, only in front of the opaque depth (its
             // shader compares with the copy): layer 1 in a depth buffer of
@@ -676,13 +750,17 @@ void Real3dGpu::render(const m3::Real3dScene& scene, std::span<const uint16_t> t
                 SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(cmd, &t, 1, &ds);
                 draw(pass, trans_, g.passes[1 + layer], true);
                 SDL_EndGPURenderPass(pass);
+                ++cost_.passes;
             }
         }
+        cost_.record_ms = std::chrono::duration<double, std::milli>(clock::now() - recording).count();
 
-        // The layers over the opaque picture; with it premultiplied, for the window.
+        // The layers over the opaque picture; with it premultiplied, for the
+        // window (not read back: only that).
         SDL_GPUColorTargetInfo t[2] = {colour_target(output_, true), colour_target(display_, true)};
+        if (!pixels) t[0].load_op = SDL_GPU_LOADOP_DONT_CARE, t[0].store_op = SDL_GPU_STOREOP_DONT_CARE;
         SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(cmd, t, 2, nullptr);
-        SDL_BindGPUGraphicsPipeline(pass, composite_);
+        SDL_BindGPUGraphicsPipeline(pass, pixels ? composite_ : composite_shown_);
         set_full_view(pass);
         const SDL_GPUTextureSamplerBinding inputs[3] = {{colour_, nearest_}, {layers_[0], nearest_}, {layers_[1], nearest_}};
         SDL_BindGPUFragmentSamplers(pass, 0, inputs, 3);

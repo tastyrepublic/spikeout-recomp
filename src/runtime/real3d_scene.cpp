@@ -132,6 +132,7 @@ void Real3dSceneBuilder::build(const Real3d& mem, Real3dScene& scene) {
     scene.polygons.clear();
     scene.vertices.clear();
     scene.viewport_info.clear();
+    scene.models.clear();
     scene.stats = {};
     scene.block_culled = mem.block_culling();
     models_.clear();
@@ -143,7 +144,20 @@ void Real3dSceneBuilder::build(const Real3d& mem, Real3dScene& scene) {
     for (int priority = 0; priority < 4; ++priority)
         for (size_t v = 0; v < scene.viewports.size(); ++v)
             if (scene.viewports[v].priority == priority)
-                for (size_t i = 0; i < viewport_models_[v].second; ++i) decode_model(v, models_[viewport_models_[v].first + i]);
+                for (size_t i = 0; i < viewport_models_[v].second; ++i) {
+                    const ModelRef& ref = models_[viewport_models_[v].first + i];
+                    Real3dScene::Model model;
+                    model.address = ref.addr;
+                    model.path = ref.path;
+                    model.viewport = static_cast<uint16_t>(v);
+                    model.matrix = ref.matrix;
+                    model.ancestors = ref.ancestors;
+                    model.depth = ref.depth;
+                    model.first_polygon = static_cast<uint32_t>(scene.polygons.size());
+                    decode_model(v, ref);
+                    model.polygon_count = static_cast<uint32_t>(scene.polygons.size()) - model.first_polygon;
+                    scene.models.push_back(model);
+                }
 }
 
 // ---- Viewports and nodes ----
@@ -246,6 +260,8 @@ void Real3dSceneBuilder::walk_viewports(uint32_t addr) {
         coord_sys_.m[12] = coord_sys_.m[13] = coord_sys_.m[14] = 0;
         coord_sys_.m[15] = 1;
 
+        path_ = (2166136261u ^ addr) * 16777619u; // each viewport's tree its own
+        ancestors_.assign(1, path_);
         if (!(node[0] & 0x20) && vp.width > 0 && vp.height > 0 && cv != 0 && cw != 0) walk_pointer(node[0x02], 0);
         const size_t model_count = models_.size() - first_model;
         scene_->viewports.push_back(vp);
@@ -300,6 +316,9 @@ void Real3dSceneBuilder::walk_node(uint32_t addr, int depth) {
 
     const Attribs saved_attribs = attribs_;
     const Mat4 saved_matrix = matrix_;
+    const uint32_t saved_path = path_;
+    path_ = (path_ ^ addr) * 16777619u;
+    ancestors_.push_back(path_);
     if (node[2] & 0x8000) {
         attribs_.tex_x = 32 * static_cast<int>((node[2] >> 7) & 0x3F);
         attribs_.tex_y = 32 * static_cast<int>(node[2] & 0x1F);
@@ -375,6 +394,8 @@ void Real3dSceneBuilder::walk_node(uint32_t addr, int depth) {
     }
     matrix_ = saved_matrix;
     attribs_ = saved_attribs;
+    path_ = saved_path;
+    ancestors_.pop_back();
 }
 
 void Real3dSceneBuilder::add_model(uint32_t addr) {
@@ -385,6 +406,9 @@ void Real3dSceneBuilder::add_model(uint32_t addr) {
     ModelRef m;
     m.matrix = matrix_;
     m.addr = addr;
+    m.path = path_;
+    m.depth = static_cast<uint8_t>(std::min<size_t>(ancestors_.size(), Real3dScene::kAncestors));
+    std::copy_n(ancestors_.begin(), m.depth, m.ancestors.begin());
     m.tex_x = attribs_.tex_x;
     m.tex_y = attribs_.tex_y;
     m.page = attribs_.page;

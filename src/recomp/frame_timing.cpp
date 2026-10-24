@@ -68,4 +68,9 @@ uint64_t FrameTiming::update(Context& c) {
     return std::min(due(), c.bus.device_due());
 }
 
+void FrameTiming::state(m3::State& s) {
+    s.tag("frame timing");
+    s.io(frame_start_), s.io(frames_), s.io(flip_line_), s.io(line_), s.io(midi_irqs_), s.io(next_);
+}
+
 } // namespace recomp

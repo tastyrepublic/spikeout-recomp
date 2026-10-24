@@ -12,7 +12,11 @@
 #include <condition_variable>
 #include <cstdint>
 #include <ctime>
+#include <fstream>
 #include <functional>
+#include <iterator>
+#include <stdexcept>
+#include <string>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -21,6 +25,8 @@
 namespace generated {
 std::span<const recomp::FunctionEntry> boot_rom_functions();
 std::span<const recomp::FunctionEntry> game_ram_functions();
+std::span<const recomp::FunctionEntry> boot_rom_blocks();
+std::span<const recomp::FunctionEntry> game_ram_blocks();
 } // namespace generated
 
 namespace tools {
@@ -35,13 +41,28 @@ inline std::vector<recomp::FunctionEntry> game_functions() {
     return functions;
 }
 
-// The RTC shows the host's local time when the run starts.
-inline void set_rtc_to_host(m3::Bus& bus) {
+// Every other block start, sorted, for save states (Context::set_blocks).
+inline std::vector<recomp::FunctionEntry> game_blocks() {
+    std::vector<recomp::FunctionEntry> blocks;
+    for (const auto& b : generated::game_ram_blocks())
+        if (b.fn) blocks.push_back(b);
+    for (const auto& b : generated::boot_rom_blocks())
+        if (b.fn) blocks.push_back(b);
+    std::sort(blocks.begin(), blocks.end(),
+              [](const recomp::FunctionEntry& a, const recomp::FunctionEntry& b) { return a.addr < b.addr; });
+    return blocks;
+}
+
+// The RTC shows the host's local time when the run starts; returns it (as
+// Rtc72421::set_time's seconds: a recording keeps it, to replay the same).
+inline int64_t set_rtc_to_host(m3::Bus& bus) {
     const std::time_t t = std::time(nullptr);
+    int64_t seconds = 0;
     if (const std::tm* lt = std::localtime(&t))
-        bus.rtc().set_time(
-            m3::Rtc72421::to_seconds({lt->tm_year + 1900, lt->tm_mon + 1, lt->tm_mday, lt->tm_hour, lt->tm_min, lt->tm_sec}),
-            0);
+        seconds =
+            m3::Rtc72421::to_seconds({lt->tm_year + 1900, lt->tm_mon + 1, lt->tm_mday, lt->tm_hour, lt->tm_min, lt->tm_sec});
+    bus.rtc().set_time(seconds, 0);
+    return seconds;
 }
 
 // The music board (DSB2) on the sound board's serial line.
@@ -69,6 +90,8 @@ public:
         due_ -= static_cast<double>(n);
         buffer_.resize(2 * n);
         std::size_t done = 0;
+        for (uint8_t b : waiting_) board.midi_in(b); // (a state saved by the window: bytes it hadn't played yet)
+        waiting_.clear();
         for (const m3::SerialByte& b : midi) {
             const uint64_t into = b.cycle > start ? b.cycle - start : 0;
             const auto at = static_cast<std::size_t>(std::min<uint64_t>(n, into * n / cycles));
@@ -85,10 +108,51 @@ public:
 
     m3::SoundBoard board;
 
+    // Save states: the board, and MIDI bytes that have reached it but not
+    // yet been played (none here: each frame plays all of its own). The
+    // window's sound, on the audio device's clock, keeps the same.
+    void state(m3::State& s) {
+        board.state(s);
+        s.io(due_);
+        s.io(waiting_);
+    }
+
 private:
     double due_ = 0;
+    std::vector<uint8_t> waiting_;
     std::vector<int16_t> buffer_;
 };
+
+// A save state of a board: its CPU and frame timing, the bus with its
+// devices (the network board's too) and the sound board (`sound`: as
+// FrameSound::state walks it; none for a board run without sound, when a
+// state with sound skips it). Saved in Context::request_snapshot's call,
+// and loaded before the run, which then starts with
+// Context::resume_block(cpu.pc). Throws if a state doesn't fit (another
+// build, or another board set-up).
+inline void board_state(m3::State& s, recomp::Context& c, recomp::FrameTiming& timing,
+                        const std::function<void(m3::State&)>& sound) {
+    s.tag("spikeout save state 1");
+    c.state(s);
+    timing.state(s);
+    c.bus.state(s);
+    bool with_sound = static_cast<bool>(sound);
+    s.io(with_sound);
+    if (with_sound && sound) sound(s);
+    else if (with_sound) return; // (loading: the rest is the sound, not wanted)
+    s.tag("end");
+    if (s.loading() && !s.done()) throw std::runtime_error("save state: longer than this build's");
+}
+
+inline bool write_file(const std::string& path, std::span<const uint8_t> data) {
+    std::ofstream out(path, std::ios::binary);
+    return static_cast<bool>(out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size())));
+}
+
+inline std::vector<uint8_t> read_file(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::vector<uint8_t>(std::istreambuf_iterator<char>(in), {});
+}
 
 // Linked boards in one process, each on its own thread, run one at a time
 // in order: each runs until it passes the turn on, then waits for it to

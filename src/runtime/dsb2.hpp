@@ -28,6 +28,8 @@
 
 namespace m3 {
 
+class State;
+
 class Dsb2 {
 public:
     static constexpr uint32_t kCpuHz = 11'000'000;
@@ -54,6 +56,7 @@ public:
     double music_energy = 0;
     std::array<uint64_t, 8> irqs_taken{};
     std::string describe() const;
+    void state(State& s); // save states (runtime/state.hpp)
 
 private:
     class Cpu;

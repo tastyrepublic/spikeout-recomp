@@ -29,6 +29,8 @@
 
 namespace m3 {
 
+class State;
+
 class SoundBoard {
 public:
     static constexpr uint32_t kCpuHz = 11'289'600;
@@ -69,6 +71,7 @@ public:
     std::span<const uint8_t> ram(int chip) const { return chip ? ram2_ : ram1_; }
     const Scsp& scsp(int chip) const { return chip ? scsp2_ : scsp1_; }
     std::string describe() const;
+    void state(State& s); // save states (runtime/state.hpp)
 
 private:
     class Cpu;

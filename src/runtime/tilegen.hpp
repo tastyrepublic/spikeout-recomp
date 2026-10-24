@@ -74,6 +74,17 @@ public:
     std::span<const uint32_t> bottom_side() const { return bottom_side_; }
     std::span<const uint32_t> top_side() const { return top_side_; }
 
+    // Smooth motion: how far the picture below the 3D (`before`, then `now`,
+    // 496x384 each) moved on screen in a frame, now(x, y) = before(x - dx,
+    // y - dy), as one layer's scroll register went from `scroll_before` to
+    // `scroll_now` (the stages' skies, layer 3: the register holds the move
+    // within a tile, the game moving it on by whole tiles as it rewrites the
+    // name table; after vf3-recomp's TileGen::scrolled). The move is the
+    // register's change plus or minus whole tiles (up to 4), the one that
+    // lines the two up best; false if none does (a cut, another scene).
+    static bool find_move(std::span<const uint32_t> before, std::span<const uint32_t> now, uint32_t scroll_before,
+                          uint32_t scroll_now, int& dx, int& dy);
+
     // For looking at: layer `layer`'s whole 512x512 name table, unscrolled,
     // into `out` (512 * 512 pixels; alpha 0 where transparent).
     static void draw_map(std::span<const uint8_t> ram, const std::array<uint32_t, 64>& regs, int layer,

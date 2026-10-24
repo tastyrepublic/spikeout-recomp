@@ -35,6 +35,8 @@
 
 namespace m3 {
 
+class State;
+
 // What the board sends its segments over: the next cabinet in the ring,
 // receiving from the previous one.
 class NetLink {
@@ -49,6 +51,9 @@ public:
     // receive(): a link between boards in one process (LinkRing) delivers
     // a packet once the receiver has reached the time it was sent.
     virtual void set_time(uint64_t /*main_cycles*/) {}
+    // Save states (runtime/state.hpp): packets on their way. Links between
+    // boards in one process can't be saved yet.
+    virtual void state(State& s);
 };
 
 // A lone cabinet: everything sent comes straight back.
@@ -57,6 +62,7 @@ public:
     void send(const uint8_t* data, std::size_t size) override { queue_.emplace_back(data, data + size); }
     std::vector<uint8_t> receive() override;
     bool loopback() const override { return true; }
+    void state(State& s) override;
 
 private:
     std::deque<std::vector<uint8_t>> queue_;
@@ -131,6 +137,8 @@ public:
 
     // One line for run reports.
     virtual std::string describe() const = 0;
+    // Save states (runtime/state.hpp); throws for a board that can't be saved.
+    virtual void state(State& s);
 };
 
 class SimNetBoard : public NetBoardDevice {
@@ -147,6 +155,7 @@ public:
     void write32(uint32_t addr, uint32_t data) override;
 
     void end_frame() override { run_frame(); }
+    void state(m3::State& s) override;
     std::string describe() const override;
 
     // Once a frame, after the main board's frame.

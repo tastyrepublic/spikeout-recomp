@@ -11,7 +11,8 @@
 // GPU its early depth test, so only those draws use it). QUADS with BOUNDED
 // too: quads whose depth is never nearer than the one they are drawn at
 // (scene.vert gives each its nearest corner's), which lets the GPU test
-// depth early again, against that bound.
+// depth early again, against that bound; and, with quads drawn whole, the
+// triangles, with their own depth (fewer changes of pipeline).
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #include "scene_common.glsl"
@@ -317,8 +318,16 @@ void main() {
     vec3 n = normal;
     float depth = gl_FragCoord.z;
 #ifdef QUADS
-    if (!quad_attributes(p, tc, sh, n, inv_distance)) discard; // outside the quad
-    depth = kNear * ((flags & kFlagLayered) != 0u ? kDecalBias : 1.0) * inv_distance;
+#ifdef BOUNDED
+    // (triangles too, drawn with these so the game's order costs no change
+    // of pipeline: their own depth, as the hardware gave it)
+    if (quad != kNoQuad) {
+#endif
+        if (!quad_attributes(p, tc, sh, n, inv_distance)) discard; // outside the quad
+        depth = kNear * ((flags & kFlagLayered) != 0u ? kDecalBias : 1.0) * inv_distance;
+#ifdef BOUNDED
+    }
+#endif
     gl_FragDepth = depth;
 #endif
 #ifndef OPAQUE

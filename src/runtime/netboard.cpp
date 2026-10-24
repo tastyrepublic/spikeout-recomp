@@ -2,6 +2,7 @@
 //   Copyright 2011-2020 Bart Trzynadlowski, Nik Henson, Ian Curtis,
 //   Harry Tuttle, and Spindizzi. GPL-3.0-or-later.
 #include "runtime/netboard.hpp"
+#include "runtime/state.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -296,6 +297,24 @@ void SimNetBoard::run_frame() {
     case State::Error:
         break;
     }
+}
+
+// ---- Save states ----
+
+void NetLink::state(State&) { throw std::runtime_error("save state: this network link can't be saved"); }
+
+void LoopbackLink::state(State& s) {
+    s.tag("loopback");
+    s.io(queue_);
+}
+
+void NetBoardDevice::state(State&) { throw std::runtime_error("save state: " + describe() + " can't be saved"); }
+
+void SimNetBoard::state(m3::State& s) {
+    s.tag("simnetboard");
+    link_->state(s);
+    s.fixed(net_ram_), s.fixed(buffer_), s.io(commbank_), s.io(state_), s.io(running_), s.io(irq2ack_);
+    s.io(status0_), s.io(status1_), s.io(machines_), s.io(counter_), s.io(segment_size_);
 }
 
 } // namespace m3

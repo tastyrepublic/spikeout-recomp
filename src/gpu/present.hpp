@@ -67,8 +67,10 @@ public:
     // widescreen, the 3D that many screen pixels wider each side than the
     // 2D (gpu::Real3dGpu::open's), and the layers as wide (width + 2 *
     // extend, their sides filled in by m3::WideLayer; shaders/screen.frag).
+    // `shift`: smooth motion, the layers below the 3D drawn that many of
+    // their pixels on (the sky between two frames).
     void present_layers(std::span<const uint32_t> bottom, std::span<const uint32_t> top, SDL_GPUTexture* three_d,
-                        int width, int height, int extend = 0);
+                        int width, int height, int extend = 0, float shift_x = 0, float shift_y = 0);
 
     // The looks over the picture (shaders/look.glsl): CRT colours (0 off,
     // then kCrtColourNames' monitors, Supermodel's) and a screen filter
@@ -105,6 +107,7 @@ private:
     SDL_GPUTransferBuffer* upload_ = nullptr;
     int width_ = 0, height_ = 0;
     SDL_GPUTexture* target_ = nullptr;
+    float shift_[2] = {}; // present_layers' shift, for draw
     uint32_t target_width_ = 0, target_height_ = 0;
     int crt_colours_ = 0, filter_ = 0;
     // The filter's gain, for the picture's size and lines it was worked out for.

@@ -47,6 +47,23 @@
 // has it (no tearing; --fifo: plain vsync, which on some Windows setups
 // shows only every second or third refresh; gpu::Device::open).
 //
+// --record FILE records the run from power-on (tools::Recording: the
+// inputs each frame, and main RAM's hash now and then), to play again with
+// gamerun --replay FILE; a restart starts FILE-2 and so on.
+//
+// Save states (one board): F9 saves the game as it is at the end of the
+// frame (spikeout-<frame>.state, the same as gamerun --save-state writes,
+// so gamerun --load-state runs on from it exactly); F10 starts again from
+// the last one saved; --load-state FILE starts from FILE.
+//
+// Smooth motion (the menu, or --smooth; the GPU 3D only): a picture each
+// refresh of the display (at most 120 a second, timed as the game's frames
+// are), its 3D placed between the last two frames (m3::interpolate) by an
+// even display clock a frame behind the game's, pulled a tenth of the way to
+// it each picture (after vf3-recomp's: the pictures drawn when a pass
+// happened to run would show the motion unevenly). The 2D is the newest
+// frame's.
+//
 // --frames N quits after N frames and writes the last one to
 // spikeout-<N>.png (for testing). --quads draws quads whole, as Supermodel's
 // "quad rendering" option. --midi-burst sends the sound board its bytes with
@@ -66,7 +83,9 @@
 #include "runtime/real3d_render.hpp"
 #include "runtime/tilegen.hpp"
 #include "runtime/widescreen.hpp"
+#include "runtime/real3d_interp.hpp"
 #include "game_setup.hpp"
+#include "recording.hpp"
 #include "png_write.hpp"
 #include "arcade_settings.hpp"
 #include "settings.hpp"
@@ -131,6 +150,16 @@ struct Shared {
     std::size_t boards = 1;
     std::atomic<bool> quit{false}, fast{false}, paused{false};
     uint64_t max_frames = 0; // 0: run until the window is closed
+    // --record FILE: board 0's run recorded (tools::Recording), from power-on;
+    // each restart a file of its own (FILE, then FILE-2 ...)
+    std::string record_path;
+    int recordings = 0;
+    // Save states (one board): F9 asks board 0 to save at the end of its
+    // frame (spikeout-<frame>.state, as gamerun --save-state writes them);
+    // `load_path` is loaded as board 0 starts (F10 restarts it with the last
+    // one saved, or --load-state's).
+    std::atomic<bool> save_request{false};
+    std::string load_path, last_state; // (under `lock`)
     bool real_netboard = true;
     std::atomic<bool> quads{false}; // draw quads whole
     bool midi_burst = false;        // Supermodel's MIDI timing
@@ -149,12 +178,23 @@ struct Shared {
         std::vector<uint32_t> bottom, top;
         // widescreen: the layers as wide as the 3D (m3::WideLayer)
         std::vector<uint32_t> bottom_wide, top_wide;
+        // the tile generator's control (which layers are above the 3D) and
+        // scroll registers at the frame's end: smooth motion slides the sky
+        uint32_t tile_control = 0;
+        std::array<uint32_t, 4> tile_scroll{};
+        // The 2D above the 3D opaque everywhere (the sides too): the 3D can't
+        // be seen (the stage the game draws behind its logo), so isn't drawn.
+        bool covered = false;
         uint64_t number = 0;
         int extend = 0; // the widescreen extension the scene was built with
     } gpu_frame;
-    // Texture RAM as of the last upload, and which upload that was.
-    std::shared_ptr<const std::vector<uint16_t>> textures;
-    uint64_t textures_version = 0;
+    // Texture RAM rows the game wrote, copied for the window (its copy kept
+    // up to date with them; the GPU given only them).
+    struct TextureRows {
+        uint32_t first, count;
+        std::vector<uint16_t> texels;
+    };
+    std::vector<TextureRows> texture_rows;
 
     // Frames the boards have finished (all of them together): the window
     // waits on it, to show each frame as it is done.
@@ -299,6 +339,23 @@ public:
         std::lock_guard<std::mutex> guard(lock_);
         board_.set_volumes(sound, music);
     }
+    // Save states, as tools::FrameSound keeps them: the board, and the MIDI
+    // bytes it hasn't played yet (loaded, they play as soon as they can;
+    // `cycle`: the game's time now).
+    void state(m3::State& s, uint64_t cycle) {
+        std::lock_guard<std::mutex> guard(lock_);
+        board_.state(s);
+        double due = 0;
+        s.io(due);
+        std::vector<uint8_t> waiting;
+        for (const Byte& b : midi_) waiting.push_back(b.value);
+        s.io(waiting);
+        if (s.loading()) {
+            midi_.clear();
+            for (uint8_t b : waiting) midi_.push_back({b, static_cast<double>(cycle) * kSamplesPerCycle});
+            anchored_ = false;
+        }
+    }
     // Silent and still while the game is paused (the menu).
     void pause(bool on) {
         paused_ = on;
@@ -401,12 +458,25 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
     Screen& out = shared.screens[index];
     m3::Bus bus(roms);
     bus.set_security_key(game.security_key);
-    tools::set_rtc_to_host(bus);
+    const int64_t clock_start = tools::set_rtc_to_host(bus);
+    tools::RecordingWriter recording;
     {
         std::lock_guard<std::mutex> guard(shared.lock);
         if (out.eeprom.size() == 64) std::copy(out.eeprom.begin(), out.eeprom.end(), bus.eeprom().words().begin());
         if (out.backup.size() == m3::Bus::kBackupRamSize) std::copy(out.backup.begin(), out.backup.end(), bus.backup_ram().begin());
         out.bus = &bus;
+        if (index == 0 && !shared.record_path.empty()) {
+            std::string path = shared.record_path;
+            if (++shared.recordings > 1) {
+                const size_t dot = path.find_last_of('.');
+                const std::string n = "-" + std::to_string(shared.recordings);
+                path = dot == std::string::npos ? path + n : path.substr(0, dot) + n + path.substr(dot);
+            }
+            if (recording.open(path, clock_start, bus.eeprom().words(), bus.backup_ram()))
+                std::printf("spikeout: recording to %s\n", path.c_str());
+            else
+                std::printf("spikeout: can't record to %s\n", path.c_str());
+        }
     }
     if (shared.real_netboard) bus.use_netboard(std::make_unique<m3::CommBoard>(ring ? ring->port(index) : nullptr));
     else if (ring) bus.use_netboard(std::make_unique<m3::SimNetBoard>(ring->port(index)));
@@ -416,15 +486,44 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
     const uint8_t link_setting = index == 0 ? 1 : 2; // master, slave
 
     recomp::Context c(bus, functions);
+    const std::vector<recomp::FunctionEntry> blocks = tools::game_blocks();
+    c.set_blocks(blocks);
     recomp::FrameTiming timing;
     c.set_scheduler(&timing);
+    const std::function<void(m3::State&)> sound_state =
+        shared.sound && index == 0 ? std::function<void(m3::State&)>([&](m3::State& s) { shared.sound->state(s, c.cycles()); })
+                                   : std::function<void(m3::State&)>();
+    bool loaded = false;    // from a save state: the run resumes there
+    std::string load_error; // a state that doesn't fit stops the board, saying why
+    if (index == 0) {
+        std::string path;
+        {
+            std::lock_guard<std::mutex> guard(shared.lock);
+            path.swap(shared.load_path);
+        }
+        if (!path.empty()) {
+            try {
+                m3::State s(tools::read_file(path));
+                tools::board_state(s, c, timing, sound_state);
+                loaded = true;
+                std::printf("spikeout: loaded %s (frame %llu)\n", path.c_str(), static_cast<unsigned long long>(timing.frames()));
+            } catch (const std::exception& e) {
+                load_error = path + ": " + e.what();
+                std::printf("spikeout: can't load %s\n", load_error.c_str());
+            }
+            if (recording.is_open()) {
+                recording.close();
+                std::printf("spikeout: not recording (a recording starts at power-on)\n");
+            }
+        }
+    }
     m3::TilegenRenderer tilegen;
     m3::Real3dRenderer real3d;
     std::vector<uint32_t> screen(kWidth * kHeight);
 
     using clock = std::chrono::steady_clock;
     auto start = clock::now();
-    uint64_t paced_from = 0; // frame count at `start`
+    uint64_t paced_from = timing.frames(); // frame count at `start` (a save state's, loaded)
     timing.on_display_line = [&](uint32_t line) {
         if (line == 0) tilegen.begin_frame();
         tilegen.draw_line(bus, static_cast<int>(line));
@@ -466,7 +565,7 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
     m3::Real3dSceneBuilder builder;
     m3::WideLayer wide_bottom, wide_top;
     Shared::GpuFrame gpu_frame;
-    uint64_t textures_seen = UINT64_MAX;
+    bool textures_whole = true; // the next frame sends all of texture RAM
     timing.on_frame_end = [&] {
         if (shared.gpu_3d && index == 0) { // the scene and layers for the window to draw
             const m3::Real3d& mem = bus.real3d();
@@ -483,25 +582,35 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
                                gpu_frame.top_wide, true);
             }
             tilegen.set_extend(gpu_frame.extend);
+            {
+                const std::vector<uint32_t>& above = gpu_frame.extend > 0 ? gpu_frame.top_wide : gpu_frame.top;
+                gpu_frame.covered = !above.empty() && std::all_of(above.begin(), above.end(), [](uint32_t p) { return (p >> 24) != 0; });
+            }
             gpu_frame.number = timing.frames();
-            std::shared_ptr<const std::vector<uint16_t>> textures;
-            if (mem.textures_uploaded() != textures_seen) {
-                textures_seen = mem.textures_uploaded();
-                textures = std::make_shared<const std::vector<uint16_t>>(mem.texture_ram().begin(), mem.texture_ram().end());
+            gpu_frame.tile_control = bus.tile_reg(0x20);
+            for (uint32_t n = 0; n < 4; ++n) gpu_frame.tile_scroll[n] = bus.tile_reg(0x60 + 4 * n);
+            // The texture RAM rows written since the last frame, copied for
+            // the window (all of them the first time, or after the software 3D).
+            std::vector<Shared::TextureRows> rows;
+            {
+                auto runs = bus.real3d().take_written_rows();
+                if (textures_whole) runs.assign(1, {0u, m3::Real3d::kTextureHeight});
+                textures_whole = false;
+                for (const auto& [first, count] : runs) {
+                    const auto from = mem.texture_ram().begin() + static_cast<std::ptrdiff_t>(size_t{first} * m3::Real3d::kTextureWidth);
+                    rows.push_back({first, count, std::vector<uint16_t>(from, from + static_cast<std::ptrdiff_t>(size_t{count} * m3::Real3d::kTextureWidth))});
+                }
             }
             pace();
             std::lock_guard<std::mutex> guard(shared.lock);
             std::swap(shared.gpu_frame, gpu_frame);
-            if (textures) {
-                shared.textures = std::move(textures);
-                ++shared.textures_version;
-            }
+            for (auto& r : rows) shared.texture_rows.push_back(std::move(r));
             out.frame_number = timing.frames();
         } else {
             real3d.set_quads(shared.quads);
             real3d.render(bus.real3d());
             tilegen.composite(screen, real3d.image());
-            textures_seen = UINT64_MAX; // (the GPU, if turned on again, takes texture RAM afresh)
+            textures_whole = true; // (the GPU, if turned on again, takes texture RAM afresh)
             pace();
             std::lock_guard<std::mutex> guard(shared.lock);
             out.frame.swap(screen);
@@ -523,6 +632,25 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
         bus.inputs.bank0 = out.bank0;
         bus.inputs.bank1 = out.bank1;
         bus.inputs.controls = out.controls;
+        if (index == 0 && shared.save_request.exchange(false))
+            c.request_snapshot([&](uint32_t) {
+                const std::string path = "spikeout-" + std::to_string(timing.frames()) + ".state";
+                try {
+                    m3::State s;
+                    tools::board_state(s, c, timing, sound_state);
+                    if (!tools::write_file(path, s.data())) throw std::runtime_error("can't write it");
+                    std::lock_guard<std::mutex> guard(shared.lock);
+                    shared.last_state = path;
+                    std::printf("spikeout: saved %s\n", path.c_str());
+                } catch (const std::exception& e) {
+                    std::printf("spikeout: no save state %s: %s\n", path.c_str(), e.what());
+                }
+            });
+        if (recording.is_open()) {
+            const auto frame = static_cast<uint32_t>(timing.frames());
+            if (frame % tools::Recording::kHashEvery == 0) recording.hash(frame, tools::Recording::ram_hash(bus.ram()));
+            recording.inputs(frame, {bus.inputs.bank0, bus.inputs.bank1, bus.inputs.controls, bus.inputs.controls2});
+        }
         if (shared.max_frames && timing.frames() >= shared.max_frames) shared.quit = true;
         if (shared.quit) throw Stop{};
     };
@@ -530,6 +658,8 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
     std::string why;
     turns.wait(index);
     try {
+        if (!load_error.empty()) throw recomp::GuestError(c.cpu.pc, "save state " + load_error);
+        if (loaded) c.resume_block(c.cpu.pc);
         c.call(c.cpu.pc);
         why = "the reset code returned";
     } catch (const Stop&) {
@@ -596,10 +726,11 @@ int music_volume(const tools::Settings& s) { return s.music_volume * s.volume / 
 
 int main(int argc, char** argv) {
     const char* dir = nullptr;
+    std::string record_path, load_state;
     int scale = 0, cli_render_scale = 0, cli_sound = -1, cli_music = -1;
     bool real_netboard = true;
     uint64_t max_frames = 0;
-    bool mute = false, cli_quads = false, midi_burst = false, dma_instant = false, use_gpu = true, cli_soft_3d = false, fifo = false,
+    bool mute = false, cli_quads = false, cli_smooth = false, cli_smooth_log = false, midi_burst = false, dma_instant = false, use_gpu = true, cli_soft_3d = false, fifo = false,
          sleep_pacing = false, list_audio = false;
     std::size_t boards = 1;
     for (int i = 1; i < argc; ++i) {
@@ -610,6 +741,10 @@ int main(int argc, char** argv) {
         else if (arg == "--boards" && i + 1 < argc)
             boards = std::clamp<std::size_t>(std::strtoull(argv[++i], nullptr, 0), 1, kMaxBoards);
         else if (arg == "--quads") cli_quads = true;
+        else if (arg == "--smooth") cli_smooth = true;
+        else if (arg == "--record" && i + 1 < argc) record_path = argv[++i];
+        else if (arg == "--load-state" && i + 1 < argc) load_state = argv[++i];
+        else if (arg == "--smooth-log") cli_smooth = cli_smooth_log = true;
         else if (arg == "--midi-burst") midi_burst = true;
         else if (arg == "--dma-instant") dma_instant = true;
         else if (arg == "--mute") mute = true;
@@ -668,6 +803,7 @@ int main(int argc, char** argv) {
     tools::Settings settings = tools::load_settings(settings_path);
     if (cli_render_scale) settings.render_scale = cli_render_scale;
     if (cli_quads) settings.quads = true;
+    if (cli_smooth) settings.smooth_motion = true;
     if (cli_soft_3d) settings.gpu_3d = false;
     if (cli_sound >= 0) settings.sound_volume = cli_sound;
     if (cli_music >= 0) settings.music_volume = cli_music;
@@ -718,6 +854,8 @@ int main(int argc, char** argv) {
     Shared shared;
     shared.boards = boards;
     shared.max_frames = max_frames;
+    shared.record_path = record_path;
+    shared.load_path = shared.last_state = load_state;
     shared.real_netboard = real_netboard;
     shared.quads = settings.quads;
     shared.midi_burst = midi_burst;
@@ -787,13 +925,32 @@ int main(int argc, char** argv) {
     };
     set_up_3d();
     Shared::GpuFrame gpu_frame; // the frame the window shows
-    std::shared_ptr<const std::vector<uint16_t>> textures;
-    uint64_t textures_version = 0;
+    // Smooth motion: the frame before it (its scene and number), when the
+    // newest came, the display clock (in frames), the last picture's time,
+    // and the scene between the two.
+    struct Smooth {
+        m3::Real3dScene before, between;
+        uint64_t before_number = 0;
+        // The sky (the layers below the 3D) as it moved from the frame before
+        // (m3::TilegenRenderer::find_move): drawn moved back part of the way.
+        std::vector<uint32_t> before_bottom;
+        int move_x = 0, move_y = 0;
+        std::chrono::steady_clock::time_point arrived{}, last_picture{}, due{};
+        double clock = 0;
+        double picture_seconds = 1.0 / 60; // the display's refresh, at most 120 a second
+        double picture_average = 1.0 / 60; // the pictures' time apart, averaged: the clock's step
+    } smooth;
+    // Texture RAM as the game thread's rows have brought it (`textures`: some
+    // came); a renderer made afresh takes it whole (its version differs), then
+    // only the rows that change.
+    std::vector<uint16_t> texture_copy(size_t{m3::Real3d::kTextureWidth} * m3::Real3d::kTextureHeight);
+    bool textures = false;
+    const uint64_t textures_version = 1;
     // Reads the GPU's 3D back and composes the screen (F12, the end of a test
     // run), at 496x384: drawn larger, every draw_scale-th pixel.
     auto capture = [&] {
         std::vector<uint32_t> drawn, three_d(static_cast<std::size_t>(kWidth) * kHeight);
-        if (textures && real3d_gpu) real3d_gpu->render(gpu_frame.scene, *textures, textures_version, &drawn);
+        if (textures && real3d_gpu) real3d_gpu->render(gpu_frame.scene, texture_copy, textures_version, &drawn);
         const auto s = static_cast<std::size_t>(std::max(draw_scale, 1));
         // (widescreen: the arcade's screen from the middle)
         const auto e = static_cast<std::size_t>(real3d_gpu ? real3d_gpu->extend() : 0);
@@ -864,7 +1021,18 @@ int main(int argc, char** argv) {
     bool running = true;
     std::size_t reported = 0;
     auto fps_start = std::chrono::steady_clock::now();
-    uint64_t fps_frames = 0, frames_shown = 0; // in the last second: frames run, and pictures shown
+    uint64_t fps_frames = 0, frames_shown = 0, pictures_shown = 0; // in the last second: frames run, shown, and (smooth motion) pictures
+    // Tests: SPIKEOUT_SMOOTH_LOG=1 (or --smooth-log, into smooth_log.txt by
+    // the program) prints smooth motion's pictures a second, how evenly its
+    // clock went from one to the next, and what the pictures cost.
+    std::FILE* smooth_log_file = stdout;
+    if (cli_smooth_log)
+        if (const char* base = SDL_GetBasePath())
+            if (std::FILE* f = std::fopen((std::string(base) + "smooth_log.txt").c_str(), "w")) smooth_log_file = f;
+    const bool smooth_log = cli_smooth_log || std::getenv("SPIKEOUT_SMOOTH_LOG") != nullptr;
+    double smooth_log_clock = 0, smooth_log_sum = 0, smooth_log_sq = 0, smooth_log_draw = 0, smooth_log_present = 0,
+           smooth_log_longest = 0;
+    uint64_t smooth_log_n = 0, smooth_log_between = 0;
     // The arcade's test and service buttons, held for a moment from the menu.
     auto test_until = std::chrono::steady_clock::time_point{}, service_until = test_until;
 
@@ -1262,7 +1430,31 @@ int main(int argc, char** argv) {
         // Each frame shown as soon as it is finished (and, with the game
         // paused or stopped, the menu and events 50 times a second: longer
         // than a frame, 17.4 ms).
-        {
+        // Smooth motion: a picture each refresh of the display instead, its
+        // time held to (slept to 1 ms before with SDL's precise delay, then
+        // waited for: Windows' plain sleep wakes on its 15.6 ms tick, which
+        // held the pictures to 64 a second on a 99 Hz screen).
+#ifdef SPIKEOUT_GPU
+        const bool smoothing = settings.smooth_motion && on_gpu && shared.gpu_3d && real3d_gpu;
+#else
+        const bool smoothing = false;
+#endif
+        if (smoothing) {
+            using clock = std::chrono::steady_clock;
+            // (each picture's time a refresh after the last's; fallen behind
+            // by more than a refresh: from now)
+            const auto period =
+                std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(smooth.picture_seconds));
+            smooth.due += period;
+            if (smooth.due + period < clock::now()) smooth.due = clock::now();
+            const auto due = smooth.due;
+            const auto rest = due - clock::now() - std::chrono::milliseconds(1);
+            if (rest > clock::duration::zero())
+                SDL_DelayPrecise(static_cast<Uint64>(std::chrono::duration_cast<std::chrono::nanoseconds>(rest).count()));
+            while (clock::now() < due) std::this_thread::yield();
+            std::lock_guard<std::mutex> guard(shared.lock);
+            frames_seen = shared.frames_done;
+        } else {
             std::unique_lock<std::mutex> guard(shared.lock);
             shared.frame_done.wait_for(guard, std::chrono::milliseconds(20),
                                        [&] { return shared.frames_done != frames_seen; });
@@ -1314,6 +1506,23 @@ int main(int argc, char** argv) {
                 if (shared.gpu_3d) shown = capture();
 #endif
                 if (tools::write_png(path, shown, width, height)) std::printf("screenshot: %s\n", path.c_str());
+            }
+            if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_F9 && !e.key.repeat) {
+                if (boards == 1) {
+                    shared.save_request = true;
+                    std::printf("spikeout: saving at the end of the frame\n");
+                } else {
+                    std::printf("spikeout: save states are for one board\n");
+                }
+            }
+            if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_F10 && !e.key.repeat && boards == 1) {
+                std::string last;
+                {
+                    std::lock_guard<std::mutex> guard(shared.lock);
+                    last = shared.last_state;
+                }
+                if (last.empty()) std::printf("spikeout: no save state yet (F9 saves one)\n");
+                else reset_game([&] { shared.load_path = last; });
             }
             if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode >= SDL_SCANCODE_F5 && e.key.scancode <= SDL_SCANCODE_F8) {
                 const auto board = static_cast<std::size_t>(e.key.scancode - SDL_SCANCODE_F5);
@@ -1368,11 +1577,29 @@ int main(int argc, char** argv) {
             // A newer frame for the GPU to draw (the swap leaves the older one
             // in its place, for the game thread to fill next).
             if (shared.gpu_3d && shared.gpu_frame.number > gpu_frame.number) {
-                std::swap(gpu_frame, shared.gpu_frame);
-                if (shared.textures_version != textures_version) {
-                    textures = shared.textures;
-                    textures_version = shared.textures_version;
+                const bool keep = settings.smooth_motion;
+                if (keep) { // kept, to draw between it and the newest
+                    smooth.before = gpu_frame.scene;
+                    smooth.before_number = gpu_frame.number;
+                    smooth.before_bottom = gpu_frame.bottom;
+                    smooth.arrived = now;
                 }
+                const uint32_t sky_before = gpu_frame.tile_scroll[3];
+                std::swap(gpu_frame, shared.gpu_frame);
+                // The sky's move: layer 3 below the 3D, its scroll the register's (not a value a line).
+                smooth.move_x = smooth.move_y = 0;
+                const uint32_t sky = gpu_frame.tile_scroll[3];
+                if (keep && smooth.before_number + 1 == gpu_frame.number && (sky & 0x80000000u) && !(sky & 0x8000) &&
+                    !(gpu_frame.tile_control & 0x800))
+                    m3::TilegenRenderer::find_move(smooth.before_bottom, gpu_frame.bottom, sky_before, sky, smooth.move_x,
+                                                   smooth.move_y);
+                for (const auto& r : shared.texture_rows) { // into the copy, and for the GPU
+                    std::copy(r.texels.begin(), r.texels.end(),
+                              texture_copy.begin() + static_cast<std::ptrdiff_t>(size_t{r.first} * m3::Real3d::kTextureWidth));
+                    if (real3d_gpu) real3d_gpu->textures_changed(r.first, r.count);
+                    textures = true;
+                }
+                shared.texture_rows.clear();
             }
 #endif
             if (max_frames && reported == (1u << boards) - 1) { // a test run: keep the last frames and close
@@ -1392,32 +1619,106 @@ int main(int argc, char** argv) {
             SDL_SetWindowTitle(window, title);
 #ifdef SPIKEOUT_GPU
             // Show FPS: the frames the window showed (the title: the frames the game ran).
+            // With smooth motion: the pictures, each between two frames.
             if (menu_ready) {
                 char shown_rate[32] = "";
+                const uint64_t shown_count = smoothing ? pictures_shown : frames_shown;
                 if (settings.show_fps)
-                    std::snprintf(shown_rate, sizeof shown_rate, "%.1f FPS", static_cast<double>(frames_shown) / secs);
+                    std::snprintf(shown_rate, sizeof shown_rate, "%.1f FPS", static_cast<double>(shown_count) / secs);
                 menu.set_fps(shown_rate);
             }
+            // The display's refresh (it may have moved to another): smooth
+            // motion's pictures, at most 120 a second.
+            if (const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window)))
+                smooth.picture_seconds = 1.0 / std::clamp(mode->refresh_rate > 0 ? static_cast<double>(mode->refresh_rate) : 60.0,
+                                                          30.0, 120.0);
 #endif
+            if (smooth_log && smoothing && smooth_log_n > 1) {
+                const double mean = smooth_log_sum / static_cast<double>(smooth_log_n);
+                const double spread = std::sqrt(std::max(0.0, smooth_log_sq / static_cast<double>(smooth_log_n) - mean * mean));
+                const double pictures = static_cast<double>(std::max<uint64_t>(pictures_shown, 1));
+                std::fprintf(smooth_log_file, "smooth motion: %llu pictures (%llu between frames) a second; the clock %.3f frames a picture, "
+                            "spread %.3f; a picture %.2f ms drawing the 3D, %.2f presenting, %.1f apart at most; the display "
+                            "%.1f Hz; frames %llu; %zu polygons, render scale %d\n",
+                            static_cast<unsigned long long>(pictures_shown), static_cast<unsigned long long>(smooth_log_between),
+                            mean, spread, 1000.0 * smooth_log_draw / pictures, 1000.0 * smooth_log_present / pictures,
+                            1000.0 * smooth_log_longest, 1.0 / smooth.picture_seconds,
+                            static_cast<unsigned long long>(fps_frames), gpu_frame.scene.polygons.size(), draw_scale);
+                std::fflush(smooth_log_file);
+            }
+            smooth_log_sum = smooth_log_sq = smooth_log_draw = smooth_log_present = smooth_log_longest = 0;
+            smooth_log_n = smooth_log_between = 0;
             fps_start = now;
             fps_frames = 0;
             frames_shown = 0;
+            pictures_shown = 0;
         }
 #ifdef SPIKEOUT_GPU
         if (on_gpu && shared.gpu_3d && real3d_gpu) {
             if (textures && !gpu_frame.bottom.empty()) {
-                if (gpu_frame.number != drawn_number) {
-                    real3d_gpu->render(gpu_frame.scene, *textures, textures_version);
+                bool between = false;
+                float sky_shift_x = 0, sky_shift_y = 0;
+                if (smoothing) {
+                    // The display clock: the pictures' average time apart on
+                    // (an even step: each picture's own time would carry its
+                    // wake-up's wobble), pulled a tenth of the way to where the
+                    // newest frame says it is (it shows, as it comes, the frame
+                    // before; a frame on, itself). Off by more than 2 frames (a
+                    // pause, a stall): taken whole.
+                    const auto at = std::chrono::steady_clock::now();
+                    constexpr double kFrame = 1.0 / recomp::FrameTiming::kRefreshHz;
+                    const double newest = static_cast<double>(gpu_frame.number);
+                    const double target = newest - 1 + std::chrono::duration<double>(at - smooth.arrived).count() / kFrame;
+                    const double apart = std::chrono::duration<double>(at - smooth.last_picture).count();
+                    if (smooth_log && apart < 1) smooth_log_longest = std::max(smooth_log_longest, apart);
+                    if (apart < 3 * smooth.picture_seconds) smooth.picture_average += 0.05 * (apart - smooth.picture_average);
+                    smooth.clock += smooth.picture_average / kFrame;
+                    smooth.clock = std::fabs(smooth.clock - target) > 2 ? target : smooth.clock + 0.1 * (target - smooth.clock);
+                    smooth.last_picture = at;
+                    const double t = smooth.clock - (newest - 1);
+                    if (smooth_log) { // tests: how evenly the clock went, picture to picture
+                        const double step = smooth.clock - smooth_log_clock;
+                        smooth_log_clock = smooth.clock;
+                        if (step > 0 && step < 2) {
+                            smooth_log_sum += step;
+                            smooth_log_sq += step * step;
+                            ++smooth_log_n;
+                        }
+                    }
+                    if (smooth.before_number + 1 == gpu_frame.number && t < 1 && !gpu_frame.covered) {
+                        between = m3::interpolate(smooth.before, gpu_frame.scene, static_cast<float>(std::max(t, 0.0)),
+                                                  smooth.between);
+                        if (between) {
+                            real3d_gpu->render(smooth.between, texture_copy, textures_version);
+                            drawn_number = 0; // the frame itself drawn again when it's shown
+                            ++smooth_log_between;
+                            // the sky where it was then: now's, back by the rest of the move
+                            const double back = 1 - std::max(t, 0.0);
+                            sky_shift_x = static_cast<float>(back * smooth.move_x);
+                            sky_shift_y = static_cast<float>(back * smooth.move_y);
+                        }
+                    }
+                    ++pictures_shown;
+                }
+                if (!between && gpu_frame.number != drawn_number) {
+                    if (!gpu_frame.covered) real3d_gpu->render(gpu_frame.scene, texture_copy, textures_version);
                     drawn_number = gpu_frame.number;
                 }
+                const auto drawn_at = std::chrono::steady_clock::now();
                 const int extend = real3d_gpu->extend();
                 const bool wide = extend > 0 && extend == gpu_frame.extend &&
                                   gpu_frame.bottom_wide.size() == static_cast<std::size_t>(kWidth + 2 * extend) * kHeight;
                 if (wide)
                     presenter->present_layers(gpu_frame.bottom_wide, gpu_frame.top_wide, real3d_gpu->display_image(), kWidth,
-                                              kHeight, extend);
+                                              kHeight, extend, sky_shift_x, sky_shift_y);
                 else
-                    presenter->present_layers(gpu_frame.bottom, gpu_frame.top, real3d_gpu->display_image(), kWidth, kHeight);
+                    presenter->present_layers(gpu_frame.bottom, gpu_frame.top, real3d_gpu->display_image(), kWidth, kHeight, 0,
+                                              sky_shift_x, sky_shift_y);
+                if (smooth_log && smoothing) {
+                    const auto presented_at = std::chrono::steady_clock::now();
+                    smooth_log_draw += std::chrono::duration<double>(drawn_at - smooth.last_picture).count();
+                    smooth_log_present += std::chrono::duration<double>(presented_at - drawn_at).count();
+                }
             } else {
                 presenter->present(shown, width, height);
             }

@@ -1,4 +1,5 @@
 #include "runtime/rtc.hpp"
+#include "runtime/state.hpp"
 
 namespace m3 {
 
@@ -168,6 +169,12 @@ void Rtc72421::write(uint32_t reg, uint8_t value, uint64_t now) {
     if (stopped_) stopped_frac_ = frac;
     else anchor_ = now - frac;
     weekday_offset_ += weekday(t) - weekday(written); // the day of the week counts on its own
+}
+
+void Rtc72421::state(State& s) {
+    s.tag("rtc");
+    s.io(base_), s.io(anchor_), s.io(stopped_), s.io(stopped_frac_), s.io(weekday_offset_);
+    s.io(cd_), s.io(ce_), s.io(cf_);
 }
 
 } // namespace m3

@@ -1,4 +1,5 @@
 #include "runtime/usart8251.hpp"
+#include "runtime/state.hpp"
 
 #include <algorithm>
 
@@ -85,6 +86,14 @@ uint8_t Usart8251::status(uint64_t now) {
     if (!buffered_) s |= 0x01;
     if (!buffered_ && !shifting_) s |= 0x04;
     return s;
+}
+
+void state_fields(State& s, SerialByte& b) { s.io(b.value), s.io(b.cycle); }
+
+void Usart8251::state(State& s) {
+    s.tag("usart");
+    s.io(expect_mode_), s.io(sync_left_), s.io(mode_), s.io(command_), s.io(buffered_), s.io(buffer_);
+    s.io(buffer_from_), s.io(shifting_), s.io(shift_), s.io(shift_end_), s.io(sent_);
 }
 
 } // namespace m3

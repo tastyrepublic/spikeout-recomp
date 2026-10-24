@@ -55,16 +55,28 @@ public:
     void render(const m3::Real3d& mem, const m3::Real3dScene& scene, std::vector<uint32_t>* pixels = nullptr) {
         render(scene, mem.texture_ram(), mem.textures_uploaded(), pixels);
     }
-    // The same from a copy of texture RAM (2048 x 2048), uploaded when
-    // `texture_version` differs from the last frame's.
+    // The same from a copy of texture RAM (2048 x 2048), uploaded whole when
+    // `texture_version` differs from the last frame's, else the rows marked
+    // changed (textures_changed) since.
     void render(const m3::Real3dScene& scene, std::span<const uint16_t> texture_ram, uint64_t texture_version,
                 std::vector<uint32_t>* pixels = nullptr);
+    // Rows of that copy changed (rows `first` on): uploaded by the next render.
+    void textures_changed(uint32_t first, uint32_t rows) { changed_rows_.emplace_back(first, rows); }
 
     // Quads drawn whole (default: as two triangles).
     void set_quads(bool on) { quads_on_ = on; }
 
-    // The picture as read back (straight alpha), and for showing:
-    // premultiplied alpha, with mipmaps.
+    // What the last render cost the CPU (ms): packing the scene for the GPU,
+    // uploading it, recording the passes; and the passes and draws recorded.
+    struct Cost {
+        double pack_ms = 0, upload_ms = 0, record_ms = 0;
+        int passes = 0, draws = 0;
+    };
+    const Cost& cost() const { return cost_; }
+
+    // The picture as read back (straight alpha; drawn only when render is
+    // asked for the pixels), and for showing: premultiplied alpha, with
+    // mipmaps.
     SDL_GPUTexture* image() const { return output_; }
     SDL_GPUTexture* display_image() const { return display_; }
     int width() const { return (kWidth + 2 * extend_) * scale_; }
@@ -97,7 +109,11 @@ private:
     std::string error_;
 
     // opaque_ and trans_ by [kind * 2 + decal].
-    SDL_GPUGraphicsPipeline *fog_ = nullptr, *opaque_[kKinds * 2] = {}, *trans_[kKinds * 2] = {}, *composite_ = nullptr;
+    // opaque_first_: the first group's, not writing the translucency layers
+    // (just cleared); composite_shown_: only the window's picture, not the
+    // one read back.
+    SDL_GPUGraphicsPipeline *fog_ = nullptr, *opaque_[kKinds * 2] = {}, *opaque_first_[kKinds * 2] = {},
+                            *trans_[kKinds * 2] = {}, *composite_ = nullptr, *composite_shown_ = nullptr;
     SDL_GPUSampler* nearest_ = nullptr;
     SDL_GPUTexture *colour_ = nullptr, *layers_[2] = {}, *depth_copy_ = nullptr, *depth_ = nullptr, *trans_depth_ = nullptr,
                    *output_ = nullptr, *display_ = nullptr, *texture_ram_ = nullptr;
@@ -107,10 +123,13 @@ private:
     uint32_t vertex_capacity_ = 0, polygon_capacity_ = 0, viewport_capacity_ = 0, quad_capacity_ = 0;
     uint32_t display_levels_ = 1;
     bool quads_on_ = false;
-    // Which texture RAM the GPU has (render's texture_version).
+    // Which texture RAM the GPU has (render's texture_version), and its rows
+    // changed since.
     uint64_t texture_version_ = UINT64_MAX;
+    std::vector<std::pair<uint32_t, uint32_t>> changed_rows_;
 
     std::vector<uint8_t> vertices_, polygons_, viewports_, quads_; // this frame's, as uploaded
+    Cost cost_;
     std::vector<Group> groups_;
 };
 

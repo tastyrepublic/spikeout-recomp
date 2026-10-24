@@ -1,4 +1,5 @@
 #include "runtime/real3d.hpp"
+#include "runtime/state.hpp"
 
 #include <algorithm>
 
@@ -143,6 +144,21 @@ void Real3d::begin_vblank(uint32_t mercury_mode) {
     flipped_ = false;
 }
 
+std::vector<std::pair<uint32_t, uint32_t>> Real3d::take_written_rows() {
+    std::vector<std::pair<uint32_t, uint32_t>> runs;
+    for (uint32_t y = 0; y < kTextureHeight;) {
+        if (!rows_written_[y]) {
+            ++y;
+            continue;
+        }
+        uint32_t end = y;
+        while (end < kTextureHeight && rows_written_[end]) rows_written_[end++] = 0;
+        runs.emplace_back(y, end - y);
+        y = end;
+    }
+    return runs;
+}
+
 void Real3d::flush_textures() {
     // The FIFO holds textures back to back: a length word (in 16-bit
     // units, roughly), the header, then the data.
@@ -194,6 +210,7 @@ void Real3d::store(uint32_t x0, uint32_t y0, uint32_t width, uint32_t height, st
     const uint32_t tw = std::min(8u, width), th = std::min(8u, height);
     auto get = [&](size_t i) -> uint16_t { return i < data.size() ? data[i] : 0; };
     used = 0;
+    for (uint32_t r = 0; r < height && r < kTextureHeight; ++r) rows_written_[(y0 + r) & 2047] = 1;
     if (sixteen_bit) {
         for (uint32_t ty = y0; ty < y0 + height; ty += th)
             for (uint32_t tx = x0; tx < x0 + width; tx += tw) {
@@ -222,6 +239,15 @@ void Real3d::store(uint32_t x0, uint32_t y0, uint32_t width, uint32_t height, st
                     }
             used += step;
         }
+}
+
+void Real3d::state(State& s) {
+    s.tag("real3d");
+    s.fixed(culling_lo_), s.fixed(culling_hi_), s.fixed(polygon_), s.fixed(texture_);
+    for (UpdateBuffer* b : {&high_buffer_, &polygon_buffer_}) s.io(b->cursor), s.io(b->block), s.io(b->used);
+    s.io(flipped_), s.io(command_written_), s.io(tilegen_drew_), s.io(block_culling_);
+    s.io(config_), s.io(fifo_), s.io(textures_uploaded_);
+    if (s.loading()) std::fill(rows_written_.begin(), rows_written_.end(), uint8_t{1}); // a renderer's copy is stale
 }
 
 } // namespace m3

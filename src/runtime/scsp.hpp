@@ -17,6 +17,8 @@
 
 namespace m3 {
 
+class State;
+
 class Scsp {
 public:
     static constexpr uint32_t kRamSize = 0x80000; // 512 KB per chip (MAME's map; Supermodel gives it 1 MB)
@@ -50,6 +52,8 @@ public:
     int active_slots() const;
     uint16_t common_reg(uint32_t addr) const { return regs_[(addr & 0x3E) / 2]; } // 0x400-0x42F, as last written
     uint16_t slot_reg(int slot, uint32_t addr) const { return slots_[static_cast<std::size_t>(slot & 31)].data[(addr & 0x1E) / 2]; }
+
+    void state(State& s); // save states (runtime/state.hpp)
 
 private:
     struct Lfo {

@@ -27,6 +27,8 @@
 
 namespace m3 {
 
+class State;
+
 class Eeprom93C46 {
 public:
     explicit Eeprom93C46(uint64_t cpu_hz = 166'000'000) : cpu_hz_(cpu_hz) { erase_all(); }
@@ -42,6 +44,8 @@ public:
 
     // Self-timed programming cycles, in microseconds.
     static constexpr uint64_t kWriteUs = 1750, kEraseUs = 1000, kAllUs = 8000;
+
+    void state(State& s); // save states (runtime/state.hpp)
 
 private:
     std::array<uint16_t, 64> words_{};

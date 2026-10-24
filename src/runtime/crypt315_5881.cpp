@@ -41,6 +41,7 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 #include "runtime/crypt315_5881.hpp"
+#include "runtime/state.hpp"
 
 #include <algorithm>
 #include <utility>
@@ -663,6 +664,14 @@ void Crypt315_5881::line_fill() {
         }
     }
     if (++block_pos_ == block_numlines_) done_compression_ = true;
+}
+
+void Crypt315_5881::state(State& s) {
+    s.tag("crypt");
+    s.io(buffer_), s.io(line_buffer_), s.io(line_buffer_prev_), s.io(prot_cur_address_), s.io(subkey_);
+    s.io(dec_hist_), s.io(dec_header_), s.io(enc_ready_), s.io(buffer_pos_), s.io(line_buffer_pos_);
+    s.io(line_buffer_size_), s.io(buffer_bit_), s.io(buffer_bit2_), s.io(buffer2_), s.io(buffer2a_);
+    s.io(block_size_), s.io(block_pos_), s.io(block_numlines_), s.io(done_compression_);
 }
 
 } // namespace m3

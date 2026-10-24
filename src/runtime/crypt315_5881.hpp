@@ -17,6 +17,8 @@
 
 namespace m3 {
 
+class State;
+
 class Crypt315_5881 {
 public:
     // `read` returns the encrypted word at a word address in the board's RAM.
@@ -36,6 +38,8 @@ public:
 
     // The block cipher alone: one encrypted word at `counter`.
     static uint16_t block_decrypt(uint32_t game_key, uint16_t sequence_key, uint16_t counter, uint16_t data);
+
+    void state(State& s); // save states (runtime/state.hpp); not the key or the reader
 
 private:
     static constexpr int kBufferSize = 2, kLineSize = 512;

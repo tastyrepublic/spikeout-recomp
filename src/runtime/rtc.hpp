@@ -24,6 +24,8 @@
 
 namespace m3 {
 
+class State;
+
 class Rtc72421 {
 public:
     // `clock_hz`: cycles per second of the `now` values passed in.
@@ -43,6 +45,8 @@ public:
     };
     static Date to_date(int64_t seconds);
     static int64_t to_seconds(const Date& d);
+
+    void state(State& s); // save states (runtime/state.hpp)
 
 private:
     uint64_t hz_;
