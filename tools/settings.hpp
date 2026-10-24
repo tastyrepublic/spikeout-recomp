@@ -29,6 +29,9 @@ constexpr std::array<const char*, kActions> kActionKeys = {"coin", "start", "up"
 struct Settings {
     // Display
     int render_scale = 0;  // the 3D's size: 0 Auto (fits the window), else 1-6 times the arcade's 384 lines
+    // Picture shape: 0 the arcade's (496 x 384), 1 the window's, 2 16:10, 3 16:9,
+    // 4 21:9 (widescreen: the gameplay's 3D wider, the 2D in the middle)
+    int picture_shape = 0;
     int antialiasing = 1;  // drawn this many times larger each way and averaged down (1: off)
     bool quads = false;    // quads drawn whole
     bool gpu_3d = true;    // the 3D on the GPU (else in software)
@@ -87,6 +90,7 @@ inline Settings load_settings(const std::string& path) {
         if (auto it = v.find(key); it != v.end()) out = it->second == "1" || it->second == "on" || it->second == "true";
     };
     get("render_scale", s.render_scale, 0, 6);
+    get("picture_shape", s.picture_shape, 0, 4);
     get("antialiasing", s.antialiasing, 1, 4);
     get_bool("quads", s.quads);
     get_bool("gpu_3d", s.gpu_3d);
@@ -110,6 +114,7 @@ inline bool save_settings(const std::string& path, const Settings& s) {
     std::ostringstream o;
     o << "# Spikeout recomp settings (the in-game menu writes this file)\n";
     o << "render_scale = " << s.render_scale << "\n";
+    o << "picture_shape = " << s.picture_shape << "\n";
     o << "antialiasing = " << s.antialiasing << "\n";
     o << "quads = " << (s.quads ? 1 : 0) << "\n";
     o << "gpu_3d = " << (s.gpu_3d ? 1 : 0) << "\n";

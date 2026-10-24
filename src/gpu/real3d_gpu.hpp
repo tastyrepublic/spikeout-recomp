@@ -43,7 +43,10 @@ class Real3dGpu {
 public:
     static constexpr int kWidth = 496, kHeight = 384;
 
-    bool open(Device& device, int scale = 1);
+    // `extend`: widescreen, the picture that many screen pixels wider each
+    // side (m3::Real3dSceneBuilder::set_extend), the 496 x 384 screen in
+    // its middle.
+    bool open(Device& device, int scale = 1, int extend = 0);
     ~Real3dGpu();
     const std::string& error() const { return error_; }
 
@@ -64,7 +67,8 @@ public:
     // premultiplied alpha, with mipmaps.
     SDL_GPUTexture* image() const { return output_; }
     SDL_GPUTexture* display_image() const { return display_; }
-    int width() const { return kWidth * scale_; }
+    int width() const { return (kWidth + 2 * extend_) * scale_; }
+    int extend() const { return extend_; }
     int height() const { return kHeight * scale_; }
 
 private:
@@ -89,6 +93,7 @@ private:
 
     Device* device_ = nullptr;
     int scale_ = 1;
+    int extend_ = 0;
     std::string error_;
 
     // opaque_ and trans_ by [kind * 2 + decal].

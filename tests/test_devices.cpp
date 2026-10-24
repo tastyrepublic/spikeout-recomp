@@ -10,6 +10,7 @@
 #include "runtime/scsp.hpp"
 #include "runtime/soundboard.hpp"
 #include "runtime/tilegen.hpp"
+#include "runtime/widescreen.hpp"
 #include "../tools/arcade_settings.hpp"
 
 #include <algorithm>
@@ -366,6 +367,87 @@ TEST_CASE("tilegen: 4- and 8-bit tiles, scroll, line mask, transparency, colour 
     r.composite(out);
     CHECK_EQ(out[0], 0xFF0000FFu);
     CHECK_EQ(out[TilegenRenderer::kWidth], 0xFF000000u); // line 1 not drawn: black
+}
+
+TEST_CASE("widescreen: the 2D layers' sides") {
+    constexpr int w = TilegenRenderer::kWidth, h = TilegenRenderer::kHeight, e = 50, wide = w + 2 * e;
+    std::vector<uint32_t> layer(w * h, 0xFF808080u), out;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < 16; x += 2) layer[y * w + x] = 0xFF888888u; // dithered: carried, averaged
+    for (int x = w - 16; x < w; ++x) layer[200 * w + x] = 0xFFFF0000u; // a plain red row
+    layer[300 * w + w - 5] = 0xFFFFFFFFu;                              // a speck: not plain, nor its neighbours
+    // Rows 100-109 on the right: a texture repeating every 40 pixels.
+    for (int y = 100; y < 110; ++y)
+        for (int x = 0; x < w; ++x) layer[y * w + x] = 0xFF000000u | static_cast<uint32_t>((x * 6) % 240);
+    WideLayer sides;
+    sides.build(layer, {}, e, out);
+    CHECK_EQ(out[e], layer[0]);                            // the picture in the middle
+    CHECK_EQ(out[e - 1], layer[7]);                        // left of row 0: its last 8 pixels repeated, dither kept
+    CHECK_EQ(out[e - 2], layer[6]);
+    CHECK_EQ(out[e - 9], layer[7]);
+    CHECK_EQ(out[wide - 1], 0xFF808080u);                  // right of row 0
+    CHECK_EQ(out[200 * wide + wide - 1], 0xFFFF0000u);
+    CHECK_EQ(out[300 * wide + wide - 1], 0xFF808080u); // not plain itself: as the nearest carried row
+    CHECK_EQ(out[299 * wide + wide - 1], 0xFF808080u);
+    CHECK_EQ(out[302 * wide + wide - 1], 0xFF808080u);
+    // the texture carried on: d pixels out shows the pixel 40 - d back in
+    for (int d = 1; d <= e; ++d) CHECK_EQ(out[105 * wide + e + w - 1 + d], layer[105 * w + w - 1 + d - 40 * ((d + 39) / 40)]);
+
+    // What the tile generator drew itself comes first.
+    std::vector<uint32_t> side(2 * e * h, 0u);
+    side[0] = 0xFF00FF00u; // row 0, the far left
+    sides.build(layer, side, e, out);
+    CHECK_EQ(out[0], 0xFF00FF00u);
+
+    // A picture plain or repeating at the edge on under 60% of its rows: nothing carried.
+    uint32_t noise = 1;
+    for (int y = 0; y < h / 2; ++y)
+        for (int x = 0; x < w; ++x) {
+            noise = noise * 1103515245u + 12345u;
+            layer[y * w + x] = 0xFF000000u | (noise >> 8 & 0xFFFFFFu);
+        }
+    sides.build(layer, {}, e, out);
+    CHECK_EQ(out[300 * wide + e - 1], 0u);
+}
+
+TEST_CASE("tilegen: widescreen sides from looping lines") {
+    TileRam ram;
+    std::array<uint32_t, 64> regs{};
+    regs[0x20 / 4] = 0x100;                  // layer 0 above the 3D, 8-bit
+    regs[0x60 / 4] = 0x80000000u | 0x8000u;  // layer 0 on, a scroll value per line
+    ram.put(0xF6000, 100u << 16);            // line 0 scrolled by 100, the rest not
+    for (uint32_t i = 0; i < 32; ++i) ram.put(0xF8000 + i * 4, 0x00010001u); // row 0: tile 1 everywhere
+    ram.put(0xF8000 + 15 * 4, 0x00020001u);                                  // but column 30 (a picture's row)
+    ram.put(64, 0x05050505u);                                                // tile 1's first row: colour 5
+    ram.put(68, 0x05050505u);
+    ram.put(0x100000 + 5 * 4, 0x001Fu); // red
+    ram.put(0xF7000, 0xFFFF0000u);
+    TilegenRenderer r;
+    r.set_extend(20);
+    r.begin_frame();
+    r.draw_line(ram.bytes, regs, 0);
+    CHECK_EQ(r.top()[0], 0xFFFF0000u);
+    CHECK_EQ(r.top_side()[0], 0xFFFF0000u);  // left
+    CHECK_EQ(r.top_side()[39], 0xFFFF0000u); // right
+    for (uint32_t at = 0; at < 0x400; at += 4) ram.put(0xF6000 + at, 100u << 16 | 100u); // the whole layer: a picture panning
+    r.begin_frame();
+    r.draw_line(ram.bytes, regs, 0);
+    CHECK_EQ(r.top_side()[0], 0xFFFF0000u);
+    // Scrolled 0-7: a picture. A photo's row (every tile different): not drawn there.
+    for (uint32_t at = 0; at < 0x400; at += 4) ram.put(0xF6000 + at, 4u << 16 | 4u);
+    for (uint32_t i = 0; i < 32; ++i) ram.put(0xF8000 + i * 4, (2 * i + 1) << 16 | (2 * i + 2));
+    r.begin_frame();
+    r.draw_line(ram.bytes, regs, 0);
+    CHECK_EQ(r.top()[0], 0xFFFF0000u);
+    CHECK_EQ(r.top_side()[0], 0u);
+    CHECK_EQ(r.top_side()[39], 0u);
+    // A row whose tile at the edge is its background (a logo on a plain band): that tile carried on.
+    for (uint32_t i = 0; i < 32; ++i) ram.put(0xF8000 + i * 4, 0x00010001u);
+    ram.put(0xF8000 + 15 * 4, 0x00020003u);
+    r.begin_frame();
+    r.draw_line(ram.bytes, regs, 0);
+    CHECK_EQ(r.top_side()[0], 0xFFFF0000u);
+    CHECK_EQ(r.top_side()[39], 0xFFFF0000u);
 }
 
 TEST_CASE("sound: MIDI port bytes, control and IRQ 0x40 (Supermodel's timing)") {

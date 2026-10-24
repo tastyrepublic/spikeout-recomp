@@ -63,9 +63,12 @@ public:
     void present(std::span<const uint32_t> pixels, int width, int height);
     // Draws the screen from the 2D layers below and above the 3D (width x
     // height, 0xAARRGGBB, 0 where nothing was drawn) and the 3D picture on
-    // the GPU (any size; gpu::Real3dGpu::image), letterboxed.
+    // the GPU (any size; gpu::Real3dGpu::image), letterboxed. `extend`:
+    // widescreen, the 3D that many screen pixels wider each side than the
+    // 2D (gpu::Real3dGpu::open's), and the layers as wide (width + 2 *
+    // extend, their sides filled in by m3::WideLayer; shaders/screen.frag).
     void present_layers(std::span<const uint32_t> bottom, std::span<const uint32_t> top, SDL_GPUTexture* three_d,
-                        int width, int height);
+                        int width, int height, int extend = 0);
 
     // The looks over the picture (shaders/look.glsl): CRT colours (0 off,
     // then kCrtColourNames' monitors, Supermodel's) and a screen filter
@@ -75,6 +78,15 @@ public:
     static constexpr const char* kFilterNames[] = {"Off", "Scanlines", "CRT"};
     void set_look(int crt_colours, int filter);
 
+    // Draws into this texture (width x height, B8G8R8A8, a colour target)
+    // instead of the window: gamerun, timing the screen's pass. Null: the
+    // window.
+    void set_target(SDL_GPUTexture* texture, uint32_t width, uint32_t height) {
+        target_ = texture;
+        target_width_ = width;
+        target_height_ = height;
+    }
+
     // Drawn over each picture, in its command buffer, onto the window's
     // texture (width x height pixels): the menu.
     std::function<void(SDL_GPUCommandBuffer*, SDL_GPUTexture*, uint32_t, uint32_t)> overlay;
@@ -83,7 +95,8 @@ private:
     void resize(int width, int height);
     bool upload(SDL_GPUCommandBuffer* cmd, std::initializer_list<std::span<const uint32_t>> frames, int width, int height);
     void draw(SDL_GPUCommandBuffer* cmd, SDL_GPUGraphicsPipeline* pipeline, std::initializer_list<SDL_GPUTexture*> inputs,
-              int width, int height, uint32_t smooth_input = UINT32_MAX); // that input filtered
+              int width, int height, uint32_t smooth_input = UINT32_MAX, // that input filtered
+              int extend = 0);
 
     Device* device_ = nullptr;
     SDL_GPUGraphicsPipeline *pipeline_ = nullptr, *screen_pipeline_ = nullptr;
@@ -91,6 +104,8 @@ private:
     SDL_GPUTexture* textures_[2] = {}; // the frame, or the layers below and above the 3D
     SDL_GPUTransferBuffer* upload_ = nullptr;
     int width_ = 0, height_ = 0;
+    SDL_GPUTexture* target_ = nullptr;
+    uint32_t target_width_ = 0, target_height_ = 0;
     int crt_colours_ = 0, filter_ = 0;
     // The filter's gain, for the picture's size and lines it was worked out for.
     float gain_ = 1;

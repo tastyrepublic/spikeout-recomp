@@ -97,7 +97,8 @@ SDL_GPUGraphicsPipeline* fullscreen_pipeline(Device& device, const ShaderCode& f
     SDL_GPUGraphicsPipeline* pipeline = nullptr;
     if (vs && fs) {
         SDL_GPUColorTargetDescription target{};
-        target.format = SDL_GetGPUSwapchainTextureFormat(d, device.window());
+        target.format = device.window() ? SDL_GetGPUSwapchainTextureFormat(d, device.window())
+                                        : SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM; // headless: Presenter::set_target's
         SDL_GPUGraphicsPipelineCreateInfo info{};
         info.vertex_shader = vs;
         info.fragment_shader = fs;
@@ -128,6 +129,7 @@ struct LookUniform {
     float matrix[3][4];
     float area[4];
     float filter[4];
+    float wide[4]; // widescreen (screen.frag): the 3D's extension each side, the 2D's width
 };
 
 // The CRT colours' monitors (Supermodel's Src/Graphics/SuperAA.cpp, from Dan
@@ -254,10 +256,11 @@ bool Presenter::upload(SDL_GPUCommandBuffer* cmd, std::initializer_list<std::spa
 }
 
 void Presenter::draw(SDL_GPUCommandBuffer* cmd, SDL_GPUGraphicsPipeline* pipeline,
-                     std::initializer_list<SDL_GPUTexture*> inputs, int width, int height, uint32_t smooth_input) {
-    SDL_GPUTexture* swapchain = nullptr;
-    Uint32 sw = 0, sh = 0;
-    if (!SDL_WaitAndAcquireGPUSwapchainTexture(cmd, device_->window(), &swapchain, &sw, &sh) || !swapchain) {
+                     std::initializer_list<SDL_GPUTexture*> inputs, int width, int height, uint32_t smooth_input,
+                     int extend) {
+    SDL_GPUTexture* swapchain = target_;
+    Uint32 sw = target_width_, sh = target_height_;
+    if (!target_ && (!SDL_WaitAndAcquireGPUSwapchainTexture(cmd, device_->window(), &swapchain, &sw, &sh) || !swapchain)) {
         SDL_SubmitGPUCommandBuffer(cmd); // minimized: nothing to draw to
         return;
     }
@@ -267,10 +270,12 @@ void Presenter::draw(SDL_GPUCommandBuffer* cmd, SDL_GPUGraphicsPipeline* pipelin
     colour.load_op = SDL_GPU_LOADOP_CLEAR;
     colour.store_op = SDL_GPU_STOREOP_STORE;
     SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(cmd, &colour, 1, nullptr);
-    // Letterboxed: the largest rectangle of the frame's aspect.
-    const float scale = std::min(static_cast<float>(sw) / static_cast<float>(width), static_cast<float>(sh) / static_cast<float>(height));
+    // Letterboxed: the largest rectangle of the frame's aspect (widescreen:
+    // the frame `extend` pixels wider each side).
+    const int full = width + 2 * extend;
+    const float scale = std::min(static_cast<float>(sw) / static_cast<float>(full), static_cast<float>(sh) / static_cast<float>(height));
     SDL_GPUViewport vp{};
-    vp.w = static_cast<float>(width) * scale;
+    vp.w = static_cast<float>(full) * scale;
     vp.h = static_cast<float>(height) * scale;
     vp.x = (static_cast<float>(sw) - vp.w) / 2;
     vp.y = (static_cast<float>(sh) - vp.h) / 2;
@@ -317,6 +322,8 @@ void Presenter::draw(SDL_GPUCommandBuffer* cmd, SDL_GPUGraphicsPipeline* pipelin
     look.filter[1] = static_cast<float>(height);
     look.filter[2] = filter_ ? gain_ : 1.0f;
     look.filter[3] = crt_colours_ ? 1.0f : 0.0f;
+    look.wide[0] = static_cast<float>(extend);
+    look.wide[1] = static_cast<float>(width);
     SDL_PushGPUFragmentUniformData(cmd, 0, &look, sizeof look);
     SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
     SDL_EndGPURenderPass(pass);
@@ -336,15 +343,15 @@ void Presenter::present(std::span<const uint32_t> pixels, int width, int height)
 }
 
 void Presenter::present_layers(std::span<const uint32_t> bottom, std::span<const uint32_t> top, SDL_GPUTexture* three_d,
-                               int width, int height) {
+                               int width, int height, int extend) {
     if (!screen_pipeline_ || !three_d) return;
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(device_->get());
     if (!cmd) return;
-    if (!upload(cmd, {bottom, top}, width, height)) {
+    if (!upload(cmd, {bottom, top}, width + 2 * std::max(extend, 0), height)) {
         SDL_SubmitGPUCommandBuffer(cmd);
         return;
     }
-    draw(cmd, screen_pipeline_, {textures_[0], three_d, textures_[1]}, width, height, 1);
+    draw(cmd, screen_pipeline_, {textures_[0], three_d, textures_[1]}, width, height, 1, extend);
 }
 
 } // namespace gpu

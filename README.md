@@ -130,8 +130,8 @@ B jump, Y shift, Start, Back coin (the first pad is player 1's, the second
 player 2's).
 
 `Esc` (or a pad's Guide button, its touchpad, or Back + Start) pauses the
-game and opens the menu: Display (render scale, antialiasing, quads drawn
-whole, GPU or software 3D, CRT colours, screen filter, fullscreen, show
+game and opens the menu: Display (render scale, picture shape: the arcade's
+4:3 or widescreen with the GPU 3D, antialiasing, quads drawn whole, GPU or software 3D, CRT colours, screen filter, fullscreen, show
 FPS), Sound (overall, effects and music volume; speakers: stereo, or the
 cabinet's front and rear pairs apart, on one output of four channels or on
 two outputs; `spikeout --list-audio` shows the channels each output has),

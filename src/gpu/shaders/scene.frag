@@ -41,7 +41,8 @@ layout(std430, set = 2, binding = kStorage + 1) readonly buffer Viewports { View
 layout(std430, set = 2, binding = kStorage + 2) readonly buffer Quads { Quad quads[]; };
 #endif
 layout(std140, set = 3, binding = 0) uniform Frame {
-    float scale; // render pixels per screen pixel
+    float scale;  // render pixels per screen pixel
+    float extend; // widescreen: the screen's left edge, in screen pixels from the picture's
 };
 
 #ifdef OPAQUE
@@ -254,7 +255,7 @@ void light_and_fog(Polygon p, float cx, float cy, float distance, vec3 normal, f
 bool quad_attributes(Polygon p, inout vec2 tc, inout float sh, inout vec3 n, inout float inv_distance) {
     const Quad q = quads[quad];
     const Viewport V = viewports[p.flags.z];
-    const vec2 at = gl_FragCoord.xy / scale; // in screen pixels, as the corners
+    const vec2 at = gl_FragCoord.xy / scale - vec2(extend, 0.0); // in screen pixels, as the corners
     float vx[4], vy[4], r[4], iw[4];
     for (int i = 0; i < 4; ++i) {
         const float w = -q.position[i].z;
@@ -348,7 +349,7 @@ void main() {
     if (texture_alpha && a >= 1.0) discard; // drawn in the opaque pass
 #endif
     if (a < 1.0 / 32.0) discard;
-    const vec2 c = gl_FragCoord.xy / scale;
+    const vec2 c = gl_FragCoord.xy / scale - vec2(extend, 0.0);
     light_and_fog(p, c.x, c.y, distance, n, sh, rgb, a);
 #ifdef OPAQUE
     colour = vec4(rgb, 1.0);

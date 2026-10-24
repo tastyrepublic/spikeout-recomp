@@ -230,6 +230,60 @@ full-screen 2D layer, so it doesn't show. The Mars mode word never sets
 bit `0x40000`, so the sun stays clamped at 0 (Supermodel's sun clamp), as
 our lighting always has it. `gamerun` prints the five mode words.
 
+Widescreen (Display, Picture shape; the arcade's 496 x 384 by default, which
+draws exactly as before: the GPU hashes are unchanged). As Supermodel's
+widescreen and vf3-recomp's: viewports that fill the screen (x 0, y 0, at
+least 495 x 383) get their frustum's left and right, and the side culling
+planes, opened out by the extra width, and are drawn that much wider each
+side (`m3::Real3dScene::set_extend`); smaller viewports stay where they
+are. The 2D stays a 4:3 picture in the middle, and its layers are made as
+wide (`m3::WideLayer`, after vf3-recomp's sides: no new art). Beside the
+arcade's screen each side pixel is, in order:
+
+- **Drawn by the tile generator from the name tables** (they wrap at 512;
+  `m3::TilegenRenderer::set_extend`), on lines where a layer is scrolling:
+  scrolled by 8 to 504 pixels (the map screen's faces panning), or apart
+  from most of its lines (the character select's marquee, a loop of 62
+  tiles and 2 blank), or, without line scroll, whose scroll register
+  changed in the last 2 seconds, or whose map row is a panorama one screen
+  wide. The stages' skies (layer 3, scrolled 0-7 as the camera turns while
+  the game rewrites the tiles) are 496 pixels round: each map row a run of
+  62 tiles written round the map's 64, its last two columns the first two
+  again (after vf3-recomp's runs of tiles). Wrapped at the hardware's 512
+  they showed a 16-pixel jump beside the screen; they're drawn wrapping
+  every 496, always (else a still camera fell back to edge colours, which
+  didn't match the clouds). And on each side of a picture, where the tile
+  at the screen's edge is the row's background (at least 4 of the screen's
+  62 columns: plain bands, the orange round the title's logo and its band;
+  the orange is dithered, two shades a pixel apart, which an edge colour
+  would average), that tile is carried on exactly (a photo's tiles are each
+  different, so the map screen's faces aren't). Layers that never scroll
+  are otherwise pictures the
+  size of the screen (the title, the character select: past the screen
+  their name tables hold nothing, or the other side).
+- **The row's last 8 pixels repeated**, where its 16 pixels at the edge are
+  opaque and within two steps of the 5-bit colours, and so are the rows
+  above and below: plain bands keep their dither or grain as drawn (the
+  character select's silver bars change along the row tile by tile, so no
+  one tile carries them on; their average made the sides flat).
+- **The row's last P pixels repeated**, where the 192 at the edge repeat
+  every P (32-160) pixels to within 24 levels on average: the red wall
+  behind the title's transition is a 496-pixel photo of riveted panels
+  (62 different tiles a row), repeating about every 84. P is chosen for a
+  band of such rows together, so that they stay aligned.
+- For a row between those (a border, a line of the logo): the nearest
+  one's within 8 rows; above the 3D, however far, so that what the arcade's
+  2D covered stays covered.
+
+Edge colours and repeats are carried only on a side where most rows (60%)
+have one, so a picture whose edge is plain here and there leaves no
+streaks. The sides show the 3D only where it reaches the arcade screen's
+edge on that side somewhere (`src/gpu/shaders/screen.frag`): on the 2D
+screens the 3D is in the middle, and what it has past the arcade's screen
+(a white streak waiting beside the title) the arcade never showed.
+`gamerun --wide 93` writes widescreen screenshots as the window draws them
+(16:9), and `--dump-layers` each tile layer's whole name table.
+
 ## Sound board
 
 `m3::SoundBoard` and `m3::Scsp` are adapted from Supermodel's SCSP (ElSemi's,

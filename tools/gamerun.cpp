@@ -7,7 +7,7 @@
 //           [--screenshot FILE.png] [--shot-every N] [--press [B:]NAME@FRAME[:N]]...
 //           [--wav FILE.wav] [--probe X,Y@FRAME] [--quads]
 //           [--boards N] [--slice LINES] [--link-latency CYCLES] [--renderer software|gpu|compare]
-//           [--gpu-scale N] [--gpu-time N] [--parallel] [--no-2d] [--no-sound]
+//           [--gpu-scale N] [--gpu-time N] [--wide E] [--parallel] [--no-2d] [--no-sound]
 //
 // Built only when CMake's SPIKEOUT_ROM_DIR is set. A run ends at the first
 // thing the runtime can't do yet (code that wasn't found, an exception, a
@@ -16,7 +16,9 @@
 // what to work on next. --text prints the text on the tile layers (what
 // screen the game is on); --dump-tile writes the tile generator's RAM at the
 // end (characters, name tables, palette; derived from the ROMs).
-// --dump-backup writes the backup RAM (128 KB) at the end.
+// --dump-backup writes the backup RAM (128 KB) at the end. --dump-layers
+// writes each tile layer's whole 512x512 name table with every screenshot
+// (FILE-<frame>-L<n>.png).
 // --eeprom FILE starts with that settings EEPROM (128 bytes, as the window's
 // nvram/board<N>.eeprom; else a blank one, which the game sets up).
 // --dump-textures FILE.png writes the Real3D's texture RAM at the end as a
@@ -77,6 +79,12 @@
 // --gpu-scale N draws the GPU's 3D at render scale N (the screenshots take
 // every Nth pixel); the report gives a hash of every GPU picture, full size,
 // for checking that a change to the GPU renderer draws exactly the same.
+// --wide E (with --renderer gpu, scale 1) draws widescreen, E pixels wider
+// each side (the window's 16:9 is 93), and writes each screenshot's whole
+// picture as the window shows it too (FILE-<frame>-wide.png). The report
+// gives the 2D layers' drawing time a frame, and with --wide the time
+// making their sides (on average and the worst frame), as the window's game
+// thread spends them.
 #include "games/games.hpp"
 #include "ppc/disasm.hpp"
 #include "ppc/instruction.hpp"
@@ -87,6 +95,7 @@
 #include "runtime/rom.hpp"
 #include "runtime/real3d_render.hpp"
 #include "runtime/tilegen.hpp"
+#include "runtime/widescreen.hpp"
 #include "game_setup.hpp"
 #include "png_write.hpp"
 #include "wav_write.hpp"
@@ -139,6 +148,7 @@ struct Options {
     const char* dump_tile = nullptr;
     const char* dump_textures = nullptr;
     const char* dump_backup = nullptr;
+    bool dump_layers = false;
     const char* eeprom = nullptr; // --eeprom: the settings EEPROM to start with (128 bytes, high byte first)
     const char* net_disasm = nullptr;
     const char* screenshot = nullptr;
@@ -165,6 +175,8 @@ struct Options {
     enum class Renderer { Software, Gpu, Compare } renderer = Renderer::Software;
     int gpu_time_scale = 0; // --gpu-time: the GPU's time a frame at this render scale
     int gpu_scale = 1;      // --gpu-scale: the GPU renderer's render scale (gpu, compare)
+    int wide = 0;           // --wide: widescreen, the picture this many pixels wider each side (gpu)
+    int screen_w = 0, screen_h = 0; // --screen-time WxH: the window's screen pass timed at that size
     bool irq5_on_e0 = true, send_waits_for_receive = m3::CommBoardOptions().send_waits_for_receive,
          host_sees_other_bank = false;
     double link_cycles_per_byte = m3::CommBoardOptions().link_cycles_per_byte;
@@ -245,6 +257,9 @@ struct Machine {
     double seconds = 0;
     int peak = 0;
     double energy = 0, sound_seconds = 0, render_seconds = 0, setup_ms = 0, raster_ms = 0;
+    // the 2D layers' drawing, and (--wide) their widescreen sides' making, every frame
+    double tilegen_seconds = 0, wide_seconds = 0, wide_worst = 0;
+    uint64_t tilegen_frames = 0, wide_frames = 0, wide_worst_frame = 0;
     uint64_t frames_rendered = 0, frames_spotlit = 0, frames_scroll_fog = 0, frames_ambient_fog = 0,
              frames_block_culled = 0;
     uint64_t micro_tris = 0, translator_tris = 0, inverted_tris = 0;
@@ -259,6 +274,16 @@ struct Machine {
     m3::Real3dSceneBuilder builder;
     m3::Real3dScene scene;
     std::vector<uint32_t> gpu_image;
+    // --wide: the GPU's whole widescreen picture, and the 2D layers made as wide
+    std::vector<uint32_t> gpu_wide, bottom_wide, top_wide;
+    m3::WideLayer wide_bottom, wide_top;
+#ifdef SPIKEOUT_GPU
+    // --screen-time: the window's screen pass, drawn off screen and timed (ms, summed over the screenshots)
+    std::unique_ptr<gpu::Presenter> presenter;
+    SDL_GPUTexture* screen_target = nullptr;
+    double screen_wide_ms = 0, screen_43_ms = 0;
+    uint64_t screen_samples = 0;
+#endif
     double gpu_seconds = 0, gpu_worst = 0;
     uint64_t gpu_worst_frame = 0, gpu_slow = 0; // (slow: over a frame, 17.4 ms)
     uint64_t gpu_hash = 0xCBF29CE484222325ull; // of every picture read back, full size (--gpu-scale)
@@ -324,8 +349,15 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
     // With several boards, the turn passes on every o.slice lines, the
     // network board caught up first so what it sent is on the link.
     m.timing.on_display_line = [&m, &turns, slice = o.slice, no_2d = o.no_2d](uint32_t line) {
-        if (line == 0 && !no_2d) m.tilegen.begin_frame();
-        if (!no_2d) m.tilegen.draw_line(m.bus, static_cast<int>(line));
+        if (!no_2d) {
+            const auto start = std::chrono::steady_clock::now();
+            if (line == 0) {
+                m.tilegen.begin_frame();
+                ++m.tilegen_frames;
+            }
+            m.tilegen.draw_line(m.bus, static_cast<int>(line));
+            m.tilegen_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        }
         if (turns.boards() > 1 && line % slice == slice - 1) {
             m.bus.netboard().sync(m.c.cycles());
             turns.pass(m.index);
@@ -363,6 +395,14 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             } else {
                 m.gpu->render(mem, o.renderer == R::Gpu ? m.scene : m.real3d.scene(), &m.gpu_image);
                 for (uint32_t p : m.gpu_image) m.gpu_hash = (m.gpu_hash ^ p) * 0x100000001B3ull; // FNV-1a, a word at a time
+                if (const int e = m.builder.extend(); e > 0) { // widescreen: kept whole, its middle for the rest
+                    const int w = m3::TilegenRenderer::kWidth, h = m3::TilegenRenderer::kHeight;
+                    m.gpu_wide = m.gpu_image;
+                    m.gpu_image.resize(static_cast<size_t>(w) * h);
+                    for (int y = 0; y < h; ++y)
+                        std::copy_n(m.gpu_wide.begin() + static_cast<std::ptrdiff_t>(y * (w + 2 * e) + e), w,
+                                    m.gpu_image.begin() + static_cast<std::ptrdiff_t>(y * w));
+                }
                 if (o.gpu_scale > 1) { // every scale-th pixel, for the screenshots
                     const int s = o.gpu_scale, w = m3::TilegenRenderer::kWidth, h = m3::TilegenRenderer::kHeight;
                     std::vector<uint32_t> small(static_cast<size_t>(w) * h);
@@ -396,6 +436,18 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
 #endif
         if (o.probe_frame && frame == o.probe_frame && m.index == 0) print_probe(m.real3d, o.probe_x, o.probe_y, frame);
         if (!o.no_2d) m.tilegen.composite(m.screen, o.renderer == R::Gpu ? std::span<const uint32_t>(m.gpu_image) : m.real3d.image());
+        if (const int e = m.tilegen.extend(); e > 0 && !o.no_2d) { // --wide: the sides made every frame, as the window does
+            const auto start = std::chrono::steady_clock::now();
+            m.wide_bottom.build(m.tilegen.bottom(), m.tilegen.bottom_side(), e, m.bottom_wide);
+            m.wide_top.build(m.tilegen.top(), m.tilegen.top_side(), e, m.top_wide, true);
+            const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            m.wide_seconds += took;
+            if (took > m.wide_worst) {
+                m.wide_worst = took;
+                m.wide_worst_frame = frame;
+            }
+            ++m.wide_frames;
+        }
         const auto sound_start = std::chrono::steady_clock::now();
         if (o.no_sound) m.bus.midi_out().clear();
         const std::span<const int16_t> pcm = o.no_sound ? std::span<const int16_t>() :
@@ -434,6 +486,76 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         if (o.screenshot && o.shot_every && frame % o.shot_every == 0) {
             const std::string path = board_path(o.screenshot, m.index);
             const size_t dot = path.find_last_of('.');
+            if (const int e = m.builder.extend(); e > 0 && !m.gpu_wide.empty() && m.tilegen.extend() == e) {
+                // --wide: the widescreen picture as the window shows it
+                m.wide_bottom.build(m.tilegen.bottom(), m.tilegen.bottom_side(), e, m.bottom_wide);
+                m.wide_top.build(m.tilegen.top(), m.tilegen.top_side(), e, m.top_wide, true);
+                std::vector<uint32_t> wide(m.bottom_wide.size());
+                m3::WideLayer::composite(wide, m.bottom_wide, m.top_wide, m.gpu_wide, e);
+#ifdef SPIKEOUT_GPU
+                if (m.presenter) { // --screen-time: the screen pass (layers uploaded, shaded), widescreen and 4:3
+                    constexpr int kRepeats = 50;
+                    auto time_draws = [&](std::span<const uint32_t> bottom, std::span<const uint32_t> top, int extend) {
+                        const int w = m3::TilegenRenderer::kWidth, h = m3::TilegenRenderer::kHeight;
+                        m.presenter->present_layers(bottom, top, m.gpu->display_image(), w, h, extend); // (its textures made)
+                        SDL_WaitForGPUIdle(m.gpu_device);
+                        const auto start = std::chrono::steady_clock::now();
+                        for (int i = 0; i < kRepeats; ++i)
+                            m.presenter->present_layers(bottom, top, m.gpu->display_image(), w, h, extend);
+                        SDL_WaitForGPUIdle(m.gpu_device);
+                        return 1000.0 * std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() / kRepeats;
+                    };
+                    m.screen_wide_ms += time_draws(m.bottom_wide, m.top_wide, e);
+                    m.screen_43_ms += time_draws(m.tilegen.bottom(), m.tilegen.top(), 0);
+                    ++m.screen_samples;
+                }
+#endif
+                tools::write_png(path.substr(0, dot) + "-" + std::to_string(frame) + "-wide" + path.substr(dot), wide,
+                                 m3::TilegenRenderer::kWidth + 2 * e, m3::TilegenRenderer::kHeight);
+                if (o.dump_layers) { // and the layers below the 3D alone, and the 3D's alpha (grey)
+                    std::vector<uint32_t> below(m.bottom_wide.size());
+                    for (std::size_t i = 0; i < below.size(); ++i) below[i] = 0xFF000000u | m.bottom_wide[i];
+                    tools::write_png(path.substr(0, dot) + "-" + std::to_string(frame) + "-wide2d" + path.substr(dot), below,
+                                     m3::TilegenRenderer::kWidth + 2 * e, m3::TilegenRenderer::kHeight);
+                    std::vector<uint32_t> alpha(m.gpu_wide.size());
+                    for (std::size_t i = 0; i < alpha.size(); ++i) {
+                        const uint32_t a = m.gpu_wide[i] >> 24;
+                        alpha[i] = 0xFF000000u | a << 16 | a << 8 | a;
+                    }
+                    tools::write_png(path.substr(0, dot) + "-" + std::to_string(frame) + "-wide3da" + path.substr(dot), alpha,
+                                     m3::TilegenRenderer::kWidth + 2 * e, m3::TilegenRenderer::kHeight);
+                }
+            }
+            if (o.dump_layers) // each layer's whole name table, for looking at
+                for (int n = 0; n < 4; ++n) {
+                    std::vector<uint32_t> map(512 * 512);
+                    m3::TilegenRenderer::draw_map(m.bus.tile_ram(), m.bus.tile_regs(), n, map);
+                    tools::write_png(path.substr(0, dot) + "-" + std::to_string(frame) + "-L" + std::to_string(n) +
+                                         path.substr(dot), map, 512, 512);
+                    // and its name table's entries, a line per tile row, then the line scroll values
+                    const std::string text = path.substr(0, dot) + "-" + std::to_string(frame) + "-L" + std::to_string(n) + ".txt";
+                    if (std::FILE* f = std::fopen(text.c_str(), "w")) {
+                        const auto ram = m.bus.tile_ram();
+                        auto word = [&](uint32_t at) {
+                            return uint32_t{ram[at]} | uint32_t{ram[at + 1]} << 8 | uint32_t{ram[at + 2]} << 16 |
+                                   uint32_t{ram[at + 3]} << 24;
+                        };
+                        std::fprintf(f, "reg %08x\n", m.bus.tile_regs()[0x60 / 4 + static_cast<std::size_t>(n)]);
+                        for (uint32_t row = 0; row < 64; ++row) {
+                            for (uint32_t col = 0; col < 32; ++col) {
+                                const uint32_t w = word(0xF8000 + static_cast<uint32_t>(n) * 0x2000 + (row * 32 + col) * 4);
+                                std::fprintf(f, "%04x %04x ", w >> 16, w & 0xFFFF);
+                            }
+                            std::fprintf(f, "\n");
+                        }
+                        for (uint32_t line = 0; line < 384; line += 2) {
+                            const uint32_t w = word(0xF6000 + static_cast<uint32_t>(n) * 0x400 + line * 2);
+                            std::fprintf(f, "%s%03x %03x", line % 32 ? " " : "\nscroll ", w >> 16, w & 0xFFFF);
+                        }
+                        std::fprintf(f, "\n");
+                        std::fclose(f);
+                    }
+                }
             tools::write_png(path.substr(0, dot) + "-" + std::to_string(frame) + path.substr(dot), m.screen,
                              m3::TilegenRenderer::kWidth, m3::TilegenRenderer::kHeight);
             if (o.renderer == R::Compare && !m.gpu_image.empty()) { // and the GPU's, beside it
@@ -573,6 +695,20 @@ void report(Machine& m, const Options& o) {
     }
     if (c.first_nan_pc) // SPIKEOUT_FP_TRAP builds
         std::printf("First FP NaN: at %08x (%016llx)\n", c.first_nan_pc, static_cast<unsigned long long>(c.first_nan_bits));
+    if (m.tilegen_frames)
+        std::printf("2D layers: %.3f ms a frame drawing them on average\n",
+                    1000.0 * m.tilegen_seconds / static_cast<double>(m.tilegen_frames));
+    if (m.wide_frames)
+        std::printf("Widescreen sides: %.3f ms a frame making them on average, %.3f at most (frame %llu)\n",
+                    1000.0 * m.wide_seconds / static_cast<double>(m.wide_frames), 1000.0 * m.wide_worst,
+                    static_cast<unsigned long long>(m.wide_worst_frame));
+#ifdef SPIKEOUT_GPU
+    if (m.screen_samples)
+        std::printf("Screen pass at %dx%d: %.3f ms widescreen, %.3f ms 4:3 (layers uploaded and shaded, on average over "
+                    "%llu screenshots)\n",
+                    o.screen_w, o.screen_h, m.screen_wide_ms / static_cast<double>(m.screen_samples),
+                    m.screen_43_ms / static_cast<double>(m.screen_samples), static_cast<unsigned long long>(m.screen_samples));
+#endif
     if (o.screenshot) {
         if (m.frames_rendered)
             std::printf("Real3D renderer: %.2f ms a frame on average (%.2f setting up, %.2f drawing; %llu frames)\n",
@@ -739,6 +875,7 @@ int main(int argc, char** argv) {
         else if (arg == "--dump-tile" && i + 1 < argc) o.dump_tile = argv[++i];
         else if (arg == "--dump-textures" && i + 1 < argc) o.dump_textures = argv[++i];
         else if (arg == "--dump-backup" && i + 1 < argc) o.dump_backup = argv[++i];
+        else if (arg == "--dump-layers") o.dump_layers = true;
         else if (arg == "--eeprom" && i + 1 < argc) o.eeprom = argv[++i];
         else if (arg == "--text") o.show_text = true;
         else if (arg == "--netboard" && i + 1 < argc) o.real_netboard = std::string(argv[++i]) == "real";
@@ -755,6 +892,15 @@ int main(int argc, char** argv) {
         else if (arg == "--quads") o.quads = true;
         else if (arg == "--gpu-time" && i + 1 < argc) o.gpu_time_scale = std::clamp(std::atoi(argv[++i]), 1, 8);
         else if (arg == "--gpu-scale" && i + 1 < argc) o.gpu_scale = std::clamp(std::atoi(argv[++i]), 1, 8);
+        else if (arg == "--wide" && i + 1 < argc) o.wide = std::clamp(std::atoi(argv[++i]), 0, 400);
+        else if (arg == "--screen-time" && i + 1 < argc) {
+            const std::string size = argv[++i];
+            const size_t x = size.find('x');
+            if (x != std::string::npos) {
+                o.screen_w = std::clamp(std::atoi(size.substr(0, x).c_str()), 0, 8192);
+                o.screen_h = std::clamp(std::atoi(size.substr(x + 1).c_str()), 0, 8192);
+            }
+        }
         else if (arg == "--renderer" && i + 1 < argc) {
             const std::string r = argv[++i];
             o.renderer = r == "gpu" ? Options::Renderer::Gpu : r == "compare" ? Options::Renderer::Compare
@@ -884,9 +1030,30 @@ int main(int argc, char** argv) {
             m.gpu = std::make_unique<gpu::Real3dGpu>();
             m.gpu->set_quads(o.quads);
             m.gpu_device = gpu_device.get();
-            if (!m.gpu->open(gpu_device, o.gpu_time_scale ? o.gpu_time_scale : o.gpu_scale)) {
+            if (o.wide && o.renderer == Options::Renderer::Gpu && o.gpu_scale == 1 && !o.gpu_time_scale) {
+                m.builder.set_extend(o.wide);
+                m.tilegen.set_extend(o.wide);
+            }
+            if (!m.gpu->open(gpu_device, o.gpu_time_scale ? o.gpu_time_scale : o.gpu_scale, m.builder.extend())) {
                 std::fprintf(stderr, "gamerun: GPU renderer: %s\n", m.gpu->error().c_str());
                 return 1;
+            }
+            if (o.screen_w > 0 && o.screen_h > 0 && i == 0) { // the window's screen pass, off screen
+                SDL_GPUTextureCreateInfo tex{};
+                tex.type = SDL_GPU_TEXTURETYPE_2D;
+                tex.format = SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
+                tex.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+                tex.width = static_cast<Uint32>(o.screen_w);
+                tex.height = static_cast<Uint32>(o.screen_h);
+                tex.layer_count_or_depth = 1;
+                tex.num_levels = 1;
+                m.screen_target = SDL_CreateGPUTexture(gpu_device.get(), &tex);
+                m.presenter = std::make_unique<gpu::Presenter>();
+                if (!m.screen_target || !m.presenter->open(gpu_device)) {
+                    std::fprintf(stderr, "gamerun: --screen-time: can't draw the screen off screen\n");
+                    return 1;
+                }
+                m.presenter->set_target(m.screen_target, static_cast<uint32_t>(o.screen_w), static_cast<uint32_t>(o.screen_h));
             }
         }
 #endif

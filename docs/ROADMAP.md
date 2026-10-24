@@ -52,7 +52,7 @@ Each milestone ends with something you can run and check.
 - [x] GPU renderer: quads drawn whole (`--quads`), as in software
 - [ ] GPU renderer: the probe, decals in the translucency layers seeing the opaque pass's; Direct3D 12
 - [x] High resolution and antialiasing: `spikeout --render-scale N` draws the 3D N times as large; shown in a smaller window it is averaged down through mipmaps (supersampling)
-- [ ] Widescreen
+- [x] Widescreen (Display, Picture shape: the window's, 16:10, 16:9, 21:9): full-screen viewports opened out as Supermodel does, the 2D in the middle and its sides filled from the scrolling layers' name tables, plain edges and repeating textures (`m3::WideLayer`)
 - [ ] **Goal:** attract mode and gameplay render correctly
 
 ## 4. Sound and input

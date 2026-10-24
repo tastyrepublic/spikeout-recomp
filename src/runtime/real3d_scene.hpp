@@ -147,6 +147,15 @@ public:
     // Decodes the frame in `mem` into `scene` (its old contents replaced).
     void build(const Real3d& mem, Real3dScene& scene);
 
+    // Widescreen (Supermodel's WideScreen; vf3-recomp's too): the viewports
+    // that cover the whole screen (x 0, at least 495 x 383) are drawn
+    // `extend` screen pixels further each side, their view opened out as
+    // far (the same vertical view) and their side culling planes with it, or
+    // what's past the 4:3 sides would pop in and out. Their x then starts at
+    // -extend. 0: the arcade's screen.
+    void set_extend(int pixels) { extend_ = pixels; }
+    int extend() const { return extend_; }
+
 private:
     struct ModelRef {
         Mat4 matrix;
@@ -181,6 +190,7 @@ private:
     Mat4 coord_sys_; // the eye's rotation, for nodes that reset theirs
     Attribs attribs_;
     uint32_t matrix_base_ = 0, lod_table_ = 0, colour_table_ = 0;
+    int extend_ = 0; // set_extend
     // The viewport's frustum planes (words 0x0C-0x13): left u, v; top u, w;
     // right u, v; bottom u, w.
     std::array<float, 8> planes_{};

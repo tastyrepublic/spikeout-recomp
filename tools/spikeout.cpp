@@ -65,6 +65,7 @@
 #include "runtime/rom.hpp"
 #include "runtime/real3d_render.hpp"
 #include "runtime/tilegen.hpp"
+#include "runtime/widescreen.hpp"
 #include "game_setup.hpp"
 #include "png_write.hpp"
 #include "arcade_settings.hpp"
@@ -140,10 +141,16 @@ struct Shared {
     // The 3D drawn by the GPU (one board): the game thread leaves each
     // frame's scene and 2D layers here, and the window draws them.
     std::atomic<bool> gpu_3d{false};
+    // Widescreen: how far the full-screen viewports are opened out each side,
+    // in screen pixels (m3::Real3dSceneBuilder::set_extend; 0: the arcade's).
+    std::atomic<int> extend{0};
     struct GpuFrame {
         m3::Real3dScene scene;
         std::vector<uint32_t> bottom, top;
+        // widescreen: the layers as wide as the 3D (m3::WideLayer)
+        std::vector<uint32_t> bottom_wide, top_wide;
         uint64_t number = 0;
+        int extend = 0; // the widescreen extension the scene was built with
     } gpu_frame;
     // Texture RAM as of the last upload, and which upload that was.
     std::shared_ptr<const std::vector<uint16_t>> textures;
@@ -457,14 +464,25 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
         while (clock::now() < due) std::this_thread::yield();
     };
     m3::Real3dSceneBuilder builder;
+    m3::WideLayer wide_bottom, wide_top;
     Shared::GpuFrame gpu_frame;
     uint64_t textures_seen = UINT64_MAX;
     timing.on_frame_end = [&] {
         if (shared.gpu_3d && index == 0) { // the scene and layers for the window to draw
             const m3::Real3d& mem = bus.real3d();
+            builder.set_extend(shared.extend);
             builder.build(mem, gpu_frame.scene);
+            gpu_frame.extend = builder.extend();
             gpu_frame.bottom.assign(tilegen.bottom().begin(), tilegen.bottom().end());
             gpu_frame.top.assign(tilegen.top().begin(), tilegen.top().end());
+            if (gpu_frame.extend > 0) {
+                const bool drawn = tilegen.extend() == gpu_frame.extend; // the tile generator's own sides
+                wide_bottom.build(tilegen.bottom(), drawn ? tilegen.bottom_side() : std::span<const uint32_t>(),
+                                  gpu_frame.extend, gpu_frame.bottom_wide);
+                wide_top.build(tilegen.top(), drawn ? tilegen.top_side() : std::span<const uint32_t>(), gpu_frame.extend,
+                               gpu_frame.top_wide, true);
+            }
+            tilegen.set_extend(gpu_frame.extend);
             gpu_frame.number = timing.frames();
             std::shared_ptr<const std::vector<uint16_t>> textures;
             if (mem.textures_uploaded() != textures_seen) {
@@ -725,15 +743,30 @@ int main(int argc, char** argv) {
         }
         return std::clamp(base * settings.antialiasing, 1, 8);
     };
+    // Widescreen: the screen pixels the gameplay's 3D is opened out each side
+    // for the picture shape (Settings::picture_shape; the window's: its shape,
+    // from the arcade's up to 21:9). 0 for the arcade's, and without the GPU.
+    auto wanted_extend = [&] {
+        static constexpr double kShapes[] = {0, 0, 16.0 / 10.0, 16.0 / 9.0, 64.0 / 27.0};
+        double shape = kShapes[std::clamp(settings.picture_shape, 0, 4)];
+        if (settings.picture_shape == 1) {
+            int pw = 0, ph = 0;
+            SDL_GetWindowSizeInPixels(window, &pw, &ph);
+            shape = ph > 0 ? std::min(static_cast<double>(pw) / ph, 64.0 / 27.0) : 0;
+        }
+        const double extra = (shape * kHeight - kWidth) / 2;
+        return shape > 0 && extra >= 1 ? static_cast<int>(std::lround(extra)) : 0;
+    };
     // The game frame whose 3D the GPU last drew (0: none; draw it again). The
     // window shows each frame for one or more of the display's refreshes and
     // draws its 3D only once, for the first.
     uint64_t drawn_number = 0;
     auto set_up_3d = [&] {
         const bool want = on_gpu && boards == 1 && settings.gpu_3d;
-        const int s = wanted_scale();
+        const int s = wanted_scale(), e = want ? wanted_extend() : 0;
         drawn_number = 0;
-        if (want && real3d_gpu && s == draw_scale) {
+        shared.extend = e;
+        if (want && real3d_gpu && s == draw_scale && e == real3d_gpu->extend()) {
             real3d_gpu->set_quads(settings.quads);
             return;
         }
@@ -742,7 +775,7 @@ int main(int argc, char** argv) {
         if (want) {
             real3d_gpu = std::make_unique<gpu::Real3dGpu>();
             real3d_gpu->set_quads(settings.quads);
-            if (real3d_gpu->open(*gpu_device, s)) {
+            if (real3d_gpu->open(*gpu_device, s, e)) {
                 draw_scale = s;
             } else {
                 std::printf("spikeout: 3D in software (%s)\n", real3d_gpu->error().c_str());
@@ -750,6 +783,7 @@ int main(int argc, char** argv) {
             }
         }
         shared.gpu_3d = real3d_gpu != nullptr;
+        if (!real3d_gpu) shared.extend = 0;
     };
     set_up_3d();
     Shared::GpuFrame gpu_frame; // the frame the window shows
@@ -761,10 +795,12 @@ int main(int argc, char** argv) {
         std::vector<uint32_t> drawn, three_d(static_cast<std::size_t>(kWidth) * kHeight);
         if (textures && real3d_gpu) real3d_gpu->render(gpu_frame.scene, *textures, textures_version, &drawn);
         const auto s = static_cast<std::size_t>(std::max(draw_scale, 1));
-        const auto stride = static_cast<std::size_t>(kWidth) * s;
+        // (widescreen: the arcade's screen from the middle)
+        const auto e = static_cast<std::size_t>(real3d_gpu ? real3d_gpu->extend() : 0);
+        const auto stride = (static_cast<std::size_t>(kWidth) + 2 * e) * s;
         for (std::size_t y = 0; y < static_cast<std::size_t>(kHeight) && !drawn.empty(); ++y)
             for (std::size_t x = 0; x < static_cast<std::size_t>(kWidth); ++x)
-                three_d[y * kWidth + x] = drawn[y * s * stride + x * s];
+                three_d[y * kWidth + x] = drawn[y * s * stride + (x + e) * s];
         std::vector<uint32_t> screen(static_cast<std::size_t>(kWidth) * kHeight);
         m3::TilegenRenderer::composite(screen, gpu_frame.bottom, gpu_frame.top, three_d);
         return screen;
@@ -872,6 +908,18 @@ int main(int argc, char** argv) {
                            },
                            [&](int d) {
                                settings.render_scale = std::clamp(settings.render_scale + d, 0, 6);
+                               changed();
+                               set_up_3d();
+                           }});
+        static constexpr const char* kShapeNames[] = {"Arcade", "The window's", "16:10", "16:9", "21:9"};
+        p.items.push_back({"Picture shape",
+                           "Arcade: the screen as the cabinet's. Wider shapes open the gameplay's 3D out to the "
+                           "sides (the same height, as Supermodel's widescreen); the 2D (scores, text) stays in the "
+                           "middle, its plain edges carried across. The game decides what's there for its own "
+                           "screen, so things can appear late at the far sides.",
+                           [&] { return std::string(kShapeNames[std::clamp(settings.picture_shape, 0, 4)]); },
+                           [&](int d) {
+                               settings.picture_shape = (settings.picture_shape + d + 5) % 5;
                                changed();
                                set_up_3d();
                            }});
@@ -1272,8 +1320,9 @@ int main(int argc, char** argv) {
                 if (board < boards) focus = board;
             }
 #ifdef SPIKEOUT_GPU
-            // Auto render scale: the window's size decides it.
-            if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED && settings.render_scale == 0) set_up_3d();
+            // Auto render scale and the window's picture shape: the window's size decides them.
+            if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED && (settings.render_scale == 0 || settings.picture_shape == 1))
+                set_up_3d();
 #endif
         }
 #ifdef SPIKEOUT_GPU
@@ -1361,7 +1410,14 @@ int main(int argc, char** argv) {
                     real3d_gpu->render(gpu_frame.scene, *textures, textures_version);
                     drawn_number = gpu_frame.number;
                 }
-                presenter->present_layers(gpu_frame.bottom, gpu_frame.top, real3d_gpu->display_image(), kWidth, kHeight);
+                const int extend = real3d_gpu->extend();
+                const bool wide = extend > 0 && extend == gpu_frame.extend &&
+                                  gpu_frame.bottom_wide.size() == static_cast<std::size_t>(kWidth + 2 * extend) * kHeight;
+                if (wide)
+                    presenter->present_layers(gpu_frame.bottom_wide, gpu_frame.top_wide, real3d_gpu->display_image(), kWidth,
+                                              kHeight, extend);
+                else
+                    presenter->present_layers(gpu_frame.bottom, gpu_frame.top, real3d_gpu->display_image(), kWidth, kHeight);
             } else {
                 presenter->present(shown, width, height);
             }

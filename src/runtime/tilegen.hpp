@@ -51,8 +51,48 @@ public:
     static void composite(std::span<uint32_t> out, std::span<const uint32_t> bottom, std::span<const uint32_t> top,
                           std::span<const uint32_t> three_d);
 
+    // Widescreen: also draws `extend` pixels past each side of the screen,
+    // into bottom_side() and top_side() (each line: the left `extend`
+    // pixels, then the right), from the name tables, which wrap at 512: on
+    // lines where a layer is scrolled by 8 to 504 pixels (a picture panning
+    // across its name table, the map screen's faces), or scrolled apart from
+    // most of its lines (a band scrolling through a still picture: the
+    // character select's marquee), or (without line scroll) whose scroll
+    // register changed in the last 120 frames, or (always) whose map row is
+    // a panorama one screen wide: the stages' skies are runs of 62 tiles
+    // written round the map's 64 (its last two columns the first two again;
+    // scrolled 0-7 as the camera turns while the game rewrites the tiles),
+    // and wrap every 496 pixels, not 512. A layer that never scrolls is
+    // otherwise a picture the size of the screen (the title, the character
+    // select): past each side of it, where the tile at the screen's edge is
+    // the row's background (at least 4 of the screen's 62 columns: plain
+    // bands, the orange round the title's logo, dithered as it is), that
+    // tile is carried on exactly, where an edge colour would be its average.
+    // Takes effect at begin_frame.
+    void set_extend(int extend) { next_extend_ = extend; }
+    int extend() const { return extend_; }
+    std::span<const uint32_t> bottom_side() const { return bottom_side_; }
+    std::span<const uint32_t> top_side() const { return top_side_; }
+
+    // For looking at: layer `layer`'s whole 512x512 name table, unscrolled,
+    // into `out` (512 * 512 pixels; alpha 0 where transparent).
+    static void draw_map(std::span<const uint8_t> ram, const std::array<uint32_t, 64>& regs, int layer,
+                         std::span<uint32_t> out);
+
 private:
     std::vector<uint32_t> bottom_, top_;
+    int extend_ = 0, next_extend_ = 0;
+    std::vector<uint32_t> bottom_side_, top_side_;
+    // Each layer's scroll register as last seen, and the frames since it changed.
+    std::array<uint32_t, 4> scroll_seen_{};
+    std::array<uint32_t, 4> scroll_still_{1000, 1000, 1000, 1000};
+    // Each layer's last tile row looked at for the sides (this frame): its
+    // row and scroll, whether it wraps as a panorama, and its edge tiles.
+    struct RowLook {
+        uint32_t key = 0, period = 512;
+        int edge[2] = {-1, -1};
+    };
+    std::array<RowLook, 4> row_look_{};
 };
 
 } // namespace m3

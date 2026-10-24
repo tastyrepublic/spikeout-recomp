@@ -216,6 +216,18 @@ void Real3dSceneBuilder::walk_viewports(uint32_t addr) {
         matrix_base_ = node[0x16] & 0xFFFFFF;
         lod_table_ = node[0x17] & 0xFFFFFF;
         for (uint32_t i = 0; i < 8; ++i) planes_[i] = as_float(node[0x0C + i]);
+        // Widescreen (set_extend): a viewport over the whole screen opened
+        // out to the sides, as Supermodel's CNew3D::CalcViewport: the side
+        // tangents and the side planes' x terms scaled by the width's ratio.
+        if (extend_ > 0 && vp.x == 0 && vp.width >= 495 && vp.y == 0 && vp.height >= 383) {
+            const float widen = (vp.width + 2.0f * static_cast<float>(extend_)) / vp.width;
+            vp.left *= widen;
+            vp.right *= widen;
+            planes_[1] /= widen;
+            planes_[5] /= widen;
+            vp.x = -static_cast<float>(extend_);
+            vp.width += 2.0f * static_cast<float>(extend_);
+        }
         const size_t first_model = models_.size();
         attribs_ = {};
 

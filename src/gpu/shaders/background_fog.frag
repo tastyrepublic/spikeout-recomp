@@ -11,12 +11,13 @@ layout(std140, set = 3, binding = 0) uniform Fog {
     vec4 spot;     // the spotlight's colour on it (times attenuation), on (1/0)
     vec4 ellipse;  // centre x, y, radius x, y (screen pixels)
     float scale;   // render pixels per screen pixel
+    float extend;  // widescreen: the screen's left edge, in screen pixels from the picture's
 };
 
 void main() {
     vec3 rgb = base.rgb;
     if (spot.w != 0.0) {
-        const vec2 c = gl_FragCoord.xy / scale;
+        const vec2 c = gl_FragCoord.xy / scale - vec2(extend, 0.0);
         const float ex = (c.x - ellipse.x) / ellipse.z, ey = (c.y - ellipse.y) / ellipse.w;
         rgb += spot.rgb * max(0.0, 1.0 - (ex * ex + ey * ey));
     }

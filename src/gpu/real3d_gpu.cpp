@@ -61,11 +61,11 @@ enum : uint32_t {
 };
 
 struct FrameUniform {
-    float scale, pad[3];
+    float scale, extend, pad[2];
 };
 struct FogUniform {
     float base[4], spot[4], ellipse[4];
-    float scale, pad[3];
+    float scale, extend, pad[2];
 };
 
 constexpr SDL_GPUTextureFormat kColourFormat = SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM; // 0xAARRGGBB in a word
@@ -131,9 +131,10 @@ GpuViewport pack(const m3::Real3dScene::Viewport& v) {
 
 // ---- Set-up ----
 
-bool Real3dGpu::open(Device& device, int scale) {
+bool Real3dGpu::open(Device& device, int scale, int extend) {
     device_ = &device;
     scale_ = std::max(1, scale);
+    extend_ = std::max(0, extend);
     SDL_GPUDevice* d = device.get();
     const auto w = static_cast<Uint32>(width()), h = static_cast<Uint32>(height());
 
@@ -562,8 +563,9 @@ void Real3dGpu::render(const m3::Real3dScene& scene, std::span<const uint16_t> t
             SDL_BindGPUGraphicsPipeline(pass, fog_);
             const m3::Real3dScene::BackgroundFog fog = scene.background_fog();
             auto fill = [&](const m3::Real3dScene::Viewport& rect, const FogUniform& u) {
-                const float x0 = std::max(0.0f, rect.x), y0 = std::max(0.0f, rect.y);
-                const float x1 = std::min(static_cast<float>(kWidth), rect.x + rect.width);
+                const float e = static_cast<float>(extend_); // (widescreen: the screen moved right)
+                const float x0 = std::max(-e, rect.x) + e, y0 = std::max(0.0f, rect.y);
+                const float x1 = std::min(static_cast<float>(kWidth) + e, rect.x + rect.width) + e;
                 const float y1 = std::min(static_cast<float>(kHeight), rect.y + rect.height);
                 if (x0 >= x1 || y0 >= y1) return;
                 const SDL_GPUViewport vp{x0 * s, y0 * s, (x1 - x0) * s, (y1 - y0) * s, 0, 1};
@@ -575,7 +577,7 @@ void Real3dGpu::render(const m3::Real3dScene& scene, std::span<const uint16_t> t
                 SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
             };
             if (fog.ambient >= 0) {
-                FogUniform u{{0, 0, 0, fog.ambient_alpha}, {0, 0, 0, 0}, {0, 0, 1, 1}, s, {}};
+                FogUniform u{{0, 0, 0, fog.ambient_alpha}, {0, 0, 0, 0}, {0, 0, 1, 1}, s, static_cast<float>(extend_), {}};
                 fill(scene.viewports[static_cast<size_t>(fog.ambient)], u);
             }
             if (fog.scroll >= 0) {
@@ -593,12 +595,13 @@ void Real3dGpu::render(const m3::Real3dScene& scene, std::span<const uint16_t> t
                 u.ellipse[2] = v.spot_rx;
                 u.ellipse[3] = v.spot_ry;
                 u.scale = s;
+                u.extend = static_cast<float>(extend_);
                 fill(scroll, u);
             }
             SDL_EndGPURenderPass(pass);
         }
 
-        const FrameUniform frame{s, {}};
+        const FrameUniform frame{s, static_cast<float>(extend_), {}};
         SDL_PushGPUFragmentUniformData(cmd, 0, &frame, sizeof frame);
         SDL_GPUBuffer* storage[3] = {polygon_buffer_, viewport_buffer_, quad_buffer_};
         const SDL_GPUBufferBinding vertices{vertex_buffer_, 0};
@@ -620,11 +623,12 @@ void Real3dGpu::render(const m3::Real3dScene& scene, std::span<const uint16_t> t
                     SDL_SetGPUStencilReference(pass, 0);
                 }
                 const auto& v = scene.viewports[dr.viewport];
-                const SDL_GPUViewport vp{v.x * s, v.y * s, v.width * s, v.height * s, 0, 1};
+                const float vx = v.x + static_cast<float>(extend_); // (widescreen: the screen moved right)
+                const SDL_GPUViewport vp{vx * s, v.y * s, v.width * s, v.height * s, 0, 1};
                 SDL_SetGPUViewport(pass, &vp);
-                const int x0 = std::clamp(static_cast<int>(v.x * s), 0, width()),
+                const int x0 = std::clamp(static_cast<int>(vx * s), 0, width()),
                           y0 = std::clamp(static_cast<int>(v.y * s), 0, height());
-                const int x1 = std::clamp(static_cast<int>((v.x + v.width) * s), 0, width()),
+                const int x1 = std::clamp(static_cast<int>((vx + v.width) * s), 0, width()),
                           y1 = std::clamp(static_cast<int>((v.y + v.height) * s), 0, height());
                 if (x0 >= x1 || y0 >= y1) continue;
                 const SDL_Rect r{x0, y0, x1 - x0, y1 - y0};

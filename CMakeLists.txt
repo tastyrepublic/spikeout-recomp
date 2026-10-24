@@ -47,6 +47,7 @@ add_library(m3runtime
     src/runtime/eeprom.cpp
     src/runtime/rtc.cpp
     src/runtime/tilegen.cpp
+    src/runtime/widescreen.cpp
     src/runtime/real3d.cpp
     src/runtime/real3d_render.cpp
     src/runtime/real3d_scene.cpp
