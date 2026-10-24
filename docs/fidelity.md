@@ -310,9 +310,17 @@ at those blocks) watch the routine that draws tile maps (0x948c), the fill
 have put past the screen's edges, 12 columns each side, entries remapped as
 the game does, shown when the game copies that layer. Past the map's own
 edge a row's edge tile is carried on where it is the row's background (the
-band, as when the title is still). Only such rows are kept: the riveted
-wall's rows (a photo, no background tile) are left to the sides above,
-exactly as before. `WideLayer` makes every side as before and then puts the
+band, as when the title is still). The title's riveted wall is a photo of
+62 different tiles a row (no tile repeats, and the photo doesn't wrap: its
+ends differ by 22 levels where neighbouring columns differ by 14); past the
+map's edge it is the title itself again 31 columns along (a door's width,
+half the title): the rivets, about 50 pixels apart, stay 49 and 48 apart
+across the joins, the smoothest joins of the spacings that keep them. So
+the wall slides with the doors and the leaving bands stay widened; the
+still title's wall sides change from the guessed repeat to these. A map
+drawn again clears only the rows it covers (the band is redrawn while the
+wall stays), and a fill may start a row above the layer (the last band's
+clear). `WideLayer` makes every side as before and then puts the
 kept rows' sides over it, so nothing else changes: the 4:3 picture and
 every other 16:9 picture from power-on through the attract sequence are the
 same (597 of 597, and every frame of the strips but their own), and the

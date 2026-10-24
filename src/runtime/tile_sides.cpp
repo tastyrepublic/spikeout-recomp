@@ -2,6 +2,8 @@
 
 #include "runtime/state.hpp"
 
+#include <algorithm>
+
 namespace m3 {
 
 namespace {
@@ -17,9 +19,9 @@ bool valid(int layer, int row) { return layer >= 0 && layer < TileSides::kLayers
 
 } // namespace
 
-void TileSides::begin_map(int layer, uint16_t map) {
+void TileSides::begin_map(int layer, uint16_t map, int first_row, int end_row) {
     if (layer < 0 || layer >= kLayers) return;
-    for (int row = 0; row < kRows; ++row)
+    for (int row = std::max(first_row, 0); row < std::min(end_row, kRows); ++row)
         for (int side = 0; side < 2; ++side)
             for (int i = 0; i < kSide; ++i) {
                 Cell& c = pending_[static_cast<std::size_t>(index(layer, row, side != 0, i))];

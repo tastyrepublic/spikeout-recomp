@@ -15,11 +15,12 @@
 // the game copies a layer, this layer's sides are copied too (to what the
 // tile generator draws from), so they change in step with the screen.
 //
-// Only rows whose edge is the row's background are kept (the title's band,
-// logo and black bar; not the riveted wall, left to widescreen's usual
-// sides). A cell is empty until a map is drawn over it. A map drawn again
-// clears the cells it drew before the last copy (the doors move on, the
-// game clears nothing past the screen); a fill
+// Kept: rows whose edge is the row's background (the title's band, logo
+// and black bar), and the title's riveted wall (its own tiles repeated past
+// the map's edge: games/spikeofe_hooks.cpp). A cell is empty until a map is
+// drawn over it. A map drawn again clears the cells it drew on those rows
+// before the last copy (the doors move on, the game clears nothing past the
+// screen; the title's wall, drawn once, stays while its band is redrawn); a fill
 // reaching the screen's edge empties the cells past that edge on its rows,
 // except those drawn since the last copy (the game draws the doors, then
 // clears the gap they left).
@@ -39,8 +40,9 @@ public:
     static constexpr uint32_t kEmpty = 0xFFFFFFFFu;
 
     // ---- As the game draws ----
-    // Map `map` is about to be drawn on `layer`: its cells from before the last copy go.
-    void begin_map(int layer, uint16_t map);
+    // Map `map` is about to be drawn on `layer` over rows [first_row,
+    // end_row): its cells there from before the last copy go.
+    void begin_map(int layer, uint16_t map, int first_row, int end_row);
     // A map's entry (the layer buffer's form) at (row, column), column outside [0, kScreen).
     void draw(int layer, int row, int column, uint16_t entry, uint16_t map);
     // A fill reaching the screen's left (right) edge on `row`.

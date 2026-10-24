@@ -70,11 +70,11 @@ a frame at scale 4), the settings menu and widescreen all work.
   m3::TileSides (12 columns each side, in save states); the tile
   generator draws those rows into bottom_own/top_own, and WideLayer puts
   them over its usual sides. Only rows whose edge tile is the row's
-  background (band, logo, black bar) are kept. The owner asked that the
-  red wall not be touched: its rows are exactly as before, including its
-  stripes while the doors slide and the leaving wall bands not being
-  widened (an earlier attempt at those changed the still title's wall
-  sides and was dropped). The faces layer on the map screen pans (line
+  background (band, logo, black bar) carry their edge tile; the riveted
+  wall (map 0x53's rows 0-10, 37-47, 62 different tiles a row) repeats the
+  map's own columns every 31 (owner's choice from previews, uncommitted
+  when written): it slides with the doors, the leaving bands stay
+  widened, and the still title's wall sides changed (owner approved). The faces layer on the map screen pans (line
   scroll) and its sides wrap the name table: the left side shows the
   photo's dark edge (the "left side goes black"), the right a repeated
   face; not addressed. Repro state: build/spikeout-819.state (the owner's

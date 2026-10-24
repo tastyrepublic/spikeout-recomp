@@ -43,6 +43,14 @@ namespace {
 constexpr uint32_t kDrawHook = 0x9628, kFillHook = 0x7E34, kCopyHook = 0x8230;
 constexpr uint32_t kNameTables = 0xF10F8000, kNameTableSize = 0x2000;
 constexpr uint16_t kBlank = 0x20; // the tile the clear flag fills with
+// The title (map 0x53) and its wall's repeat past the map's edge: the
+// rivets are about 50 pixels apart, and 31 columns on (a door's width, half
+// the title) keeps that spacing across the join (49 and 48 pixels) and
+// joins its photo best of the spacings that do (measured on the still
+// title's layer: an average step of 19.7 and 19.1 across the joins, 14
+// between neighbouring columns within the photo).
+constexpr uint16_t kTitleMap = 0x53;
+constexpr int32_t kTitleWallRepeat = 31;
 
 // The tile layer a descriptor is copied to (-1: none known); its columns and rows.
 int layer_of(recomp::Context& c, uint32_t desc, int& columns, int& rows) {
@@ -67,9 +75,9 @@ void draw(recomp::Context& c) {
     if (layer < 0) return;
     TileSides& sides = c.bus.tile_sides();
     const auto map = static_cast<uint16_t>(r[23]);
-    sides.begin_map(layer, map);
     const auto x = static_cast<int32_t>(r[6]), y = static_cast<int32_t>(r[5]);
     const auto w = static_cast<int32_t>(r[26]), h = static_cast<int32_t>(r[27]);
+    sides.begin_map(layer, map, y, y + std::max(h, 0));
     const auto stride = static_cast<int32_t>(r[28]), x0 = static_cast<int32_t>(r[10]), y0 = static_cast<int32_t>(r[9]);
     if (w <= 0 || h <= 0 || stride <= 0 || stride > 1024) return;
     // The map's entries less 2 (its header's height just before them).
@@ -78,22 +86,31 @@ void draw(recomp::Context& c) {
     const bool clear = (r[18] & 0x8000) != 0;
     const bool reaches_left = x <= 0, reaches_right = x + w >= TileSides::kScreen;
     auto source = [&](int32_t mr, int32_t mc) { return c.bus.read16(base + 2 + static_cast<uint32_t>(mr * stride + mc) * 2); };
-    // Only rows whose edge on that side is the row's background (at least 4
-    // of its tiles: the title's band, its logo and the black bar), carried on
-    // past the map's own edge as the tile generator carries a still
-    // picture's (TilegenRenderer::set_extend). Other rows (the riveted wall,
-    // a photo of different tiles) are left to widescreen's usual sides.
+    // Past the map's own edge: in rows whose edge on that side is the row's
+    // background (at least 4 of its tiles: the title's band, its logo and the
+    // black bar), that tile carried on, as the tile generator carries a still
+    // picture's (TilegenRenderer::set_extend). In the title's other rows (its
+    // riveted wall, a photo of 62 different tiles a row: none repeats), the
+    // title itself again kTitleWallRepeat columns along. Other maps' other
+    // rows are left to widescreen's usual sides.
     auto background = [&](int32_t mr, int32_t edge) {
         const uint16_t tile = source(mr, edge);
         int count = 0;
         for (int32_t mc = 0; mc < stride && count < 4; ++mc) count += source(mr, mc) == tile;
         return count >= 4;
     };
-    auto put = [&](int32_t row, int32_t column) {
+    const bool title = map == kTitleMap && stride > kTitleWallRepeat;
+    auto put = [&](int32_t row, int32_t column, bool carry) {
         const bool part = column >= x && column < x + w;
         if (!part && !(column < x ? reaches_left : reaches_right)) return;
         const int32_t mr = y0 + (row - y);
-        const int32_t mc = std::clamp(x0 + (column - x), 0, stride - 1);
+        int32_t mc = x0 + (column - x);
+        if (carry) {
+            mc = std::clamp(mc, 0, stride - 1);
+        } else {
+            while (mc < 0) mc += kTitleWallRepeat;
+            while (mc >= stride) mc -= kTitleWallRepeat;
+        }
         uint16_t entry = kBlank;
         if (!clear) {
             const uint16_t src = source(mr, mc);
@@ -105,11 +122,17 @@ void draw(recomp::Context& c) {
     for (int32_t row = std::max(y, 0); row < std::min(y + h, rows); ++row) { // (clipped as the game does)
         const int32_t mr = y0 + (row - y);
         if (mr < 0 || mr >= height) continue;
-        if (reaches_left && background(mr, 0))
-            for (int32_t column = -TileSides::kSide; column < 0; ++column) put(row, column);
-        if (reaches_right && background(mr, stride - 1))
-            for (int32_t column = TileSides::kScreen; column < TileSides::kScreen + TileSides::kSide; ++column)
-                put(row, column);
+        if (reaches_left) {
+            const bool carry = background(mr, 0);
+            if (carry || title)
+                for (int32_t column = -TileSides::kSide; column < 0; ++column) put(row, column, carry);
+        }
+        if (reaches_right) {
+            const bool carry = background(mr, stride - 1);
+            if (carry || title)
+                for (int32_t column = TileSides::kScreen; column < TileSides::kScreen + TileSides::kSide; ++column)
+                    put(row, column, carry);
+        }
     }
 }
 
@@ -120,8 +143,10 @@ void fill(recomp::Context& c) {
     const int layer = layer_of(c, r[3], columns, rows);
     if (layer < 0) return;
     const auto w = static_cast<int32_t>(r[4]), h = static_cast<int32_t>(r[5]);
-    const uint32_t row_bytes = static_cast<uint32_t>(columns) * 2;
-    const auto y = static_cast<int32_t>(r[11] / row_bytes), x = static_cast<int32_t>(r[11] % row_bytes / 2);
+    // (the offset may be negative: the title's last band clear starts a row above the layer)
+    const int32_t row_bytes = columns * 2, offset = static_cast<int32_t>(r[11]);
+    const int32_t y = offset >= 0 ? offset / row_bytes : -((-offset + row_bytes - 1) / row_bytes);
+    const int32_t x = (offset - y * row_bytes) / 2;
     const bool left = x == 0, right = x + w >= TileSides::kScreen;
     if (!left && !right) return;
     for (int32_t row = y; row < y + h && row < rows; ++row) {
