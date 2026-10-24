@@ -26,6 +26,9 @@
 // of from power-on; with --replay, the recording's inputs from there.
 // --blocks then counts from the state. Loaded, a run is the same as the one
 // that saved it, to the byte.
+// --watch-write LO-HI@FRAME[:N] (hex addresses) prints every write to
+// [LO, HI) in N frames from FRAME (default 1): the block writing, LR and
+// registers (finding the code that draws something; work RAM too).
 // --dump-backup writes the backup RAM (128 KB) at the end. --dump-layers
 // writes each tile layer's whole 512x512 name table with every screenshot
 // (FILE-<frame>-L<n>.png).
@@ -169,6 +172,8 @@ struct Options {
     std::string save_state;                   // --save-state FILE@FRAME
     uint64_t save_frame = 0;
     const char* load_state = nullptr;         // --load-state FILE
+    uint32_t watch_lo = 0, watch_hi = 0;      // --watch-write LO-HI@FRAME:N
+    uint64_t watch_frame = 0, watch_frames = 1;
     bool dump_layers = false;
     const char* eeprom = nullptr; // --eeprom: the settings EEPROM to start with (128 bytes, high byte first)
     const char* net_disasm = nullptr;
@@ -274,6 +279,7 @@ struct Machine {
     m3::Bus bus;
     m3::CommBoard* comm = nullptr;
     bool loaded = false; // --load-state: the run resumes where the state was saved
+    uint64_t watch_from = 0, watch_to = 0; // --watch-write: the frames whose writes are printed
     // --replay: the next recorded inputs and hash, hashes matched, the first frame not
     size_t replay_input = 0, replay_hash = 0;
     uint64_t replay_matched = 0, replay_parted = 0;
@@ -439,6 +445,20 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
                     m.c.cpu.pc);
     }
     m.c.limit_blocks(static_cast<uint64_t>(o.blocks));
+    if (o.watch_hi > o.watch_lo) { // --watch-write: each write there, where the code was, and its registers
+        m.watch_from = o.watch_frame;
+        m.watch_to = o.watch_frame + o.watch_frames;
+        bus.watch_writes(o.watch_lo, o.watch_hi, [](void* user, uint32_t addr, uint32_t value, uint32_t size) {
+            Machine& w = *static_cast<Machine*>(user);
+            const uint64_t frame = w.timing.frames();
+            if (frame < w.watch_from || frame >= w.watch_to) return;
+            const auto& r = w.c.cpu.gpr;
+            std::printf("frame %llu: write%u %08x = %08x at block %08x, LR %08x; r3-r12 %08x %08x %08x %08x %08x %08x %08x %08x "
+                        "%08x %08x, r24-r31 %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                        static_cast<unsigned long long>(frame), 8 * size, addr, value, w.c.cpu.pc, w.c.cpu.lr, r[3], r[4], r[5],
+                        r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[24], r[25], r[26], r[27], r[28], r[29], r[30], r[31]);
+        }, &m);
+    }
     m.real3d.set_probe(o.probe_x, o.probe_y);
     m.real3d.set_quads(o.quads);
     m.sound.board.set_volumes(o.sound_volume, o.music_volume);
@@ -1166,6 +1186,14 @@ int main(int argc, char** argv) {
             o.save_frame = std::strtoull(spec.c_str() + at + 1, nullptr, 0);
         }
         else if (arg == "--load-state" && i + 1 < argc) o.load_state = argv[++i];
+        else if (arg == "--watch-write" && i + 1 < argc) { // LO-HI@FRAME[:N], hex addresses
+            const std::string spec = argv[++i];
+            char* end = nullptr;
+            o.watch_lo = static_cast<uint32_t>(std::strtoul(spec.c_str(), &end, 16));
+            if (*end == '-') o.watch_hi = static_cast<uint32_t>(std::strtoul(end + 1, &end, 16));
+            if (*end == '@') o.watch_frame = std::strtoull(end + 1, &end, 0);
+            if (*end == ':') o.watch_frames = std::strtoull(end + 1, &end, 0);
+        }
         else if (arg == "--dump-tile" && i + 1 < argc) o.dump_tile = argv[++i];
         else if (arg == "--dump-textures" && i + 1 < argc) o.dump_textures = argv[++i];
         else if (arg == "--dump-backup" && i + 1 < argc) o.dump_backup = argv[++i];

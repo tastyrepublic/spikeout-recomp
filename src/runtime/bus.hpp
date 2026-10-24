@@ -126,11 +126,11 @@ public:
     uint64_t read64(uint32_t addr) { return uint64_t{read32(addr)} << 32 | read32(addr + 4); }
 
     void write8(uint32_t addr, uint8_t value) {
-        if (addr < kWorkRamSize) ram_[addr] = value;
+        if (addr < fast_limit_[0]) ram_[addr] = value;
         else write_slow(addr, value, 1);
     }
     void write16(uint32_t addr, uint16_t value) {
-        if (addr < kWorkRamSize - 1) {
+        if (addr < fast_limit_[1]) {
             ram_[addr] = static_cast<uint8_t>(value >> 8);
             ram_[addr + 1] = static_cast<uint8_t>(value);
         } else {
@@ -138,7 +138,7 @@ public:
         }
     }
     void write32(uint32_t addr, uint32_t value) {
-        if (addr < kWorkRamSize - 3) store_be32(&ram_[addr], value);
+        if (addr < fast_limit_[2]) store_be32(&ram_[addr], value);
         else write_slow(addr, value, 4);
     }
     void write64(uint32_t addr, uint64_t value) {
@@ -233,6 +233,17 @@ public:
     // Called when midi_due() may have moved earlier (the runtime asks again).
     void (*on_due_change)(void* user) = nullptr;
     void* on_due_change_user = nullptr;
+    // Debugging (gamerun --watch-write): `fn` is called for each write to
+    // [lo, hi), with the access as write_slow has it. Watching work RAM sends
+    // all its writes the slow way while it lasts.
+    void watch_writes(uint32_t lo, uint32_t hi, void (*fn)(void*, uint32_t, uint32_t, uint32_t), void* user) {
+        watch_lo_ = lo;
+        watch_hi_ = hi;
+        on_watch_ = fn;
+        on_watch_user_ = user;
+        const bool ram = fn && lo < kWorkRamSize;
+        fast_limit_ = ram ? std::array<uint32_t, 3>{} : std::array<uint32_t, 3>{kWorkRamSize, kWorkRamSize - 1, kWorkRamSize - 3};
+    }
 
     // Real-time clock (0xF0140000), on the emulated time. It starts at
     // 1970-01-01 00:00; a frontend sets it (rtc().set_time) from the host's
@@ -298,6 +309,11 @@ private:
 
     const RomSet& roms_;
     std::vector<uint8_t> ram_;
+    // Writes below these (by size: 1, 2, 4 bytes) go straight to work RAM.
+    std::array<uint32_t, 3> fast_limit_{kWorkRamSize, kWorkRamSize - 1, kWorkRamSize - 3};
+    uint32_t watch_lo_ = 0, watch_hi_ = 0;
+    void (*on_watch_)(void* user, uint32_t addr, uint32_t value, uint32_t size) = nullptr;
+    void* on_watch_user_ = nullptr;
     uint8_t system_read(uint32_t reg) const;
     void system_write(uint32_t reg, uint8_t value);
 

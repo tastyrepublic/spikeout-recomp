@@ -39,7 +39,8 @@ struct Settings {
     bool show_fps = false; // the frames shown a second, in a corner
     // Smooth motion: a picture each refresh of the screen (up to 120 a
     // second), the 3D placed between the arcade's last two frames, a frame
-    // behind them (m3::interpolate). Off: the arcade's own frames.
+    // behind them (m3::interpolate). Off: the arcade's own frames. Still
+    // being tested: not kept in settings.ini, only spikeout --smooth turns it on.
     bool smooth_motion = false;
     // Speakers (SpeakerSetup in spikeout.cpp): 0 stereo, 1 front and rear on one
     // output of four channels, 2 each pair on an output of its own (by name)
@@ -100,7 +101,6 @@ inline Settings load_settings(const std::string& path) {
     get_bool("gpu_3d", s.gpu_3d);
     get_bool("fullscreen", s.fullscreen);
     get_bool("show_fps", s.show_fps);
-    get_bool("smooth_motion", s.smooth_motion);
     get("crt_colours", s.crt_colours, 0, 5);
     get("speakers", s.speakers, 0, 2);
     if (auto it = v.find("front_output"); it != v.end()) s.front_output = it->second;
@@ -125,7 +125,6 @@ inline bool save_settings(const std::string& path, const Settings& s) {
     o << "gpu_3d = " << (s.gpu_3d ? 1 : 0) << "\n";
     o << "fullscreen = " << (s.fullscreen ? 1 : 0) << "\n";
     o << "show_fps = " << (s.show_fps ? 1 : 0) << "\n";
-    o << "smooth_motion = " << (s.smooth_motion ? 1 : 0) << "\n";
     o << "speakers = " << s.speakers << "\n";
     o << "front_output = " << s.front_output << "\n";
     o << "rear_output = " << s.rear_output << "\n";
