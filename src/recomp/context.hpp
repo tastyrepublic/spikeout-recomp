@@ -172,6 +172,19 @@ public:
     // the caller's return site, as the CPU would, for as long as the game
     // runs. Throws as call() does.
     [[noreturn]] void resume_block(uint32_t pc);
+    // Game-specific observers (m3::GameSpec::hooks): the generated code calls
+    // hook(pc) at the start of each such block, after its tick, before its
+    // instructions. They read the guest's state and never change it, so the
+    // game runs the same with or without them.
+    using Hook = void (*)(Context& c, uint32_t pc, void* user);
+    void set_hook(Hook fn, void* user) {
+        hook_ = fn;
+        hook_user_ = user;
+    }
+    void hook(uint32_t pc) {
+        if (hook_) hook_(*this, pc, hook_user_);
+    }
+
     // Calls `fn` at the start of the next block run outside any exception
     // (where resume_block can start again), before anything else is done
     // there; it may save the state then.
@@ -240,6 +253,8 @@ private:
     std::span<const FunctionEntry> functions_;
     std::span<const FunctionEntry> blocks_;
     std::function<void(uint32_t)> snapshot_;
+    Hook hook_ = nullptr;
+    void* hook_user_ = nullptr;
     std::vector<uint32_t> resume_;
     std::array<uint32_t, 4096> return_stack_{};
     size_t return_depth_ = 0;

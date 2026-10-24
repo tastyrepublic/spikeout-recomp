@@ -2,6 +2,7 @@
 // one table, and the RTC set to the host's clock.
 #pragma once
 
+#include "games/spikeofe_hooks.hpp"
 #include "recomp/context.hpp"
 #include "recomp/frame_timing.hpp"
 #include "runtime/bus.hpp"

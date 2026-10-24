@@ -47,6 +47,7 @@ add_library(m3runtime
     src/runtime/eeprom.cpp
     src/runtime/rtc.cpp
     src/runtime/tilegen.cpp
+    src/runtime/tile_sides.cpp
     src/runtime/widescreen.cpp
     src/runtime/real3d.cpp
     src/runtime/real3d_render.cpp
@@ -107,7 +108,7 @@ endif()
 
 # What recompiled code runs against (CPU state, bus, function table).
 # Linking it brings in spikeout_fp for the generated code.
-add_library(recomp_runtime src/recomp/context.cpp src/recomp/frame_timing.cpp)
+add_library(recomp_runtime src/recomp/context.cpp src/recomp/frame_timing.cpp src/games/spikeofe_hooks.cpp)
 target_include_directories(recomp_runtime PUBLIC src)
 target_link_libraries(recomp_runtime PUBLIC ppc m3runtime spikeout_fp PRIVATE spikeout_warnings)
 

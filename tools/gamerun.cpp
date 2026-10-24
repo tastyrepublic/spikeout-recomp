@@ -664,8 +664,10 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         if (!o.no_2d) m.tilegen.composite(m.screen, o.renderer == R::Gpu ? std::span<const uint32_t>(m.gpu_image) : m.real3d.image());
         if (const int e = m.tilegen.extend(); e > 0 && !o.no_2d) { // --wide: the sides made every frame, as the window does
             const auto start = std::chrono::steady_clock::now();
-            m.wide_bottom.build(m.tilegen.bottom(), m.tilegen.bottom_side(), e, m.bottom_wide);
-            m.wide_top.build(m.tilegen.top(), m.tilegen.top_side(), e, m.top_wide, true);
+            m.wide_bottom.build(m.tilegen.bottom(), m.tilegen.bottom_side(), e, m.bottom_wide, false, m.tilegen.bottom_own(),
+                                m.tilegen.bottom_real());
+            m.wide_top.build(m.tilegen.top(), m.tilegen.top_side(), e, m.top_wide, true, m.tilegen.top_own(),
+                             m.tilegen.top_real());
             const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
             m.wide_seconds += took;
             if (took > m.wide_worst) {
@@ -739,8 +741,10 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
 #endif
             if (const int e = m.builder.extend(); e > 0 && !m.gpu_wide.empty() && m.tilegen.extend() == e) {
                 // --wide: the widescreen picture as the window shows it
-                m.wide_bottom.build(m.tilegen.bottom(), m.tilegen.bottom_side(), e, m.bottom_wide);
-                m.wide_top.build(m.tilegen.top(), m.tilegen.top_side(), e, m.top_wide, true);
+                m.wide_bottom.build(m.tilegen.bottom(), m.tilegen.bottom_side(), e, m.bottom_wide, false,
+                                    m.tilegen.bottom_own(), m.tilegen.bottom_real());
+                m.wide_top.build(m.tilegen.top(), m.tilegen.top_side(), e, m.top_wide, true, m.tilegen.top_own(),
+                                 m.tilegen.top_real());
                 std::vector<uint32_t> wide(m.bottom_wide.size());
                 m3::WideLayer::composite(wide, m.bottom_wide, m.top_wide, m.gpu_wide, e);
 #ifdef SPIKEOUT_GPU
@@ -1364,6 +1368,7 @@ int main(int argc, char** argv) {
     for (std::size_t i = 0; i < o.boards; ++i) {
         machines.push_back(std::make_unique<Machine>(i, roms, functions));
         machines.back()->c.set_blocks(blocks);
+        m3::games::install_spikeout_hooks(machines.back()->c);
         set_up(*machines.back(), o, game, ring.get(), turns);
 #ifdef SPIKEOUT_GPU
         if (o.renderer != Options::Renderer::Software || o.gpu_time_scale) {

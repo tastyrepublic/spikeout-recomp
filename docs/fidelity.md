@@ -298,6 +298,26 @@ screens the 3D is in the middle, and what it has past the arcade's screen
 `gamerun --wide 93` writes widescreen screenshots as the window draws them
 (16:9), and `--dump-layers` each tile layer's whole name table.
 
+The title's doors (between the character select and the map) and its
+strips (after the attract sequence) are parts of one tile map (0x53, the
+whole title, 62 x 48), drawn by the game each frame at the screen's edge,
+wider or narrower as they slide; the rest of each door is never written, so
+the name table holds nothing past the screen. Their sides come from that
+map instead (`m3::TileSides`): observers in the recompiled code
+(`m3::GameSpec::hooks`, `games/spikeofe_hooks.cpp`; the lifter emits a call
+at those blocks) watch the routine that draws tile maps (0x948c), the fill
+(0x7e34) and the copy to the name tables (0x8200), and keep what a map would
+have put past the screen's edges, 12 columns each side, entries remapped as
+the game does, shown when the game copies that layer. Past the map's own
+edge a row's edge tile is carried on where it is the row's background (the
+band, as when the title is still). Only such rows are kept: the riveted
+wall's rows (a photo, no background tile) are left to the sides above,
+exactly as before. `WideLayer` makes every side as before and then puts the
+kept rows' sides over it, so nothing else changes: the 4:3 picture and
+every other 16:9 picture from power-on through the attract sequence are the
+same (597 of 597, and every frame of the strips but their own), and the
+hooks only read the game's state (save states and replays unchanged).
+
 ## Sound board
 
 `m3::SoundBoard` and `m3::Scsp` are adapted from Supermodel's SCSP (ElSemi's,

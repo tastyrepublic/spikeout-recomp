@@ -45,7 +45,8 @@ void WideLayer::composite(std::span<uint32_t> out, std::span<const uint32_t> bot
 }
 
 void WideLayer::build(std::span<const uint32_t> layer, std::span<const uint32_t> side, int extend,
-                      std::vector<uint32_t>& out, bool above) {
+                      std::vector<uint32_t>& out, bool above, std::span<const uint32_t> own,
+                      std::span<const uint8_t> real) {
     const int e = std::max(extend, 0), wide = kWidth + 2 * e;
     out.assign(static_cast<std::size_t>(wide) * kHeight, 0u);
     if (layer.size() < static_cast<std::size_t>(kWidth) * kHeight) return;
@@ -204,6 +205,18 @@ void WideLayer::build(std::span<const uint32_t> layer, std::span<const uint32_t>
             }
         }
     }
+
+    // The sides the tile generator drew from the game's own columns past the
+    // screen (the title's doors), over whatever was made for them above: the
+    // rest is made as it always was, these rows not looked at.
+    if (!has_side || own.size() != side.size() || real.size() != static_cast<std::size_t>(kHeight)) return;
+    for (int y = 0; y < kHeight; ++y)
+        for (int s = 0; s < 2; ++s) {
+            if (!(real[static_cast<std::size_t>(y)] & (1u << s))) continue;
+            const uint32_t* from = own.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(2 * e) +
+                                   static_cast<std::size_t>(s ? e : 0);
+            std::copy_n(from, e, out.begin() + static_cast<std::ptrdiff_t>(y) * wide + (s ? e + kWidth : 0));
+        }
 }
 
 } // namespace m3

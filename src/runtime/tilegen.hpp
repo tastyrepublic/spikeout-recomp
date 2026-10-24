@@ -27,6 +27,7 @@
 namespace m3 {
 
 class Bus;
+class TileSides;
 
 class TilegenRenderer {
 public:
@@ -36,8 +37,10 @@ public:
 
     // Clears both images (transparent).
     void begin_frame();
-    // Draws display line `line` (0-383) from the current RAM and registers.
-    void draw_line(std::span<const uint8_t> ram, const std::array<uint32_t, 64>& regs, int line);
+    // Draws display line `line` (0-383) from the current RAM and registers
+    // (widescreen: and `sides`, the game's own columns past the screen).
+    void draw_line(std::span<const uint8_t> ram, const std::array<uint32_t, 64>& regs, int line,
+                   const TileSides* sides = nullptr);
     void draw_line(const Bus& bus, int line);
 
     // Pixels as 0xAARRGGBB; alpha 0 where nothing was drawn.
@@ -68,11 +71,22 @@ public:
     // the row's background (at least 4 of the screen's 62 columns: plain
     // bands, the orange round the title's logo, dithered as it is), that
     // tile is carried on exactly, where an edge colour would be its average.
+    // Apart from all that, on a layer that isn't scrolled across (x scroll 0,
+    // no line scroll), a map row that has the game's own columns past the
+    // screen (m3::TileSides: the title's doors) is drawn from them on that
+    // side into bottom_own() and top_own() (laid out as the sides; nothing
+    // where there are none), such lines marked in bottom_real() and
+    // top_real() (bit 0 left, bit 1 right), for m3::WideLayer to put over
+    // its sides there.
     // Takes effect at begin_frame.
     void set_extend(int extend) { next_extend_ = extend; }
     int extend() const { return extend_; }
     std::span<const uint32_t> bottom_side() const { return bottom_side_; }
     std::span<const uint32_t> top_side() const { return top_side_; }
+    std::span<const uint32_t> bottom_own() const { return bottom_own_; }
+    std::span<const uint32_t> top_own() const { return top_own_; }
+    std::span<const uint8_t> bottom_real() const { return bottom_real_; }
+    std::span<const uint8_t> top_real() const { return top_real_; }
 
     // Smooth motion: how far the picture below the 3D (`before`, then `now`,
     // 496x384 each) moved on screen in a frame, now(x, y) = before(x - dx,
@@ -94,6 +108,8 @@ private:
     std::vector<uint32_t> bottom_, top_;
     int extend_ = 0, next_extend_ = 0;
     std::vector<uint32_t> bottom_side_, top_side_;
+    std::vector<uint32_t> bottom_own_, top_own_;
+    std::vector<uint8_t> bottom_real_, top_real_;
     // Each layer's scroll register as last seen, and the frames since it changed.
     std::array<uint32_t, 4> scroll_seen_{};
     std::array<uint32_t, 4> scroll_still_{1000, 1000, 1000, 1000};

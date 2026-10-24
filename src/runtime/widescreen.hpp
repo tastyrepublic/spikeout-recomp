@@ -41,8 +41,12 @@ public:
     // `out` becomes (kWidth + 2 * extend) x kHeight. `side`: the tile
     // generator's side pixels (TilegenRenderer::bottom_side or top_side, for
     // the same extend; else ignored). `above`: the layers above the 3D.
+    // `own` and `real`: sides the tile generator drew from the game's own
+    // columns past the screen, and the lines it did (TilegenRenderer::
+    // bottom_own/top_own and bottom_real/top_real): put over the sides made
+    // there, everything else made as without them.
     void build(std::span<const uint32_t> layer, std::span<const uint32_t> side, int extend, std::vector<uint32_t>& out,
-               bool above = false);
+               bool above = false, std::span<const uint32_t> own = {}, std::span<const uint8_t> real = {});
 
     // The widescreen picture as the window's screen shader makes it
     // (src/gpu/shaders/screen.frag), for gamerun: the wide layers and 3D

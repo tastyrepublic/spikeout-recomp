@@ -84,10 +84,12 @@ public:
     // that has it (shared by the emitters of all files).
     // `block_sites`: every block start found so far, with the first function
     // that has it (save states resume at any block).
+    // `hooks`: blocks whose start calls c.hook(pc).
     Emitter(const analysis::CodeImage& image, const analysis::Analysis& an, const std::set<uint32_t>& compiled,
-            LiftStats& stats, std::map<uint32_t, uint32_t>& resume_sites, std::map<uint32_t, uint32_t>& block_sites)
+            LiftStats& stats, std::map<uint32_t, uint32_t>& resume_sites, std::map<uint32_t, uint32_t>& block_sites,
+            const std::set<uint32_t>& hooks)
         : image_(image), an_(an), compiled_(compiled), stats_(stats), resume_sites_(resume_sites),
-          block_sites_(block_sites) {}
+          block_sites_(block_sites), hooks_(hooks) {}
 
     void function(const Function& fn) {
         blocks_.clear();
@@ -141,6 +143,7 @@ private:
         const uint32_t cycles = ppc::block_cycles(code);
         stats_.cycles += cycles;
         line("c.tick(" + hex(b.start) + ", " + std::to_string(cycles) + ");");
+        if (hooks_.contains(b.start)) line("c.hook(" + hex(b.start) + ");");
         for (uint32_t pc = b.start; pc < b.end; pc += 4) {
             const uint32_t raw = image_.read32(pc).value_or(0);
             const Instruction in = ppc::decode(raw);
@@ -602,6 +605,7 @@ private:
     LiftStats& stats_;
     std::map<uint32_t, uint32_t>& resume_sites_;
     std::map<uint32_t, uint32_t>& block_sites_;
+    const std::set<uint32_t>& hooks_;
     std::set<uint32_t> blocks_;
     std::map<uint32_t, std::string> sites_; // this function's return sites and their labels
     std::string out_;
@@ -645,7 +649,7 @@ std::vector<std::string> lift(const analysis::CodeImage& image, const analysis::
     std::map<uint32_t, uint32_t> resume_sites, block_sites;
     std::vector<std::string> bodies;
     for (const auto& group : groups) {
-        Emitter emitter(image, an, compiled, stats, resume_sites, block_sites);
+        Emitter emitter(image, an, compiled, stats, resume_sites, block_sites, options.hooks);
         for (uint32_t entry : group) emitter.function(an.functions.at(entry));
         bodies.push_back(emitter.take());
     }

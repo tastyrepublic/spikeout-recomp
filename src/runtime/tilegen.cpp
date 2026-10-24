@@ -1,6 +1,7 @@
 #include "runtime/tilegen.hpp"
 
 #include "runtime/bus.hpp"
+#include "runtime/tile_sides.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -37,11 +38,18 @@ void TilegenRenderer::begin_frame() {
     const auto side = static_cast<std::size_t>(2 * extend_ * kHeight);
     bottom_side_.assign(side, 0u);
     top_side_.assign(side, 0u);
+    bottom_own_.assign(side, 0u);
+    top_own_.assign(side, 0u);
+    bottom_real_.assign(extend_ > 0 ? kHeight : 0, 0);
+    top_real_.assign(extend_ > 0 ? kHeight : 0, 0);
 }
 
-void TilegenRenderer::draw_line(const Bus& bus, int line) { draw_line(bus.tile_ram(), bus.tile_regs(), line); }
+void TilegenRenderer::draw_line(const Bus& bus, int line) {
+    draw_line(bus.tile_ram(), bus.tile_regs(), line, &bus.tile_sides());
+}
 
-void TilegenRenderer::draw_line(std::span<const uint8_t> ram, const std::array<uint32_t, 64>& regs, int line) {
+void TilegenRenderer::draw_line(std::span<const uint8_t> ram, const std::array<uint32_t, 64>& regs, int line,
+                                const TileSides* sides) {
     if (line < 0 || line >= kHeight) return;
     auto word = [&](uint32_t index) -> uint32_t { // the tile generator's 32-bit word `index`
         const std::size_t at = std::size_t{index} * 4;
@@ -64,6 +72,8 @@ void TilegenRenderer::draw_line(std::span<const uint8_t> ram, const std::array<u
             bool loops;      // widescreen: drawn past the screen on this line
             uint32_t period; // and wrapping there every this many pixels
             int edge[2];     // else the map column whose tile carries on past the left, right edge (-1: none)
+            int index;       // the layer (0-3)
+            bool own[2];     // ahead of those, the game's own columns past the left, right edge (m3::TileSides)
         } layers[2];
         for (int k = 0; k < 2; ++k) {
             const uint32_t n = static_cast<uint32_t>(pair * 2 + k);
@@ -129,8 +139,15 @@ void TilegenRenderer::draw_line(std::span<const uint8_t> ram, const std::array<u
                     edge[1] = look.edge[1];
                 }
             }
+            bool own[2] = {false, false};
+            if (extend_ > 0 && sides && !(scroll & 0x8000) && (sx & 511) == 0) {
+                const int map_row = static_cast<int>(((y + ((scroll >> 16) & 0x1FF)) & 511) / 8);
+                own[0] = sides->any(static_cast<int>(n), map_row, false);
+                own[1] = sides->any(static_cast<int>(n), map_row, true);
+            }
             layers[k] = {(scroll & 0x80000000u) != 0, ((control >> (8 + n)) & 1) != 0, ((control >> (12 + n)) & 1) != 0,
-                         sx, (scroll >> 16) & 0x1FF, names, loops, period, {edge[0], edge[1]}};
+                         sx, (scroll >> 16) & 0x1FF, names, loops, period, {edge[0], edge[1]}, static_cast<int>(n),
+                         {own[0], own[1]}};
         }
         if (!layers[0].enabled && !layers[1].enabled) continue;
 
@@ -138,30 +155,50 @@ void TilegenRenderer::draw_line(std::span<const uint8_t> ram, const std::array<u
         // and a tile row (8 pixels of the scrolled layer). Widescreen: from
         // `extend` pixels left of the screen to as far right of it, where the
         // mask and name table wrap at 512 (drawn only from looping lines).
+        // A second pass (widescreen) draws the sides again from the game's own columns past the
+        // screen (m3::TileSides) where a map row has some, into bottom_own()/top_own(): the first's
+        // left as it always was.
         const int first = -extend_, last = kWidth + extend_;
+        for (int pass = 0; pass < (extend_ > 0 && sides ? 2 : 1); ++pass)
         for (int sx = first; sx < last;) {
             const bool side = sx < 0 || sx >= kWidth;
+            if (pass == 1 && !side) { // (the sides alone)
+                sx = kWidth;
+                continue;
+            }
             const uint32_t x = static_cast<uint32_t>(sx) & 511;
             const int stop = sx < 0 ? 0 : sx < kWidth ? kWidth : last;
             const uint32_t mask_end =
                 x + static_cast<uint32_t>(std::min<int>(static_cast<int>((x / 32 + 1) * 32 - x), stop - sx));
             const Layer& l = layers[(mask >> (15 - x / 32)) & 1 ? 0 : 1];
             const int edge = l.edge[sx < 0 ? 0 : 1];
-            if (!l.enabled || (side && !l.loops && edge < 0)) {
+            // The game's own columns past the screen (x scroll 0), from the sides kept.
+            const bool own = pass == 1 && l.enabled && l.own[sx < 0 ? 0 : 1];
+            if (own) (l.above ? top_real_ : bottom_real_)[y] |= static_cast<uint8_t>(sx < 0 ? 1 : 2);
+            if (!l.enabled || (pass == 1 && !own) || (side && !own && !l.loops && edge < 0)) {
                 sx += static_cast<int>(mask_end - x);
                 continue;
             }
             uint32_t px = (x + l.sx) & 511;
-            if (side && l.loops && l.period < 512) { // where the screen's pixel sx is along the panorama
+            if (side && !own && l.loops && l.period < 512) { // where the screen's pixel sx is along the panorama
                 const int along = (sx + static_cast<int>(l.sx)) % static_cast<int>(l.period);
                 px = static_cast<uint32_t>(along < 0 ? along + static_cast<int>(l.period) : along);
-            } else if (side && !l.loops) { // the edge's tile, in step with the screen's
+            } else if (side && !own && !l.loops) { // the edge's tile, in step with the screen's
                 px = static_cast<uint32_t>(edge * 8) | (static_cast<uint32_t>(sx + static_cast<int>(l.sx)) & 7);
             }
             const uint32_t py = (y + l.sy) & 511;
             const uint32_t end = std::min(mask_end, x + (8 - (px & 7)));
-            const uint32_t names = word(l.names + (py / 8) * 32 + px / 16);
-            const uint32_t entry = (px & 8) ? names & 0xFFFF : names >> 16;
+            uint32_t entry = 0;
+            if (own) {
+                entry = sides->entry(l.index, static_cast<int>(py / 8), sx >> 3);
+                if (entry == TileSides::kEmpty) { // nothing there
+                    sx += static_cast<int>(end - x);
+                    continue;
+                }
+            } else {
+                const uint32_t names = word(l.names + (py / 8) * 32 + px / 16);
+                entry = (px & 8) ? names & 0xFFFF : names >> 16;
+            }
             const uint32_t fy = py & 7;
             // The tile's row as 8 pixel values, left first.
             uint32_t base;
@@ -184,8 +221,8 @@ void TilegenRenderer::draw_line(std::span<const uint8_t> ram, const std::array<u
             if (!side)
                 out = (l.above ? top_ : bottom_).data() + row + sx;
             else // this line's left pixels, then its right ones
-                out = (l.above ? top_side_ : bottom_side_).data() + static_cast<std::size_t>(2 * extend_) * y +
-                      (sx < 0 ? sx + extend_ : sx - kWidth + extend_);
+                out = (own ? (l.above ? top_own_ : bottom_own_) : (l.above ? top_side_ : bottom_side_)).data() +
+                      static_cast<std::size_t>(2 * extend_) * y + (sx < 0 ? sx + extend_ : sx - kWidth + extend_);
             const uint32_t n = end - x;
             for (uint32_t i = 0, fx = px & 7; i < n; ++i, ++fx) {
                 const uint32_t colour = word(kPalette / 4 + (base | pixels[fx]));

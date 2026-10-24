@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -44,6 +45,7 @@ int main(int argc, char** argv) {
     uint32_t base = 0, split = 1;
     std::vector<uint32_t> entries;
     std::vector<std::string> segments;
+    std::set<uint32_t> lift_hooks; // the game's (m3::GameSpec::hooks)
     analysis::Options options;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -81,6 +83,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         boot = analysis::make_boot_image(*game, roms);
+        lift_hooks.insert(game->hooks.begin(), game->hooks.end());
         for (const analysis::Segment& seg : boot.image.segments())
             if (seg.base < m3::kWorkRamSize) options.pointer_segments.push_back(seg.name);
         source = std::string(game->id);
@@ -103,6 +106,7 @@ int main(int argc, char** argv) {
     lift.name = name;
     lift.source = source;
     lift.files = split;
+    lift.hooks = lift_hooks;
     for (const auto& [entry, fn] : an.functions) {
         const analysis::Segment* seg = boot.image.segment_at(entry);
         bool wanted = segments.empty();

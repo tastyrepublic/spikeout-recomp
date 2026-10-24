@@ -61,6 +61,10 @@ struct GameSpec {
     // Function entries the control-flow analysis can't find by itself
     // (targets of computed jumps), found by reading the code.
     std::span<const uint32_t> code_entries = {};
+    // Blocks whose start calls recomp::Context::hook: game-specific observers
+    // that read the game's state and never change it (widescreen's sides
+    // from the game's own tile maps: games/spikeofe_hooks.cpp).
+    std::span<const uint32_t> hooks = {};
 };
 
 // Places one file's data into a region buffer according to `spec`.

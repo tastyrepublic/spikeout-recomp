@@ -488,6 +488,7 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
     recomp::Context c(bus, functions);
     const std::vector<recomp::FunctionEntry> blocks = tools::game_blocks();
     c.set_blocks(blocks);
+    m3::games::install_spikeout_hooks(c);
     recomp::FrameTiming timing;
     c.set_scheduler(&timing);
     const std::function<void(m3::State&)> sound_state =
@@ -577,9 +578,12 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             if (gpu_frame.extend > 0) {
                 const bool drawn = tilegen.extend() == gpu_frame.extend; // the tile generator's own sides
                 wide_bottom.build(tilegen.bottom(), drawn ? tilegen.bottom_side() : std::span<const uint32_t>(),
-                                  gpu_frame.extend, gpu_frame.bottom_wide);
+                                  gpu_frame.extend, gpu_frame.bottom_wide, false,
+                                  drawn ? tilegen.bottom_own() : std::span<const uint32_t>(),
+                                  drawn ? tilegen.bottom_real() : std::span<const uint8_t>());
                 wide_top.build(tilegen.top(), drawn ? tilegen.top_side() : std::span<const uint32_t>(), gpu_frame.extend,
-                               gpu_frame.top_wide, true);
+                               gpu_frame.top_wide, true, drawn ? tilegen.top_own() : std::span<const uint32_t>(),
+                               drawn ? tilegen.top_real() : std::span<const uint8_t>());
             }
             tilegen.set_extend(gpu_frame.extend);
             {

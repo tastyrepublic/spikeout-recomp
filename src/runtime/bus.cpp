@@ -513,6 +513,7 @@ void Bus::state(State& s) {
     s.io(security_first_read_);
     s.io(tile_regs_), s.fixed(tile_ram_), s.fixed(backup_ram_), s.io(crom_bank_), s.io(crom_bank_reg_);
     netboard_->state(s);
+    tile_sides_.state(s); // (not hardware: what the game's hooks kept, for widescreen)
 }
 
 } // namespace m3

@@ -61,32 +61,28 @@ a frame at scale 4), the settings menu and widescreen all work.
 - Smooth motion (frame interpolation, m3::interpolate, spikeout --smooth /
   menu setting, default OFF): ghosts remain (tower light, car wheels, gate,
   sea birds, sea level); to be revisited with replays and states.
-- Widescreen bug (open): the title doors between character select and the
-  map (owner's state build/spikeout-818.state; doors close ~frames
-  1061-1071, open ~1204-1214, the wall bands leave ~1216-1228). Layer 0 is
-  redrawn each frame (no scroll; the doors' off-screen part isn't in the
-  name table; tiles deduplicated, so no extrapolating). In 16:9 the sides
-  don't move with the doors: closing shows stripes, opening stays covered,
-  the bands aren't widened and the left side goes black while they leave.
-  Reproduce: `gamerun --load-state build\spikeout-818.state --blocks
-  400000000 --renderer gpu --wide 93 --screenshot X.png --shot-every 4`.
-  Found with `gamerun --watch-write LO-HI@FRAME:N` (new, uncommitted):
-  the game keeps each layer in a RAM buffer (layer 0: 0x188000, 64
-  16-bit entries a row) and f_000082xx copies dirty entries (bit
-  0x8000 per entry, r27=0x80008000) to the name table. The buffer is
-  filled by f_0000948c, a "draw tile map" routine: map id r4 (r18; id &
-  0x3fff, or through a table at 0xA0D30), its header found through
-  0xFFD00004 (or 0xFFC00000) + id*4: +4 width, +6 height, entries from +8
-  (relative tile numbers); position r7/r20 (y<<16 | x, in tiles, may be
-  negative); layer descriptor r6/r19 (+8 columns 62, +10 rows, +16
-  buffer). It clips at column 0 and at +8 (blocks 9670-96a8), and each
-  entry's top bits are remapped through a RAM table at r29 (0x1873c4+976:
-  tile banks given out at run time): entry = (src & 0x7f) | (table[(src >>
-  6) & 0x1fe] & 0xff80). The doors' art is such a map (ROM ~0xFFD1D0xx,
-  base 0x3680). Plan proposed to the owner (not yet approved): hook this routine (and the
-  routine that clears rectangles) so the columns it clips off are kept in
-  a side table per layer (columns -12..-1 and 62..73), and draw the sides
-  from that table: the real art, sliding exactly as the game moves it.
+- Widescreen, title doors (between character select and the map) and the
+  title's strips after attract (uncommitted when written): their sides now
+  come from the game's own tile map (map 0x53, the whole title; each door
+  is a part of it drawn at the screen's edge, never clipped). Hooks in the
+  recompiled code (m3::GameSpec::hooks, lifter emits c.hook(pc);
+  games/spikeofe_hooks.cpp: draw 0x9628, fill 0x7e34, copy 0x8230) keep
+  m3::TileSides (12 columns each side, in save states); the tile
+  generator draws those rows into bottom_own/top_own, and WideLayer puts
+  them over its usual sides. Only rows whose edge tile is the row's
+  background (band, logo, black bar) are kept. The owner asked that the
+  red wall not be touched: its rows are exactly as before, including its
+  stripes while the doors slide and the leaving wall bands not being
+  widened (an earlier attempt at those changed the still title's wall
+  sides and was dropped). The faces layer on the map screen pans (line
+  scroll) and its sides wrap the name table: the left side shows the
+  photo's dark edge (the "left side goes black"), the right a repeated
+  face; not addressed. Repro state: build/spikeout-819.state (the owner's
+  818 converted; states from before the side table don't load): `gamerun
+  --load-state build\spikeout-819.state --blocks 400000000 --renderer gpu
+  --wide 93 --screenshot X.png --shot-every 4` (doors close ~1061-1071,
+  open ~1204-1214). The layer buffers: 0x188000 + n * 0x2000, 64 entries a
+  row; descriptor +8 columns (64), +10 rows, +16 buffer, +20 name table.
 - Smooth motion is no longer read from or saved to settings.ini (only
   `--smooth`), as it's still being tested (uncommitted when written).
 - Next: the owner asked Claude to learn to play the game (a bot driving

@@ -34,6 +34,7 @@ struct LiftOptions {
     std::set<uint32_t> functions; // entries to recompile; empty: every function found
     std::string source;           // where the code came from, for the header comment
     uint32_t files = 1;           // spread the functions over this many files (parallel builds)
+    std::set<uint32_t> hooks;     // blocks whose start calls c.hook(pc) (m3::GameSpec::hooks)
 };
 
 struct LiftStats {

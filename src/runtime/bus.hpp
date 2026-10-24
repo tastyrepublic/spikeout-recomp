@@ -12,6 +12,7 @@
 #include "runtime/real3d.hpp"
 #include "runtime/rtc.hpp"
 #include "runtime/state.hpp"
+#include "runtime/tile_sides.hpp"
 #include "runtime/eeprom.hpp"
 #include "runtime/jtag.hpp"
 #include "runtime/memory_map.hpp"
@@ -186,6 +187,11 @@ public:
     // Tilegen RAM 0xF1000000-0xF111FFFF (characters, name tables, palette),
     // in CPU byte order: byte i is what the CPU reads at 0xF1000000 + i.
     std::span<const uint8_t> tile_ram() const { return tile_ram_; }
+    // Widescreen: the tile layers' columns past the screen, from the game's
+    // own tile maps (not hardware: kept by the game's hooks; saved with the
+    // bus, as the game's run decides them).
+    TileSides& tile_sides() { return tile_sides_; }
+    const TileSides& tile_sides() const { return tile_sides_; }
     // I/O board (315-5649, 0xF0040000): inputs and the settings EEPROM.
     // Register 0x00 selects the input bank and drives the EEPROM (CS bit 6,
     // CLK bit 7, DI bit 5); 0x04 reads the switches of that bank (bank 1:
@@ -363,6 +369,7 @@ private:
     void security_write32(uint32_t reg, uint32_t value);
     std::array<uint32_t, 64> tile_regs_{};
     std::vector<uint8_t> tile_ram_;
+    TileSides tile_sides_;
     std::vector<uint8_t> backup_ram_;
     uint32_t crom_bank_ = 0;
     uint32_t crom_bank_reg_ = 0xFF;
