@@ -56,7 +56,12 @@ a frame at scale 4), the settings menu and widescreen all work.
   exception after a frame ends). Verified: a state loaded at frame 2000 gives
   the same state at 3000, byte for byte, same sound and pictures. minimp3 was
   patched to clear its scratch (its stack garbage made states differ).
-  Not yet: linked boards (LinkRing) in a state; a recording from a state.
+  Linked boards too (2026-10-25, gamerun --boards N: one file, the ring's
+  packets on their way cut between the boards' points). Not yet: the
+  window's linked boards in a state; a recording from a state.
+- Online/local play: Mode B (every PC runs every board, inputs only)
+  delay-based on a LAN/hotspot comes first, Mode A waits (the link only
+  tolerates ~4 ms one way); plan and state sizes in docs/netplay.md.
 - Record/replay: spikeout --record, gamerun --replay (66/66 hashes).
 - Smooth motion (frame interpolation, m3::interpolate, spikeout --smooth /
   menu setting, default OFF): ghosts remain (tower light, car wheels, gate,

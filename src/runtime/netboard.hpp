@@ -51,8 +51,8 @@ public:
     // receive(): a link between boards in one process (LinkRing) delivers
     // a packet once the receiver has reached the time it was sent.
     virtual void set_time(uint64_t /*main_cycles*/) {}
-    // Save states (runtime/state.hpp): packets on their way. Links between
-    // boards in one process can't be saved yet.
+    // Save states (runtime/state.hpp): packets on their way (a LinkRing's
+    // port: its counts, the packets being in the ring's part).
     virtual void state(State& s);
 };
 
@@ -81,6 +81,16 @@ private:
 // nothing sent in a slice could have arrived in it anyway: the same every
 // run, whichever thread ran first. Each port then touches only its own
 // outbox and inbox while the boards run.
+//
+// Save states: each board saves itself at its own point (the first block it
+// can resume at after a frame ends), so the boards' points differ a little,
+// and the packets on their way have to be cut between them. Every packet
+// on a link is numbered. A board's state (its port's part) records how
+// many it had sent and taken in; the ring's part (cut_state, once every
+// board has saved, with all of them stopped) keeps the packets the sender
+// had sent by its point that the receiver hadn't taken in by its own. If
+// the receiver had already taken in packets the sender sends after its
+// point, the receiver drops that many when they come again.
 class LinkRing {
 public:
     explicit LinkRing(std::size_t boards);
@@ -96,18 +106,37 @@ public:
         state_->on_send = std::move(fn);
     }
 
+    // Save states: true once every board's state has been saved since the
+    // last cut_state (a cut is under way while some have).
+    bool cut_complete() const;
+    // The ring's part of a state of all its boards: saving, once
+    // cut_complete() (and ends the cut); loading, before the boards run.
+    // Every board stopped.
+    void cut_state(m3::State& s);
+
 private:
     struct Packet {
-        uint64_t at; // main board cycle it can arrive
+        uint64_t at;      // main board cycle it can arrive
+        uint64_t seq = 0; // its number on its link
         std::vector<uint8_t> data;
     };
+    friend void state_fields(m3::State& s, Packet& p);
     struct State {
         std::vector<std::deque<Packet>> inbox;  // by receiver
         std::vector<std::deque<Packet>> outbox; // by sender (deferred)
         std::vector<uint64_t> delivered;        // by receiver
+        std::vector<uint64_t> sent;             // by sender
+        std::vector<uint64_t> taken;            // by receiver: delivered or dropped (the next one's number)
+        std::vector<uint64_t> drop;             // by receiver: packets to drop on arrival (after a load)
         uint64_t latency = 0;
         bool deferred = false;
         std::function<void(std::size_t, uint64_t, const std::vector<uint8_t>&)> on_send;
+        // A cut under way: by board, whether it has saved, its counts then,
+        // and (as receiver) the packets it has taken in since.
+        std::vector<uint8_t> saved; // (bytes: each board's thread writes its own)
+        std::vector<uint64_t> saved_sent, saved_taken, saved_delivered;
+        std::vector<std::deque<Packet>> taken_since;
+        void arrive(std::size_t to, Packet p);
     };
     class Port;
     std::shared_ptr<State> state_;

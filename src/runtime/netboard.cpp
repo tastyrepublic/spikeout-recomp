@@ -46,20 +46,36 @@ public:
     Port(std::shared_ptr<State> state, std::size_t index) : state_(std::move(state)), index_(index) {}
 
     void send(const uint8_t* data, std::size_t size) override {
-        auto& to = state_->deferred ? state_->outbox[index_] : state_->inbox[(index_ + 1) % state_->inbox.size()];
-        to.push_back({now_ + state_->latency, std::vector<uint8_t>(data, data + size)});
-        if (state_->on_send && !state_->deferred) state_->on_send(index_, now_, to.back().data);
+        Packet p{now_ + state_->latency, state_->sent[index_]++, std::vector<uint8_t>(data, data + size)};
+        if (state_->deferred) {
+            state_->outbox[index_].push_back(std::move(p));
+            return;
+        }
+        if (state_->on_send) state_->on_send(index_, now_, p.data);
+        state_->arrive((index_ + 1) % state_->inbox.size(), std::move(p));
     }
     std::vector<uint8_t> receive() override {
         auto& inbox = state_->inbox[index_];
         if (inbox.empty() || inbox.front().at > now_) return {};
+        if (state_->saved[index_]) state_->taken_since[index_].push_back(inbox.front()); // (a cut under way)
         std::vector<uint8_t> packet = std::move(inbox.front().data);
         inbox.pop_front();
         ++state_->delivered[index_];
+        ++state_->taken[index_];
         return packet;
     }
     bool loopback() const override { return state_->inbox.size() == 1; }
     void set_time(uint64_t main_cycles) override { now_ = main_cycles; }
+    // The board's counts at its point (the packets go in the ring's part).
+    void state(m3::State& s) override {
+        s.tag("ring port");
+        if (s.loading()) return;
+        state_->saved[index_] = 1;
+        state_->saved_sent[index_] = state_->sent[index_];
+        state_->saved_taken[index_] = state_->taken[index_] + state_->drop[index_]; // (those to drop: as good as taken)
+        state_->saved_delivered[index_] = state_->delivered[index_];
+        state_->taken_since[index_].clear();
+    }
 
 private:
     std::shared_ptr<State> state_;
@@ -71,7 +87,20 @@ LinkRing::LinkRing(std::size_t boards) : state_(std::make_shared<State>()) {
     const std::size_t n = std::max<std::size_t>(boards, 1);
     state_->inbox.resize(n);
     state_->outbox.resize(n);
-    state_->delivered.resize(n, 0);
+    for (auto* v : {&state_->delivered, &state_->sent, &state_->taken, &state_->drop, &state_->saved_sent, &state_->saved_taken,
+                    &state_->saved_delivered})
+        v->resize(n, 0);
+    state_->saved.resize(n, 0);
+    state_->taken_since.resize(n);
+}
+
+void LinkRing::State::arrive(std::size_t to, Packet p) {
+    if (drop[to]) { // the receiver had it before the state it was loaded from
+        --drop[to];
+        ++taken[to];
+        return;
+    }
+    inbox[to].push_back(std::move(p));
 }
 
 void LinkRing::exchange() {
@@ -80,10 +109,49 @@ void LinkRing::exchange() {
         auto& out = state_->outbox[from];
         for (Packet& p : out) {
             if (state_->on_send) state_->on_send(from, p.at - state_->latency, p.data);
-            state_->inbox[(from + 1) % n].push_back(std::move(p));
+            state_->arrive((from + 1) % n, std::move(p));
         }
         out.clear();
     }
+}
+
+void state_fields(m3::State& s, LinkRing::Packet& p) {
+    s.io(p.at), s.io(p.seq), s.io(p.data);
+}
+
+bool LinkRing::cut_complete() const {
+    return std::all_of(state_->saved.begin(), state_->saved.end(), [](uint8_t b) { return b != 0; });
+}
+
+void LinkRing::cut_state(m3::State& s) {
+    State& r = *state_;
+    s.tag("link ring");
+    uint64_t n = r.inbox.size();
+    s.io(n);
+    if (n != r.inbox.size()) throw std::runtime_error("save state: for another number of linked boards");
+    if (!s.loading() && !cut_complete()) throw std::runtime_error("save state: not every linked board has saved");
+    for (std::size_t to = 0; to < n; ++to) {
+        const std::size_t from = (to + n - 1) % n;
+        // Packets the sender had sent by its point that the receiver hadn't
+        // taken in by its own; or, if it had taken in more, how many to drop.
+        uint64_t sent = r.saved_sent[from], taken = r.saved_taken[to], delivered = r.saved_delivered[to];
+        std::deque<Packet> on_way;
+        if (!s.loading())
+            for (const auto* q : {&r.taken_since[to], &r.inbox[to], &r.outbox[from]}) // (oldest first)
+                for (const Packet& p : *q)
+                    if (p.seq >= taken && p.seq < sent) on_way.push_back(p);
+        s.io(sent), s.io(taken), s.io(delivered), s.io(on_way);
+        if (s.loading()) {
+            r.sent[from] = sent;
+            r.taken[to] = std::min(taken, sent);
+            r.drop[to] = taken - r.taken[to];
+            r.delivered[to] = delivered;
+            r.inbox[to] = std::move(on_way);
+            r.outbox[from].clear();
+        }
+    }
+    std::fill(r.saved.begin(), r.saved.end(), 0);
+    for (auto& q : r.taken_since) q.clear();
 }
 
 uint64_t LinkRing::delivered() const {

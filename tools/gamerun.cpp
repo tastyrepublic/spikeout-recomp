@@ -6,7 +6,7 @@
 //           [--netboard sim|real] [--net-trace N] [--net-disasm FILE]
 //           [--screenshot FILE.png] [--shot-every N] [--press [B:]NAME@FRAME[:N]]...
 //           [--wav FILE.wav] [--probe X,Y@FRAME] [--quads]
-//           [--boards N] [--slice LINES] [--link-latency CYCLES] [--renderer software|gpu|compare]
+//           [--boards N] [--slice LINES] [--link-latency CYCLES] [--input-delay N] [--renderer software|gpu|compare]
 //           [--gpu-scale N] [--gpu-time N] [--wide E] [--screen-time WxH] [--match-models] [--parallel] [--no-2d] [--no-sound]
 //
 // Built only when CMake's SPIKEOUT_ROM_DIR is set. A run ends at the first
@@ -25,7 +25,9 @@
 // --load-state FILE runs on from such a state (or the window's, F9) instead
 // of from power-on; with --replay, the recording's inputs from there.
 // --blocks then counts from the state. Loaded, a run is the same as the one
-// that saved it, to the byte.
+// that saved it, to the byte. With --boards N, one file holds every board
+// and the packets on their way between them (m3::LinkRing::cut_state),
+// loaded with the same --boards N.
 // --watch-write LO-HI@FRAME[:N] (hex addresses) prints every write to
 // [LO, HI) in N frames from FRAME (default 1): the block writing, LR and
 // registers (finding the code that draws something; work RAM too).
@@ -72,7 +74,11 @@
 // --press [B:]NAME@FRAME[:N] holds an input for N frames (default 6) from
 // FRAME: coin, start, test, service, beat, charge, shift, jump, up, down,
 // left, right. Repeat it for more presses. --poke [B:]ADDR=VALUE@FRAME[:N]
-// writes a byte of RAM. Without B: they apply to every board.
+// writes a byte of RAM. Without B: they apply to every board. Every board
+// reads its inputs from a table by frame (tools::InputTable), as network
+// play will fill it; --input-delay N sets each one there N frames on, as
+// delay-based network play does (the frames on their way are not in a
+// save state).
 //
 // The sound board (m3::SoundBoard) runs with the game; --wav writes what
 // it played (44.1 kHz stereo).
@@ -115,6 +121,7 @@
 #include "runtime/tilegen.hpp"
 #include "runtime/widescreen.hpp"
 #include "game_setup.hpp"
+#include "input_table.hpp"
 #include "recording.hpp"
 #include "png_write.hpp"
 #include "wav_write.hpp"
@@ -192,6 +199,7 @@ struct Options {
     std::size_t boards = 1;
     uint32_t slice = 8;
     uint64_t link_latency = 0;
+    uint64_t input_delay = 0; // --input-delay N: inputs read N frames after they were set
     bool parallel = false; // --parallel: the boards run at once (tools::Turns, m3::LinkRing deferred)
     // --no-2d, --no-sound: what a remote cabinet needn't run (the game the same without them)
     bool no_2d = false, no_sound = false;
@@ -270,6 +278,44 @@ void print_probe(const m3::Real3dRenderer& r, int x, int y, uint64_t frame) {
 }
 
 // One Model 3 board and what the run keeps of it.
+// --save-state / --load-state with linked boards: one file for all of them,
+// each board's state (saved at its own point, as a board alone) and the
+// ring's part, the packets on their way between those points
+// (m3::LinkRing::cut_state), written once every board has saved and all
+// are stopped: at the slices' meeting when running at once, else by the
+// last board to save (the others waiting their turn).
+struct LinkedState {
+    m3::LinkRing* ring = nullptr;
+    std::string path;
+    std::mutex lock;
+    std::vector<std::vector<uint8_t>> boards; // each board's, as it saves (or as the file has them)
+    std::vector<std::vector<uint8_t>> loaded; // --load-state: each board's to load
+    std::size_t saved = 0;
+    bool written = false;
+
+    void finish() {
+        {
+            std::lock_guard guard(lock);
+            if (written || saved < boards.size() || !ring->cut_complete()) return;
+            written = true;
+        }
+        m3::State s;
+        io(s);
+        if (tools::write_file(path, s.data()))
+            std::printf("Saved %s: %zu linked boards, %zu bytes\n", path.c_str(), boards.size(), s.data().size());
+        else
+            std::fprintf(stderr, "gamerun: cannot write %s\n", path.c_str());
+    }
+    // The file: saving or loading (before the boards run).
+    void io(m3::State& s) {
+        s.tag("spikeout linked save state 1");
+        ring->cut_state(s);
+        for (auto& b : boards) s.io(b);
+        s.tag("end");
+        if (s.loading() && !s.done()) throw std::runtime_error("save state: longer than this build's");
+    }
+};
+
 struct Machine {
     Machine(std::size_t i, const m3::RomSet& roms, std::span<const recomp::FunctionEntry> functions)
         : index(i), bus(roms), c(bus, functions), sound(roms),
@@ -279,6 +325,9 @@ struct Machine {
     m3::Bus bus;
     m3::CommBoard* comm = nullptr;
     bool loaded = false; // --load-state: the run resumes where the state was saved
+    LinkedState* linked = nullptr; // linked boards' --save-state / --load-state
+    tools::InputTable* inputs = nullptr; // every board's inputs by frame
+    bool inputs_started = false;
     uint64_t watch_from = 0, watch_to = 0; // --watch-write: the frames whose writes are printed
     // --replay: the next recorded inputs and hash, hashes matched, the first frame not
     size_t replay_input = 0, replay_hash = 0;
@@ -434,7 +483,7 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
     m.c.set_scheduler(&m.timing);
     if (o.load_state) { // everything above that the game sees, as it was saved
         try {
-            m3::State s(tools::read_file(o.load_state));
+            m3::State s(m.linked ? std::move(m.linked->loaded[m.index]) : tools::read_file(o.load_state));
             tools::board_state(s, m.c, m.timing, sound_state(m, o));
         } catch (const std::exception& e) {
             std::fprintf(stderr, "gamerun: %s: %s\n", o.load_state, e.what());
@@ -697,7 +746,33 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         m.bus.inputs.bank0 = in[0];
         m.bus.inputs.controls = in[1];
         if (o.replay && m.index == 0) replay_frame(m, *o.replay, frame);
-        if (!o.save_state.empty() && frame == o.save_frame && m.index == 0) // --save-state: at the next block it can resume at
+        // Into the board's input table (--input-delay frames on), and the
+        // next frame's out of it.
+        {
+            const tools::InputTable::Inputs source{m.bus.inputs.bank0, m.bus.inputs.bank1, m.bus.inputs.controls,
+                                                   m.bus.inputs.controls2};
+            if (o.input_delay && !m.inputs_started) m.inputs->set(m.index, frame, {}); // (until the first comes: none held)
+            m.inputs_started = true;
+            m.inputs->set(m.index, frame + o.input_delay, source);
+            const tools::InputTable::Inputs in_table = *m.inputs->wait(m.index, frame);
+            m.inputs->forget_before(m.index, frame);
+            m.bus.inputs.bank0 = in_table.bank0;
+            m.bus.inputs.bank1 = in_table.bank1;
+            m.bus.inputs.controls = in_table.controls;
+            m.bus.inputs.controls2 = in_table.controls2;
+        }
+        if (!o.save_state.empty() && frame == o.save_frame && m.linked) // linked boards: each saves, the last writes
+            m.c.request_snapshot([&m, &o](uint32_t) {
+                m3::State s;
+                tools::board_state(s, m.c, m.timing, sound_state(m, o));
+                {
+                    std::lock_guard guard(m.linked->lock);
+                    m.linked->boards[m.index] = std::move(s.data());
+                    ++m.linked->saved;
+                }
+                if (!o.parallel) m.linked->finish(); // (taking turns: the others are waiting)
+            });
+        else if (!o.save_state.empty() && frame == o.save_frame && m.index == 0) // --save-state: at the next block it can resume at
             m.c.request_snapshot([&m, &o](uint32_t pc) {
                 m3::State s;
                 tools::board_state(s, m.c, m.timing, sound_state(m, o));
@@ -1253,6 +1328,7 @@ int main(int argc, char** argv) {
         else if (arg == "--boards" && i + 1 < argc) o.boards = std::max<std::size_t>(1, std::strtoull(argv[++i], nullptr, 0));
         else if (arg == "--slice" && i + 1 < argc) o.slice = std::max<uint32_t>(1, static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 0)));
         else if (arg == "--link-latency" && i + 1 < argc) o.link_latency = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--input-delay" && i + 1 < argc) o.input_delay = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--parallel") o.parallel = true;
         else if (arg == "--no-2d") o.no_2d = true;
         else if (arg == "--no-sound") o.no_sound = true;
@@ -1301,7 +1377,7 @@ int main(int argc, char** argv) {
                              "               [--screenshot FILE.png] [--shot-every N] [--wav FILE.wav]\n"
                              "               [--probe X,Y@FRAME] [--quads] [--midi-burst] [--dma-instant]\n"
                              "               [--sound-volume N] [--music-volume N]\n"
-                             "               [--boards N] [--slice LINES] [--link-latency CYCLES]\n"
+                             "               [--boards N] [--slice LINES] [--link-latency CYCLES] [--input-delay N]\n"
                              "               [--press [B:]NAME@FRAME[:N]]... [--poke [B:]ADDR=VALUE@FRAME[:N]]...\n");
         return 2;
     }
@@ -1345,7 +1421,28 @@ int main(int argc, char** argv) {
         std::printf("Parallel: the link's latency %llu main board cycles (a slice of %u lines)\n",
                     static_cast<unsigned long long>(std::max(o.link_latency, slice_cycles)), o.slice);
     }
-    tools::Turns turns(o.boards, parallel, parallel ? std::function<void()>([&ring] { ring->exchange(); }) : std::function<void()>());
+    // Linked boards' save states: one file for all of them.
+    LinkedState linked;
+    if (ring && (!o.save_state.empty() || o.load_state)) {
+        linked.ring = ring.get();
+        linked.path = o.save_state;
+        linked.boards.resize(o.boards);
+        if (o.load_state) {
+            try {
+                m3::State s(tools::read_file(o.load_state));
+                linked.io(s);
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "gamerun: %s: %s (a state of %zu linked boards?)\n", o.load_state, e.what(), o.boards);
+                return 1;
+            }
+            linked.loaded = std::move(linked.boards);
+            linked.boards.assign(o.boards, {});
+        }
+    }
+    tools::Turns turns(o.boards, parallel, parallel ? std::function<void()>([&ring, &linked] {
+        ring->exchange();
+        if (linked.ring && !linked.path.empty()) linked.finish();
+    }) : std::function<void()>());
     // The GPU (--renderer gpu or compare), without a window; the boards take
     // turns, so they share it.
 #ifdef SPIKEOUT_GPU
@@ -1364,11 +1461,14 @@ int main(int argc, char** argv) {
         return 1;
     }
 #endif
+    tools::InputTable inputs(o.boards);
     std::vector<std::unique_ptr<Machine>> machines;
     for (std::size_t i = 0; i < o.boards; ++i) {
         machines.push_back(std::make_unique<Machine>(i, roms, functions));
         machines.back()->c.set_blocks(blocks);
         m3::games::install_spikeout_hooks(machines.back()->c);
+        if (linked.ring) machines.back()->linked = &linked;
+        machines.back()->inputs = &inputs;
         set_up(*machines.back(), o, game, ring.get(), turns);
 #ifdef SPIKEOUT_GPU
         if (o.renderer != Options::Renderer::Software || o.gpu_time_scale) {

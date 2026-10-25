@@ -13,10 +13,12 @@
 #include "runtime/tilegen.hpp"
 #include "runtime/widescreen.hpp"
 #include "../tools/arcade_settings.hpp"
+#include "../tools/input_table.hpp"
 
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <thread>
 #include <vector>
 
 using namespace m3;
@@ -1031,6 +1033,67 @@ TEST_CASE("link ring: board i sends to i + 1, a packet arrives once the receiver
     CHECK(LinkRing(1).port(0)->loopback());
 }
 
+TEST_CASE("link ring: a state of boards saved at different points runs on as the boards did") {
+    // Two boards, each step sending (a packet, sometimes two or none) and
+    // taking in all that has arrived, a packet arriving 2.5 steps later.
+    // Saved with the boards a few steps apart, either way round, loaded
+    // into a new ring and run on, each board takes in what it did.
+    struct Board {
+        std::unique_ptr<NetLink> port;
+        std::vector<std::vector<uint8_t>> got;
+    };
+    auto step = [](Board& b, std::size_t i, uint32_t k) {
+        b.port->set_time(k * 100);
+        for (uint32_t n = 0; n < (k + i) % 3; ++n) {
+            const uint8_t data[] = {static_cast<uint8_t>(i), static_cast<uint8_t>(k), static_cast<uint8_t>(n)};
+            b.port->send(data, sizeof data);
+        }
+        for (std::vector<uint8_t> p = b.port->receive(); !p.empty(); p = b.port->receive()) b.got.push_back(p);
+    };
+    constexpr uint32_t kSteps = 60;
+    std::vector<std::vector<uint8_t>> straight[2];
+    {
+        LinkRing ring(2);
+        ring.set_latency(250);
+        Board b[2] = {{ring.port(0), {}}, {ring.port(1), {}}};
+        for (uint32_t k = 0; k < kSteps; ++k)
+            for (std::size_t i = 0; i < 2; ++i) step(b[i], i, k);
+        for (std::size_t i = 0; i < 2; ++i) straight[i] = b[i].got;
+    }
+    for (const auto& at : {std::array<uint32_t, 2>{20, 26}, std::array<uint32_t, 2>{27, 20}, std::array<uint32_t, 2>{31, 31}}) {
+        LinkRing ring(2);
+        ring.set_latency(250);
+        Board b[2] = {{ring.port(0), {}}, {ring.port(1), {}}};
+        std::size_t got_then[2] = {};
+        for (uint32_t k = 0; k <= std::max(at[0], at[1]); ++k)
+            for (std::size_t i = 0; i < 2; ++i) {
+                if (k == at[i]) { // board i saves before its step k
+                    State s;
+                    b[i].port->state(s);
+                    got_then[i] = b[i].got.size();
+                    CHECK_EQ(ring.cut_complete(), i == 0 ? at[1] < at[0] : at[0] < at[1] || at[0] == at[1]);
+                }
+                if (k < at[i] || k < std::max(at[0], at[1])) step(b[i], i, k); // (the later one's step k waits for the load)
+            }
+        CHECK(ring.cut_complete());
+        State saved;
+        ring.cut_state(saved);
+        CHECK(!ring.cut_complete());
+
+        LinkRing loaded(2);
+        loaded.set_latency(250);
+        State in(saved.data());
+        loaded.cut_state(in);
+        CHECK(in.done());
+        Board r[2] = {{loaded.port(0), {}}, {loaded.port(1), {}}};
+        for (std::size_t i = 0; i < 2; ++i) r[i].got.assign(straight[i].begin(), straight[i].begin() + got_then[i]);
+        for (uint32_t k = std::min(at[0], at[1]); k < kSteps; ++k)
+            for (std::size_t i = 0; i < 2; ++i)
+                if (k >= at[i]) step(r[i], i, k);
+        for (std::size_t i = 0; i < 2; ++i) CHECK(r[i].got == straight[i]);
+    }
+}
+
 namespace {
 
 // A firmware for the link tests: SSP 0xFF00, start at 0x100; IRQ 4 (0x70
@@ -1112,6 +1175,36 @@ TEST_CASE("commboard: transmit complete waits for the frame being received") {
         CHECK_EQ(board.irqs_taken[6], 1u);
         CHECK_EQ(board.irqs_taken[4], 1u);
     }
+}
+
+TEST_CASE("input table: each board's inputs by frame, gaps held, a frame waited for") {
+    tools::InputTable t(2);
+    using In = tools::InputTable::Inputs;
+    CHECK(!t.get(0, 0));
+    t.set(0, 100, In{0xFE, 0xFF, 0x7F, 0xFF}); // the first (a run from a state at frame 100)
+    CHECK(!t.get(0, 99));
+    CHECK_EQ(t.get(0, 100)->bank0, 0xFE);
+    t.set(0, 103, In{0xFD, 0xFF, 0xFF, 0xFF}); // 101 and 102 hold 100's
+    CHECK_EQ(t.get(0, 102)->controls, 0x7F);
+    CHECK_EQ(t.get(0, 103)->bank0, 0xFD);
+    CHECK_EQ(t.next(0), 104u);
+    t.set(0, 101, In{0x00, 0x00, 0x00, 0x00}); // already set: kept
+    CHECK_EQ(t.get(0, 101)->bank0, 0xFE);
+    t.forget_before(0, 103);
+    CHECK(!t.get(0, 102));
+    CHECK_EQ(t.get(0, 103)->bank0, 0xFD);
+    t.forget_before(0, 200); // the last set stays (the next one's gaps)
+    CHECK_EQ(t.get(0, 103)->bank0, 0xFD);
+    CHECK(!t.get(1, 103)); // board 1: none yet
+
+    std::thread later([&] { t.set(1, 5, In{0xEF, 0xFF, 0xFF, 0xFF}); });
+    const auto got = t.wait(1, 5);
+    later.join();
+    CHECK(got.has_value());
+    CHECK_EQ(got->bank0, 0xEF);
+    std::thread closer([&] { t.close(); });
+    CHECK(!t.wait(1, 6)); // never set: the close ends the wait
+    closer.join();
 }
 
 TEST_CASE("arcade settings: the EEPROM checksum and both copies, as the game writes them") {

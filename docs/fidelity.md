@@ -599,6 +599,31 @@ What the firmware's handlers settle (`hardware-notes.md` has the detail):
   play, and a 2-player game shows each cabinet the other's player.
   Registers seen but not understood: control `0xC0` (`0x7FFF` with each
   small frame, a per-node table value with the data frame: a timer?).
+- **How late a packet may arrive (measured 2026-10-25).** The real link is
+  a cable, so a packet takes next to no time; ours adds a delay in game
+  time (`--link-latency`, at least a slice with `--parallel`). Two boards,
+  `--parallel --no-2d --no-sound`, about 3,880 frames: with 0, 1, 3 or 4 ms
+  one way the ring comes up and attract mode plays (about 7,100 packets
+  each way); with 5 or 6 ms the ring comes up but both games stay on
+  NETWORK CHECKING (TWO PROCESSORS DETECTED); with 8, 12 and 17 ms
+  exchanges are missed (6,234, 4,408, 2,575 packets). The firmware makes
+  several round trips each frame (the master's small frame, the slave's
+  answer, the data frames), all within a tick. So a link carried over a
+  network (Mode A, `netplay.md`) has about 4 ms of game time to spare,
+  which is why local network play goes through Mode B first (owner's
+  decision, 2026-10-25).
+- **Save states of linked boards** (not hardware: how the link between
+  boards in one process is kept). Each board saves at its own point, the
+  first block it can resume at after the frame ends, and the ring's part
+  holds the packets on their way between those points (numbered on each
+  link; a receiver that had already taken in packets its sender sends
+  after its point drops them when they come again). `gamerun --boards 2`
+  saved at frame 1000, loaded and saved again at 1500, gives the same
+  file, byte for byte, as a run straight to 1500, taking turns and
+  `--parallel` alike; a single board's state is unchanged (the same bytes
+  as before). At the end of a frame the link's exchange is over, so those
+  files have no packets on their way; a unit test saves the two ends at
+  different points, either way round, and checks both paths.
 - **A lone cabinet** with the default settings uploads the firmware,
   checks the board and keeps it in reset; the link vectors are never
   installed. The link setting is the byte at `0x10019E` (`-32354(r13)`; the
