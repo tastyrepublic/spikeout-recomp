@@ -114,13 +114,154 @@ need more: cheap save states, then profiling the game's own emulation.
 Mode A (a board per device, at single-board cost) would suit weak devices,
 but only on a wired LAN (see Mode A above), so it waits.
 
-## Session model (Mode B)
+## Session model (Mode B), as built (2026-10-25)
 
-- 2–4 players plus spectators, peer-to-peer UDP with relay fallback.
-  Candidate libraries: GekkoNet or GGPO (MIT); Steam Networking Sockets as an
-  optional transport.
-- ROM set CRCs and build version are compared at connect time; any
-  difference guarantees a desync.
+Delay-based, every machine running every board; our own code, no netcode
+library (`src/net/`, `tools/netplay.hpp`).
+
+- **Seats:** the host's cabinet is seat 1, the link's master (link setting
+  1); players take the next free seat as they join (slaves, setting 2); the
+  ring goes in seat order. 2–4 players.
+- **The start:** the host's Start powers every machine's boards on at once,
+  from the host's clock. Each board starts from its own player's cabinet:
+  every player's machine sends the host its settings EEPROM and backup RAM
+  (the window: its first cabinet's) as it joins, and the start carries all
+  of them to everyone. The country is set to the host's on every board, as
+  linked cabinets must share one (a new cabinet, with no settings yet,
+  starts as the host's). After the game each machine keeps its own
+  player's board as its cabinet (its country back as it was), as a cabinet
+  keeps what it played. Only machines with the same build (the ROMs
+  sampled, the recompiled game, the protocol: `tools::build_id`) can join.
+- **Boards:** all of them run in each process at once, meeting every 8
+  lines, the link's packets a slice late (`gamerun --parallel`); only the
+  local player's board draws its 2D and 3D and runs its sound.
+- **Inputs:** each player's inputs set at the end of a frame (for the
+  next, `tools::InputTable`), `input delay` frames ahead, and sent to every
+  other machine (UDP, every frame not yet acknowledged sent again until it
+  is, the others' passed on too). A board waits at the end of a frame until
+  every player's inputs for the next are in. Input delay 0 is as the
+  arcade (a frame waits for the network once, about a millisecond on a
+  LAN); a setting gives 1–4, or Auto (chosen at the start from the round
+  trip: 0 within about 8 ms one way; not yet adjusted during play).
+- **Checks and recovery:** every 120 frames each board's main RAM hash
+  goes to the others. A machine whose boards differ from the host's asks
+  for every board's state (a linked save state, zstd-compressed: 2-9 MB
+  for two boards), runs on from it unpaced until it has caught up, and the
+  game goes on; the others only wait for its inputs meanwhile.
+- **Drops:** a player not heard from for 3 s (or who says goodbye): the
+  lowest seat still there stops everyone taking that seat's inputs from it,
+  asks how far each has them, gets them as far as anyone has, and announces
+  the frame from which the seat has none. Its character stands idle and the
+  game goes on, the same on every machine; the cabinet is then free.
+- **Empty cabinets, joining in progress:** every cabinet of a game is
+  powered on at the start, as in an arcade, whether a player has it or not:
+  the host can start alone, the others standing in attract mode. A cabinet
+  no player has gets inputs of none from the authority (the lowest seat
+  still connected), sent as anyone's. A player can join the game in
+  progress (listed "playing" nearby and in the lobby while a cabinet is
+  free): the host sends the start and every board's state, the inputs
+  since come as usual, the new player's boards run unpaced until they have
+  caught up, then the authority hands the cabinet over from a frame a
+  little ahead (8 frames). The cabinet is played as it was set up (not
+  from the joiner's own, which isn't kept afterwards either). Sound: the
+  joiner's own board starts with its sound board fresh (the host's state
+  carries only the host's), so the music comes back with the next tune.
+- **Finding games, on this network:** a host broadcasts on every network
+  this machine is on (port 47326, once a second); "Join a game nearby"
+  lists them. No internet needed (a LAN, one device's hotspot).
+- **Finding games, on the internet:** the lobby, a Cloudflare Worker with
+  one Durable Object (`lobby/src/index.js`, free plan; WebSocket hibernation
+  so idle players cost nothing). Hosting gives a 6-letter code; a game is
+  listed for anyone with the same build, or private (by its code only).
+  Names only, no accounts. The lobby's address is fixed in the build
+  (CMake's `SPIKEOUT_LOBBY_URL`), not the player's to change.
+- **Connecting over the internet:** each machine learns its router's
+  address from Cloudflare's STUN, and sends the lobby every address it may
+  be reached at (its own, its router's); both sides send to all of the
+  other's at once (the host as the lobby tells it of a joiner), which opens
+  most home routers ("hole punching"), and keep to the first that answers.
+  When routers won't allow that, Cloudflare's TURN relay: the lobby hands
+  out short-lived credentials (its key kept in the Worker's secrets) and a
+  machine takes a relay address the others can send to; a direct path is
+  preferred as soon as one works. Mode B's traffic is a few KB a second a
+  player, so a relay costs little.
+- **The window:** Esc, Network play: players, input delay, host on this
+  network or on the internet (listed or private), join a game nearby or on
+  the internet (the lobby's list, or by code: a letter at a time, pads
+  too). The lobby page shows the code, the seats and Start (the host) or
+  Leave. In a network game the menu doesn't pause (the others play on;
+  this player's controls are let go meanwhile), and save states, recording
+  and the arcade settings are off.
+
+How it was proven (2026-10-25, one PC):
+
+- Two `gamerun` processes over this machine's network, found by LAN
+  discovery, give the same reports for both boards and the same sound
+  (both boards', byte for byte) as one `gamerun --boards 2 --parallel` with
+  the same presses (board 1's reached the host only over the network); the
+  same with `--input-delay 2`; and with a player who leaves at frame 1316,
+  the host announces it idle from 1317 and plays on to the end.
+- The same through the lobby run here (`wrangler dev`): a private game
+  joined by its code, the same reports and sound again.
+- Two windows: one hosts on this network, the other finds it nearby and
+  joins; both play from power-on to frame 1500 with every hash check
+  equal, each showing its own cabinet.
+- Keeping each player's board after the game (two portable windows, each
+  with its own cabinet files: the host export and coins, the joiner Japan
+  and free play, with no saved data yet). The host leaves from the menu at
+  about frame 970: it keeps seat 1's board as its cabinet; the joiner plays
+  on with the host standing idle, then its window is closed: it keeps seat
+  2's board, its settings back to Japan and free play (its board played as
+  export, the host's country), and now has saved data of its own.
+
+- Joining in progress (2026-10-26): the host starts alone (`gamerun
+  --net-host ... --net-start-alone`), a second gamerun joins 8 s later,
+  gets every board's state at frame 897 (4.6 MB packed) and takes cabinet
+  2 from frame 957; its presses (coin and start at 2000-2060) reach the
+  host only over the network. The host's run to frame 3000 is the same,
+  reports and both boards' sound byte for byte, as one `gamerun --boards
+  2 --parallel` with those presses (board 1 idle before them); the
+  joiner's game state is the same too (its report differs only in
+  gamerun's own counters, kept from where it began). Two windows: one
+  starts alone, the other finds it "playing" nearby 15 s later, joins at
+  frame 945 (5.3 MB), catches up in about a second and has cabinet 2 from
+  frame 1008, every hash check equal.
+- Recovery (2026-10-26): a 2-player gamerun game in which the joiner
+  alone pokes a byte of board 0's RAM at frame 1500: both see the
+  difference at frame 1560, the joiner gets every board's state at 1563
+  and runs on; no check differs after, and the host's run is the same as
+  the one-process reference, reports and sound byte for byte. In two
+  windows (`SPIKEOUT_TEST_POKE=0:100800=5A@900` on the joiner's): the
+  difference seen at frame 960 on both, the joiner put back in step at
+  963 (5.8 MB), no check differing after.
+
+- The lobby deployed (2026-10-26) to the owner's Cloudflare account,
+  `wss://spikeout-lobby.spikeout-lobby.workers.dev/v1/lobby` (the build's
+  `SPIKEOUT_LOBBY_URL`; its workers.dev subdomain registered by that first
+  deploy). Two gamerun processes through it: a private game joined by its
+  code, every hash check equal; two windows: one hosting a listed game on
+  the internet, the other joining it from "Join on the internet".
+
+- The relay (2026-10-26): the TURN key's two secrets set on the Worker
+  (`npx wrangler secret put TURN_KEY_ID` and `TURN_KEY_API_TOKEN`, the
+  values typed by the owner). The lobby now hands out credentials and
+  each machine takes a relay address. With `SPIKEOUT_TEST_RELAY_ONLY=1` on
+  the host (it offers only its relay address and takes only what comes
+  through it), two gamerun processes play 600 frames all through
+  Cloudflare's TURN, every hash check equal. Found doing so: the relay
+  refuses a permission request naming a private address (a LAN one), so
+  only public addresses are asked for, one a request.
+  (`SPIKEOUT_NET_DEBUG=1` prints the relay's answers.)
+
+Not done yet:
+play between two different networks (hole punching and the relay are
+tested only against Cloudflare's STUN from here); input delay adjusted
+during play; spectators; player names (the computer's user name for now).
+
+Testing it: `cd lobby && npm install && npm test` (the lobby, run here);
+`gamerun ROMS --net-host NAME --seats 2 ...` and `gamerun ROMS --net-join
+NAME ...` (two terminals), or with `--lobby ws://127.0.0.1:8790/v1/lobby`
+and `wrangler dev --port 8790` for the internet path.
 
 ## Plan
 
@@ -147,17 +288,11 @@ but only on a wired LAN (see Mode A above), so it waits.
      it: one board and two linked boards with `--press`, the same reports
      and the same sound, byte for byte. The window takes it with network
      play.
-   - Found by LAN discovery only (broadcast; no address typed anywhere);
-     seats in joining order, seat 1 the host and the link's master.
-   - Every PC starts from the same settings and clock (the host's), or
-     from the host's state; state hashes compared every few seconds, the
-     host's state sent to a PC that differs.
-   - A player who drops: their board gets no inputs, their character
-     stands idle.
-   - Headless proof: `gamerun` processes over localhost give the same
-     hashes as one `gamerun --boards N --parallel` with the same inputs.
-   - The window: a Network play menu page and a lobby.
-5. Mode B with rollback, online (an internet lobby), on top of 4: every
-   board saved each frame (pages written only), re-run when a guess was
-   wrong.
+   - **Done** (2026-10-25), with the internet lobby too: see "Session
+     model" above (seats, start, inputs, checks, drops, LAN discovery, the
+     lobby, the window, and how it was proven). Still to do: deploying the
+     lobby, play between two networks, input delay adjusted during play,
+     resync, rejoining, spectators.
+5. Mode B with rollback, online, on top of 4: every board saved each frame
+   (pages written only), re-run when a guess was wrong.
 6. Mode A, if wanted for weak devices on a wired LAN.

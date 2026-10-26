@@ -65,6 +65,94 @@ add_library(m3runtime
 target_include_directories(m3runtime PUBLIC src)
 target_link_libraries(m3runtime PUBLIC ppc PRIVATE moira minimp3 spikeout_warnings)
 
+# Network play (docs/netplay.md): UDP sockets, LAN discovery, Mode B sessions.
+add_library(m3net src/net/udp.cpp src/net/session.cpp src/net/stun.cpp src/net/digest.cpp src/net/compress.cpp)
+target_include_directories(m3net PUBLIC src)
+target_link_libraries(m3net PRIVATE spikeout_warnings)
+find_package(Threads REQUIRED)
+target_link_libraries(m3net PUBLIC Threads::Threads)
+if(WIN32)
+    target_link_libraries(m3net PRIVATE ws2_32 iphlpapi)
+endif()
+
+# zstd (BSD-3-Clause, Meta), downloaded and built with the project:
+# network play sends save states compressed (a player joining a game in
+# progress, a machine that went out of step).
+include(FetchContent)
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ZSTD_LEGACY_SUPPORT OFF CACHE BOOL "" FORCE)
+set(ZSTD_MULTITHREAD_SUPPORT OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(zstd
+    GIT_REPOSITORY https://github.com/facebook/zstd.git
+    GIT_TAG v1.5.7
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR build/cmake)
+FetchContent_MakeAvailable(zstd)
+target_link_libraries(m3net PUBLIC libzstd_static)
+target_include_directories(m3net PUBLIC ${zstd_SOURCE_DIR}/lib)
+
+# The internet lobby's client (src/net/lobby.cpp): a WebSocket over TLS to
+# the lobby Worker (lobby/), through libcurl (curl license): the system's if
+# CMake finds it, else (Windows) built with the project on Windows' own TLS
+# (Schannel). Without it, LAN play only. The lobby's address is fixed in the
+# build (players can't change it).
+include(FetchContent)
+option(SPIKEOUT_LOBBY "Build the internet lobby client (libcurl)" ON)
+set(SPIKEOUT_LOBBY_URL "wss://spikeout-lobby.spikeout-lobby.workers.dev/v1/lobby" CACHE STRING "The internet lobby (wss://.../v1/lobby; lobby/, on the owner's Cloudflare account)")
+if(SPIKEOUT_LOBBY)
+    find_package(CURL QUIET)
+    if(CURL_FOUND) # a system libcurl must have WebSockets (curl 8.11 on; some older builds left them out)
+        include(CheckSymbolExists)
+        set(CMAKE_REQUIRED_LIBRARIES CURL::libcurl)
+        check_symbol_exists(curl_ws_send "curl/curl.h" SPIKEOUT_CURL_WEBSOCKETS)
+        unset(CMAKE_REQUIRED_LIBRARIES)
+        if(NOT SPIKEOUT_CURL_WEBSOCKETS)
+            message(STATUS "The system's libcurl has no WebSockets")
+            set(SPIKEOUT_LOBBY OFF)
+        endif()
+    endif()
+    if(NOT CURL_FOUND AND WIN32)
+        set(BUILD_CURL_EXE OFF CACHE BOOL "" FORCE)
+        set(BUILD_LIBCURL_DOCS OFF CACHE BOOL "" FORCE)
+        set(BUILD_MISC_DOCS OFF CACHE BOOL "" FORCE)
+        set(ENABLE_CURL_MANUAL OFF CACHE BOOL "" FORCE)
+        set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+        set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(BUILD_STATIC_LIBS ON CACHE BOOL "" FORCE)
+        set(CURL_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
+        set(CURL_USE_SCHANNEL ON CACHE BOOL "" FORCE)
+        set(CURL_USE_OPENSSL OFF CACHE BOOL "" FORCE)
+        set(CURL_USE_LIBPSL OFF CACHE BOOL "" FORCE)
+        set(CURL_USE_LIBSSH2 OFF CACHE BOOL "" FORCE)
+        set(USE_LIBIDN2 OFF CACHE BOOL "" FORCE)
+        set(USE_NGHTTP2 OFF CACHE BOOL "" FORCE)
+        set(CURL_ZLIB OFF CACHE BOOL "" FORCE)
+        set(CURL_BROTLI OFF CACHE BOOL "" FORCE)
+        set(CURL_ZSTD OFF CACHE BOOL "" FORCE)
+        set(HTTP_ONLY ON CACHE BOOL "" FORCE)
+        set(CURL_ENABLE_EXPORT_TARGET OFF CACHE BOOL "" FORCE)
+        set(_shared ${BUILD_SHARED_LIBS})
+        set(BUILD_SHARED_LIBS OFF)
+        FetchContent_Declare(curl
+            GIT_REPOSITORY https://github.com/curl/curl.git
+            GIT_TAG curl-8_15_0
+            GIT_SHALLOW TRUE)
+        FetchContent_MakeAvailable(curl)
+        set(BUILD_SHARED_LIBS ${_shared})
+    endif()
+endif()
+if(SPIKEOUT_LOBBY AND TARGET CURL::libcurl)
+    target_sources(m3net PRIVATE src/net/lobby.cpp)
+    target_link_libraries(m3net PUBLIC CURL::libcurl)
+    target_compile_definitions(m3net PUBLIC SPIKEOUT_LOBBY SPIKEOUT_LOBBY_URL="${SPIKEOUT_LOBBY_URL}")
+else()
+    target_sources(m3net PRIVATE src/net/lobby_none.cpp)
+    message(STATUS "No libcurl: the internet lobby is left out (LAN play only)")
+endif()
+
 # Moira 68000 core (MIT, Dirk W. Hoffmann, v3.0; third_party/moira) for the
 # network board's 68000. Musashi was rejected: its bundled SoftFloat 2b
 # license has a disputed indemnity clause.
@@ -334,7 +422,7 @@ if(SPIKEOUT_ROM_DIR)
     target_link_libraries(boottest PRIVATE boot_rom spikeout_warnings)
 
     add_executable(gamerun tools/gamerun.cpp)
-    target_link_libraries(gamerun PRIVATE game_ram boot_rom spikeout_warnings)
+    target_link_libraries(gamerun PRIVATE game_ram boot_rom m3net spikeout_warnings)
     if(SPIKEOUT_GPU)
         target_link_libraries(gamerun PRIVATE m3gpu)
         target_compile_definitions(gamerun PRIVATE SPIKEOUT_GPU)
@@ -344,7 +432,7 @@ if(SPIKEOUT_ROM_DIR)
     # through the GPU.
     if(SPIKEOUT_FRONTEND)
         add_executable(spikeout tools/spikeout.cpp)
-        target_link_libraries(spikeout PRIVATE game_ram boot_rom SDL3::SDL3 spikeout_warnings)
+        target_link_libraries(spikeout PRIVATE game_ram boot_rom m3net SDL3::SDL3 spikeout_warnings)
         if(SPIKEOUT_GPU)
             target_link_libraries(spikeout PRIVATE m3gpu m3ui)
             target_compile_definitions(spikeout PRIVATE SPIKEOUT_GPU)
@@ -359,8 +447,9 @@ if(SPIKEOUT_BUILD_TESTS)
         tests/test_ppc.cpp
         tests/test_runtime.cpp
         tests/test_analysis.cpp
-        tests/test_devices.cpp)
-    target_link_libraries(spikeout_tests PRIVATE analysis m3runtime spikeout_warnings)
+        tests/test_devices.cpp
+        tests/test_net.cpp)
+    target_link_libraries(spikeout_tests PRIVATE analysis m3runtime m3net spikeout_warnings)
     if(SPIKEOUT_GPU)
         target_sources(spikeout_tests PRIVATE tests/test_gpu.cpp)
         target_link_libraries(spikeout_tests PRIVATE m3gpu)

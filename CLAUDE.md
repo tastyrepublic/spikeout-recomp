@@ -59,9 +59,39 @@ a frame at scale 4), the settings menu and widescreen all work.
   Linked boards too (2026-10-25, gamerun --boards N: one file, the ring's
   packets on their way cut between the boards' points). Not yet: the
   window's linked boards in a state; a recording from a state.
-- Online/local play: Mode B (every PC runs every board, inputs only)
-  delay-based on a LAN/hotspot comes first, Mode A waits (the link only
-  tolerates ~4 ms one way); plan and state sizes in docs/netplay.md.
+- Online/local play: Mode B (every PC runs every board, inputs only),
+  delay-based, works (2026-10-25, uncommitted when written): src/net/ (UDP,
+  LAN discovery, sessions, STUN/TURN, the lobby client over libcurl),
+  tools/netplay.hpp, gamerun --net-host/--net-join (+ --lobby URL), the
+  window's Network play menu; the lobby is a Cloudflare Worker in lobby/
+  (`npm test` runs it here). Deployed 2026-10-26 (wrangler logged in on
+  this PC; `npx wrangler deploy` in lobby/) at
+  wss://spikeout-lobby.spikeout-lobby.workers.dev/v1/lobby, the build's
+  SPIKEOUT_LOBBY_URL; its TURN key secrets set (the relay works, tested
+  with SPIKEOUT_TEST_RELAY_ONLY=1 on a host). Not yet: a test between two
+  real networks (the owner's second machine or a phone hotspot). Also
+  working: a host starting alone, players joining a game in progress,
+  machines out of step put back from the host's state. Mode A
+  (a "Cable link" menu, Ethernet) comes after Mode B. docs/netplay.md has
+  the design, proofs and what's left.
+- OPEN BUG (2026-10-26, unsolved): a network game in the window (hosted,
+  3 cabinets, even alone) plays in slow motion at 57.5 fps. The game's
+  logic counter (0x1000A8, +1 a logic frame) shows the shown board 0
+  (master) at +200 per 300 frames while boards 1-2 (slaves) run +300.
+  CommBoard's new defaults (master 3 IRQ 5 a frame, slaves 1, wire 0.5)
+  fixed the same 2/3 in gamerun, and gamerun --boards 3 --parallel (or
+  --net-host --seats 3 --net-start-alone) runs board 0 at +300 even with
+  the window's exact start data (SPIKEOUT_TEST_DUMP_START=1 in the window
+  writes start-N.eeprom/.backup and prints the clock). The window's local
+  --boards 3 reaches +300 too. Not the cause: sound, EEPROM/backup, RTC,
+  slave ticks 1 vs 3, real-time sleeps in gamerun (SPIKEOUT_TEST_SLEEP=ms).
+  Last lead: gamerun --watch-write 1000A8@0 printed no board 0 writes with
+  SPIKEOUT_TEST_RAM_ZERO=1 (check that run). Window debug: SPIKEOUT_NET_DEBUG=1
+  prints every board's logic, inputs and network board each 300 frames;
+  driving it: SPIKEOUT_MENU_KEYS="esc,down,enter,right,down,down,enter,enter"
+  hosts a 3-cabinet game alone. Test hacks to remove once fixed:
+  SPIKEOUT_TEST_PARALLEL, SPIKEOUT_TEST_SLEEP, SPIKEOUT_TEST_DUMP_START,
+  SPIKEOUT_TEST_RAM_ZERO.
 - Record/replay: spikeout --record, gamerun --replay (66/66 hashes).
 - Smooth motion (frame interpolation, m3::interpolate, spikeout --smooth /
   menu setting, default OFF): ghosts remain (tower light, car wheels, gate,

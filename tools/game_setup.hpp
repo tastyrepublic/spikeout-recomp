@@ -6,10 +6,13 @@
 #include "recomp/context.hpp"
 #include "recomp/frame_timing.hpp"
 #include "runtime/bus.hpp"
+#include "runtime/netboard.hpp"
 #include "runtime/rom.hpp"
 #include "runtime/soundboard.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 #include <condition_variable>
 #include <cstdint>
 #include <ctime>
@@ -241,5 +244,57 @@ private:
 // word for it is known, linked runs write it over the first frames.
 constexpr uint32_t kLinkSettingAddr = 0x10019E;
 constexpr uint64_t kLinkSettingFrames = 3000;
+
+// A save state of linked boards (gamerun --save-state / --load-state, and
+// network play's states for a player joining a game in progress): one file
+// for all of them,
+// each board's state (saved at its own point, as a board alone) and the
+// ring's part, the packets on their way between those points
+// (m3::LinkRing::cut_state), written once every board has saved and all
+// are stopped: at the slices' meeting when running at once, else by the
+// last board to save (the others waiting their turn).
+struct LinkedState {
+    m3::LinkRing* ring = nullptr;
+    std::string path;
+    std::mutex lock;
+    std::vector<std::vector<uint8_t>> boards; // each board's, as it saves (or as the file has them)
+    std::vector<std::vector<uint8_t>> loaded; // --load-state: each board's to load
+    std::size_t saved = 0;
+    bool written = false;
+    // Network play, the host: every board's state at the end of
+    // `capture_frame`, as a machine joining the game (or out of step) asked
+    // for it, handed to `sink` (again each time asked).
+    std::atomic<uint64_t> capture_frame{0};
+    std::function<void(uint64_t, std::vector<uint8_t>)> sink;
+
+    void finish() {
+        {
+            std::lock_guard guard(lock);
+            if (written || saved < boards.size() || !ring->cut_complete()) return;
+            written = true;
+        }
+        m3::State s;
+        io(s);
+        if (sink) {
+            sink(capture_frame, std::move(s.data()));
+            std::lock_guard guard(lock);
+            capture_frame = 0, saved = 0, written = false;
+            boards.assign(boards.size(), {});
+            return;
+        }
+        if (tools::write_file(path, s.data()))
+            std::printf("Saved %s: %zu linked boards, %zu bytes\n", path.c_str(), boards.size(), s.data().size());
+        else
+            std::fprintf(stderr, "gamerun: cannot write %s\n", path.c_str());
+    }
+    // The file: saving or loading (before the boards run).
+    void io(m3::State& s) {
+        s.tag("spikeout linked save state 1");
+        ring->cut_state(s);
+        for (auto& b : boards) s.io(b);
+        s.tag("end");
+        if (s.loading() && !s.done()) throw std::runtime_error("save state: longer than this build's");
+    }
+};
 
 } // namespace tools

@@ -129,11 +129,13 @@ void CommBoard::run_until(uint64_t target) {
 // MAME's free-running 100 Hz a lone master fails it within seconds, with
 // IRQ 5 once a frame it doesn't. What drives it on the board isn't known.
 void CommBoard::end_frame() {
-    if (in_reset_ || options_.irq5_per_frame == 0) return;
+    const bool slave = ram_[0x400] != 0 || ram_[0x401] != 0;
+    const uint32_t ticks = slave && options_.slave_irq5_per_frame != CommBoardOptions::kSame ? options_.slave_irq5_per_frame
+                                                                                              : options_.irq5_per_frame;
+    if (in_reset_ || ticks == 0) return;
     set_irq(5, true);
-    frame_irq5_left_ = options_.irq5_per_frame - 1;
-    frame_irq5_period_ =
-        static_cast<uint64_t>(static_cast<double>(options_.cpu_hz) / options_.main_frame_hz / options_.irq5_per_frame);
+    frame_irq5_left_ = ticks - 1;
+    frame_irq5_period_ = static_cast<uint64_t>(static_cast<double>(options_.cpu_hz) / options_.main_frame_hz / ticks);
     frame_irq5_next_ = frame_irq5_left_ ? cpu_cycles() + frame_irq5_period_ : UINT64_MAX;
 }
 

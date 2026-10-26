@@ -1,0 +1,16 @@
+// The Spikeout lobby (src/index.js). `npx wrangler dev` runs it on this
+// machine (the tests use that); `npx wrangler deploy` puts it on the
+// owner's Cloudflare account. The TURN relay's key goes in as secrets,
+// never in the repo: `npx wrangler secret put TURN_KEY_ID` and
+// `TURN_KEY_API_TOKEN` (locally: a .dev.vars file, git-ignored).
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "spikeout-lobby",
+	"main": "src/index.js",
+	"compatibility_date": "2026-10-01",
+	"durable_objects": {
+		"bindings": [{ "name": "LOBBY", "class_name": "Lobby" }]
+	},
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["Lobby"] }],
+	"observability": { "enabled": true }
+}

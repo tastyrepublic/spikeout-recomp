@@ -75,6 +75,26 @@ public:
         }
     }
 
+    // From `frame` on, every frame's inputs are `in` (a player who has
+    // dropped: none held, the character standing idle).
+    void hold_from(std::size_t board, uint64_t frame, const Inputs& in) {
+        {
+            std::lock_guard guard(lock_);
+            Board& b = boards_[board];
+            b.hold_from = frame;
+            b.held = in;
+        }
+        changed_.notify_all();
+    }
+
+    // Every board's frames let go, and open again after a close (a run
+    // starting again from a state, its boards stopped).
+    void reset() {
+        std::lock_guard guard(lock_);
+        for (Board& b : boards_) b = Board{};
+        closed_ = false;
+    }
+
     // Wakes every wait (a session ending).
     void close() {
         {
@@ -89,6 +109,8 @@ private:
         std::deque<Inputs> frames; // frames first .. next - 1
         uint64_t first = 0, next = 0;
         bool known = false; // any set yet
+        std::optional<uint64_t> hold_from;
+        Inputs held;
     };
     static void push(Board& b, const Inputs& in) {
         if (!b.known) b.first = b.next;
@@ -97,6 +119,7 @@ private:
         ++b.next;
     }
     static std::optional<Inputs> find(const Board& b, uint64_t frame) {
+        if (b.hold_from && frame >= *b.hold_from) return b.held;
         if (!b.known || frame >= b.next || frame < b.first) return std::nullopt;
         return b.frames[static_cast<std::size_t>(frame - b.first)];
     }

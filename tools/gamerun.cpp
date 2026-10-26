@@ -34,8 +34,9 @@
 // --dump-backup writes the backup RAM (128 KB) at the end. --dump-layers
 // writes each tile layer's whole 512x512 name table with every screenshot
 // (FILE-<frame>-L<n>.png).
-// --eeprom FILE starts with that settings EEPROM (128 bytes, as the window's
-// nvram/board<N>.eeprom; else a blank one, which the game sets up).
+// --eeprom [B:]FILE starts with that settings EEPROM (128 bytes, as the window's
+// nvram/board<N>.eeprom; else a blank one, which the game sets up); with B:,
+// board B's only (linked cabinets set up differently).
 // --dump-textures FILE.png writes the Real3D's texture RAM at the end as a
 // 2048x2048 picture, each texel read as T1RGB5 (the other formats show as
 // noise; derived from the ROMs).
@@ -53,6 +54,16 @@
 // was sent (plus --link-latency main board cycles, default 0). --parallel
 // runs the boards at once instead, meeting every slice, where the link's
 // packets go on (still the same every run; the latency at least a slice).
+// Network play (Mode B, tools::NetPlay, docs/netplay.md): --net-host NAME
+// --seats N offers a game on the networks this machine is on and waits for
+// N - 1 players; --net-join NAME finds it there (LAN discovery) and joins.
+// Every process then runs every board --parallel, its own board's inputs
+// (--press for it) sent to the others, theirs received; the same run, to
+// the byte, as one gamerun --boards N --parallel with all the presses.
+// --clock SECONDS sets the boards' clocks at power-on (else the host's
+// time; the host's goes to all). --lobby URL goes through an internet lobby
+// instead (a test's own, `wrangler dev` in lobby/): --net-host offers it
+// there (--private: by its code only), --net-join CODE joins by the code.
 // --no-2d and --no-sound leave out the tile generator's drawing and the
 // sound and music boards: the game runs the same without them (nothing
 // reads them back), as a remote player's cabinet would.
@@ -122,6 +133,8 @@
 #include "runtime/widescreen.hpp"
 #include "game_setup.hpp"
 #include "input_table.hpp"
+#include "netplay.hpp"
+#include "net/compress.hpp"
 #include "recording.hpp"
 #include "png_write.hpp"
 #include "wav_write.hpp"
@@ -182,7 +195,24 @@ struct Options {
     uint32_t watch_lo = 0, watch_hi = 0;      // --watch-write LO-HI@FRAME:N
     uint64_t watch_frame = 0, watch_frames = 1;
     bool dump_layers = false;
-    const char* eeprom = nullptr; // --eeprom: the settings EEPROM to start with (128 bytes, high byte first)
+    // --eeprom [B:]FILE: the settings EEPROM to start with (128 bytes, high byte first), for board B or all
+    std::vector<std::pair<int, std::string>> eeprom_files;
+    std::vector<std::pair<int, std::string>> backup_files; // --backup [B:]FILE: backup RAM to start with (as nvram/board<N>.backup)
+    std::vector<uint8_t> eeprom_bytes; // (its bytes, or the network host's)
+    std::array<std::vector<uint8_t>, 4> board_eeprom; // (one board's own, over those)
+    std::array<std::vector<uint8_t>, 4> board_backup; // (network play: each board's backup RAM, its player's cabinet's)
+    std::optional<int64_t> clock;      // --clock SECONDS: the boards' clocks at power-on (else the host's time)
+    // --net-host NAME --seats N / --net-join NAME: network play (tools::NetPlay)
+    std::string net_host, net_join;
+    uint8_t net_seats = 2;
+    // --lobby URL: through an internet lobby (a test's own, `wrangler dev`):
+    // --net-host offers it there (--private: by its code only), --net-join CODE
+    std::string lobby_url;
+    bool net_private = false;
+    bool net_start_alone = false; // --net-start-alone: the host starts at once, the other cabinets empty until players join
+    uint64_t max_frames = 0;       // --frames N: the run ends at the end of frame N
+    std::size_t local_seat = 0; // (network play: the board this machine's player has)
+    tools::NetPlay* netplay = nullptr;
     const char* net_disasm = nullptr;
     const char* screenshot = nullptr;
     const char* wav = nullptr;
@@ -221,6 +251,8 @@ struct Options {
     bool irq5_on_e0 = true, send_waits_for_receive = m3::CommBoardOptions().send_waits_for_receive,
          host_sees_other_bank = false;
     double link_cycles_per_byte = m3::CommBoardOptions().link_cycles_per_byte;
+    uint32_t irq5_per_frame = m3::CommBoardOptions().irq5_per_frame; // --net-irq5-per-frame N (a link question: docs/fidelity.md)
+    uint32_t slave_irq5_per_frame = m3::CommBoardOptions::kSame; // --net-slave-irq5-per-frame N
 };
 
 // Where each input is, active low (hardware-notes.md, Inputs).
@@ -277,44 +309,9 @@ void print_probe(const m3::Real3dRenderer& r, int x, int y, uint64_t frame) {
                     h.outcome);
 }
 
-// One Model 3 board and what the run keeps of it.
-// --save-state / --load-state with linked boards: one file for all of them,
-// each board's state (saved at its own point, as a board alone) and the
-// ring's part, the packets on their way between those points
-// (m3::LinkRing::cut_state), written once every board has saved and all
-// are stopped: at the slices' meeting when running at once, else by the
-// last board to save (the others waiting their turn).
-struct LinkedState {
-    m3::LinkRing* ring = nullptr;
-    std::string path;
-    std::mutex lock;
-    std::vector<std::vector<uint8_t>> boards; // each board's, as it saves (or as the file has them)
-    std::vector<std::vector<uint8_t>> loaded; // --load-state: each board's to load
-    std::size_t saved = 0;
-    bool written = false;
+using tools::LinkedState; // (tools/game_setup.hpp)
 
-    void finish() {
-        {
-            std::lock_guard guard(lock);
-            if (written || saved < boards.size() || !ring->cut_complete()) return;
-            written = true;
-        }
-        m3::State s;
-        io(s);
-        if (tools::write_file(path, s.data()))
-            std::printf("Saved %s: %zu linked boards, %zu bytes\n", path.c_str(), boards.size(), s.data().size());
-        else
-            std::fprintf(stderr, "gamerun: cannot write %s\n", path.c_str());
-    }
-    // The file: saving or loading (before the boards run).
-    void io(m3::State& s) {
-        s.tag("spikeout linked save state 1");
-        ring->cut_state(s);
-        for (auto& b : boards) s.io(b);
-        s.tag("end");
-        if (s.loading() && !s.done()) throw std::runtime_error("save state: longer than this build's");
-    }
-};
+// One Model 3 board and what the run keeps of it.
 
 struct Machine {
     Machine(std::size_t i, const m3::RomSet& roms, std::span<const recomp::FunctionEntry> functions)
@@ -328,6 +325,7 @@ struct Machine {
     LinkedState* linked = nullptr; // linked boards' --save-state / --load-state
     tools::InputTable* inputs = nullptr; // every board's inputs by frame
     bool inputs_started = false;
+    bool took_seat = false; // (network play: a game joined in progress, our cabinet asked for)
     uint64_t watch_from = 0, watch_to = 0; // --watch-write: the frames whose writes are printed
     // --replay: the next recorded inputs and hash, hashes matched, the first frame not
     size_t replay_input = 0, replay_hash = 0;
@@ -455,20 +453,21 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         if (o.replay->backup.size() == m3::Bus::kBackupRamSize)
             std::copy(o.replay->backup.begin(), o.replay->backup.end(), bus.backup_ram().begin());
     } else {
-        tools::set_rtc_to_host(bus);
-        for (uint8_t& b : bus.ram()) b = 0xA5;
+        if (o.clock) bus.rtc().set_time(*o.clock, 0);
+        else tools::set_rtc_to_host(bus);
+        if (!std::getenv("SPIKEOUT_TEST_RAM_ZERO")) for (uint8_t& b : bus.ram()) b = 0xA5;
     }
-    if (o.eeprom) {
-        std::ifstream in(o.eeprom, std::ios::binary);
-        uint8_t bytes[128] = {};
-        if (in.read(reinterpret_cast<char*>(bytes), sizeof bytes))
-            for (std::size_t i = 0; i < 64; ++i) bus.eeprom().words()[i] = static_cast<uint16_t>(bytes[2 * i] << 8 | bytes[2 * i + 1]);
-        else
-            std::fprintf(stderr, "gamerun: cannot read %s (128 bytes)\n", o.eeprom);
-    }
+    const std::vector<uint8_t>& eeprom =
+        m.index < o.board_eeprom.size() && o.board_eeprom[m.index].size() == 128 ? o.board_eeprom[m.index] : o.eeprom_bytes;
+    if (eeprom.size() == 128)
+        for (std::size_t i = 0; i < 64; ++i) bus.eeprom().words()[i] = static_cast<uint16_t>(eeprom[2 * i] << 8 | eeprom[2 * i + 1]);
+    if (m.index < o.board_backup.size() && o.board_backup[m.index].size() == m3::Bus::kBackupRamSize)
+        std::copy(o.board_backup[m.index].begin(), o.board_backup[m.index].end(), bus.backup_ram().begin());
     if (o.real_netboard) {
         m3::CommBoardOptions options;
         options.irq5_on_e0 = o.irq5_on_e0;
+        options.irq5_per_frame = o.irq5_per_frame;
+        options.slave_irq5_per_frame = o.slave_irq5_per_frame;
         options.link_cycles_per_byte = o.link_cycles_per_byte;
         options.send_waits_for_receive = o.send_waits_for_receive;
         options.host_sees_other_bank = o.host_sees_other_bank;
@@ -481,17 +480,17 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         bus.use_netboard(std::make_unique<m3::SimNetBoard>(ring->port(m.index)));
     }
     m.c.set_scheduler(&m.timing);
-    if (o.load_state) { // everything above that the game sees, as it was saved
+    if (o.load_state || (m.linked && !m.linked->loaded.empty())) { // everything above that the game sees, as it was saved
         try {
             m3::State s(m.linked ? std::move(m.linked->loaded[m.index]) : tools::read_file(o.load_state));
             tools::board_state(s, m.c, m.timing, sound_state(m, o));
         } catch (const std::exception& e) {
-            std::fprintf(stderr, "gamerun: %s: %s\n", o.load_state, e.what());
+            std::fprintf(stderr, "gamerun: %s: %s\n", o.load_state ? o.load_state : "the host's state", e.what());
             std::exit(1);
         }
         m.loaded = true;
-        std::printf("Loaded %s: frame %llu, block %08x\n", o.load_state, static_cast<unsigned long long>(m.timing.frames()),
-                    m.c.cpu.pc);
+        std::printf("Loaded %s: frame %llu, block %08x\n", o.load_state ? o.load_state : "the host's state",
+                    static_cast<unsigned long long>(m.timing.frames()), m.c.cpu.pc);
     }
     m.c.limit_blocks(static_cast<uint64_t>(o.blocks));
     if (o.watch_hi > o.watch_lo) { // --watch-write: each write there, where the code was, and its registers
@@ -502,8 +501,9 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             const uint64_t frame = w.timing.frames();
             if (frame < w.watch_from || frame >= w.watch_to) return;
             const auto& r = w.c.cpu.gpr;
-            std::printf("frame %llu: write%u %08x = %08x at block %08x, LR %08x; r3-r12 %08x %08x %08x %08x %08x %08x %08x %08x "
+            std::printf("%sframe %llu: write%u %08x = %08x at block %08x, LR %08x; r3-r12 %08x %08x %08x %08x %08x %08x %08x %08x "
                         "%08x %08x, r24-r31 %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                        w.index ? ("board " + std::to_string(w.index) + " ").c_str() : "",
                         static_cast<unsigned long long>(frame), 8 * size, addr, value, w.c.cpu.pc, w.c.cpu.lr, r[3], r[4], r[5],
                         r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[24], r[25], r[26], r[27], r[28], r[29], r[30], r[31]);
         }, &m);
@@ -532,6 +532,8 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
     };
     m.timing.on_frame_end = [&m, &o] {
         const uint64_t frame = m.timing.frames();
+        if (static const char* s = std::getenv("SPIKEOUT_TEST_SLEEP"); s && m.index == 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::atoi(s)));
         if (const uint64_t up = m.bus.real3d().textures_uploaded(); up != m.textures_seen) { // a frame that changed textures
             m.textures_seen = up;
             ++m.texture_frames;
@@ -748,20 +750,46 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         if (o.replay && m.index == 0) replay_frame(m, *o.replay, frame);
         // Into the board's input table (--input-delay frames on), and the
         // next frame's out of it.
-        {
+        // Network play: only this machine's player's board has a source
+        // here (into the session too); the others' inputs come from theirs.
+        if (!o.netplay || m.index == o.local_seat) {
             const tools::InputTable::Inputs source{m.bus.inputs.bank0, m.bus.inputs.bank1, m.bus.inputs.controls,
                                                    m.bus.inputs.controls2};
-            if (o.input_delay && !m.inputs_started) m.inputs->set(m.index, frame, {}); // (until the first comes: none held)
+            auto put = [&](uint64_t at, const tools::InputTable::Inputs& value) {
+                if (o.netplay) o.netplay->local(m.index, at, value);
+                else m.inputs->set(m.index, at, value);
+            };
+            if (o.input_delay && !m.inputs_started) put(frame, {}); // (until the first comes: none held)
             m.inputs_started = true;
-            m.inputs->set(m.index, frame + o.input_delay, source);
-            const tools::InputTable::Inputs in_table = *m.inputs->wait(m.index, frame);
+            put(frame + o.input_delay, source);
+        }
+        if (o.netplay && frame % 120 == 0) o.netplay->hash(frame, m.index, tools::Recording::ram_hash(m.bus.ram()));
+        {
+            const auto got = m.inputs->wait(m.index, frame);
+            if (!got) throw recomp::OutOfBudget(m.c.cpu.pc); // (the session ended)
+            const tools::InputTable::Inputs in_table = *got;
             m.inputs->forget_before(m.index, frame);
             m.bus.inputs.bank0 = in_table.bank0;
             m.bus.inputs.bank1 = in_table.bank1;
             m.bus.inputs.controls = in_table.controls;
             m.bus.inputs.controls2 = in_table.controls2;
         }
-        if (!o.save_state.empty() && frame == o.save_frame && m.linked) // linked boards: each saves, the last writes
+        // Network play, the host: every board's state asked for (by a player
+        // joining the game in progress, or a machine out of step), at the
+        // end of a frame every board is yet to finish.
+        if (o.netplay && m.linked && m.index == o.local_seat && m.linked->capture_frame == 0 && o.netplay->take_state_request())
+            m.linked->capture_frame = frame + 2;
+        // A player who joined in progress: its cabinet, at once (gamerun runs
+        // as fast as it can, as the host does: it wouldn't catch up first,
+        // as the window does; the host then waits for its inputs).
+        if (o.netplay && m.index == o.local_seat && !m.took_seat) {
+            m.took_seat = true;
+            o.netplay->session().take_seat();
+        }
+        if (o.max_frames && frame >= o.max_frames) throw recomp::OutOfBudget(m.c.cpu.pc); // --frames
+        if (o.netplay && o.netplay->resync_pending()) throw recomp::OutOfBudget(m.c.cpu.pc); // (again from the host's state)
+        const bool capture = m.linked && m.linked->capture_frame != 0 && frame == m.linked->capture_frame;
+        if (((!o.save_state.empty() && frame == o.save_frame) || capture) && m.linked) // linked boards: each saves, the last writes
             m.c.request_snapshot([&m, &o](uint32_t) {
                 m3::State s;
                 tools::board_state(s, m.c, m.timing, sound_state(m, o));
@@ -1277,7 +1305,25 @@ int main(int argc, char** argv) {
         else if (arg == "--dump-textures" && i + 1 < argc) o.dump_textures = argv[++i];
         else if (arg == "--dump-backup" && i + 1 < argc) o.dump_backup = argv[++i];
         else if (arg == "--dump-layers") o.dump_layers = true;
-        else if (arg == "--eeprom" && i + 1 < argc) o.eeprom = argv[++i];
+        else if (arg == "--backup" && i + 1 < argc) {
+            int board = kAllBoards;
+            const std::string path = board_prefix(argv[++i], board);
+            o.backup_files.push_back({board, path});
+        }
+        else if (arg == "--eeprom" && i + 1 < argc) {
+            int board = kAllBoards;
+            const std::string path = board_prefix(argv[++i], board);
+            o.eeprom_files.push_back({board, path});
+        }
+        else if (arg == "--clock" && i + 1 < argc) o.clock = std::strtoll(argv[++i], nullptr, 0);
+        else if (arg == "--net-host" && i + 1 < argc) o.net_host = argv[++i];
+        else if (arg == "--net-join" && i + 1 < argc) o.net_join = argv[++i];
+        else if (arg == "--lobby" && i + 1 < argc) o.lobby_url = argv[++i];
+        else if (arg == "--private") o.net_private = true;
+        else if (arg == "--net-start-alone") o.net_start_alone = true;
+        else if (arg == "--frames" && i + 1 < argc) o.max_frames = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--seats" && i + 1 < argc)
+            o.net_seats = static_cast<uint8_t>(std::clamp<unsigned long>(std::strtoul(argv[++i], nullptr, 0), 2, net::kMaxSeats));
         else if (arg == "--text") o.show_text = true;
         else if (arg == "--netboard" && i + 1 < argc) o.real_netboard = std::string(argv[++i]) == "real";
         else if (arg == "--net-trace" && i + 1 < argc) o.net_trace = std::strtoull(argv[++i], nullptr, 0);
@@ -1287,6 +1333,8 @@ int main(int argc, char** argv) {
         else if (arg == "--net-watch") o.net_watch = true;
         else if (arg == "--net-other-bank") o.host_sees_other_bank = true;
         else if (arg == "--net-e0-irq5" && i + 1 < argc) o.irq5_on_e0 = std::string(argv[++i]) != "off";
+        else if (arg == "--net-irq5-per-frame" && i + 1 < argc) o.irq5_per_frame = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 0));
+        else if (arg == "--net-slave-irq5-per-frame" && i + 1 < argc) o.slave_irq5_per_frame = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 0));
         else if (arg == "--link-byte-cycles" && i + 1 < argc) o.link_cycles_per_byte = std::strtod(argv[++i], nullptr);
         else if (arg == "--screenshot" && i + 1 < argc) o.screenshot = argv[++i];
         else if (arg == "--wav" && i + 1 < argc) o.wav = argv[++i];
@@ -1394,6 +1442,156 @@ int main(int argc, char** argv) {
 
     const std::vector<recomp::FunctionEntry> functions = tools::game_functions();
     const std::vector<recomp::FunctionEntry> blocks = tools::game_blocks(); // (save states)
+    for (const auto& [board, path] : o.backup_files) { // --backup [B:]FILE
+        std::vector<uint8_t> bytes = tools::read_file(path);
+        if (bytes.size() != m3::Bus::kBackupRamSize) {
+            std::fprintf(stderr, "gamerun: %s isn't a backup RAM (%u bytes)\n", path.c_str(), m3::Bus::kBackupRamSize);
+            return 1;
+        }
+        for (std::size_t b = 0; b < o.board_backup.size(); ++b)
+            if (board == kAllBoards || static_cast<std::size_t>(board) == b) o.board_backup[b] = bytes;
+    }
+    for (const auto& [board, path] : o.eeprom_files) { // --eeprom [B:]FILE
+        std::ifstream in(path, std::ios::binary);
+        std::vector<uint8_t> bytes(128, 0);
+        if (!in.read(reinterpret_cast<char*>(bytes.data()), 128)) {
+            std::fprintf(stderr, "gamerun: cannot read %s (128 bytes)\n", path.c_str());
+            return 1;
+        }
+        if (board == kAllBoards) o.eeprom_bytes = bytes;
+        else if (board >= 0 && static_cast<std::size_t>(board) < o.board_eeprom.size()) o.board_eeprom[static_cast<std::size_t>(board)] = bytes;
+    }
+
+    // Network play: the game found or offered on the networks this machine
+    // is on, every board run here, the boards as the host started them.
+    const bool networked = !o.net_host.empty() || !o.net_join.empty();
+    tools::InputTable inputs(networked ? net::kMaxSeats : o.boards);
+    std::unique_ptr<tools::NetPlay> netplay;
+    std::vector<uint8_t> join_state; // (a game joined in progress: every board's state, unpacked)
+    if (networked) {
+        if (o.replay || o.load_state || !o.save_state.empty()) {
+            std::fprintf(stderr, "gamerun: network play starts from power-on (no --replay or save states yet)\n");
+            return 2;
+        }
+        netplay = std::make_unique<tools::NetPlay>(inputs, tools::build_id(roms, functions.size()),
+                                                   [](const std::string& s) { std::printf("net: %s\n", s.c_str()), std::fflush(stdout); });
+        net::Session& session = netplay->session();
+        session.set_cabinet(o.eeprom_bytes, {}); // (this process's cabinet: --eeprom FILE)
+        const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+        const uint64_t build = tools::build_id(roms, functions.size());
+        auto log = [](const std::string& s) { std::printf("net: %s\n", s.c_str()), std::fflush(stdout); };
+        net::LobbyClient lobby;
+        std::optional<net::Json> welcome;
+        if (!o.lobby_url.empty()) {
+            if (!net::LobbyClient::available()) {
+                std::fprintf(stderr, "gamerun: built without the internet lobby (libcurl)\n");
+                return 1;
+            }
+            welcome = tools::lobby_hello(lobby, build, o.net_host.empty() ? "gamerun" : o.net_host, o.lobby_url);
+            if (!welcome) {
+                std::fprintf(stderr, "gamerun: no lobby at %s: %s\n", o.lobby_url.c_str(), lobby.error().c_str());
+                return 1;
+            }
+            std::printf("net: the lobby says hello (a relay: %s)\n", (*welcome)["turn"].as_bool() ? "yes" : "no");
+        }
+        if (!o.net_host.empty()) {
+            if (!session.host(o.net_host, o.net_seats)) {
+                std::fprintf(stderr, "gamerun: can't offer a game: %s\n", session.error().c_str());
+                return 1;
+            }
+            std::printf("net: offering \"%s\" for %u players (port %u)\n", o.net_host.c_str(), o.net_seats, session.port());
+            if (welcome) {
+                tools::find_addresses(lobby, session, (*welcome)["turn"].as_bool(), log);
+                const auto code = tools::lobby_offer(lobby, session, o.net_host, o.net_seats, !o.net_private);
+                if (!code) {
+                    std::fprintf(stderr, "gamerun: the lobby didn't take the game\n");
+                    return 1;
+                }
+                std::printf("net: on the lobby as %s (%s)\n", code->c_str(), o.net_private ? "private" : "listed");
+                std::fflush(stdout); // (a test reads the code as it comes)
+            }
+            while (!o.net_start_alone && !session.all_seats_taken() && std::chrono::steady_clock::now() < give_up) {
+                if (welcome) tools::lobby_pump(lobby, session);
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            if (!o.net_start_alone && !session.all_seats_taken()) {
+                std::fprintf(stderr, "gamerun: nobody joined\n");
+                return 1;
+            }
+            net::StartInfo info;
+            if (o.clock) info.clock = *o.clock;
+            else {
+                m3::Bus probe(roms);
+                info.clock = tools::set_rtc_to_host(probe);
+            }
+            session.start(info);
+            if (welcome) {
+                net::Json m = net::Json::object();
+                m.set("t", "update"), m.set("taken", static_cast<int>(o.net_seats)), m.set("started", true);
+                lobby.send(m);
+            }
+        } else if (welcome) { // --net-join CODE through the lobby
+            std::string error;
+            if (!session.listen()) {
+                std::fprintf(stderr, "gamerun: %s\n", session.error().c_str());
+                return 1;
+            }
+            tools::find_addresses(lobby, session, (*welcome)["turn"].as_bool(), log);
+            if (!tools::lobby_join(lobby, session, build, o.net_join, "gamerun", error)) {
+                std::fprintf(stderr, "gamerun: can't join %s: %s\n", o.net_join.c_str(), error.c_str());
+                return 1;
+            }
+            std::printf("net: joining %s through the lobby\n", o.net_join.c_str());
+        } else {
+            net::Discovery discovery;
+            if (!discovery.open()) {
+                std::fprintf(stderr, "gamerun: can't look for games: %s\n", discovery.error().c_str());
+                return 1;
+            }
+            std::optional<net::GameInfo> found;
+            while (!found && std::chrono::steady_clock::now() < give_up) {
+                for (const net::GameInfo& g : discovery.poll())
+                    if (g.name == o.net_join && g.taken < g.seats) found = g; // (a game in progress too, a cabinet empty)
+                if (!found) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            if (!found) {
+                std::fprintf(stderr, "gamerun: no game \"%s\" found\n", o.net_join.c_str());
+                return 1;
+            }
+            std::printf("net: found \"%s\" at %s\n", found->name.c_str(), found->host.str().c_str());
+            if (!session.join(*found, "gamerun")) {
+                std::fprintf(stderr, "gamerun: can't join: %s\n", session.error().c_str());
+                return 1;
+            }
+        }
+        const auto start = netplay->wait_start(std::chrono::seconds(120));
+        if (!start) {
+            std::fprintf(stderr, "gamerun: the game didn't start\n");
+            return 1;
+        }
+        o.boards = start->seats;
+        o.parallel = true;
+        o.local_seat = start->my_seat;
+        o.clock = start->clock;
+        for (std::size_t s = 0; s < start->seats && s < o.board_eeprom.size(); ++s) { // each board from its player's cabinet
+            o.board_eeprom[s] = tools::seat_eeprom(*start, s);
+            o.board_backup[s] = s < start->backup.size() ? start->backup[s] : std::vector<uint8_t>();
+        }
+        o.eeprom_bytes.clear(); // (not this process's own: every board as every machine has it)
+        o.netplay = netplay.get();
+        std::printf("net: playing seat %u of %u (board %u), clock %lld\n", start->my_seat + 1, start->seats,
+                    start->my_seat, static_cast<long long>(start->clock));
+        if (start->state_frame) { // a game joined in progress: every board as the host had them
+            auto state = net::decompress(start->state);
+            if (!state) {
+                std::fprintf(stderr, "gamerun: the host's state doesn't unpack\n");
+                return 1;
+            }
+            join_state = std::move(*state);
+            std::printf("net: running on from the host's frame %llu (%zu KB, %zu KB packed)\n",
+                        static_cast<unsigned long long>(*start->state_frame), join_state.size() / 1024, start->state.size() / 1024);
+        }
+    }
 
     std::unique_ptr<m3::LinkRing> ring;
     if (o.boards > 1) {
@@ -1423,26 +1621,37 @@ int main(int argc, char** argv) {
     }
     // Linked boards' save states: one file for all of them.
     LinkedState linked;
-    if (ring && (!o.save_state.empty() || o.load_state)) {
+    if (ring && (!o.save_state.empty() || o.load_state || networked)) {
         linked.ring = ring.get();
         linked.path = o.save_state;
         linked.boards.resize(o.boards);
-        if (o.load_state) {
+        if (o.load_state || !join_state.empty()) {
             try {
-                m3::State s(tools::read_file(o.load_state));
+                m3::State s(o.load_state ? tools::read_file(o.load_state) : std::move(join_state));
                 linked.io(s);
             } catch (const std::exception& e) {
-                std::fprintf(stderr, "gamerun: %s: %s (a state of %zu linked boards?)\n", o.load_state, e.what(), o.boards);
+                std::fprintf(stderr, "gamerun: %s: %s (a state of %zu linked boards?)\n", o.load_state ? o.load_state : "the host's state",
+                             e.what(), o.boards);
                 return 1;
             }
             linked.loaded = std::move(linked.boards);
             linked.boards.assign(o.boards, {});
         }
+        if (networked) // (asked for every board's state: a player joining in progress, or one out of step)
+            linked.sink = [&netplay](uint64_t frame, std::vector<uint8_t> state) {
+                std::vector<uint8_t> packed = net::compress(state);
+                std::printf("net: every board's state at frame %llu: %zu KB, %zu KB packed\n", static_cast<unsigned long long>(frame),
+                            state.size() / 1024, packed.size() / 1024);
+                netplay->session().send_state(frame, std::move(packed));
+            };
     }
-    tools::Turns turns(o.boards, parallel, parallel ? std::function<void()>([&ring, &linked] {
-        ring->exchange();
-        if (linked.ring && !linked.path.empty()) linked.finish();
-    }) : std::function<void()>());
+    auto make_turns = [&] {
+        return std::make_unique<tools::Turns>(o.boards, parallel, parallel ? std::function<void()>([&ring, &linked] {
+            ring->exchange();
+            if (linked.ring && (!linked.path.empty() || linked.sink)) linked.finish();
+        }) : std::function<void()>());
+    };
+    std::unique_ptr<tools::Turns> turns_ptr = make_turns();
     // The GPU (--renderer gpu or compare), without a window; the boards take
     // turns, so they share it.
 #ifdef SPIKEOUT_GPU
@@ -1461,8 +1670,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 #endif
-    tools::InputTable inputs(o.boards);
     std::vector<std::unique_ptr<Machine>> machines;
+  for (;;) { // (network play: again from the host's state, a machine out of step)
+    tools::Turns& turns = *turns_ptr;
+    machines.clear();
     for (std::size_t i = 0; i < o.boards; ++i) {
         machines.push_back(std::make_unique<Machine>(i, roms, functions));
         machines.back()->c.set_blocks(blocks);
@@ -1518,11 +1729,39 @@ int main(int argc, char** argv) {
         for (auto& m : machines) threads.emplace_back([&m, &turns] { run(*m, turns); });
         for (auto& t : threads) t.join();
     }
+    // Network play: our boards out of step with the host's; every board
+    // again from its state, the inputs since fed again.
+    const auto resync = netplay ? netplay->take_resync() : std::nullopt;
+    if (!resync) break;
+    auto unpacked = net::decompress(resync->state);
+    if (!unpacked) {
+        std::fprintf(stderr, "gamerun: the host's state doesn't unpack\n");
+        return 1;
+    }
+    try {
+        m3::State s(std::move(*unpacked));
+        linked.boards.assign(o.boards, {});
+        linked.io(s);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "gamerun: the host's state: %s\n", e.what());
+        return 1;
+    }
+    linked.loaded = std::move(linked.boards);
+    linked.boards.assign(o.boards, {});
+    inputs.reset();
+    netplay->session().feed_inputs(*resync->state_frame);
+    turns_ptr = make_turns();
+    std::printf("net: running on from the host's frame %llu again\n", static_cast<unsigned long long>(*resync->state_frame));
+  }
 
     for (auto& m : machines) {
         if (o.boards > 1) std::printf("%s==== Board %zu ====\n", m->index ? "\n" : "", m->index);
         report(*m, o);
     }
     if (ring) std::printf("\nLink: %llu packets delivered around the ring\n", static_cast<unsigned long long>(ring->delivered()));
+    if (netplay) {
+        netplay->session().leave();
+        std::printf("Network: %llu hash checks differed\n", static_cast<unsigned long long>(netplay->desyncs()));
+    }
     return 0;
 }

@@ -599,7 +599,40 @@ What the firmware's handlers settle (`hardware-notes.md` has the detail):
   play, and a 2-player game shows each cabinet the other's player.
   Registers seen but not understood: control `0xC0` (`0x7FFF` with each
   small frame, a per-node table value with the data frame: a timer?).
-- **How late a packet may arrive (measured 2026-10-25).** The real link is
+- **Linked games ran in slow motion: the tick and the wire (2026-10-26).**
+  The owner saw a network game lag (slow motion, late controls, a jerky
+  picture) at a steady 57.5 frames a second. Measured: the game's logic
+  counter (`0x1000A8`, raised each pass of the main loop at `0x6D78C`)
+  went up 399 in 599 frames on two linked boards, 600 in 600 alone or as
+  a lone master: every third frame `0x6DBE0` found another cabinet's frame
+  counter (its node, `+28`) two behind its own and the loop put its
+  counter back and skipped the frame. Three linked boards ran at 1/2,
+  four at 2/5 (with IRQ 5 once a frame, the wire at 4 MB/s). Neither the
+  link's delay, the turns nor the wire alone changed it; IRQ 5 did, the
+  master's and the slave's apart (a slave's other tick being `0xE0`'s):
+
+  | master / slave ticks a frame, wire | 2 boards | 3 | 4 |
+  |---|---|---|---|
+  | 1 / 1, 4 MB/s (before) | 399 / 599 | 299 | 239 |
+  | 4 / 1, 4 MB/s | 599 | checking | checking |
+  | 3 / 1, 20 MB/s (now) | 599 | 599 | 599 |
+  | 3 / 1, instant | 599 | 599 | 599 |
+
+  So the master's IRQ 5 three times a frame (evenly spaced from the
+  frame's end), a slave's once (and with the master's frame), and 0.5
+  68000 cycles a byte on the wire (20 MB/s): `CommBoardOptions`
+  `irq5_per_frame` 3, `slave_irq5_per_frame` 1, `link_cycles_per_byte`
+  0.5; the old ones stay selectable (`gamerun --net-irq5-per-frame 1
+  --net-slave-irq5-per-frame 1 --link-byte-cycles 2.5`). Supermodel's
+  real-board emulation raises IRQ 5 four times a frame on every board
+  (`NetBoard.cpp`, "3 times more avoid network error"); four on our
+  master leaves rings of 3 and 4 on NETWORK CHECKING. What drives IRQ 5
+  and the link's rate on the real board are still unknown; these are the
+  values that let every ring size run as an arcade's does, at full speed.
+  Network play is unchanged in kind: two processes still give exactly
+  one `--boards 2 --parallel` run's reports and sound.
+- **How late a packet may arrive (measured 2026-10-25, with IRQ 5 once a
+  frame and the wire at 4 MB/s: the limit is to measure again).** The real link is
   a cable, so a packet takes next to no time; ours adds a delay in game
   time (`--link-latency`, at least a slice with `--parallel`). Two boards,
   `--parallel --no-2d --no-sound`, about 3,880 frames: with 0, 1, 3 or 4 ms
@@ -612,6 +645,57 @@ What the firmware's handlers settle (`hardware-notes.md` has the detail):
   network (Mode A, `netplay.md`) has about 4 ms of game time to spare,
   which is why local network play goes through Mode B first (owner's
   decision, 2026-10-25).
+- **Linked cabinets with different settings (measured 2026-10-25,
+  `gamerun --boards 2 --parallel --eeprom 0:A --eeprom 1:B`, 3,100
+  frames).** Each cabinet reads its own settings EEPROM into its own copy
+  (RAM `0x10018C`, at frame 19) and nothing overwrites it later. A slave
+  set to Hardest under a Normal master, or one on free play: the link comes
+  up and runs exactly as with equal settings (the same 5,600 packets each
+  way), each keeping its own. A different **country** (export and Japan,
+  either way round): the slave stops on NETWORK CHECKING with **COUNTRY
+  SETTING DIFFERENT** and the master plays on alone (both Japan: linked
+  as usual). So the game requires the same country on every cabinet.
+  In a 2-player game (both players in at frames 1300-1400, then idle;
+  pictures of both cabinets every 250 frames to 4,941):
+  - **Difficulty follows the master,** for both cabinets: every run is the
+    same to the pixel up to frame 3,500; from 4,000 a Hardest slave under a
+    Normal master gives exactly the both-Normal pictures, and a Hardest
+    master over a Normal slave exactly the both-Hardest ones (other enemies
+    on screen), on both screens.
+  - **Coins and free play are each cabinet's own:** a slave on free play
+    (FREE PLAY on its screen) lets its player start with no coin, and the
+    game is then the same as both players paying; a master on free play
+    over a slave on coins starts its own player free, while the slave, its
+    player with no coin, stays on "Waiting for your collaboration" with
+    CREDIT(S) 0 and the team goes on without it.
+- **Network play (Mode B, 2026-10-25; `netplay.md`), what differs from
+  linked cabinets:**
+  - The link between the boards is the in-process one at `--parallel`'s
+    timing: a packet a slice (8 lines, about 0.33 ms) late, where a cable
+    takes next to nothing; the game runs the same with up to 4 ms (above).
+  - A player's controls reach the boards `input delay` frames after they
+    were pressed: 0 by default, as the arcade (read at the end of a frame
+    for the next); 1-4 or Auto are the player's choice, for slower
+    networks (an enhancement, off by default).
+  - Each board starts from its own player's cabinet (settings EEPROM and
+    backup RAM, owner's choice), as linked cabinets do; every machine has
+    all of them. The one change: the country is the host's on every board,
+    since the game won't link cabinets of different countries (above);
+    each player's own is put back when their board is kept after the game.
+    The clock is the host's for every board. Proven with `gamerun`: a
+    Hardest host and a free-play joiner give the same reports and sound as
+    one process with `--eeprom 0:hardest --eeprom 1:free`; a Japan joiner
+    under an export host links and plays as two export cabinets.
+  - A player who drops stands idle (owner's decision); a real cabinet
+    pulled off the link makes the others show the link's error.
+  - Every cabinet of a game is powered on at the start, as in an arcade,
+    whether a player has it or not; one nobody has stands in attract mode
+    (its inputs none) until a player joins the game in progress and takes
+    it over, as one walks up to a cabinet and puts a coin in. A cabinet
+    taken so is played as it was set up, not from the joiner's own
+    settings (it was running already). The link's cabinets are fixed at
+    the start, since the game counts them as it boots.
+  - In a network game the menu doesn't pause the game (the others play on).
 - **Save states of linked boards** (not hardware: how the link between
   boards in one process is kept). Each board saves at its own point, the
   first block it can resume at after the frame ends, and the ring's part

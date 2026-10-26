@@ -1,0 +1,189 @@
+// The Spikeout internet lobby (docs/netplay.md), a Cloudflare Worker with
+// one Durable Object holding every open game. It only introduces players:
+// the game itself goes between their machines (peer to peer, Cloudflare's
+// TURN relay when their routers won't allow that).
+//
+// One WebSocket a player, JSON text messages, {"t": type, ...}:
+//
+//   hello  {build, name}                 -> welcome {address, turn}
+//   list   {}                            -> games {games: [{code, name, seats, taken, started}]}
+//   host   {name, seats, public, session, port, candidates}
+//                                        -> hosted {code}
+//   update {taken, started}              (the host's game)
+//   unhost {}
+//   join   {code, port, candidates}      -> joining {code, name, seats, session, candidates}
+//                                           and the host gets joiner {name, candidates}
+//   turn   {}                            -> turn {iceServers} (short-lived TURN credentials)
+//   "ping"                               -> "pong" (answered without waking the object)
+//
+// Errors: error {why}. Candidates are "ip:port" strings: the addresses a
+// machine can be reached at (its own on its networks, its public one as
+// STUN saw it); the lobby adds the address it sees the player at.
+// Games are listed only to players with the same build (the same game,
+// ROMs and version); private games only by their code.
+
+import { DurableObject } from "cloudflare:workers";
+
+const CODE_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // (no I, O, 0, 1)
+const CODE_LENGTH = 6;
+const MAX_MESSAGE = 4096;
+const MAX_CANDIDATES = 8;
+
+export default {
+	async fetch(request, env) {
+		const url = new URL(request.url);
+		if (url.pathname === "/v1/lobby") {
+			if (request.method !== "GET" || request.headers.get("Upgrade") !== "websocket")
+				return new Response("expected a WebSocket", { status: 426 });
+			return env.LOBBY.getByName("lobby").fetch(request);
+		}
+		if (url.pathname === "/") return new Response("Spikeout lobby\n", { headers: { "Content-Type": "text/plain" } });
+		return new Response("not found", { status: 404 });
+	},
+};
+
+function text(v, max) {
+	return typeof v === "string" ? v.slice(0, max) : "";
+}
+
+function candidates(list, seen) {
+	const out = [];
+	if (Array.isArray(list))
+		for (const c of list.slice(0, MAX_CANDIDATES))
+			if (typeof c === "string" && /^\d{1,3}(\.\d{1,3}){3}:\d{1,5}$/.test(c) && !out.includes(c)) out.push(c);
+	if (seen && !out.includes(seen)) out.push(seen);
+	return out;
+}
+
+export class Lobby extends DurableObject {
+	constructor(ctx, env) {
+		super(ctx, env);
+		this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+	}
+
+	async fetch(request) {
+		const [client, server] = Object.values(new WebSocketPair());
+		this.ctx.acceptWebSocket(server);
+		server.serializeAttachment({
+			ip: request.headers.get("CF-Connecting-IP") || "",
+			name: "",
+			build: "",
+			game: null, // the game this player offers
+		});
+		return new Response(null, { status: 101, webSocket: client });
+	}
+
+	players() {
+		return this.ctx.getWebSockets().map((ws) => ({ ws, a: ws.deserializeAttachment() || {} }));
+	}
+
+	findGame(code, build) {
+		for (const p of this.players()) if (p.a.game && p.a.game.code === code && p.a.build === build) return p;
+		return null;
+	}
+
+	newCode() {
+		for (;;) {
+			const bytes = crypto.getRandomValues(new Uint8Array(CODE_LENGTH));
+			const code = Array.from(bytes, (b) => CODE_LETTERS[b % CODE_LETTERS.length]).join("");
+			if (!this.players().some((p) => p.a.game && p.a.game.code === code)) return code;
+		}
+	}
+
+	async webSocketMessage(ws, message) {
+		const send = (m) => ws.send(JSON.stringify(m));
+		if (typeof message !== "string" || message.length > MAX_MESSAGE) return send({ t: "error", why: "message too big" });
+		let m;
+		try {
+			m = JSON.parse(message);
+		} catch {
+			return send({ t: "error", why: "not JSON" });
+		}
+		const a = ws.deserializeAttachment() || {};
+		const seen = a.ip && /^\d{1,3}(\.\d{1,3}){3}$/.test(a.ip) ? a.ip : ""; // (IPv4 only for now)
+
+		switch (m.t) {
+			case "hello":
+				a.build = text(m.build, 32);
+				a.name = text(m.name, 32);
+				ws.serializeAttachment(a);
+				return send({ t: "welcome", address: a.ip, turn: Boolean(this.env.TURN_KEY_ID && this.env.TURN_KEY_API_TOKEN) });
+
+			case "list": {
+				const games = [];
+				for (const p of this.players())
+					if (p.a.game && p.a.game.public && p.a.game.taken < p.a.game.seats && p.a.build === a.build) // (in progress too: an empty cabinet)
+						games.push({ code: p.a.game.code, name: p.a.game.name, seats: p.a.game.seats, taken: p.a.game.taken, started: p.a.game.started });
+				return send({ t: "games", games });
+			}
+
+			case "host": {
+				if (!a.build) return send({ t: "error", why: "say hello first" });
+				const seats = Math.min(4, Math.max(2, Number(m.seats) | 0));
+				const port = Number(m.port) | 0;
+				a.game = {
+					code: a.game ? a.game.code : this.newCode(),
+					name: text(m.name, 32) || a.name,
+					seats,
+					taken: 1,
+					started: false,
+					public: m.public !== false,
+					session: text(m.session, 20),
+					candidates: candidates(m.candidates, seen && port ? `${seen}:${port}` : ""),
+				};
+				ws.serializeAttachment(a);
+				return send({ t: "hosted", code: a.game.code });
+			}
+
+			case "update":
+				if (!a.game) return send({ t: "error", why: "no game offered" });
+				a.game.taken = Math.min(a.game.seats, Math.max(1, Number(m.taken) | 0));
+				a.game.started = Boolean(m.started);
+				ws.serializeAttachment(a);
+				return;
+
+			case "unhost":
+				a.game = null;
+				ws.serializeAttachment(a);
+				return;
+
+			case "join": {
+				const code = text(m.code, CODE_LENGTH).toUpperCase();
+				const host = this.findGame(code, a.build);
+				if (!host) return send({ t: "error", why: "no game with that code" });
+				const g = host.a.game;
+				if (g.taken >= g.seats) return send({ t: "error", why: "that game is full" });
+				const port = Number(m.port) | 0;
+				const mine = candidates(m.candidates, seen && port ? `${seen}:${port}` : "");
+				host.ws.send(JSON.stringify({ t: "joiner", name: a.name, candidates: mine }));
+				return send({ t: "joining", code, name: g.name, seats: g.seats, session: g.session, candidates: g.candidates });
+			}
+
+			case "turn": {
+				if (!this.env.TURN_KEY_ID || !this.env.TURN_KEY_API_TOKEN) return send({ t: "error", why: "no relay here" });
+				const r = await fetch(
+					`https://rtc.live.cloudflare.com/v1/turn/keys/${this.env.TURN_KEY_ID}/credentials/generate-ice-servers`,
+					{
+						method: "POST",
+						headers: { Authorization: `Bearer ${this.env.TURN_KEY_API_TOKEN}`, "Content-Type": "application/json" },
+						body: JSON.stringify({ ttl: 86400 }),
+					},
+				);
+				if (!r.ok) return send({ t: "error", why: `relay: ${r.status}` });
+				const body = await r.json();
+				return send({ t: "turn", iceServers: body.iceServers });
+			}
+
+			default:
+				return send({ t: "error", why: "unknown message" });
+		}
+	}
+
+	async webSocketClose(ws, code, reason) {
+		ws.close(code, reason); // (its game, in its attachment, goes with it)
+	}
+
+	async webSocketError(ws) {
+		ws.close(1011, "error");
+	}
+}

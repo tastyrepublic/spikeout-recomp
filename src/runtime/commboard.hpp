@@ -51,19 +51,27 @@ struct CommBoardOptions {
     uint64_t cpu_hz = 10'000'000;   // 40 MHz crystal / 4: unverified (MAME: 10 MHz "random")
     uint64_t irq5_hz = 100;         // MAME's timer, "where is this timing from?"
     // IRQ 5 locked to the main board's frame: this many a frame, evenly
-    // spaced from the frame's end (0: irq5_hz instead). See the .cpp.
-    uint32_t irq5_per_frame = 1;
+    // spaced from the frame's end (0: irq5_hz instead). See the .cpp. 3: a
+    // linked game's logic runs at full speed on rings of 2-4 (1, as before,
+    // made it run at 2/3, 1/2, 2/5: docs/fidelity.md; Supermodel has 4).
+    uint32_t irq5_per_frame = 3;
     // A write to control register 0xE0 raises IRQ 5. A slave's IRQ 6
     // handler writes it when a master's frame comes in, and its IRQ 5
     // handler resets the count of polls that frame must have arrived
     // within (2), so its tick has to follow the frame (docs/fidelity.md).
     bool irq5_on_e0 = true;
+    // A slave's ticks a frame from its own main board's frame (besides 0xE0's):
+    // kSame, as irq5_per_frame. See docs/fidelity.md.
+    static constexpr uint32_t kSame = UINT32_MAX;
+    uint32_t slave_irq5_per_frame = 1;
     // Time on the wire, in 68000 cycles a byte (0: none): a frame arrives,
     // and transmit complete (IRQ 4) comes, once it has all gone. Each board
     // waits for its own transmission before looking for the other's frame,
-    // so both have to be on the wire together. The rate is unknown: 2.5
-    // cycles at 10 MHz is 4 MB/s (12,800 bytes in 3.2 ms).
-    double link_cycles_per_byte = 2.5;
+    // so both have to be on the wire together. The rate is unknown: 0.5
+    // cycles at 10 MHz is 20 MB/s (12,800 bytes in 0.64 ms), fast enough
+    // for rings of 3 and 4 to run at full speed (2.5, 4 MB/s, as before,
+    // wasn't: docs/fidelity.md).
+    double link_cycles_per_byte = 0.5;
     // Transmit complete (IRQ 4) also waits for the frame the receiver is
     // armed for, as on a ring where a node's transmitter is clocked by what
     // it receives. The firmware sends with its receiver armed, waits for
