@@ -248,6 +248,9 @@ struct Session::Impl {
         bool announced = false;
     };
     std::array<Drop, kMaxSeats> drops;
+    // A seat whose player went (Session::seats): their name, and whether they said goodbye.
+    std::array<std::string, kMaxSeats> gone_name;
+    std::array<bool, kMaxSeats> said_bye{};
     std::map<uint64_t, uint64_t> my_hashes;
     std::map<std::pair<uint64_t, uint8_t>, uint64_t> their_hashes;
 
@@ -461,6 +464,7 @@ struct Session::Impl {
         if (seat == kNoSeat) return refuse("the game is full");
         Peer& p = peers[seat];
         p = Peer{};
+        said_bye[seat] = false, gone_name[seat].clear();
         p.present = p.connected = true;
         p.address = from, p.name = name, p.player = player, p.heard = Clock::now();
         p.reached = true, p.direct_heard = from.relayed ? Clock::time_point{} : p.heard;
@@ -587,6 +591,7 @@ struct Session::Impl {
                     p.present = present && !where.empty(), p.name = name;
                     if (p.present && !p.reached) p.address = where.front();
                     if (started && p.present && !was) p.connected = true, p.heard = Clock::now(); // (joined in progress)
+                    if (p.present && !was) said_bye[s] = false, gone_name[s].clear();
                     for (const Address& a : where) permit(a);
                     p.candidates = std::move(where);
                 }
@@ -701,6 +706,7 @@ struct Session::Impl {
             break;
         case kBye:
             peers[from].heard = Clock::time_point{}; // (as if silent for long: dropped next)
+            said_bye[from] = true;
             log(peers[from].name + " left");
             break;
         default: break;
@@ -759,6 +765,7 @@ struct Session::Impl {
         if (cb.idle) cb.idle(s, frame);
         // The seat free again (a new player may join it): this player is gone.
         Peer& p = peers[s];
+        gone_name[s] = p.name;
         p = Peer{};
         p.dropped = true; // (its datagrams, if any still come, ignored; a new player resets it)
         drops[s] = Drop{};
@@ -1253,6 +1260,36 @@ std::array<int, kMaxSeats> Session::round_trips() const {
     std::array<int, kMaxSeats> out{};
     for (uint8_t s = 0; s < kMaxSeats; ++s) out[s] = s == m.my_seat ? 0 : m.peers[s].present ? m.peers[s].rtt : -1;
     return out;
+}
+
+std::array<Session::SeatView, kMaxSeats> Session::seats() const {
+    const Impl& m = *impl_;
+    std::lock_guard guard(m.lock);
+    std::array<SeatView, kMaxSeats> out{};
+    using State = SeatView::State;
+    for (uint8_t s = 0; s < m.seats && s < kMaxSeats; ++s) {
+        SeatView& v = out[s];
+        const auto& p = m.peers[s];
+        const auto& cab = m.cabinets[s];
+        if (s == m.my_seat) {
+            v.state = State::me, v.name = m.my_name;
+        } else if (p.present && !p.dropped) {
+            v.name = p.name, v.round_trip = p.rtt;
+            v.state = cab.open && !cab.until ? State::joining : State::playing;
+        } else if (!m.gone_name[s].empty() || m.said_bye[s]) {
+            v.state = State::gone, v.name = m.gone_name[s], v.left = m.said_bye[s];
+        } else {
+            v.state = State::open;
+            if (s < m.start_info.names.size() && !cab.open) v.name = m.start_info.names[s]; // (before the drop is known)
+        }
+    }
+    return out;
+}
+
+bool Session::hosting() const {
+    const Impl& m = *impl_;
+    std::lock_guard guard(m.lock);
+    return m.is_host;
 }
 
 } // namespace net

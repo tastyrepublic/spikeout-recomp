@@ -10,6 +10,8 @@
 
 #include <RmlUi/Core.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 
 namespace ui {
@@ -42,6 +44,18 @@ struct MenuListener : Rml::EventListener {
     Menu* menu = nullptr;
     void ProcessEvent(Rml::Event& ev) override {
         Rml::Element* e = ev.GetTargetElement();
+        if (!menu->stack_.empty() && menu->stack_.back().code) { // a code page's on-screen key
+            while (e && !e->IsClassSet("ckey")) e = e->GetParentNode();
+            if (!e) return;
+            const int k = std::atoi(e->GetId().c_str() + 1);
+            if (ev.GetId() == Rml::EventId::Click) {
+                menu->code_press(k);
+            } else if (menu->mouse_moved_ && menu->stack_.back().code->key != k) { // (not a key redrawn under a still pointer)
+                menu->stack_.back().code->key = k;
+                menu->build_code();
+            }
+            return;
+        }
         while (e && !e->IsClassSet("row")) e = e->GetParentNode();
         if (!e || e->IsClassSet("info")) return;
         const int i = std::atoi(e->GetId().c_str() + 1);
@@ -119,12 +133,58 @@ bool Menu::init(SDL_GPUDevice* device, SDL_Window* window) {
     impl_->listener.menu = this;
     impl_->doc->AddEventListener(Rml::EventId::Mouseover, &impl_->listener);
     impl_->doc->AddEventListener(Rml::EventId::Click, &impl_->listener);
-    // The frame rate, top right, over the game (and the menu).
+    // The frame rate, top right, over the game (and the menu), and a network
+    // game's seats under it in the same style.
     impl_->fps = impl_->ctx->LoadDocumentFromMemory(
         "<rml><head><style>body { width: 100%; height: 100%; font-family: \"Barlow Condensed\"; font-weight: 600; } "
-        "#fps { position: absolute; right: 16dp; top: 10dp; font-size: 26dp; color: #ffd34a; "
-        "font-effect: outline(2dp #000000); }</style></head><body><div id=\"fps\"></div></body></rml>");
+        "#corner { position: absolute; right: 16dp; top: 10dp; } "
+        "#fps { display: block; text-align: right; font-size: 26dp; color: #ffd34a; font-effect: outline(2dp #000000); } "
+        "#net { display: block; margin-top: 4dp; } "
+        ".seat { display: flex; justify-content: flex-end; align-items: flex-end; height: 24dp; font-size: 20dp; "
+        "color: #ffd34a; font-effect: outline(2dp #000000); } "
+        ".seat.player { color: #ffffff; } .seat.fresh { color: #7fe07f; } .seat.dim { color: #9a9a9a; } "
+        ".seat .p { width: 26dp; } .seat .name { width: 96dp; white-space: nowrap; overflow: hidden; } "
+        ".seat .st { width: 92dp; text-align: right; white-space: nowrap; } "
+        ".conn { display: flex; justify-content: flex-end; align-items: flex-end; width: 92dp; } "
+        ".bars { display: flex; align-items: flex-end; height: 16dp; margin-bottom: 3dp; margin-left: 5dp; } "
+        ".bar { width: 3dp; margin-left: 1dp; background-color: #4a4a4a; border: 1dp #000000; } "
+        ".g .on { background-color: #5fd35f; } .y .on { background-color: #ffd34a; } .r .on { background-color: #e05555; } "
+        ".ms { text-align: right; white-space: nowrap; }"
+        "</style></head><body><div id=\"corner\"><div id=\"fps\"></div><div id=\"net\"></div></div></body></rml>");
     return true;
+}
+
+void Menu::show_corner() {
+    if (!impl_->fps) return;
+    if (fps_shown_ || net_shown_) impl_->fps->Show();
+    else impl_->fps->Hide();
+}
+
+void Menu::set_net(const std::vector<NetRow>& rows) {
+    if (!impl_->fps) return;
+    std::string rml;
+    for (const NetRow& r : rows) {
+        static const char* const kLooks[] = {"you", "player", "fresh", "dim"};
+        rml += "<div class=\"seat " + std::string(kLooks[static_cast<int>(r.look)]) + "\"><span class=\"p\">" + escape(r.seat) +
+               "</span><span class=\"name\">" + escape(r.name) + "</span>";
+        if (!r.status.empty() || r.bars < 0) {
+            rml += "<span class=\"st\">" + escape(r.status) + "</span>";
+        } else {
+            rml += "<div class=\"conn\"><span class=\"ms\">" + (r.ms >= 0 ? std::to_string(r.ms) + " ms" : std::string()) +
+                   "</span><div class=\"bars " + (r.bars >= 3 ? "g" : r.bars == 2 ? "y" : "r") + "\">";
+            for (int b = 0; b < 4; ++b)
+                rml += "<div class=\"bar" + std::string(b < r.bars ? " on" : "") + "\" style=\"height: " +
+                       std::to_string(5 + 3 * b) + "dp;\"></div>";
+            rml += "</div></div>";
+        }
+        rml += "</div>";
+    }
+    net_shown_ = !rows.empty();
+    if (rml != net_rml_) {
+        net_rml_ = rml;
+        if (Rml::Element* e = impl_->fps->GetElementById("net")) e->SetInnerRML(rml);
+    }
+    show_corner();
 }
 
 void Menu::set_footer(const std::string& text) {
@@ -134,13 +194,12 @@ void Menu::set_footer(const std::string& text) {
 
 void Menu::set_fps(const std::string& text) {
     if (!impl_->fps) return;
-    if (text.empty()) {
-        impl_->fps->Hide();
-    } else {
-        if (Rml::Element* e = impl_->fps->GetElementById("fps")) e->SetInnerRML(escape(text));
-        impl_->fps->Show();
+    if (Rml::Element* e = impl_->fps->GetElementById("fps")) {
+        e->SetInnerRML(escape(text));
+        e->SetProperty("display", text.empty() ? "none" : "block");
     }
     fps_shown_ = !text.empty();
+    show_corner();
 }
 
 void Menu::open(MenuPage root) {
@@ -191,6 +250,10 @@ void Menu::build() {
     std::string crumb;
     for (size_t i = 1; i < stack_.size(); i++) crumb += (i > 1 ? "  /  " : "") + stack_[i].name;
     impl_->doc->GetElementById("crumb")->SetInnerRML(escape(crumb));
+    if (p.code) {
+        build_code();
+        return;
+    }
     std::string rml;
     for (size_t i = 0; i < p.items.size(); i++) {
         const MenuItem& it = p.items[i];
@@ -208,6 +271,150 @@ void Menu::build() {
     impl_->doc->GetElementById("rows")->SetInnerRML(rml);
     scroll_to_selected();
     show_help();
+}
+
+// ---- A code page (MenuPage::code) ----
+// The code's box, then the on-screen keyboard: its letters kCodeColumns a
+// row, and a row of Delete and Join (each half the width).
+namespace {
+constexpr int kCodeColumns = 8;
+}
+
+void Menu::build_code() {
+    const CodeInput& c = *stack_.back().code;
+    const int letters = static_cast<int>(c.alphabet.size());
+    std::string rml = "<div id=\"codebox\">";
+    for (std::size_t i = 0; i < c.length; ++i)
+        rml += std::string("<span class=\"slot") + (i == c.text.size() ? " cur" : "") + "\">" +
+               (i < c.text.size() ? escape(std::string(1, c.text[i])) : std::string("&nbsp;")) + "</span>";
+    rml += "</div>";
+    auto key = [&](int k, const std::string& text, const char* more) {
+        rml += std::string("<span class=\"ckey") + more + (k == c.key ? " sel" : "") + "\" id=\"k" + std::to_string(k) + "\">" +
+               escape(text) + "</span>";
+    };
+    for (int k = 0; k < letters; ++k) {
+        if (k % kCodeColumns == 0) rml += "<div class=\"krow\">";
+        key(k, std::string(1, c.alphabet[static_cast<std::size_t>(k)]), "");
+        if (k % kCodeColumns == kCodeColumns - 1 || k == letters - 1) rml += "</div>";
+    }
+    rml += "<div class=\"krow\">";
+    key(letters, "DELETE", " wide");
+    key(letters + 1, "JOIN", c.text.size() == c.length ? " wide ready" : " wide");
+    rml += "</div>";
+    impl_->doc->GetElementById("rows")->SetInnerRML(rml);
+    impl_->doc->GetElementById("note")->SetInnerRML(escape(stack_.back().note));
+}
+
+void Menu::code_move(int dx, int dy) {
+    CodeInput& c = *stack_.back().code;
+    const int letters = static_cast<int>(c.alphabet.size());
+    const int rows = (letters + kCodeColumns - 1) / kCodeColumns + 1; // (the last: Delete, Join)
+    int row = c.key < letters ? c.key / kCodeColumns : rows - 1;
+    int col = c.key < letters ? c.key % kCodeColumns : c.key == letters ? 0 : kCodeColumns / 2;
+    if (row == rows - 1) col = (col + dx * (kCodeColumns / 2) + kCodeColumns) % kCodeColumns; // (two keys)
+    else col = (col + dx + kCodeColumns) % kCodeColumns;
+    row = (row + dy + rows) % rows;
+    if (row == rows - 1) c.key = col < kCodeColumns / 2 ? letters : letters + 1;
+    else c.key = std::min(row * kCodeColumns + col, letters - 1);
+    build_code();
+}
+
+void Menu::code_type(const std::string& typed) {
+    CodeInput& c = *stack_.back().code;
+    for (char ch : typed) {
+        const char up = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+        if (c.text.size() < c.length && c.alphabet.find(up) != std::string::npos) c.text += up;
+    }
+    if (c.text.size() == c.length) c.key = static_cast<int>(c.alphabet.size()) + 1; // (on to Join, for a pad)
+    build_code();
+}
+
+void Menu::code_press(int k) {
+    std::shared_ptr<CodeInput> c = stack_.back().code; // (kept: Join may pop the page)
+    const int letters = static_cast<int>(c->alphabet.size());
+    c->key = k;
+    if (k < letters) {
+        code_type(std::string(1, c->alphabet[static_cast<std::size_t>(k)]));
+    } else if (k == letters) {
+        if (!c->text.empty()) c->text.pop_back();
+        build_code();
+    } else if (c->text.size() == c->length && c->done) {
+        auto f = c->done;
+        f(c->text);
+    } else {
+        build_code();
+    }
+}
+
+// The keyboard types (and pastes), Backspace deletes a letter, Delete all
+// of them, Enter joins; the arrows, a pad and the mouse use the on-screen
+// keyboard. Esc / B: back.
+bool Menu::code_event(const SDL_Event& e) {
+    CodeInput& c = *stack_.back().code;
+    const int letters = static_cast<int>(c.alphabet.size());
+    if (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || e.type == SDL_EVENT_GAMEPAD_AXIS_MOTION) mouse_moved_ = false;
+    switch (e.type) {
+    case SDL_EVENT_KEY_DOWN: {
+        switch (e.key.scancode) {
+        case SDL_SCANCODE_ESCAPE: if (!e.key.repeat) pop(); return true;
+        case SDL_SCANCODE_BACKSPACE: code_press(letters); return true;
+        case SDL_SCANCODE_DELETE:
+            c.text.clear();
+            build_code();
+            return true;
+        case SDL_SCANCODE_RETURN:
+        case SDL_SCANCODE_KP_ENTER: if (!e.key.repeat) code_press(letters + 1); return true;
+        case SDL_SCANCODE_SPACE: if (!e.key.repeat) code_press(c.key); return true;
+        case SDL_SCANCODE_LEFT: code_move(-1, 0); return true;
+        case SDL_SCANCODE_RIGHT: code_move(+1, 0); return true;
+        case SDL_SCANCODE_UP: code_move(0, -1); return true;
+        case SDL_SCANCODE_DOWN: code_move(0, +1); return true;
+        default: break;
+        }
+        const SDL_Keycode k = e.key.key ? e.key.key : SDL_GetKeyFromScancode(e.key.scancode, e.key.mod, false);
+        if ((e.key.mod & SDL_KMOD_CTRL) && k == SDLK_V) {
+            if (char* clip = SDL_GetClipboardText()) {
+                code_type(clip);
+                SDL_free(clip);
+            }
+        } else if (k >= SDLK_A && k <= SDLK_Z) {
+            code_type(std::string(1, static_cast<char>('A' + (k - SDLK_A))));
+        } else if (k >= SDLK_0 && k <= SDLK_9) {
+            code_type(std::string(1, static_cast<char>('0' + (k - SDLK_0))));
+        } else if (e.key.scancode >= SDL_SCANCODE_KP_1 && e.key.scancode <= SDL_SCANCODE_KP_9) {
+            code_type(std::string(1, static_cast<char>('1' + (e.key.scancode - SDL_SCANCODE_KP_1))));
+        }
+        return true;
+    }
+    case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+        switch (e.gbutton.button) {
+        case SDL_GAMEPAD_BUTTON_DPAD_UP: code_move(0, -1); break;
+        case SDL_GAMEPAD_BUTTON_DPAD_DOWN: code_move(0, +1); break;
+        case SDL_GAMEPAD_BUTTON_DPAD_LEFT: code_move(-1, 0); break;
+        case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: code_move(+1, 0); break;
+        case SDL_GAMEPAD_BUTTON_SOUTH: code_press(c.key); break;
+        case SDL_GAMEPAD_BUTTON_EAST: pop(); break;
+        case SDL_GAMEPAD_BUTTON_NORTH: code_press(letters); break;
+        case SDL_GAMEPAD_BUTTON_START: code_press(letters + 1); break;
+        case SDL_GAMEPAD_BUTTON_BACK:
+        case SDL_GAMEPAD_BUTTON_GUIDE: close(); break;
+        default: break;
+        }
+        return true;
+    case SDL_EVENT_GAMEPAD_AXIS_MOTION: {
+        const int dir = e.gaxis.value < -16000 ? -1 : e.gaxis.value > 16000 ? 1 : 0;
+        if (e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTY) {
+            if (dir && dir != stick_y_) code_move(0, dir);
+            stick_y_ = dir;
+        } else if (e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX) {
+            if (dir && dir != stick_x_) code_move(dir, 0);
+            stick_x_ = dir;
+        }
+        return true;
+    }
+    case SDL_EVENT_MOUSE_WHEEL: return true;
+    default: return false; // (the mouse: the keys' own events)
+    }
 }
 
 // A long page scrolls inside #rows: the selected row kept in view.
@@ -338,6 +545,7 @@ bool Menu::handle_event(const SDL_Event& e) {
         default: break;
         }
     }
+    if (!stack_.empty() && stack_.back().code && code_event(e)) return true;
     switch (e.type) {
     case SDL_EVENT_KEY_DOWN:
         switch (e.key.scancode) {
@@ -391,6 +599,7 @@ bool Menu::handle_event(const SDL_Event& e) {
         return true;
     }
     case SDL_EVENT_MOUSE_MOTION: {
+        mouse_moved_ = true;
         const float d = SDL_GetWindowPixelDensity(impl_->window);
         impl_->ctx->ProcessMouseMove(static_cast<int>(e.motion.x * d), static_cast<int>(e.motion.y * d), 0);
         return true;
@@ -410,7 +619,7 @@ bool Menu::handle_event(const SDL_Event& e) {
 }
 
 void Menu::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* swapchain, uint32_t width, uint32_t height) {
-    if ((!open_ && !fps_shown_) || !impl_->ctx) return;
+    if ((!open_ && !fps_shown_ && !net_shown_) || !impl_->ctx) return;
     impl_->ctx->SetDimensions(Rml::Vector2i(static_cast<int>(width), static_cast<int>(height)));
     impl_->ctx->SetDensityIndependentPixelRatio(static_cast<float>(height) / 720.0f);
     impl_->ctx->Update();

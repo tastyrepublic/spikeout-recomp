@@ -89,9 +89,9 @@ a frame at scale 4), the settings menu and widescreen all work.
   tools::build_id, so machines that differ can't join each other.
   Timeline tool: gamerun --net-trace N --net-host-trace FRAME:N;
   firmware: --net-disasm FILE.
-  Next (owner's order): commit when asked; then the network status
-  display (design in docs/netplay.md: seat list under the FPS counter,
-  signal bars and ms, JOINED/LEFT/IDLE/WAITING in each row).
+  Built since (uncommitted when written): the network status display and
+  the new Join by code page (both in docs/netplay.md). Next: the
+  two-network test; the late-join music (the owner decides).
   What's known and tried: docs/fidelity.md, "Linked games ran in slow motion". Window
   debug: SPIKEOUT_NET_DEBUG=1 prints each board's logic, inputs and
   network board every 300 frames; SPIKEOUT_MENU_KEYS="esc,down,enter,

@@ -135,3 +135,53 @@ div { display: block; }
 	color: #8a6a60;
 	white-space: nowrap;
 }
+
+/* A code page (ui::CodeInput): the code's box, then an on-screen keyboard
+   of 8 keys a row (8 x 50dp) and a row of Delete and Join. */
+#codebox {
+	margin: 6dp 0 14dp 16dp;
+	height: 58dp;
+}
+
+.slot {
+	display: inline-block;
+	width: 42dp;
+	height: 52dp;
+	line-height: 52dp;
+	margin-right: 8dp;
+	text-align: center;
+	font-size: 42dp;
+	color: #ff9a3c;
+	border-bottom: 3dp #8a6a60;
+}
+
+.slot.cur { border-bottom: 3dp #ff6a1f; }
+
+.krow {
+	display: flex;
+	margin-left: 16dp;
+	margin-bottom: 4dp;
+}
+
+.ckey {
+	width: 46dp;
+	height: 40dp;
+	line-height: 40dp;
+	margin-right: 4dp;
+	text-align: center;
+	font-size: 26dp;
+	color: #e6d3cc;
+	background-color: #3a120ccc;
+}
+
+.ckey.wide {
+	width: 196dp;
+	font-size: 22dp;
+}
+
+.ckey.ready { color: #ff9a3c; }
+
+.ckey.sel {
+	decorator: horizontal-gradient(#ff8a2c #e8251f);
+	color: #1a0705;
+}

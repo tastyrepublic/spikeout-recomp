@@ -1567,7 +1567,9 @@ int main(int argc, char** argv) {
             session.start(info);
             if (welcome) {
                 net::Json m = net::Json::object();
-                m.set("t", "update"), m.set("taken", static_cast<int>(o.net_seats)), m.set("started", true);
+                std::size_t taken = 0; // (the seats with players: started alone, the others free to join)
+                for (const std::string& name : session.players()) taken += name.empty() ? 0 : 1;
+                m.set("t", "update"), m.set("taken", static_cast<int>(taken)), m.set("started", true);
                 lobby.send(m);
             }
         } else if (welcome) { // --net-join CODE through the lobby

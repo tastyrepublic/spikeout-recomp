@@ -1417,9 +1417,12 @@ int main(int argc, char** argv) {
             info.clock = tools::set_rtc_to_host(probe);
         }
         netgame->session().start(info);
-        if (netgame->internet) {
+        if (netgame->internet) { // (the seats with players: a game started alone has free ones to join)
+            std::size_t taken = 0;
+            for (const std::string& name : netgame->session().players()) taken += name.empty() ? 0 : 1;
+            netgame->listed_taken = taken;
             net::Json m = net::Json::object();
-            m.set("t", "update"), m.set("taken", static_cast<int>(netgame->session().players().size())), m.set("started", true);
+            m.set("t", "update"), m.set("taken", static_cast<int>(taken)), m.set("started", true);
             netgame->lobby.send(m);
         }
     };
@@ -1594,6 +1597,14 @@ int main(int argc, char** argv) {
                            [&](int) {
                                settings.show_fps = !settings.show_fps;
                                if (!settings.show_fps) menu.set_fps("");
+                               changed();
+                           }});
+        p.items.push_back({"Network status",
+                           "In a network game, each seat under the frame rate: the players, their connection (bars "
+                           "and round trip), and who joined, left or dropped.",
+                           [&] { return on_off(settings.show_net); },
+                           [&](int) {
+                               settings.show_net = !settings.show_net;
                                changed();
                            }});
         p.items.push_back(back_item());
@@ -1897,26 +1908,23 @@ int main(int argc, char** argv) {
         p.items.push_back(back_item());
         return p;
     };
-    // A game's code, a letter at a time (Left / Right), for pads too.
-    std::string code_entry = "AAAAAA";
+    // A game's code: typed (or pasted, Ctrl+V), or picked from an on-screen
+    // keyboard with a pad or the mouse (ui::CodeInput). The lobby's codes
+    // leave out I, O, 0 and 1 (too like each other).
     auto code_page = [&] {
-        static const std::string kLetters = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-        ui::MenuPage p{"Join by code", "The code the host's lobby page shows.", {}};
-        for (std::size_t i = 0; i < 6; ++i)
-            p.items.push_back({"Letter " + std::to_string(i + 1), "Left / Right: change it.",
-                               [&, i] { return std::string(1, code_entry[i]); },
-                               [&, i](int d) {
-                                   const auto at = kLetters.find(code_entry[i]);
-                                   const auto n = static_cast<int>(kLetters.size());
-                                   code_entry[i] = kLetters[static_cast<std::size_t>(((at == std::string::npos ? 0 : static_cast<int>(at)) + d + n) % n)];
-                               }});
-        p.items.push_back({"Join", "Join the game with this code.", {}, {}, [&] {
-                               net_join_code(code_entry);
-                               menu.pop();
-                               menu.pop();
-                               menu.push(lobby_page());
-                           }});
-        p.items.push_back(back_item());
+        ui::MenuPage p{"Join by code",
+                       "Type the code the host's lobby page shows (Ctrl+V pastes it), or pick its letters below. "
+                       "Backspace / Y: delete. Enter / Start: join.",
+                       {}};
+        p.code = std::make_shared<ui::CodeInput>();
+        p.code->alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        p.code->length = 6;
+        p.code->done = [&](const std::string& code) {
+            net_join_code(code);
+            menu.pop();
+            menu.pop();
+            menu.push(lobby_page());
+        };
         return p;
     };
     // The lobby's list of games (listed ones; private ones by their code).
@@ -2063,6 +2071,7 @@ int main(int argc, char** argv) {
             SDL_Event key{};
             key.type = SDL_EVENT_KEY_DOWN;
             key.key.scancode = test_keys[test_key++];
+            key.key.key = SDL_GetKeyFromScancode(key.key.scancode, SDL_KMOD_NONE, false);
             key.key.down = true;
             SDL_PushEvent(&key);
             test_key_due = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
@@ -2187,6 +2196,59 @@ int main(int argc, char** argv) {
         }
         if (discovery) discovery->poll(); // (games heard of, for the nearby list)
 #ifdef SPIKEOUT_GPU
+        // Network status (Settings::show_net), 4 times a second: each seat
+        // under the frame rate. A seat's news (joined, left) shows in its
+        // row for a few seconds in place of its connection.
+        static auto net_status_at = now;
+        static std::array<net::Session::SeatView::State, net::kMaxSeats> seat_was{};
+        static std::array<std::chrono::steady_clock::time_point, net::kMaxSeats> seat_news{};
+        if (menu_ready && now - net_status_at > std::chrono::milliseconds(250)) {
+            net_status_at = now;
+            std::vector<ui::NetRow> net_rows;
+            using State = net::Session::SeatView::State;
+            if (netgame && netgame->running) {
+                const auto seats = netgame->session().seats();
+                const bool hosting = netgame->session().hosting();
+                for (std::size_t s = 0; s < seats.size(); ++s) {
+                    const auto& v = seats[s];
+                    if (v.state == State::none) continue;
+                    const State was = seat_was[s];
+                    if (was != State::none && was != v.state &&
+                        (v.state == State::playing || v.state == State::gone)) // (news: joined, left)
+                        seat_news[s] = now + std::chrono::seconds(4);
+                    seat_was[s] = v.state;
+                    const bool news = now < seat_news[s];
+                    ui::NetRow r;
+                    r.seat = std::to_string(s + 1) + "P";
+                    for (char c : v.name) r.name += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                    switch (v.state) {
+                    case State::me: r.name = "YOU", r.look = ui::NetRow::Look::you; break;
+                    case State::open: r.status = hosting ? "WAITING" : "OPEN", r.look = ui::NetRow::Look::dim; break;
+                    case State::joining: r.status = "JOINING", r.look = ui::NetRow::Look::fresh; break;
+                    case State::gone:
+                        r.status = !v.left ? "IDLE" : news ? "LEFT" : hosting ? "WAITING" : "OPEN";
+                        if (v.left && !news) r.name.clear();
+                        r.look = ui::NetRow::Look::dim;
+                        break;
+                    case State::playing:
+                        if (news) {
+                            r.status = "JOINED", r.look = ui::NetRow::Look::fresh;
+                        } else {
+                            const int ms = v.round_trip;
+                            r.ms = ms;
+                            r.bars = ms < 0 ? 0 : ms < 40 ? 4 : ms < 80 ? 3 : ms < 140 ? 2 : 1;
+                        }
+                        break;
+                    default: break;
+                    }
+                    net_rows.push_back(std::move(r));
+                }
+            } else {
+                seat_was.fill(State::none);
+                seat_news.fill({});
+            }
+            menu.set_net(settings.show_net ? net_rows : std::vector<ui::NetRow>());
+        }
         if (menu_open && now - net_refreshed > std::chrono::milliseconds(250)) {
             net_refreshed = now;
             if (netgame) menu.refresh();

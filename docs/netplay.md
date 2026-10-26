@@ -258,16 +258,40 @@ play between two different networks (hole punching and the relay are
 tested only against Cloudflare's STUN from here); input delay adjusted
 during play; spectators; player names (the computer's user name for now).
 
-To build (the owner's design, 2026-10-26): a network status display in
-the window, only in network games, with a "Network status" menu setting
-(on by default). It sits at the top right under the FPS counter, in its
-style (yellow `#ffd34a`, black outline). One row per seat: "1P YOU" (no
-ping), others with phone-style signal bars (4 under 40 ms green, 3 to
-80, 2 to 140 yellow, 1 over 140 red, none without an answer; tuned after
-the two-network test) and the round trip in ms. No separate messages: a
-row shows JOINED (green) for a few seconds then its bars, LEFT then OPEN,
-IDLE (grey) while its player is dropped, WAITING for a free seat while
-hosting.
+Built (the owner's design, 2026-10-26): a network status display in the
+window, only in network games, with a "Network status" setting under
+Show FPS (on by default; settings.ini `show_net`). It sits at the top
+right under the FPS counter, in its style (yellow `#ffd34a`, black
+outline). One row per seat: "1P YOU" (no ping), others with the round
+trip in ms and, right of it, phone-style signal bars (4 under 40 ms
+green, 3 to 80, 2 to 140 yellow, 1 over 140 red, none until measured;
+tuned after the two-network test; narrow, the tallest as high as the
+capitals, on the text's baseline: the owner's adjustments). No separate
+messages: a row shows JOINING while a
+player joining in progress catches up, JOINED (green) for 4 seconds then
+its bars, LEFT for 4 seconds then OPEN (a goodbye), IDLE (grey) while a
+player who went quiet is dropped, WAITING for a free seat while hosting
+(OPEN to the others). From `net::Session::seats()`, 4 times a second
+(`ui::Menu::set_net`). Seen working: WAITING, bars and ms, IDLE after a
+joiner was stopped, a game joined by code. Not yet seen: JOINED and LEFT
+on screen (they last 4 seconds).
+
+Join by code (2026-10-26, the owner's choice): one box of the code's six
+letters (`ui::CodeInput`), typed on the keyboard (Backspace deletes one,
+Delete all, Ctrl+V pastes, Enter joins; letters a code never has, I, O,
+0 and 1, are ignored), or picked from an on-screen keyboard of the 32
+code letters with Delete and Join keys: the arrows, a pad (D-pad or
+stick, A presses, Y deletes, Start joins, B back) or the mouse. Seen
+working: typing, Backspace, moving and pressing keys on it, and joining
+a private lobby game by its code; the owner tried both and they work.
+Fixed with it: a host starting before every seat was taken told the lobby
+all were ("taken" as the seat count), so joining it by code said "that
+game is full"; now the seats with players (window and gamerun).
+
+A game between gamerun and the window starts out of step (gamerun fills
+the main board's RAM with 0xA5 at power-on, the window doesn't) and is
+put back from the host's state at the first hash check; two windows
+start alike.
 
 Open, the owner to decide (2026-10-26): joining a game in progress starts
 without background music until the next scene change. Each PC runs sound

@@ -9,6 +9,8 @@
 
 #include <SDL3/SDL.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <utility>
 #include <memory>
@@ -34,10 +36,36 @@ struct MenuItem {
     std::function<void()> clear;        // Delete / Y: back to none (a key binding)
 };
 
+// A seat of a network game, in the list under the frame rate.
+struct NetRow {
+    enum class Look : uint8_t { you, player, fresh, dim }; // yellow, white, green (just joined), grey
+    std::string seat;   // "2P"
+    std::string name;
+    std::string status; // in place of the bars and round trip (JOINED, LEFT, IDLE, ...); empty: them
+    int bars = -1;      // 0-4 (-1: none)
+    int ms = -1;        // the round trip (-1: none)
+    Look look = Look::player;
+};
+
+// A page for typing a short code (a game's): a box of its letters and an
+// on-screen keyboard of the letters it may have, for pads and the mouse;
+// a keyboard types into it (and pastes, Ctrl+V).
+struct CodeInput {
+    std::string alphabet; // the letters a code may have (typed lower case: upper)
+    std::size_t length = 6;
+    std::string text;     // so far
+    int key = 0;          // the on-screen key selected: the letters, then Delete, Join
+    std::function<void(const std::string&)> done; // Join, the code whole
+};
+
 struct MenuPage {
+    MenuPage(std::string name_ = {}, std::string note_ = {}, std::vector<MenuItem> items_ = {})
+        : name(std::move(name_)), note(std::move(note_)), items(std::move(items_)) {}
+
     std::string name;
     std::string note; // under the items when the selected one has no help
     std::vector<MenuItem> items;
+    std::shared_ptr<CodeInput> code; // a code page instead of items
 };
 
 class Menu {
@@ -54,6 +82,8 @@ public:
     // The frame rate in the top right corner, shown with the menu closed
     // too (empty: none).
     void set_fps(const std::string& text);
+    // A network game's seats, under the frame rate (empty: none).
+    void set_net(const std::vector<NetRow>& rows);
 
     bool is_open() const { return open_; }
     void open(MenuPage root);
@@ -84,15 +114,24 @@ private:
     void click_change(int d);
     void activate();
     void clear();
+    // A code page (MenuPage::code).
+    void build_code();
+    bool code_event(const SDL_Event& e);
+    void code_move(int dx, int dy);
+    void code_press(int key);
+    void code_type(const std::string& letters);
 
     std::unique_ptr<Impl> impl_;
     std::string error_;
     bool open_ = false;
-    bool fps_shown_ = false;
+    bool fps_shown_ = false, net_shown_ = false;
+    std::string net_rml_; // (what the seat list shows: not set again unchanged)
+    void show_corner();   // the corner page shown while either is
     std::vector<MenuPage> stack_;
     std::vector<int> selected_stack_;
     int selected_ = 0;
     int stick_x_ = 0, stick_y_ = 0; // the left stick's last direction, for its edges
+    bool mouse_moved_ = false;      // the mouse moved since the last key or button (a code page: it selects)
     std::function<bool(const SDL_Event&)> capture_;
     std::string capture_prompt_;
 };

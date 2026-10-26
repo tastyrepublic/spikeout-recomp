@@ -181,6 +181,23 @@ public:
 
     // How it goes, for an overlay: round trip to each seat (ms, -1: none).
     std::array<int, kMaxSeats> round_trips() const;
+    // Each seat of a game in progress, for an overlay.
+    struct SeatView {
+        enum class State : uint8_t {
+            none,    // not in this game (beyond its seats)
+            open,    // no player has taken it yet
+            me,      // this machine's player
+            joining, // a player joined in progress, catching up (the cabinet not theirs yet)
+            playing, // a player's
+            gone,    // its player dropped (or left: `left`); the character stands idle
+        };
+        State state = State::none;
+        std::string name; // the player's (gone: the one who was)
+        bool left = false; // gone after saying goodbye
+        int round_trip = -1; // ms (-1: not measured yet)
+    };
+    std::array<SeatView, kMaxSeats> seats() const;
+    bool hosting() const;
 
     // ---- Internet play (with the lobby, net::LobbyClient) ----
     // Our address as a STUN server sees it (our router's), found in the
