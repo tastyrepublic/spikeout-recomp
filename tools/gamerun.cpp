@@ -75,7 +75,12 @@
 // prints the first N packets; --net-watch prints each board's network
 // status registers when they change. The link's open questions
 // (docs/fidelity.md) have switches: --net-e0-irq5 off, --net-send-waits off,
-// --net-other-bank, --link-byte-cycles C (68000 cycles a byte on the wire).
+// --net-other-bank, --link-byte-cycles C (68000 cycles a byte on the wire),
+// --net-irq5-per-frame N, --net-slave-irq5-per-frame N, --net-irq5-phase F,
+// and the ring model's parts: --net-ring-forwarding off, --net-double-buffer
+// off; --net-old-link puts the link back as it was before the ring model
+// (linked games at 2/(N+1) speed). --net-host-trace FRAME:N adds the main
+// board's accesses to the network board, by time, to the report.
 //
 // The tile generator draws a line at a time as the frame runs; the 3D is
 // drawn at the end of a frame, only when screenshots are being written.
@@ -194,6 +199,7 @@ struct Options {
     const char* load_state = nullptr;         // --load-state FILE
     uint32_t watch_lo = 0, watch_hi = 0;      // --watch-write LO-HI@FRAME:N
     uint64_t watch_frame = 0, watch_frames = 1;
+    uint64_t host_trace_frame = 0, host_trace_frames = 0; // --net-host-trace FRAME:N
     bool dump_layers = false;
     // --eeprom [B:]FILE: the settings EEPROM to start with (128 bytes, high byte first), for board B or all
     std::vector<std::pair<int, std::string>> eeprom_files;
@@ -252,7 +258,11 @@ struct Options {
          host_sees_other_bank = false;
     double link_cycles_per_byte = m3::CommBoardOptions().link_cycles_per_byte;
     uint32_t irq5_per_frame = m3::CommBoardOptions().irq5_per_frame; // --net-irq5-per-frame N (a link question: docs/fidelity.md)
-    uint32_t slave_irq5_per_frame = m3::CommBoardOptions::kSame; // --net-slave-irq5-per-frame N
+    uint32_t slave_irq5_per_frame = m3::CommBoardOptions().slave_irq5_per_frame; // --net-slave-irq5-per-frame N
+    double irq5_phase = 0; // --net-irq5-phase F (a part of a frame)
+    bool ring_forwarding = m3::CommBoardOptions().ring_forwarding; // --net-ring-forwarding on/off
+    bool double_buffer = m3::CommBoardOptions().double_buffer; // --net-double-buffer on/off
+    bool old_link = false; // --net-old-link: the link before the ring model (CommBoardOptions::use_old_link)
 };
 
 // Where each input is, active low (hardware-notes.md, Inputs).
@@ -442,6 +452,23 @@ std::function<void(m3::State&)> sound_state(Machine& m, const Options& o) {
     return [&m](m3::State& s) { m.sound.state(s); };
 }
 
+// The network board's options from the switches (also in the build's id
+// for network play: machines with others can't play together).
+m3::CommBoardOptions link_options(const Options& o) {
+    m3::CommBoardOptions options;
+    options.irq5_on_e0 = o.irq5_on_e0;
+    options.irq5_per_frame = o.irq5_per_frame;
+    options.slave_irq5_per_frame = o.slave_irq5_per_frame;
+    options.irq5_phase = o.irq5_phase;
+    options.ring_forwarding = o.ring_forwarding;
+    options.double_buffer = o.double_buffer;
+    if (o.old_link) options.use_old_link();
+    options.link_cycles_per_byte = o.link_cycles_per_byte;
+    options.send_waits_for_receive = o.send_waits_for_receive;
+    options.host_sees_other_bank = o.host_sees_other_bank;
+    return options;
+}
+
 void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing* ring, tools::Turns& turns) {
     m3::Bus& bus = m.bus;
     bus.midi_burst = o.midi_burst;
@@ -464,14 +491,7 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
     if (m.index < o.board_backup.size() && o.board_backup[m.index].size() == m3::Bus::kBackupRamSize)
         std::copy(o.board_backup[m.index].begin(), o.board_backup[m.index].end(), bus.backup_ram().begin());
     if (o.real_netboard) {
-        m3::CommBoardOptions options;
-        options.irq5_on_e0 = o.irq5_on_e0;
-        options.irq5_per_frame = o.irq5_per_frame;
-        options.slave_irq5_per_frame = o.slave_irq5_per_frame;
-        options.link_cycles_per_byte = o.link_cycles_per_byte;
-        options.send_waits_for_receive = o.send_waits_for_receive;
-        options.host_sees_other_bank = o.host_sees_other_bank;
-        auto board = std::make_unique<m3::CommBoard>(ring ? ring->port(m.index) : nullptr, options);
+        auto board = std::make_unique<m3::CommBoard>(ring ? ring->port(m.index) : nullptr, link_options(o));
         m.comm = board.get();
         m.comm->trace_limit = o.net_trace;
         m.comm->force_master = o.force_master;
@@ -669,8 +689,8 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
                 if (o.gpu_hash_frames) { // each picture's own hash, to find where two runs part
                     uint64_t h = 0xCBF29CE484222325ull;
                     for (uint32_t p : m.gpu_image) h = (h ^ p) * 0x100000001B3ull;
-                    std::printf("frame %llu: GPU picture %016llx\n", static_cast<unsigned long long>(frame),
-                                static_cast<unsigned long long>(h));
+                    std::printf("%sframe %llu: GPU picture %016llx\n", m.index ? ("board " + std::to_string(m.index) + " ").c_str() : "",
+                                static_cast<unsigned long long>(frame), static_cast<unsigned long long>(h));
                 }
                 if (const int e = m.builder.extend(); e > 0) { // widescreen: kept whole, its middle for the rest
                     const int w = m3::TilegenRenderer::kWidth, h = m3::TilegenRenderer::kHeight;
@@ -819,6 +839,8 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             m.net_status[0] = s0;
             m.net_status[1] = s1;
         }
+        if (m.comm && o.host_trace_frames) // --net-host-trace: the frames after this one
+            m.comm->host_tracing = frame >= o.host_trace_frame && frame < o.host_trace_frame + o.host_trace_frames;
         if (o.tilegen_trace && frame % o.tilegen_trace == 0) {
             std::printf("%sframe %6llu tilegen", m.index ? ("board " + std::to_string(m.index) + " ").c_str() : "",
                         static_cast<unsigned long long>(frame));
@@ -1169,6 +1191,14 @@ void report(Machine& m, const Options& o) {
             std::printf("  %10llu  pc %06x  %s%u %06x  %04x\n", static_cast<unsigned long long>(a.cycle), a.pc,
                         a.write ? "W" : "R", a.size * 8u, a.addr, a.value);
     }
+    if (comm && !comm->host_trace.empty()) {
+        static const char* const kRegions[] = {"comm", "io", "netram", "netram"};
+        std::printf("\nNetwork board, the main board's accesses (68000 cycles):\n");
+        for (const auto& r : comm->host_trace)
+            std::printf("  %10llu  host %s %s %05x-%05x x%u bank %u, to %llu%s\n", static_cast<unsigned long long>(r.first),
+                        r.write ? "W" : "R", kRegions[r.region & 3], r.lo, r.hi, r.count, r.bank,
+                        static_cast<unsigned long long>(r.last), r.region == 1 && r.write ? (" = " + std::to_string(r.value)).c_str() : "");
+    }
     if (comm && o.net_disasm && m.index == 0) {
         if (std::FILE* f = std::fopen((std::string(o.net_disasm) + ".bin").c_str(), "wb")) { // raw 68000 RAM
             std::fwrite(comm->ram().data(), 1, comm->ram().size(), f);
@@ -1301,6 +1331,11 @@ int main(int argc, char** argv) {
             if (*end == '@') o.watch_frame = std::strtoull(end + 1, &end, 0);
             if (*end == ':') o.watch_frames = std::strtoull(end + 1, &end, 0);
         }
+        else if (arg == "--net-host-trace" && i + 1 < argc) { // FRAME:N
+            char* end = nullptr;
+            o.host_trace_frame = std::strtoull(argv[++i], &end, 0);
+            o.host_trace_frames = *end == ':' ? std::strtoull(end + 1, nullptr, 0) : 1;
+        }
         else if (arg == "--dump-tile" && i + 1 < argc) o.dump_tile = argv[++i];
         else if (arg == "--dump-textures" && i + 1 < argc) o.dump_textures = argv[++i];
         else if (arg == "--dump-backup" && i + 1 < argc) o.dump_backup = argv[++i];
@@ -1334,6 +1369,10 @@ int main(int argc, char** argv) {
         else if (arg == "--net-other-bank") o.host_sees_other_bank = true;
         else if (arg == "--net-e0-irq5" && i + 1 < argc) o.irq5_on_e0 = std::string(argv[++i]) != "off";
         else if (arg == "--net-irq5-per-frame" && i + 1 < argc) o.irq5_per_frame = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 0));
+        else if (arg == "--net-ring-forwarding" && i + 1 < argc) o.ring_forwarding = std::string(argv[++i]) != "off";
+        else if (arg == "--net-double-buffer" && i + 1 < argc) o.double_buffer = std::string(argv[++i]) != "off";
+        else if (arg == "--net-old-link") o.old_link = true;
+        else if (arg == "--net-irq5-phase" && i + 1 < argc) o.irq5_phase = std::strtod(argv[++i], nullptr);
         else if (arg == "--net-slave-irq5-per-frame" && i + 1 < argc) o.slave_irq5_per_frame = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 0));
         else if (arg == "--link-byte-cycles" && i + 1 < argc) o.link_cycles_per_byte = std::strtod(argv[++i], nullptr);
         else if (arg == "--screenshot" && i + 1 < argc) o.screenshot = argv[++i];
@@ -1468,17 +1507,18 @@ int main(int argc, char** argv) {
     tools::InputTable inputs(networked ? net::kMaxSeats : o.boards);
     std::unique_ptr<tools::NetPlay> netplay;
     std::vector<uint8_t> join_state; // (a game joined in progress: every board's state, unpacked)
+    const m3::CommBoardOptions link = link_options(o);
     if (networked) {
         if (o.replay || o.load_state || !o.save_state.empty()) {
             std::fprintf(stderr, "gamerun: network play starts from power-on (no --replay or save states yet)\n");
             return 2;
         }
-        netplay = std::make_unique<tools::NetPlay>(inputs, tools::build_id(roms, functions.size()),
+        netplay = std::make_unique<tools::NetPlay>(inputs, tools::build_id(roms, functions.size(), o.real_netboard ? &link : nullptr),
                                                    [](const std::string& s) { std::printf("net: %s\n", s.c_str()), std::fflush(stdout); });
         net::Session& session = netplay->session();
         session.set_cabinet(o.eeprom_bytes, {}); // (this process's cabinet: --eeprom FILE)
         const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(120);
-        const uint64_t build = tools::build_id(roms, functions.size());
+        const uint64_t build = tools::build_id(roms, functions.size(), o.real_netboard ? &link : nullptr);
         auto log = [](const std::string& s) { std::printf("net: %s\n", s.c_str()), std::fflush(stdout); };
         net::LobbyClient lobby;
         std::optional<net::Json> welcome;

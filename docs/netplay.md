@@ -258,6 +258,34 @@ play between two different networks (hole punching and the relay are
 tested only against Cloudflare's STUN from here); input delay adjusted
 during play; spectators; player names (the computer's user name for now).
 
+To build (the owner's design, 2026-10-26): a network status display in
+the window, only in network games, with a "Network status" menu setting
+(on by default). It sits at the top right under the FPS counter, in its
+style (yellow `#ffd34a`, black outline). One row per seat: "1P YOU" (no
+ping), others with phone-style signal bars (4 under 40 ms green, 3 to
+80, 2 to 140 yellow, 1 over 140 red, none without an answer; tuned after
+the two-network test) and the round trip in ms. No separate messages: a
+row shows JOINED (green) for a few seconds then its bars, LEFT then OPEN,
+IDLE (grey) while its player is dropped, WAITING for a free seat while
+hosting.
+
+Open, the owner to decide (2026-10-26): joining a game in progress starts
+without background music until the next scene change. Each PC runs sound
+only for its own cabinet, so the host's state for the joiner's cabinet
+has a sound board that never ran. Options put to the owner: (1) replay the
+cabinet's recent sound commands (cheap; the music restarts from its
+beginning); (2) the host runs every cabinet's sound board without playing
+it, so the state it sends is exact (only the host pays, roughly a quarter
+of a cabinet's run time each; option 1 if the host has left); (3) every PC
+runs every cabinet's sound (exact always; every player pays). Suggested:
+2, measured on 4 cabinets first.
+
+Seen in the same test (two windows on one PC, both with the ring model): joined
+at frame 1991, seat taken at 2105, no hash check differed; 50-60 frames a
+second with both windows running all three cabinets on one PC (about
+15 ms of each 17.4 ms frame). Fixed then: leaving before catching up left
+the next game unpaced (111 frames a second).
+
 Testing it: `cd lobby && npm install && npm test` (the lobby, run here);
 `gamerun ROMS --net-host NAME --seats 2 ...` and `gamerun ROMS --net-join
 NAME ...` (two terminals), or with `--lobby ws://127.0.0.1:8790/v1/lobby`

@@ -51,27 +51,28 @@ struct CommBoardOptions {
     uint64_t cpu_hz = 10'000'000;   // 40 MHz crystal / 4: unverified (MAME: 10 MHz "random")
     uint64_t irq5_hz = 100;         // MAME's timer, "where is this timing from?"
     // IRQ 5 locked to the main board's frame: this many a frame, evenly
-    // spaced from the frame's end (0: irq5_hz instead). See the .cpp. 3: a
-    // linked game's logic runs at full speed on rings of 2-4 (1, as before,
-    // made it run at 2/3, 1/2, 2/5: docs/fidelity.md; Supermodel has 4).
-    uint32_t irq5_per_frame = 3;
+    // spaced from the frame's end (0: irq5_hz instead). See the .cpp. (3,
+    // tried 2026-10-26, froze linked boards on a red screen: docs/fidelity.md.)
+    uint32_t irq5_per_frame = 1;
+    // The first of them this part of a frame after the frame's end (0: at it).
+    double irq5_phase = 0;
     // A write to control register 0xE0 raises IRQ 5. A slave's IRQ 6
     // handler writes it when a master's frame comes in, and its IRQ 5
     // handler resets the count of polls that frame must have arrived
     // within (2), so its tick has to follow the frame (docs/fidelity.md).
     bool irq5_on_e0 = true;
     // A slave's ticks a frame from its own main board's frame (besides 0xE0's):
-    // kSame, as irq5_per_frame. See docs/fidelity.md.
+    // kSame, as irq5_per_frame (before the ring model). 0: the firmware's
+    // own only, its write to 0xE0 when the master's sync comes in. See
+    // docs/fidelity.md.
     static constexpr uint32_t kSame = UINT32_MAX;
-    uint32_t slave_irq5_per_frame = 1;
+    uint32_t slave_irq5_per_frame = 0;
     // Time on the wire, in 68000 cycles a byte (0: none): a frame arrives,
     // and transmit complete (IRQ 4) comes, once it has all gone. Each board
     // waits for its own transmission before looking for the other's frame,
-    // so both have to be on the wire together. The rate is unknown: 0.5
-    // cycles at 10 MHz is 20 MB/s (12,800 bytes in 0.64 ms), fast enough
-    // for rings of 3 and 4 to run at full speed (2.5, 4 MB/s, as before,
-    // wasn't: docs/fidelity.md).
-    double link_cycles_per_byte = 0.5;
+    // so both have to be on the wire together. The rate is unknown: 2.5
+    // cycles at 10 MHz is 4 MB/s (12,800 bytes in 3.2 ms).
+    double link_cycles_per_byte = 2.5;
     // Transmit complete (IRQ 4) also waits for the frame the receiver is
     // armed for, as on a ring where a node's transmitter is clocked by what
     // it receives. The firmware sends with its receiver armed, waits for
@@ -80,6 +81,26 @@ struct CommBoardOptions {
     // reaches it, so without this the link fails in its first data
     // exchange (false: IRQ 4 after the frame's own time on the wire).
     bool send_waits_for_receive = true;
+    // A slave's data frame goes out as the master's comes in, carrying it
+    // on (its receive area lies inside what it sends, a node's part on):
+    // without it each cabinet's data moves one node a frame, and linked
+    // games run at 2/(N+1) speed. See the .cpp and docs/fidelity.md.
+    bool ring_forwarding = true;
+    // The main board sees the bank the 68000 hasn't selected (as
+    // host_sees_other_bank), and data frames come in there too: what it
+    // reads came in last exchange, and what it and they write goes out with
+    // the next swap. See docs/fidelity.md.
+    bool double_buffer = true;
+
+    // These three (ring_forwarding, double_buffer, slave_irq5_per_frame 0)
+    // are the ring model, the default since 2026-10-26: linked games at an
+    // arcade's speed (docs/fidelity.md, "Linked games ran in slow motion").
+    // The link as it was before, at 2/(N+1) speed:
+    void use_old_link() {
+        ring_forwarding = false;
+        double_buffer = false;
+        slave_irq5_per_frame = kSame;
+    }
     double main_frame_hz = 57.524160;
     uint64_t main_hz = 166'000'000; // the main board's CPU clock
     uint16_t link_status = 5;       // receive/transmit status reads: both sources return 5
@@ -125,6 +146,19 @@ public:
     std::vector<Access> trace;
     std::size_t trace_limit = 0;
 
+    // The main board's accesses while host_tracing, merged into bursts
+    // (I/O register accesses one by one): when it reads and writes what.
+    // Times in 68000 cycles (the board is caught up before each access).
+    struct HostRun {
+        uint64_t first, last;
+        uint32_t lo, hi, value; // addresses (0xC0000000 + this); an I/O write's value
+        uint32_t count;
+        bool write;
+        uint8_t region, bank; // 0 comm RAM, 1 I/O, 2-3 net RAM; the bank the 68000 has selected
+    };
+    std::vector<HostRun> host_trace;
+    bool host_tracing = false;
+
     // Debug aid, off by default: when the game writes the link role (68000
     // word 0x400: 0 master, otherwise slave), store 0 instead. A lone
     // cabinet set up as a slave correctly reports NO CARRIER (it waits for
@@ -146,11 +180,16 @@ private:
     uint16_t io_read(uint32_t index) const;
     void io_write(uint32_t index, uint16_t v, uint16_t mask, bool from_host);
     void note(uint32_t addr, uint16_t value, bool write, uint8_t size);
+    void host_note(uint32_t addr, bool write, uint32_t value);
 
     void set_irq(int level, bool on);
     void update_ipl();
     void run_until(uint64_t cpu_cycle);
     void deliver_receive();
+    bool forwards(std::size_t size) const;
+    bool slave() const { return ram_[0x400] != 0 || ram_[0x401] != 0; } // the link role the main board set
+    void transmit(const uint8_t* data, std::size_t size); // a frame, arriving at send_done_
+    static constexpr uint64_t kForwarding = UINT64_MAX; // send_done_: waiting for what it passes on
     void release_reset();
 
     uint8_t* bank(bool host);

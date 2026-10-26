@@ -163,6 +163,7 @@ struct Shared {
     std::atomic<bool> save_request{false};
     std::string load_path, last_state; // (under `lock`)
     bool real_netboard = true;
+    bool old_link = false; // --net-old-link: the link before the ring model (docs/fidelity.md)
     std::atomic<bool> quads{false}; // draw quads whole
     bool midi_burst = false;        // Supermodel's MIDI timing
     bool dma_instant = false;       // Real3D DMA done at once (Supermodel, MAME)
@@ -515,7 +516,11 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
                 std::printf("spikeout: can't record to %s\n", path.c_str());
         }
     }
-    if (shared.real_netboard) bus.use_netboard(std::make_unique<m3::CommBoard>(ring ? ring->port(index) : nullptr));
+    if (shared.real_netboard) {
+        m3::CommBoardOptions options;
+        if (shared.old_link) options.use_old_link();
+        bus.use_netboard(std::make_unique<m3::CommBoard>(ring ? ring->port(index) : nullptr, options));
+    }
     else if (ring) bus.use_netboard(std::make_unique<m3::SimNetBoard>(ring->port(index)));
     bus.midi_burst = shared.midi_burst;
     bus.dma_timed = !shared.dma_instant;
@@ -923,7 +928,7 @@ int main(int argc, char** argv) {
     const char* dir = nullptr;
     std::string record_path, load_state;
     int scale = 0, cli_render_scale = 0, cli_sound = -1, cli_music = -1;
-    bool real_netboard = true;
+    bool real_netboard = true, old_link = false;
     uint64_t max_frames = 0;
     bool mute = false, cli_quads = false, cli_smooth = false, cli_smooth_log = false, midi_burst = false, dma_instant = false, use_gpu = true, cli_soft_3d = false, fifo = false,
          sleep_pacing = false, list_audio = false;
@@ -932,6 +937,7 @@ int main(int argc, char** argv) {
         const std::string arg = argv[i];
         if (arg == "--scale" && i + 1 < argc) scale = std::max(1, std::atoi(argv[++i]));
         else if (arg == "--netboard" && i + 1 < argc) real_netboard = std::string(argv[++i]) == "real";
+        else if (arg == "--net-old-link") old_link = true;
         else if (arg == "--frames" && i + 1 < argc) max_frames = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--boards" && i + 1 < argc)
             boards = std::clamp<std::size_t>(std::strtoull(argv[++i], nullptr, 0), 1, kMaxBoards);
@@ -1052,6 +1058,7 @@ int main(int argc, char** argv) {
     shared.record_path = record_path;
     shared.load_path = shared.last_state = load_state;
     shared.real_netboard = real_netboard;
+    shared.old_link = old_link;
     shared.quads = settings.quads;
     shared.midi_burst = midi_burst;
     shared.dma_instant = dma_instant;
@@ -1296,7 +1303,9 @@ int main(int argc, char** argv) {
 
     // ---- Network play (Mode B, docs/netplay.md) ----
     const std::size_t own_boards = boards; // (--boards: what runs when not in a network game)
-    const uint64_t build = tools::build_id(roms, tools::game_functions().size());
+    m3::CommBoardOptions link; // (as run_game makes the boards')
+    if (shared.old_link) link.use_old_link();
+    const uint64_t build = tools::build_id(roms, tools::game_functions().size(), shared.real_netboard ? &link : nullptr);
     std::unique_ptr<NetGame> netgame;
     int net_seats = 2;      // a game offered: its players
     bool net_listed = true; // on the internet: in the lobby's list, or by its code only
@@ -1477,6 +1486,7 @@ int main(int argc, char** argv) {
                 keep_seat(); // (this player's board, as this computer's cabinet: while still in the game)
                 shared.netplay = nullptr;
                 shared.inputs = nullptr;
+                shared.catching_up = false; // (left before catching up: paced again)
                 boards = own_boards;
                 shared.boards = boards;
                 focus = 0;

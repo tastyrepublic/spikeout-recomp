@@ -79,7 +79,8 @@ std::string CommBoard::describe() const {
 }
 
 uint8_t* CommBoard::bank(bool host) {
-    const bool second = (commbank_ & 1) != (host && options_.host_sees_other_bank);
+    const bool other = options_.host_sees_other_bank || options_.double_buffer;
+    const bool second = (commbank_ & 1) != (host && other);
     return comm_.data() + (second ? 0x10000 : 0);
 }
 
@@ -129,13 +130,18 @@ void CommBoard::run_until(uint64_t target) {
 // MAME's free-running 100 Hz a lone master fails it within seconds, with
 // IRQ 5 once a frame it doesn't. What drives it on the board isn't known.
 void CommBoard::end_frame() {
-    const bool slave = ram_[0x400] != 0 || ram_[0x401] != 0;
-    const uint32_t ticks = slave && options_.slave_irq5_per_frame != CommBoardOptions::kSame ? options_.slave_irq5_per_frame
+    const uint32_t ticks = slave() && options_.slave_irq5_per_frame != CommBoardOptions::kSame ? options_.slave_irq5_per_frame
                                                                                               : options_.irq5_per_frame;
     if (in_reset_ || ticks == 0) return;
+    const double frame_cycles = static_cast<double>(options_.cpu_hz) / options_.main_frame_hz;
+    frame_irq5_period_ = static_cast<uint64_t>(frame_cycles / ticks);
+    if (options_.irq5_phase > 0) { // the first a part of a frame after its end
+        frame_irq5_left_ = ticks;
+        frame_irq5_next_ = cpu_cycles() + static_cast<uint64_t>(frame_cycles * options_.irq5_phase);
+        return;
+    }
     set_irq(5, true);
     frame_irq5_left_ = ticks - 1;
-    frame_irq5_period_ = static_cast<uint64_t>(static_cast<double>(options_.cpu_hz) / options_.main_frame_hz / ticks);
     frame_irq5_next_ = frame_irq5_left_ ? cpu_cycles() + frame_irq5_period_ : UINT64_MAX;
 }
 
@@ -173,12 +179,36 @@ void CommBoard::deliver_receive() {
     std::vector<uint8_t> packet = link_->receive();
     if (packet.empty()) return; // nothing yet (or the link is down)
     ++packets_received;
-    uint8_t* comm = bank(false);
+    // (double_buffer: a data frame, into the bank the main board sees)
+    const bool data_frame = recv_offset_ > send_offset_ && recv_offset_ < send_offset_ + (send_size_ & 0x7FFFu);
+    uint8_t* comm = options_.double_buffer && data_frame ? bank(true) : bank(false);
     const std::size_t size = std::min<std::size_t>({packet.size(), recv_size_ & 0x7FFFu, 0x10000u - recv_offset_});
-    std::memcpy(comm + recv_offset_, packet.data(), size);
     receive_armed_ = false;
     send_waiting_ = false;
+    if (send_done_ == kForwarding) { // a slave's frame, with what came in where it lands: on to the next
+        const std::size_t out = std::min<std::size_t>(send_size_ & 0x7FFFu, 0x10000u - send_offset_);
+        std::vector<uint8_t> frame(bank(false) + send_offset_, bank(false) + send_offset_ + out);
+        const std::size_t at = recv_offset_ - send_offset_;
+        std::memcpy(frame.data() + at, packet.data(), std::min(size, out - at));
+        send_done_ = cpu_cycles() + static_cast<uint64_t>(options_.link_cycles_per_byte * static_cast<double>(at));
+        transmit(frame.data(), out);
+    }
+    std::memcpy(comm + recv_offset_, packet.data(), size);
     set_irq(6, true); // receive complete
+}
+
+// options_.ring_forwarding: a slave sending a frame its receive area lies
+// inside (the firmware's data frame: out from 0x100, in at 0xD00, a node's
+// part on; it arms the receiver just after) sends as the next frame comes
+// in, as a ring's node shifts on what it receives.
+bool CommBoard::forwards(std::size_t size) const {
+    return options_.ring_forwarding && slave() && recv_offset_ > send_offset_ && recv_offset_ < send_offset_ + size;
+}
+
+void CommBoard::transmit(const uint8_t* data, std::size_t size) {
+    link_->set_time(rescale(send_done_, options_.cpu_hz, options_.main_hz));
+    link_->send(data, size);
+    ++packets_sent;
 }
 
 // ---- 68000 side ----
@@ -243,11 +273,14 @@ void CommBoard::io_write(uint32_t index, uint16_t v, uint16_t mask, bool from_ho
     case kIoTxEnable:
         if (low == 0x80) { // data transfer enable: send now; it arrives once all of it has gone
             const std::size_t size = std::min<std::size_t>(send_size_ & 0x7FFFu, 0x10000u - send_offset_);
-            send_done_ = cpu_cycles() + static_cast<uint64_t>(options_.link_cycles_per_byte * static_cast<double>(size));
-            link_->set_time(rescale(send_done_, options_.cpu_hz, options_.main_hz));
-            link_->send(bank(false) + send_offset_, size);
-            ++packets_sent;
             send_waiting_ = options_.send_waits_for_receive;
+            if (forwards(size)) { // passed on as it comes in (deliver_receive)
+                send_done_ = kForwarding;
+                deliver_receive();
+                break;
+            }
+            send_done_ = cpu_cycles() + static_cast<uint64_t>(options_.link_cycles_per_byte * static_cast<double>(size));
+            transmit(bank(false) + send_offset_, size);
             deliver_receive();
         }
         break;
@@ -346,7 +379,25 @@ void CommBoard::cpu_write16(uint32_t a, uint16_t v) {
 
 // ---- Main board side ----
 
+void CommBoard::host_note(uint32_t addr, bool write, uint32_t value) {
+    if (!host_tracing) return;
+    const uint8_t region = static_cast<uint8_t>(host_region(addr));
+    const uint8_t which = static_cast<uint8_t>(commbank_ & 1);
+    const uint32_t a = addr & 0x3FFFF;
+    const uint64_t now = cpu_cycles();
+    if (!host_trace.empty() && region != kHostIo) { // a burst: the same kind of access, close by, soon after
+        HostRun& r = host_trace.back();
+        if (r.write == write && r.region == region && r.bank == which && now - r.last < 2000 && a + 64 >= r.lo && a <= r.hi + 64) {
+            r.last = now, r.lo = std::min(r.lo, a), r.hi = std::max(r.hi, a);
+            ++r.count;
+            return;
+        }
+    }
+    host_trace.push_back({now, now, a, a, value, 1, write, region, which});
+}
+
 uint8_t CommBoard::read8(uint32_t addr) {
+    host_note(addr, false, 0);
     switch (host_region(addr)) {
     case kHostComm: return host_comm(addr);
     case kHostIo: {
@@ -369,6 +420,7 @@ uint32_t CommBoard::read32(uint32_t addr) {
 }
 
 void CommBoard::write8(uint32_t addr, uint8_t data) {
+    host_note(addr, true, data);
     switch (host_region(addr)) {
     case kHostComm: host_comm(addr) = data; break;
     case kHostIo: {
@@ -389,6 +441,7 @@ void CommBoard::write8(uint32_t addr, uint8_t data) {
 
 void CommBoard::write16(uint32_t addr, uint16_t data) {
     if (host_region(addr) == kHostIo && (addr & 3) == 0) { // one access to the whole register
+        host_note(addr, true, data);
         io_write(host_io_index(addr), swap16(data), 0xFFFF, true);
         return;
     }
@@ -398,6 +451,7 @@ void CommBoard::write16(uint32_t addr, uint16_t data) {
 
 void CommBoard::write32(uint32_t addr, uint32_t data) {
     if (host_region(addr) == kHostIo) { // the register is the upper half
+        host_note(addr, true, data);
         io_write(host_io_index(addr), swap16(static_cast<uint16_t>(data >> 16)), 0xFFFF, true);
         return;
     }

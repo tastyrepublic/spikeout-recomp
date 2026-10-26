@@ -615,22 +615,122 @@ What the firmware's handlers settle (`hardware-notes.md` has the detail):
   |---|---|---|---|
   | 1 / 1, 4 MB/s (before) | 399 / 599 | 299 | 239 |
   | 4 / 1, 4 MB/s | 599 | checking | checking |
-  | 3 / 1, 20 MB/s (now) | 599 | 599 | 599 |
+  | 3 / 1, 20 MB/s (tried, withdrawn below) | 599 | 599 | 599 |
   | 3 / 1, instant | 599 | 599 | 599 |
 
-  So the master's IRQ 5 three times a frame (evenly spaced from the
-  frame's end), a slave's once (and with the master's frame), and 0.5
-  68000 cycles a byte on the wire (20 MB/s): `CommBoardOptions`
-  `irq5_per_frame` 3, `slave_irq5_per_frame` 1, `link_cycles_per_byte`
-  0.5; the old ones stay selectable (`gamerun --net-irq5-per-frame 1
-  --net-slave-irq5-per-frame 1 --link-byte-cycles 2.5`). Supermodel's
-  real-board emulation raises IRQ 5 four times a frame on every board
-  (`NetBoard.cpp`, "3 times more avoid network error"); four on our
-  master leaves rings of 3 and 4 on NETWORK CHECKING. What drives IRQ 5
-  and the link's rate on the real board are still unknown; these are the
-  values that let every ring size run as an arcade's does, at full speed.
-  Network play is unchanged in kind: two processes still give exactly
-  one `--boards 2 --parallel` run's reports and sound.
+  **Withdrawn (2026-10-26): that table was wrong.** The logic counter
+  goes up even when the game isn't running properly: with 3 ticks a frame
+  every board sat on a black (or red) screen with only INSERT COIN, no
+  attract scenes, while the counter said full speed. The defaults went
+  back to 1 tick a frame (slaves as the master) and 2.5 cycles a byte.
+  Measure speed from pictures instead: `gamerun --renderer gpu
+  --gpu-scale 1 --gpu-hash-frames --screenshot X.png` prints each board's
+  3D picture hash every frame; in a moving attract scene a game at full
+  speed makes a new picture every frame. Frames 1500-2099, new pictures
+  of 600 a board:
+
+  | setting | 1 board | 2 | 3 | 4 |
+  |---|---|---|---|---|
+  | 1 tick, 4 MB/s (default) | 600 | 400 | 300 | |
+  | 1 tick, 20 MB/s or instant wire | | | 300 | |
+  | 2 ticks or 4 ticks | | | stuck on COMMUNICATION BOARD DOWNLOADED | |
+  | 3 ticks | | | 600, but a blank 3D scene | |
+  | first tick 0.25 / 0.75 of a frame late (`--net-irq5-phase`) | | 400 | 300 | |
+  | first tick 0.5 of a frame late | | 240-300 | 200-240 | |
+  | slaves no own tick, only `0xE0`'s | | 300 | 200 | 0 |
+  | `--net-other-bank` | | 0 | 0 | |
+
+  Why it skips: `0x6DBE0` allows each cabinet's logic counter as received
+  (node `+28`) to be at most 2 behind its own (`0x140028` is 0, so own-2;
+  1 would mean own-1); `0x6D7EC` takes the counter back when not. The
+  partner's counter arrives 3 frames old on 2 boards, 4 on 3, 5 on 4: a
+  frame more for each cabinet in the ring. The node each board checks is
+  its own data come back round the ring (mask `0x14002C`: the master's
+  `0x80000001`, a slave's `0x40000001`); node structs at `0x140400` and
+  `0x140700`, `+28` the logic counter, `+0x58` the frame counter.
+
+  The timeline (`gamerun --net-trace N --net-host-trace FRAME:N`: the
+  68000's register accesses and the main board's comm RAM bursts, by 68000
+  cycle), 2 boards, in frames:
+  - master: bank swap at 0.001 (IRQ 5); sync out (7 bytes from `0x80`,
+    in at `0x90`) 0.005; sync back 0.140; data out 0.146 (`0x3200` bytes
+    from `0x100`, in at `0xD00`); the slave's data in 0.33.
+  - slave: own tick, bank swap 0.001; sync in 0.114, `0xE0`, bank swap
+    back 0.117; sync on 0.118; its data out 0.124 (before the master's
+    has come); the master's data in 0.35.
+  - each main board, once a frame at 0.675: reads `0xD00-0x15FF` and
+    `0x1900-0x21FF` (the nodes), writes its own `0x100-0x9FF`.
+
+  So each board sends its whole table and receives it a node's part
+  (`0xC00`) on: the layout of a ring that shifts the data through every
+  node in one pass (a slave's transmitter clocked by what it receives).
+  Here a slave's frame went out whole before the master's arrived, carrying
+  last frame's: a frame lost at each slave. `CommBoardOptions::
+  ring_forwarding` (now on by default; `gamerun --net-ring-forwarding off`)
+  holds a slave's frame whose receive area lies inside it until the next
+  frame comes in, and sends it with that in place. With it the master
+  runs at full speed on rings of 2, 3 and 4, all boards showing real
+  attract scenes; the slaves at 2/3 (400 of 600) whatever the size.
+
+  What's left is the master's bank: a slave swaps twice a frame (its own
+  tick, then `0xE0`'s), so it sends from and receives into the bank its
+  main board uses; the master swaps once, so what it receives (the
+  slaves' data) goes out again only two frames on, and each slave's own
+  data comes back 3 frames old. Tried with forwarding, none better
+  (3 boards, new pictures of 600, master / slaves): first tick 0.6 of a
+  frame late 450/400, 0.75 or 0.9 600/400; slaves without their own tick
+  600/300; the main board on the other bank, slaves without their own
+  tick 600/300 (without forwarding 200 all); master 2 ticks, slaves none
+  219 all (4 boards: stuck); receiving into the other bank: stuck (the
+  firmware reads what it receives, and that took the sync frames too).
+
+  **The ring model (the default since 2026-10-26, the owner's decision;
+  `--net-old-link` / `CommBoardOptions::use_old_link` for the link as it
+  was): every board at full speed.** From the firmware (disassembled with
+  `gamerun --net-disasm`): IRQ 5's handlers (master `0x208C`, slave
+  `0x2056`) swap the bank when `$60F` is set (it is, once linked), IRQ 2's
+  (`0x22AA`) always; the master's loop waits for IRQ 5 (`$608`) to start
+  each exchange (MAME: "data frame exchange cycle start signal on
+  MASTER"), and a slave's IRQ 5 comes from its own write to `0xE0` when
+  the master's sync is in, the handler clearing its poll count (D4). So a
+  slave's own end-of-frame tick (ours, `slave_irq5_per_frame` as the
+  master's) isn't in the firmware's design. Working through the banks:
+  data that passes through a node must go out from the bank it came into,
+  and the main board must read what came in and write into what goes out
+  next, with one swap an exchange. That's a double buffer: the main board,
+  and the data frames coming in, on the bank the 68000 hasn't selected;
+  the 68000's own sync frames on its own. Together:
+  1. slaves pass the master's data frame on as it comes (`ring_forwarding`);
+  2. the double buffer on every board (`double_buffer`);
+  3. a slave's tick only from `0xE0` (`slave_irq5_per_frame` 0).
+
+  New pictures of 600 (frames 1500-2099), every board:
+
+  | | 2 boards | 3 | 4 |
+  |---|---|---|---|
+  | as before (`--net-old-link`) | 400 | 300 | |
+  | all three (default) | 600 | 600 | 600 |
+  | without forwarding | 600 | 400 | 300 |
+  | double buffer on the master only, slaves' own tick kept | 600 | 600 | 600 |
+  | with the slaves' own tick | | 0 (stuck) | |
+
+  Run to frame 7200 (3 and 4 boards): linked all the way (2 packets a
+  frame each way), every board on the same attract scene, and new pictures
+  as a lone cabinet's over the same stretches (1690 of 1800 against 1691
+  through the attract's still moments). The window showed the master at
+  full speed too (the owner watched it; its log: logic +300 a 300 frames).
+  Not settled: the real hardware's banks and IRQ 5 are still unknown;
+  this is the arrangement the game's own lock-step check accepts at the
+  arcade's speed. Made the default (2026-10-26), proved: a lone cabinet's
+  pictures as before, hash for hash (2400 frames; its network board is
+  held in reset, so none of this touches it); `--net-old-link` as the old
+  default, hash for hash (3 boards, 2400 frames); network play (two
+  gamerun processes, 2 cabinets, 1500 frames) every picture of both
+  boards the same as one `--boards 2 --parallel` process, no hash check
+  differing. The network board's options are part of the build's id for
+  network play (`tools::build_id`), so machines with different ones can't
+  join each other ("a different game or build", tested with
+  `--net-old-link` on one side).
 - **How late a packet may arrive (measured 2026-10-25, with IRQ 5 once a
   frame and the wire at 4 MB/s: the limit is to measure again).** The real link is
   a cable, so a packet takes next to no time; ours adds a delay in game

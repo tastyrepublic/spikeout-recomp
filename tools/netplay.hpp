@@ -8,6 +8,7 @@
 #include "input_table.hpp"
 #include "net/lobby.hpp"
 #include "net/session.hpp"
+#include "runtime/commboard.hpp"
 #include "runtime/rom.hpp"
 
 #include <array>
@@ -17,6 +18,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -29,10 +31,24 @@ namespace tools {
 
 // What two machines must share to play together: the ROMs (sampled) and
 // the recompiled game (its functions), and the protocol.
-inline uint64_t build_id(const m3::RomSet& roms, std::size_t functions) {
+// The network board too (`link`, null for the simulated one): its options
+// change what the game does, so two machines must have the same.
+inline uint64_t build_id(const m3::RomSet& roms, std::size_t functions, const m3::CommBoardOptions* link) {
     uint64_t h = 0xCBF29CE484222325ull;
     auto mix = [&](uint64_t v) { h = (h ^ v) * 0x100000001B3ull; };
+    auto mixd = [&](double v) {
+        uint64_t bits = 0;
+        std::memcpy(&bits, &v, sizeof bits);
+        mix(bits);
+    };
     mix(net::kProtocol), mix(functions);
+    mix(link != nullptr);
+    if (link) {
+        mix(link->comm_ram_xor), mix(link->host_sees_other_bank), mix(link->cpu_hz), mix(link->irq5_hz);
+        mix(link->irq5_per_frame), mixd(link->irq5_phase), mix(link->irq5_on_e0), mix(link->slave_irq5_per_frame);
+        mixd(link->link_cycles_per_byte), mix(link->send_waits_for_receive), mix(link->ring_forwarding);
+        mix(link->double_buffer), mixd(link->main_frame_hz), mix(link->main_hz), mix(link->link_status);
+    }
     for (std::size_t r = 0; r < static_cast<std::size_t>(m3::RomRegionId::Count); ++r) {
         const auto& region = roms.region(static_cast<m3::RomRegionId>(r));
         mix(region.size());
