@@ -77,8 +77,10 @@ test("a public game listed (in progress too, while a cabinet is empty), joined b
 	guest.send({ t: "hello", build: "b1", name: "Bo" });
 	await guest.next("welcome");
 	guest.send({ t: "list" });
-	const { games } = await guest.next("games");
-	assert.deepEqual(games, [{ code, name: "Ann's game", seats: 2, taken: 1, started: false }]);
+	const { games, total } = await guest.next("games");
+	assert.equal(total, 1);
+	for (const g of games) { assert.equal(typeof g.country, "string"); delete g.country; } // (Cloudflare's; whatever wrangler dev says)
+	assert.deepEqual(games, [{ code, name: "Ann's game", seats: 2, taken: 1, started: false, session: "abcdef" }]); // (the session: a game found nearby too shown once)
 
 	guest.send({ t: "join", code: code.toLowerCase(), port: 47100, candidates: ["10.0.0.7:47100"] });
 	const joining = await guest.next("joining");
@@ -102,7 +104,10 @@ test("a public game listed (in progress too, while a cabinet is empty), joined b
 
 	host.send({ t: "update", taken: 1, started: true }); // in progress, a cabinet empty: still listed, joinable
 	guest.send({ t: "list" });
-	assert.deepEqual((await guest.next("games")).games, [{ code, name: "Ann's game", seats: 2, taken: 1, started: true }]);
+	assert.deepEqual(
+		(await guest.next("games")).games.map(({ country, ...g }) => g),
+		[{ code, name: "Ann's game", seats: 2, taken: 1, started: true, session: "abcdef" }],
+	);
 	guest.send({ t: "join", code, port: 1, candidates: [] });
 	assert.equal((await guest.next("joining")).session, "abcdef");
 	host.send({ t: "update", taken: 2, started: true }); // full: off the list, not joinable
@@ -121,4 +126,42 @@ test("a public game listed (in progress too, while a cabinet is empty), joined b
 	guest.send({ t: "join", code: secretCode, port: 1, candidates: [] });
 	assert.equal((await guest.next("error")).why, "no game with that code");
 	for (const p of [host, guest, other]) p.close();
+});
+
+test("the list: waiting games first, then those in progress, the newest first in each; 50 a page, and the total", async () => {
+	const hosts = [];
+	const host = async (name, started) => {
+		const h = await player();
+		h.send({ t: "hello", build: "order", name });
+		await h.next("welcome");
+		h.send({ t: "host", name, seats: 2, public: true, session: name, port: 1, candidates: [] });
+		await h.next("hosted");
+		if (started) h.send({ t: "update", taken: 1, started: true });
+		hosts.push(h);
+		await new Promise((r) => setTimeout(r, 15)); // (a later game: newer)
+	};
+	await host("old-waiting", false);
+	await host("old-playing", true);
+	await host("new-waiting", false);
+	await host("new-playing", true);
+
+	const guest = await player();
+	guest.send({ t: "hello", build: "order", name: "Ed" });
+	await guest.next("welcome");
+	guest.send({ t: "list" });
+	const first = await guest.next("games");
+	assert.deepEqual(first.games.map((g) => g.name), ["new-waiting", "old-waiting", "new-playing", "old-playing"]);
+	assert.equal(first.total, 4);
+
+	for (let i = 0; i < 48; ++i) await host(`more-${i}`, true); // 52 in all: two pages
+	guest.send({ t: "list" });
+	const page1 = await guest.next("games");
+	assert.equal(page1.total, 52);
+	assert.equal(page1.from, 0);
+	assert.equal(page1.games.length, 50);
+	guest.send({ t: "list", from: 50 });
+	const page2 = await guest.next("games");
+	assert.equal(page2.from, 50);
+	assert.deepEqual(page2.games.map((g) => g.name), ["new-playing", "old-playing"]); // (the oldest in progress, last)
+	for (const h of [...hosts, guest]) h.close();
 });

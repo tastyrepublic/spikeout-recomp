@@ -256,7 +256,7 @@ How it was proven (2026-10-25, one PC):
 Not done yet:
 play between two different networks (hole punching and the relay are
 tested only against Cloudflare's STUN from here); input delay adjusted
-during play; spectators; player names (the computer's user name for now).
+during play; spectators.
 
 Built (the owner's design, 2026-10-26): a network status display in the
 window, only in network games, with a "Network status" setting under
@@ -302,10 +302,50 @@ Only a crash or a lost connection still waits for kDropAfter (3 s);
 shortening that, or showing who is being waited for, is left until
 rollback (the owner's call).
 
-A game between gamerun and the window starts out of step (gamerun fills
-the main board's RAM with 0xA5 at power-on, the window doesn't) and is
-put back from the host's state at the first hash check; two windows
-start alike.
+gamerun and the window start alike (2026-10-26). gamerun used to fill the
+main board's RAM with 0xA5 at power-on (the window: zero), so a game
+between them was out of step at the first hash check (frame 120) and put
+back from the host's state. The game's pictures and sound were the same
+either way (proved: a lone cabinet's 2400 GPU picture hashes and its
+sound, two linked boards' pictures, each the same as with zero RAM), so
+gamerun now starts at zero too: a window hosting and gamerun joining from
+power-on, 2260 frames, no hash check differing.
+
+The Network play menu (2026-10-26, the owner's layout): Join a game, Host
+a game, Player name, Input delay. Join a game is one list of every game:
+this network's first ("nearby", found by its broadcasts from when Network
+play opens), then the internet lobby's listed ones ("internet"), each with
+its players and "playing" for one in progress, then Join by code and
+Refresh. A game in both (an internet host's broadcasts reach this network
+too) shows once, nearby, by its session: the lobby's list now carries
+each game's session (deployed 2026-10-26, version 4b4f8409; an older
+lobby's list has none, and the game then shows twice). Host a game:
+Players, Where (This network / Internet (listed) / Internet (private)),
+Start hosting. Seen: a host on the internet and on this network listed
+once, nearby, in another window's Join a game.
+
+The lobby's list with many games (2026-10-26, deployed, version
+7a976fcd): games still waiting for players first, then those in progress
+with an empty cabinet, the newest first in each (`created` when hosted);
+50 a message (`list {from}` -> `games {games, from, total}`), the window
+offering "More games (51-100 of 230)" and "Earlier games" rather than a
+cap (the owner's concern: every game stays reachable); each game with
+its host's country as Cloudflare sees it (`request.cf.country`, two
+letters: "(1/2, internet, GB)"), a hint for a near one. Tested in
+lobby/test (the order, two pages of 52 games, the total) and on the live
+lobby (a game under a made-up build listed with its country, GB here).
+One Durable Object holds every player; a lobby per region would be the
+next step if that ever gets crowded.
+
+Player names (2026-10-26, the owner's choice): "Player name" in the
+Network play menu, the same page as Join by code: up to 10 of A-Z, 0-9,
+space, - _ . (typed lower case comes out upper case; anything else is left
+out; Ctrl+V, the on-screen keyboard, OK). Kept in settings.ini
+(`player_name`); none set: this computer's user name, cleaned the same
+way (`tools::clean_name`); the others' names shown cleaned too (the
+menu's font has only Latin letters). The game's name in the nearby list
+and the lobby is the host's. Seen: a name typed (SPIKE1 X), kept, a game
+hosted and found by it; - and . typed, / left out.
 
 Open, the owner to decide (2026-10-26): joining a game in progress starts
 without background music until the next scene change. Each PC runs sound

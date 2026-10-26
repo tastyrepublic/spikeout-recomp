@@ -6,7 +6,8 @@
 // One WebSocket a player, JSON text messages, {"t": type, ...}:
 //
 //   hello  {build, name}                 -> welcome {address, turn}
-//   list   {}                            -> games {games: [{code, name, seats, taken, started}]}
+//   list   {from}                        -> games {games: [{code, name, seats, taken, started, session, country}],
+//                                                  from, total} (LIST_PAGE from `from`; waiting first, newest first)
 //   host   {name, seats, public, session, port, candidates}
 //                                        -> hosted {code}
 //   update {taken, started}              (the host's game)
@@ -28,6 +29,7 @@ const CODE_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // (no I, O, 0, 1)
 const CODE_LENGTH = 6;
 const MAX_MESSAGE = 4096;
 const MAX_CANDIDATES = 8;
+const LIST_PAGE = 50; // games a list message
 
 export default {
 	async fetch(request, env) {
@@ -66,6 +68,7 @@ export class Lobby extends DurableObject {
 		this.ctx.acceptWebSocket(server);
 		server.serializeAttachment({
 			ip: request.headers.get("CF-Connecting-IP") || "",
+			country: (request.cf && request.cf.country) || "", // (Cloudflare's: two letters, shown with a listed game)
 			name: "",
 			build: "",
 			game: null, // the game this player offers
@@ -110,11 +113,25 @@ export class Lobby extends DurableObject {
 				return send({ t: "welcome", address: a.ip, turn: Boolean(this.env.TURN_KEY_ID && this.env.TURN_KEY_API_TOKEN) });
 
 			case "list": {
-				const games = [];
+				// Those waiting for players first, then those in progress with an
+				// empty cabinet; the newest first in each. A page of LIST_PAGE from
+				// `from`, and how many there are (the game asks for the next page).
+				const open = [];
 				for (const p of this.players())
 					if (p.a.game && p.a.game.public && p.a.game.taken < p.a.game.seats && p.a.build === a.build) // (in progress too: an empty cabinet)
-						games.push({ code: p.a.game.code, name: p.a.game.name, seats: p.a.game.seats, taken: p.a.game.taken, started: p.a.game.started });
-				return send({ t: "games", games });
+						open.push(p.a);
+				open.sort((x, y) => Number(x.game.started) - Number(y.game.started) || (y.game.created || 0) - (x.game.created || 0));
+				const from = Math.max(0, Number(m.from) | 0);
+				const games = open.slice(from, from + LIST_PAGE).map((h) => ({
+					code: h.game.code,
+					name: h.game.name,
+					seats: h.game.seats,
+					taken: h.game.taken,
+					started: h.game.started,
+					session: h.game.session,
+					country: h.country || "",
+				}));
+				return send({ t: "games", games, from, total: open.length });
 			}
 
 			case "host": {
@@ -129,6 +146,7 @@ export class Lobby extends DurableObject {
 					started: false,
 					public: m.public !== false,
 					session: text(m.session, 20),
+					created: Date.now(),
 					candidates: candidates(m.candidates, seen && port ? `${seen}:${port}` : ""),
 				};
 				ws.serializeAttachment(a);

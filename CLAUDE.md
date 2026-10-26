@@ -89,15 +89,18 @@ a frame at scale 4), the settings menu and widescreen all work.
   tools::build_id, so machines that differ can't join each other.
   Timeline tool: gamerun --net-trace N --net-host-trace FRAME:N;
   firmware: --net-disasm FILE.
-  Built since (uncommitted when written): the network status display and
-  the new Join by code page (both in docs/netplay.md). Next: the
-  two-network test; the late-join music (the owner decides).
+  Built since (committed): the network status display, the new Join by
+  code page, goodbyes on every normal exit (all in docs/netplay.md); then
+  a player name setting, and gamerun's RAM starting at zero as the
+  window's (it was 0xA5: same pictures and sound, but network play
+  compares all of RAM). Next: the two-network test; the late-join music
+  (the owner decides); spectators, Auto delay during play, rollback,
+  Mode A.
   What's known and tried: docs/fidelity.md, "Linked games ran in slow motion". Window
   debug: SPIKEOUT_NET_DEBUG=1 prints each board's logic, inputs and
   network board every 300 frames; SPIKEOUT_MENU_KEYS="esc,down,enter,
-  right,down,down,enter,enter" hosts a 3-cabinet game alone. Test hacks to
-  remove once fixed: SPIKEOUT_TEST_PARALLEL, SPIKEOUT_TEST_SLEEP,
-  SPIKEOUT_TEST_DUMP_START, SPIKEOUT_TEST_RAM_ZERO.
+  right,down,down,enter,enter" hosts a 3-cabinet game alone (F13 in the
+  list waits a quarter second; the keys go on through a network game).
 - Record/replay: spikeout --record, gamerun --replay (66/66 hashes).
 - Smooth motion (frame interpolation, m3::interpolate, spikeout --smooth /
   menu setting, default OFF): ghosts remain (tower light, car wheels, gate,

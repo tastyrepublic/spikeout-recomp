@@ -185,3 +185,5 @@ div { display: block; }
 	decorator: horizontal-gradient(#ff8a2c #e8251f);
 	color: #1a0705;
 }
+
+.ckey.space { font-size: 15dp; }

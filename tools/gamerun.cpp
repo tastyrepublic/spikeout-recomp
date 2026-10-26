@@ -474,7 +474,11 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
     bus.midi_burst = o.midi_burst;
     bus.dma_timed = !o.dma_instant;
     bus.set_security_key(game.security_key);
-    if (o.replay) { // as the window started the recorded run: its clock, EEPROM and backup RAM, RAM as it was
+    // RAM from power-on as the window has it (zero). It was 0xA5 here once:
+    // the game's pictures and sound are the same either way (it writes
+    // before it reads), but network play compares all of RAM, so gamerun
+    // and the window must agree (docs/netplay.md).
+    if (o.replay) { // as the window started the recorded run: its clock, EEPROM and backup RAM
         bus.rtc().set_time(o.replay->clock, 0);
         std::copy(o.replay->eeprom.begin(), o.replay->eeprom.end(), bus.eeprom().words().begin());
         if (o.replay->backup.size() == m3::Bus::kBackupRamSize)
@@ -482,7 +486,6 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
     } else {
         if (o.clock) bus.rtc().set_time(*o.clock, 0);
         else tools::set_rtc_to_host(bus);
-        if (!std::getenv("SPIKEOUT_TEST_RAM_ZERO")) for (uint8_t& b : bus.ram()) b = 0xA5;
     }
     const std::vector<uint8_t>& eeprom =
         m.index < o.board_eeprom.size() && o.board_eeprom[m.index].size() == 128 ? o.board_eeprom[m.index] : o.eeprom_bytes;
@@ -552,8 +555,6 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
     };
     m.timing.on_frame_end = [&m, &o] {
         const uint64_t frame = m.timing.frames();
-        if (static const char* s = std::getenv("SPIKEOUT_TEST_SLEEP"); s && m.index == 0)
-            std::this_thread::sleep_for(std::chrono::milliseconds(std::atoi(s)));
         if (const uint64_t up = m.bus.real3d().textures_uploaded(); up != m.textures_seen) { // a frame that changed textures
             m.textures_seen = up;
             ++m.texture_frames;

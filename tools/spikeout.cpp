@@ -911,11 +911,14 @@ struct NetGame {
     }
 };
 
-// This computer's player's name for the others (its user's name).
-std::string player_name() {
+// This computer's player's name for the others: the one set in the menu,
+// else its user's name (tools::clean_name's rules both).
+std::string player_name(const tools::Settings& settings) {
+    if (!settings.player_name.empty()) return settings.player_name;
     for (const char* var : {"USERNAME", "USER"})
-        if (const char* v = std::getenv(var); v && *v) return std::string(v).substr(0, 24);
-    return "Player";
+        if (const char* v = std::getenv(var); v && *v)
+            if (std::string name = tools::clean_name(v); !name.empty()) return name;
+    return "PLAYER";
 }
 
 // The effects' and the music's volumes (percent), under the overall one.
@@ -1221,11 +1224,6 @@ int main(int argc, char** argv) {
                 ring->exchange();
                 shared.linked.finish();
             });
-        } else if (ring && std::getenv("SPIKEOUT_TEST_PARALLEL")) {
-            ring->set_deferred(true);
-            ring->set_latency((recomp::FrameTiming().frame_cycles() * kTurnLines + recomp::FrameTiming::kLines - 1) /
-                              recomp::FrameTiming::kLines);
-            turns = std::make_unique<tools::Turns>(boards, true, [&] { ring->exchange(); });
         } else {
             turns = std::make_unique<tools::Turns>(boards);
         }
@@ -1309,10 +1307,12 @@ int main(int argc, char** argv) {
     std::unique_ptr<NetGame> netgame;
     int net_seats = 2;      // a game offered: its players
     bool net_listed = true; // on the internet: in the lobby's list, or by its code only
+    int net_where = 0;      // a game offered: 0 this network, 1 the internet (listed), 2 the internet (private)
     int net_delay = 0;      // input delay in frames (0: as the arcade; -1: Auto, from the round trip at the start)
     std::unique_ptr<net::Discovery> discovery; // games on this network, while looked for
     std::unique_ptr<net::LobbyClient> browser; // the lobby's list, while looked at
     std::vector<net::Json> internet_games;
+    int internet_from = 0, internet_total = 0; // the lobby's list: the page shown (from this game), and how many there are
     std::vector<net::GameInfo> nearby_games;
     // This computer's cabinet (its first: board 0's settings and backup RAM,
     // as the board has them now), what it brings to a network game; its
@@ -1356,7 +1356,7 @@ int main(int argc, char** argv) {
         new_netgame();
         netgame->host = true;
         netgame->internet = internet;
-        const std::string name = player_name();
+        const std::string name = player_name(settings);
         if (!internet) {
             if (netgame->session().host(name, static_cast<uint8_t>(net_seats))) {
                 netgame->set_status("Offered on this network: waiting for players");
@@ -1386,7 +1386,7 @@ int main(int argc, char** argv) {
     };
     auto net_join_nearby = [&](const net::GameInfo& game) {
         new_netgame();
-        if (netgame->session().join(game, player_name())) netgame->set_status("Joining " + game.name + "...");
+        if (netgame->session().join(game, player_name(settings))) netgame->set_status("Joining " + game.name + "...");
         else netgame->fail("Can't join: " + netgame->session().error());
         netgame->ready = true;
     };
@@ -1396,7 +1396,7 @@ int main(int argc, char** argv) {
         netgame->code = code;
         netgame->set_status("Connecting to the lobby...");
         NetGame* g = netgame.get();
-        g->worker = std::thread([g, code, name = player_name(), build] {
+        g->worker = std::thread([g, code, name = player_name(settings), build] {
             const auto welcome = tools::lobby_hello(g->lobby, build, name, net::kLobbyUrl);
             if (!welcome) return g->fail("No lobby: " + g->lobby.error());
             if (!g->session().listen()) return g->fail(g->session().error());
@@ -1455,14 +1455,6 @@ int main(int argc, char** argv) {
             focus = start.my_seat;
         });
         netgame->running = true;
-        if (std::getenv("SPIKEOUT_TEST_DUMP_START")) {
-            std::printf("spikeout: start clock %lld\n", static_cast<long long>(start.clock));
-            for (std::size_t s = 0; s < start.seats; ++s) {
-                const std::vector<uint8_t> e = tools::seat_eeprom(start, s);
-                if (!e.empty()) tools::write_file("start-" + std::to_string(s) + ".eeprom", e);
-                if (s < start.backup.size() && !start.backup[s].empty()) tools::write_file("start-" + std::to_string(s) + ".backup", start.backup[s]);
-            }
-        }
         std::printf("spikeout: network game, seat %u of %u, input delay %llu%s\n", start.my_seat + 1, start.seats,
                     static_cast<unsigned long long>(delay), start.state_frame ? " (joined in progress)" : "");
         if (set_up_display) set_up_display();
@@ -1873,40 +1865,12 @@ int main(int argc, char** argv) {
                            }});
         return p;
     };
-    // Games found on the networks this computer is on (a broadcast; no internet).
-    std::function<ui::MenuPage()> nearby_page = [&] {
-        ui::MenuPage p{"Games nearby", "Games offered on this network (a LAN, or a hotspot this computer is on).", {}};
-        if (!discovery) {
-            discovery = std::make_unique<net::Discovery>();
-            if (!discovery->open()) std::printf("spikeout: can't look for games: %s\n", discovery->error().c_str());
-        }
-        nearby_games = discovery->poll();
-        for (const net::GameInfo& g : nearby_games) {
-            const std::string label = g.name + "  (" + std::to_string(g.taken) + "/" + std::to_string(g.seats) + ")";
-            if (g.build != build || g.taken >= g.seats)
-                p.items.push_back({label, g.build != build ? "A different game or build." : "Full.", [] { return std::string(); }, {},
-                                   {}, true});
-            else if (g.started)
-                p.items.push_back({label + "  (playing)", "Join this game in progress: an empty cabinet is yours once you've caught up.",
-                                   {}, {}, [&, g] {
-                                       net_join_nearby(g);
-                                       menu.pop();
-                                       menu.push(lobby_page());
-                                   }});
-            else
-                p.items.push_back({label, "Join this game.", {}, {}, [&, g] {
-                                       net_join_nearby(g);
-                                       menu.pop();
-                                       menu.push(lobby_page());
-                                   }});
-        }
-        if (nearby_games.empty()) p.items.push_back({"None found yet", "", {}, {}, {}, true});
-        p.items.push_back({"Refresh", "Look again (a game shows within a second or two).", {}, {}, [&] {
-                               menu.pop();
-                               menu.push(nearby_page());
-                           }});
-        p.items.push_back(back_item());
-        return p;
+    // Looking for games on the networks this computer is on (a broadcast; no
+    // internet), from when the Network play page opens.
+    auto look_nearby = [&] {
+        if (discovery) return;
+        discovery = std::make_unique<net::Discovery>();
+        if (!discovery->open()) std::printf("spikeout: can't look for games: %s\n", discovery->error().c_str());
     };
     // A game's code: typed (or pasted, Ctrl+V), or picked from an on-screen
     // keyboard with a pad or the mouse (ui::CodeInput). The lobby's codes
@@ -1927,66 +1891,159 @@ int main(int argc, char** argv) {
         };
         return p;
     };
-    // The lobby's list of games (listed ones; private ones by their code).
-    std::function<ui::MenuPage()> internet_page = [&] {
-        ui::MenuPage p{"Games on the internet", "", {}};
-        if (!browser) {
-            browser = std::make_unique<net::LobbyClient>();
-            browser->connect(tools::hex64(build), player_name(), net::kLobbyUrl);
+    // Every game there is to join, in one list (the owner's choice): this
+    // network's first (found by its broadcasts, no internet), then the
+    // internet lobby's listed ones (private ones: Join by code). A game in
+    // both (the same session) is shown once, nearby.
+    std::function<ui::MenuPage()> join_page = [&] {
+        ui::MenuPage p{"Join a game", "Games on this network and on the internet.", {}};
+        look_nearby();
+        nearby_games = discovery->poll();
+        const char* const kInProgress = "Join this game in progress: an empty cabinet is yours once you've caught up.";
+        auto label = [](const std::string& name, int taken, int seats, const std::string& where, bool playing) {
+            return name + "  (" + std::to_string(taken) + "/" + std::to_string(seats) + ", " + where + (playing ? ", playing)" : ")");
+        };
+        for (const net::GameInfo& g : nearby_games) {
+            const std::string text = label(g.name, g.taken, g.seats, "nearby", g.started);
+            if (g.build != build || g.taken >= g.seats)
+                p.items.push_back({text, g.build != build ? "A different game or build." : "Full.", [] { return std::string(); }, {},
+                                   {}, true});
+            else
+                p.items.push_back({text, g.started ? kInProgress : "Join this game (on this network).", {}, {}, [&, g] {
+                                       net_join_nearby(g);
+                                       menu.pop();
+                                       menu.push(lobby_page());
+                                   }});
         }
-        net::Json list = net::Json::object();
-        list.set("t", "list");
-        browser->send(list);
-        if (auto answer = browser->wait_for("games", 3000); answer && (*answer)["t"].as_string() == "games")
-            internet_games = (*answer)["games"].items();
-        for (const net::Json& g : internet_games) {
-            const std::string code = g["code"].as_string();
-            const bool playing = g["started"].as_bool();
-            p.items.push_back({g["name"].as_string() + "  (" + std::to_string(static_cast<int>(g["taken"].as_number())) + "/" +
-                                   std::to_string(static_cast<int>(g["seats"].as_number())) + ")" + (playing ? "  (playing)" : ""),
-                               playing ? "Join this game in progress: an empty cabinet is yours once you've caught up." : "Join this game.",
-                               {}, {}, [&, code] {
-                                   net_join_code(code);
+        std::string lobby_note;
+        if (net::LobbyClient::available()) {
+            if (!browser) {
+                browser = std::make_unique<net::LobbyClient>();
+                browser->connect(tools::hex64(build), player_name(settings), net::kLobbyUrl);
+            }
+            // A page of the lobby's list (it sends 50 at a time: waiting games
+            // first, then those in progress, the newest first in each).
+            net::Json list = net::Json::object();
+            list.set("t", "list"), list.set("from", internet_from);
+            browser->send(list);
+            if (auto answer = browser->wait_for("games", 3000); answer && (*answer)["t"].as_string() == "games") {
+                internet_games = (*answer)["games"].items();
+                internet_total = static_cast<int>((*answer)["total"].as_number()); // (0 from an older lobby: no pages)
+            }
+            if (browser->failed()) lobby_note = "No internet lobby: " + browser->error();
+            for (const net::Json& g : internet_games) {
+                const std::string name = g["name"].as_string();
+                const std::string session = g["session"].as_string(); // (hex; none from an older lobby)
+                if (!session.empty() && std::any_of(nearby_games.begin(), nearby_games.end(), [&](const net::GameInfo& n) {
+                        return tools::hex64(n.session) == session;
+                    }))
+                    continue; // (shown nearby)
+                const std::string code = g["code"].as_string();
+                const bool playing = g["started"].as_bool();
+                const std::string country = g["country"].as_string(); // (the host's, as Cloudflare sees it)
+                p.items.push_back({label(name, static_cast<int>(g["taken"].as_number()), static_cast<int>(g["seats"].as_number()),
+                                         country.empty() ? std::string("internet") : "internet, " + country, playing),
+                                   playing ? kInProgress : "Join this game (through the internet).", {}, {}, [&, code] {
+                                       net_join_code(code);
+                                       menu.pop();
+                                       menu.push(lobby_page());
+                                   }});
+            }
+        }
+        if (p.items.empty()) p.items.push_back({"No games found yet", "", {}, {}, {}, true});
+        if (!lobby_note.empty()) p.items.push_back({lobby_note, "", {}, {}, {}, true});
+        constexpr int kPage = 50; // (the lobby's)
+        if (internet_from + kPage < internet_total)
+            p.items.push_back({"More games (" + std::to_string(internet_from + kPage + 1) + "-" +
+                                   std::to_string(std::min(internet_from + 2 * kPage, internet_total)) + " of " +
+                                   std::to_string(internet_total) + ")",
+                               "The lobby's next games.", {}, {}, [&] {
+                                   internet_from += kPage;
                                    menu.pop();
-                                   menu.push(lobby_page());
+                                   menu.push(join_page());
                                }});
-        }
-        if (internet_games.empty())
-            p.items.push_back({browser->failed() ? "No lobby: " + browser->error() : "No games listed", "", {}, {}, {}, true});
-        p.items.push_back({"Join by code", "A private game, or one you were told the code of.", {}, {}, [&] { menu.push(code_page()); }});
-        p.items.push_back({"Refresh", "Ask the lobby again.", {}, {}, [&] {
+        if (internet_from > 0)
+            p.items.push_back({"Earlier games", "The lobby's games before these.", {}, {}, [&] {
+                                   internet_from = std::max(0, internet_from - kPage);
+                                   menu.pop();
+                                   menu.push(join_page());
+                               }});
+        if (net::LobbyClient::available())
+            p.items.push_back({"Join by code", "A private internet game, or one you were told the code of.", {}, {},
+                               [&] { menu.push(code_page()); }});
+        p.items.push_back({"Refresh", "Look again (a game nearby shows within a second or two).", {}, {}, [&] {
                                menu.pop();
-                               menu.push(internet_page());
+                               menu.push(join_page());
                            }});
         p.items.push_back(back_item());
+        return p;
+    };
+    // Offering a game: how many cabinets, and where (this network, or the
+    // internet lobby: in its list, or only by its code).
+    auto host_page = [&] {
+        ui::MenuPage p{"Host a game", "", {}};
+        p.items.push_back({"Players", "How many cabinets your game has (one for each player).",
+                           [&] { return std::to_string(net_seats); },
+                           [&](int d) { net_seats = std::clamp(net_seats + d, 2, static_cast<int>(net::kMaxSeats)); }});
+        if (net::LobbyClient::available())
+            p.items.push_back({"Where",
+                               "This network: computers on your network find it (no internet needed). Internet (listed): in "
+                               "the lobby's list for anyone. Internet (private): only by its code.",
+                               [&] {
+                                   return std::string(net_where == 0 ? "This network" : net_where == 1 ? "Internet (listed)"
+                                                                                                       : "Internet (private)");
+                               },
+                               [&](int d) { net_where = (net_where + d + 3) % 3; }});
+        p.items.push_back({"Start hosting", "Offer the game; it starts when you choose (players can also join it later).", {}, {},
+                           [&] {
+                               net_listed = net_where != 2;
+                               net_host(net_where != 0 && net::LobbyClient::available());
+                               menu.pop();
+                               menu.push(lobby_page());
+                           }});
+        p.items.push_back(back_item());
+        return p;
+    };
+    // The name the others see: typed, or picked like a game's code (the
+    // owner's choice: up to 10 of A-Z, 0-9, space, - _ .).
+    auto name_page = [&] {
+        ui::MenuPage p{"Player name",
+                       "The name the other players see (up to 10: A-Z, 0-9, space, - _ .). Type it, or pick its letters "
+                       "below. Backspace / Y: delete. Enter / Start: OK.",
+                       {}};
+        p.code = std::make_shared<ui::CodeInput>();
+        p.code->alphabet = tools::kNameLetters;
+        p.code->length = tools::kNameLength;
+        p.code->min_length = 1;
+        p.code->done_label = "OK";
+        p.code->text = player_name(settings);
+        p.code->done = [&](const std::string& name) {
+            if (const std::string clean = tools::clean_name(name); !clean.empty()) {
+                settings.player_name = clean;
+                changed();
+            }
+            menu.pop();
+        };
         return p;
     };
     auto network_page = [&] {
         ui::MenuPage p{"Network play",
                        "Each player on their own computer: every computer runs every cabinet, only the controls go between them.",
                        {}};
-        p.items.push_back({"Players", "How many cabinets a game you offer has.", [&] { return std::to_string(net_seats); },
-                           [&](int d) { net_seats = std::clamp(net_seats + d, 2, static_cast<int>(net::kMaxSeats)); }});
+        look_nearby(); // (so the games nearby are found by the time Join a game opens)
+        p.items.push_back({"Join a game", "Games on this network and on the internet, or one by its code.", {}, {},
+                           [&] {
+                               internet_from = 0; // (the lobby's first games)
+                               menu.push(join_page());
+                           }});
+        p.items.push_back({"Host a game", "Offer a game on this network or on the internet.", {}, {}, [&] { menu.push(host_page()); }});
+        p.items.push_back({"Player name", "The name the other players see. Enter: change it.", [&] { return player_name(settings); },
+                           {}, [&] { menu.push(name_page()); }});
         p.items.push_back({"Input delay",
                            "Frames your controls are sent ahead, so they reach the others in time. 0 is as the arcade; "
                            "Auto: 0 on a quick network, more the further away they are.",
                            [&] { return net_delay < 0 ? std::string("Auto") : std::to_string(net_delay); },
                            [&](int d) { net_delay = std::clamp(net_delay + d, -1, 4); }});
-        p.items.push_back({"Host on this network", "Offer a game to computers on this network (no internet needed).", {}, {},
-                           [&] {
-                               net_host(false);
-                               menu.push(lobby_page());
-                           }});
-        p.items.push_back({"Join a game nearby", "A game offered on this network.", {}, {}, [&] { menu.push(nearby_page()); }});
-        if (net::LobbyClient::available()) {
-            p.items.push_back({"Internet game", "Listed: in the lobby's list for anyone. Private: only by its code.",
-                               [&] { return std::string(net_listed ? "Listed" : "Private"); }, [&](int) { net_listed = !net_listed; }});
-            p.items.push_back({"Host on the internet", "Offer a game through the internet lobby.", {}, {}, [&] {
-                                   net_host(true);
-                                   menu.push(lobby_page());
-                               }});
-            p.items.push_back({"Join on the internet", "The lobby's games, or one by its code.", {}, {}, [&] { menu.push(internet_page()); }});
-        }
         p.items.push_back(back_item());
         return p;
     };
@@ -2224,7 +2281,7 @@ int main(int argc, char** argv) {
                     const bool news = now < seat_news[s];
                     ui::NetRow r;
                     r.seat = std::to_string(s + 1) + "P";
-                    for (char c : v.name) r.name += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                    r.name = tools::clean_name(v.name); // (as ours: what the menu's font has)
                     switch (v.state) {
                     case State::me: r.name = "YOU", r.look = ui::NetRow::Look::you; break;
                     case State::open: r.status = hosting ? "WAITING" : "OPEN", r.look = ui::NetRow::Look::dim; break;

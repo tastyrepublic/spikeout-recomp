@@ -52,10 +52,12 @@ struct NetRow {
 // a keyboard types into it (and pastes, Ctrl+V).
 struct CodeInput {
     std::string alphabet; // the letters a code may have (typed lower case: upper)
-    std::size_t length = 6;
+    std::size_t length = 6;      // at most
+    std::size_t min_length = 6;  // for the done key (a name: 1)
+    std::string done_label = "JOIN";
     std::string text;     // so far
-    int key = 0;          // the on-screen key selected: the letters, then Delete, Join
-    std::function<void(const std::string&)> done; // Join, the code whole
+    int key = 0;          // the on-screen key selected: the letters, then Delete, the done key
+    std::function<void(const std::string&)> done; // the done key (Enter, Start), the text long enough
 };
 
 struct MenuPage {

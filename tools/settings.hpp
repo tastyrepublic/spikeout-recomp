@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -51,6 +52,8 @@ struct Settings {
     int screen_filter = 0; // 0 off, 1 scanlines, 2 CRT
     // Sound, in percent: overall (0-100), and the effects and music (0-200) under it
     int volume = 100, sound_volume = 100, music_volume = 100;
+    // Network play: the name the others see (clean_name's; empty: this computer's user name)
+    std::string player_name;
     // Controls: two players' keys (SDL scancodes, 0: none)
     std::array<std::array<int, kActions>, 2> keys{{
         {SDL_SCANCODE_5, SDL_SCANCODE_1, SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT,
@@ -60,6 +63,23 @@ struct Settings {
     }};
     static Settings defaults() { return {}; }
 };
+
+// A player's name as the others see it (the owner's choice): up to
+// kNameLength of kNameLetters, lower case made upper, anything else left
+// out, no spaces at the ends. The menu's font has only Latin letters.
+constexpr std::size_t kNameLength = 10;
+constexpr const char* kNameLetters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_.";
+
+inline std::string clean_name(const std::string& name) {
+    std::string out;
+    for (char c : name) {
+        const char up = static_cast<char>(c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c);
+        if (up != '\0' && std::string(kNameLetters).find(up) != std::string::npos && out.size() < kNameLength) out += up;
+    }
+    const auto first = out.find_first_not_of(' ');
+    if (first == std::string::npos) return {};
+    return out.substr(first, out.find_last_not_of(' ') - first + 1);
+}
 
 // The data folder, ending in a separator.
 inline std::string data_folder() {
@@ -107,6 +127,7 @@ inline Settings load_settings(const std::string& path) {
     get("speakers", s.speakers, 0, 2);
     if (auto it = v.find("front_output"); it != v.end()) s.front_output = it->second;
     if (auto it = v.find("rear_output"); it != v.end()) s.rear_output = it->second;
+    if (auto it = v.find("player_name"); it != v.end()) s.player_name = clean_name(it->second);
     get("screen_filter", s.screen_filter, 0, 2);
     get("volume", s.volume, 0, 100);
     get("sound_volume", s.sound_volume, 0, 200);
@@ -131,6 +152,7 @@ inline bool save_settings(const std::string& path, const Settings& s) {
     o << "speakers = " << s.speakers << "\n";
     o << "front_output = " << s.front_output << "\n";
     o << "rear_output = " << s.rear_output << "\n";
+    o << "player_name = " << s.player_name << "\n";
     o << "crt_colours = " << s.crt_colours << "\n";
     o << "screen_filter = " << s.screen_filter << "\n";
     o << "volume = " << s.volume << "\n";

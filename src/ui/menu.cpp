@@ -294,12 +294,13 @@ void Menu::build_code() {
     };
     for (int k = 0; k < letters; ++k) {
         if (k % kCodeColumns == 0) rml += "<div class=\"krow\">";
-        key(k, std::string(1, c.alphabet[static_cast<std::size_t>(k)]), "");
+        const char letter = c.alphabet[static_cast<std::size_t>(k)];
+        key(k, letter == ' ' ? std::string("SPACE") : std::string(1, letter), letter == ' ' ? " space" : "");
         if (k % kCodeColumns == kCodeColumns - 1 || k == letters - 1) rml += "</div>";
     }
     rml += "<div class=\"krow\">";
     key(letters, "DELETE", " wide");
-    key(letters + 1, "JOIN", c.text.size() == c.length ? " wide ready" : " wide");
+    key(letters + 1, c.done_label, c.text.size() >= c.min_length ? " wide ready" : " wide");
     rml += "</div>";
     impl_->doc->GetElementById("rows")->SetInnerRML(rml);
     impl_->doc->GetElementById("note")->SetInnerRML(escape(stack_.back().note));
@@ -325,7 +326,7 @@ void Menu::code_type(const std::string& typed) {
         const char up = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
         if (c.text.size() < c.length && c.alphabet.find(up) != std::string::npos) c.text += up;
     }
-    if (c.text.size() == c.length) c.key = static_cast<int>(c.alphabet.size()) + 1; // (on to Join, for a pad)
+    if (c.text.size() == c.length) c.key = static_cast<int>(c.alphabet.size()) + 1; // (full: on to the done key, for a pad)
     build_code();
 }
 
@@ -338,7 +339,7 @@ void Menu::code_press(int k) {
     } else if (k == letters) {
         if (!c->text.empty()) c->text.pop_back();
         build_code();
-    } else if (c->text.size() == c->length && c->done) {
+    } else if (c->text.size() >= c->min_length && c->done) {
         auto f = c->done;
         f(c->text);
     } else {
@@ -364,7 +365,10 @@ bool Menu::code_event(const SDL_Event& e) {
             return true;
         case SDL_SCANCODE_RETURN:
         case SDL_SCANCODE_KP_ENTER: if (!e.key.repeat) code_press(letters + 1); return true;
-        case SDL_SCANCODE_SPACE: if (!e.key.repeat) code_press(c.key); return true;
+        case SDL_SCANCODE_SPACE: // (a space where the text may have one; else the on-screen key)
+            if (c.alphabet.find(' ') != std::string::npos) code_type(" ");
+            else if (!e.key.repeat) code_press(c.key);
+            return true;
         case SDL_SCANCODE_LEFT: code_move(-1, 0); return true;
         case SDL_SCANCODE_RIGHT: code_move(+1, 0); return true;
         case SDL_SCANCODE_UP: code_move(0, -1); return true;
@@ -383,6 +387,12 @@ bool Menu::code_event(const SDL_Event& e) {
             code_type(std::string(1, static_cast<char>('0' + (k - SDLK_0))));
         } else if (e.key.scancode >= SDL_SCANCODE_KP_1 && e.key.scancode <= SDL_SCANCODE_KP_9) {
             code_type(std::string(1, static_cast<char>('1' + (e.key.scancode - SDL_SCANCODE_KP_1))));
+        } else if (e.key.scancode == SDL_SCANCODE_KP_0) {
+            code_type("0");
+        } else if (k == SDLK_MINUS || e.key.scancode == SDL_SCANCODE_KP_MINUS) {
+            code_type((e.key.mod & SDL_KMOD_SHIFT) && k == SDLK_MINUS ? "_" : "-");
+        } else if (k == SDLK_PERIOD || e.key.scancode == SDL_SCANCODE_KP_PERIOD) {
+            code_type(".");
         }
         return true;
     }
