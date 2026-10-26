@@ -2030,6 +2030,7 @@ int main(int argc, char** argv) {
         }
     }
     std::size_t test_key = 0;
+    bool test_key_ready = false; // (frame 300 reached once)
     auto test_key_due = std::chrono::steady_clock::time_point{};
 
     uint64_t frames_seen = 0;
@@ -2067,7 +2068,10 @@ int main(int argc, char** argv) {
                                        [&] { return shared.frames_done != frames_seen; });
             frames_seen = shared.frames_done;
         }
-        if (test_key < test_keys.size() && shown_number[0] >= 300 && std::chrono::steady_clock::now() >= test_key_due) {
+        // (from the game's frame 300: the board shown, in a network game this player's; and then on, through a
+        // network game starting: its frames begin again)
+        if (test_key < test_keys.size() && (test_key_ready || shown_number[shared.netplay ? shared.local : 0] >= 300) && std::chrono::steady_clock::now() >= test_key_due) {
+            test_key_ready = true;
             SDL_Event key{};
             key.type = SDL_EVENT_KEY_DOWN;
             key.key.scancode = test_keys[test_key++];

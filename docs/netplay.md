@@ -288,6 +288,20 @@ Fixed with it: a host starting before every seat was taken told the lobby
 all were ("taken" as the seat count), so joining it by code said "that
 game is full"; now the seats with players (window and gamerun).
 
+Leaving says goodbye (2026-10-26, checked each way): closing the window,
+Alt+F4, the menu's Quit and Network play's Leave all send it (the window
+calls Session::leave as its loop ends, or on Leave). Tested with a host
+window and a joiner window, the joiner leaving each way: the host drops
+the seat the same second, its game never stopping (57.5 frames a second,
+60 the next while it caught up a few frames). Fixed doing so: with
+Alt+F4 the host froze 3 s (dropped only when silence ran out) because
+the leaving machine went on sending its inputs while it shut down and
+the host took them as signs of life; now nothing heard after a goodbye
+counts, and a machine that has said it sends nothing but the goodbye.
+Only a crash or a lost connection still waits for kDropAfter (3 s);
+shortening that, or showing who is being waited for, is left until
+rollback (the owner's call).
+
 A game between gamerun and the window starts out of step (gamerun fills
 the main board's RAM with 0xA5 at power-on, the window doesn't) and is
 put back from the host's state at the first hash check; two windows

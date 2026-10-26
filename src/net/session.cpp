@@ -439,7 +439,7 @@ struct Session::Impl {
         if (!p.reached || !d.from.relayed || now - p.direct_heard > std::chrono::seconds(1)) p.address = d.from;
         if (!d.from.relayed) p.direct_heard = now;
         p.reached = true;
-        p.heard = now;
+        if (!said_bye[from]) p.heard = now; // (after a goodbye, what still comes isn't a sign of life: dropped at once)
         p.connected = true;
         if (type == kReliable) on_reliable(from, p, r);
         else if (type == kInput) on_inputs(from, p, r);
@@ -900,6 +900,10 @@ struct Session::Impl {
             for (uint8_t s = 0; s < kMaxSeats; ++s) {
                 Peer& p = peers[s];
                 if (s == my_seat || !p.present || p.dropped) continue;
+                if (leaving) { // (gone: only the goodbye still to get through)
+                    pump_reliable(s, p);
+                    continue;
+                }
                 if ((p.inputs_due || inputs_pending(s, p)) && now - p.inputs_sent >= kInputResend) send_inputs(s, p);
                 else if (now - p.inputs_sent >= kKeepAlive) send_inputs(s, p);
                 pump_reliable(s, p);
