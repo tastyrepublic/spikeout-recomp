@@ -8,7 +8,7 @@
 //   hello  {build, name}                 -> welcome {address, turn}
 //   list   {from}                        -> games {games: [{code, name, seats, taken, started, session, country}],
 //                                                  from, total} (LIST_PAGE from `from`; waiting first, newest first)
-//   host   {name, seats, public, session, port, candidates}
+//   host   {name, seats, public, session, port, candidates[, takeover: code]}
 //                                        -> hosted {code}
 //   update {taken, started}              (the host's game)
 //   unhost {}
@@ -30,6 +30,7 @@ const CODE_LENGTH = 6;
 const MAX_MESSAGE = 4096;
 const MAX_CANDIDATES = 8;
 const LIST_PAGE = 50; // games a list message
+const ROOM_KEPT = 30 * 60 * 1000; // ms a game in progress is kept after its host goes, to take over
 
 export default {
 	async fetch(request, env) {
@@ -138,6 +139,7 @@ export class Lobby extends DurableObject {
 				if (!a.build) return send({ t: "error", why: "say hello first" });
 				const seats = Math.min(4, Math.max(2, Number(m.seats) | 0));
 				const port = Number(m.port) | 0;
+				const session = text(m.session, 20);
 				a.game = {
 					code: a.game ? a.game.code : this.newCode(),
 					name: text(m.name, 32) || a.name,
@@ -145,10 +147,22 @@ export class Lobby extends DurableObject {
 					taken: 1,
 					started: false,
 					public: m.public !== false,
-					session: text(m.session, 20),
+					session,
 					created: Date.now(),
 					candidates: candidates(m.candidates, seen && port ? `${seen}:${port}` : ""),
 				};
+				// Taking over a room whose host left its game in progress (a player
+				// in it hosts it now): the same code, name, seats and listing, if the
+				// session is that room's (only its players know it) and it's free.
+				if (m.takeover) {
+					const code = text(m.takeover, CODE_LENGTH).toUpperCase();
+					const was = await this.ctx.storage.get(`room:${code}`);
+					if (was && was.until > Date.now() && was.build === a.build && was.session === session && session &&
+						!this.players().some((p) => p.a.game && p.a.game.code === code)) {
+						Object.assign(a.game, { code, name: was.name, seats: was.seats, public: was.public, created: was.created });
+						await this.ctx.storage.delete(`room:${code}`);
+					}
+				}
 				ws.serializeAttachment(a);
 				return send({ t: "hosted", code: a.game.code });
 			}
@@ -197,11 +211,25 @@ export class Lobby extends DurableObject {
 		}
 	}
 
+	// A host gone: its game goes with its connection, but is remembered for a
+	// while (ROOM_KEPT), for a player of a game in progress to take over.
+	async remember(ws) {
+		const a = ws.deserializeAttachment() || {};
+		const g = a.game;
+		if (g && g.started && g.code && g.session)
+			await this.ctx.storage.put(`room:${g.code}`, {
+				session: g.session, build: a.build, name: g.name, seats: g.seats, public: g.public, created: g.created,
+				until: Date.now() + ROOM_KEPT,
+			});
+	}
+
 	async webSocketClose(ws, code, reason) {
+		await this.remember(ws);
 		ws.close(code, reason); // (its game, in its attachment, goes with it)
 	}
 
 	async webSocketError(ws) {
+		await this.remember(ws);
 		ws.close(1011, "error");
 	}
 }

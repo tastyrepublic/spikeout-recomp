@@ -172,6 +172,11 @@ struct Session::Impl {
     Clock::time_point epoch = Clock::now();
 
     bool is_host = false;
+    // The room's host: seat 0 until it leaves a game in progress, then the
+    // lowest seat still connected (every machine works it out alike: host
+    // migration). Only its welcome, roster and start are taken.
+    uint8_t host_seat = 0;
+    bool room_closed = false; // (a joiner: the host left before the game started)
     uint64_t session = 0;
     std::string game_name, my_name;
     std::vector<uint8_t> my_eeprom, my_backup; // this player's cabinet (Session::set_cabinet)
@@ -427,12 +432,18 @@ struct Session::Impl {
         }
         if (sess != session || from >= kMaxSeats || from == my_seat) return;
         Peer& p = peers[from];
+        // A player dropped: what still comes is ignored (first: the host's
+        // last goodbyes, coming after it was dropped, would otherwise bring it
+        // back as present below, take charge of the empty cabinets from us
+        // and leave its inputs to no one).
+        if (p.dropped) return;
         if (!p.present) {
-            if (is_host || from != 0) return; // (the host, before its welcome: from any of its addresses)
+            // (the host, before its welcome: from any of its addresses; joining a
+            // game whose host has moved on, the seat it hosts from is learnt then)
+            if (is_host || (my_seat != kNoSeat && from != host_seat)) return;
             p.present = true, p.connected = true, p.address = d.from;
             p.candidates = host_candidates;
         }
-        if (p.dropped) return;
         // Where it answers from is where to send (a router may move it);
         // straight to it rather than through our relay, once that works.
         const auto now = Clock::now();
@@ -450,8 +461,8 @@ struct Session::Impl {
         const std::string name = r.str();
         std::vector<Address> where = get_addresses(r);
         if (!r.ok()) return;
-        for (uint8_t s = 1; s < seats; ++s)
-            if (peers[s].present && peers[s].player == player) return; // (already in: our welcome is on its way)
+        for (uint8_t s = 0; s < seats; ++s)
+            if (s != my_seat && peers[s].present && peers[s].player == player) return; // (already in: our welcome is on its way)
         auto refuse = [&](const std::string& why) {
             Writer w = header(kRefuse, session, my_seat);
             w.str(why);
@@ -459,8 +470,8 @@ struct Session::Impl {
         };
         if (their_build != build) return refuse("a different game or build");
         uint8_t seat = kNoSeat; // (a game in progress: a cabinet no player has)
-        for (uint8_t s = 1; s < seats && seat == kNoSeat; ++s)
-            if (!peers[s].present && (!started || (cabinets[s].open && !cabinets[s].until))) seat = s;
+        for (uint8_t s = 0; s < seats && seat == kNoSeat; ++s) // (the old host's too, once the room has moved on)
+            if (s != my_seat && !peers[s].present && (!started || (cabinets[s].open && !cabinets[s].until))) seat = s;
         if (seat == kNoSeat) return refuse("the game is full");
         Peer& p = peers[seat];
         p = Peer{};
@@ -563,25 +574,26 @@ struct Session::Impl {
         Reader r(m.data(), m.size());
         switch (r.u8()) {
         case kWelcome:
-            if (from == 0 && !is_host) {
+            if (my_seat == kNoSeat && !is_host) {
+                host_seat = from; // (0, or whoever hosts the room now)
                 my_seat = r.u8();
                 seats = r.u8();
                 late = r.u8() != 0;
                 log("joined " + game_name + ", seat " + std::to_string(my_seat + 1) + (late ? " (the game in progress)" : ""));
                 Writer c; // our cabinet, for every machine to start our board from
                 c.u8(kCabinet), c.bytes(my_eeprom), c.bytes(my_backup);
-                send_reliable(0, c.out);
+                send_reliable(host_seat, c.out);
             }
             break;
         case kRoster: // (a game in progress too: a player joining)
-            if (from == 0 && !is_host) {
+            if (from == host_seat && !is_host) {
                 const uint8_t n = r.u8();
                 for (uint8_t s = 0; s < n && s < kMaxSeats && r.ok(); ++s) {
                     const bool present = r.u8() != 0;
                     const std::string name = r.str();
                     std::vector<Address> where = get_addresses(r);
-                    if (s == my_seat || s == 0) {
-                        if (s == 0) peers[0].name = name;
+                    if (s == my_seat || s == host_seat) {
+                        if (s == host_seat) peers[host_seat].name = name;
                         continue;
                     }
                     Peer& p = peers[s];
@@ -598,7 +610,7 @@ struct Session::Impl {
             }
             break;
         case kStart:
-            if (from == 0 && !is_host && !started) {
+            if (from == host_seat && !is_host && !started) {
                 StartInfo info;
                 info.seats = r.u8();
                 info.clock = static_cast<int64_t>(r.u64());
@@ -624,7 +636,7 @@ struct Session::Impl {
         case kState: { // every board as the host has them: a game joined in progress, or ours put back in step
             const uint64_t frame = r.u64();
             std::vector<uint8_t> state = r.bytes();
-            if (from != authority() && from != 0) break;
+            if (from != authority() && from != host_seat) break;
             if (!r.ok()) break;
             want_state = false;
             state_at = frame;
@@ -708,6 +720,10 @@ struct Session::Impl {
             peers[from].heard = Clock::time_point{}; // (as if silent for long: dropped next)
             said_bye[from] = true;
             log(peers[from].name + " left");
+            if (!started && !is_host && from == host_seat && !room_closed) { // (before the start: the room goes with it)
+                room_closed = true;
+                log("the host closed the room");
+            }
             break;
         default: break;
         }
@@ -770,6 +786,22 @@ struct Session::Impl {
         p.dropped = true; // (its datagrams, if any still come, ignored; a new player resets it)
         drops[s] = Drop{};
         fill_open_to_mine();
+        // The host gone from a game in progress: the room goes on, hosted by
+        // the lowest seat still connected (the authority, the same on every
+        // machine): it lets players in (welcome, roster, the start, the
+        // boards' state), and is found on the networks (beacons) and the lobby
+        // (the frontend, Session::hosting).
+        if (started && s == host_seat) {
+            host_seat = authority();
+            if (host_seat == my_seat) {
+                is_host = true;
+                targets_asked = Clock::time_point{}; // (the networks to announce it on, at once)
+                log("the host left: this machine hosts the room now");
+            } else {
+                log("the host left: " + (peers[host_seat].name.empty() ? "seat " + std::to_string(host_seat + 1) : peers[host_seat].name) +
+                    " hosts the room now");
+            }
+        }
     }
 
     // A cabinet a player has from frame `x` (taken in a game in progress).
@@ -796,9 +828,17 @@ struct Session::Impl {
         send_reliable(from, w.out);
     }
 
+    // Who makes the empty cabinets' inputs, settles drops and hands cabinets
+    // over: the room's host while it's there; else the lowest seat still
+    // connected, leaving out a player who joined the game in progress and
+    // hasn't its cabinet yet (it isn't running the game with the others).
     uint8_t authority() const {
+        auto connected = [&](uint8_t s) {
+            return s == my_seat || (peers[s].present && peers[s].connected && !drops[s].suspected);
+        };
+        if (host_seat < seats && connected(host_seat)) return host_seat;
         for (uint8_t s = 0; s < seats; ++s)
-            if (s == my_seat || (peers[s].present && peers[s].connected && !drops[s].suspected)) return s;
+            if (connected(s) && !(cabinets[s].open && !cabinets[s].until)) return s;
         return my_seat;
     }
 
@@ -890,6 +930,11 @@ struct Session::Impl {
             }
             if (turn) turn->tick(turn_send());
             if (started && !leaving) check_drops();
+            if (!started && !is_host && my_seat != kNoSeat && !room_closed && peers[host_seat].present &&
+                now - peers[host_seat].heard > kDropAfter) { // (before the start, a host gone quiet: the room is gone)
+                room_closed = true;
+                log("the host isn't answering: the room is closed");
+            }
             if (is_host && !started) // before the start, a player gone quiet frees the seat
                 for (uint8_t s = 1; s < seats; ++s)
                     if (peers[s].present && now - peers[s].heard > kDropAfter) {
@@ -930,8 +975,8 @@ struct Session::Impl {
     void beacon(Clock::time_point now) {
         last_beacon = now;
         Writer w = header(kBeacon, session, my_seat);
-        uint8_t taken = 1;
-        for (uint8_t s = 1; s < seats; ++s) taken = static_cast<uint8_t>(taken + (peers[s].present ? 1 : 0));
+        uint8_t taken = 1; // (ours, and the players present)
+        for (uint8_t s = 0; s < seats; ++s) taken = static_cast<uint8_t>(taken + (s != my_seat && peers[s].present ? 1 : 0));
         w.u64(build), w.str(game_name), w.u8(seats), w.u8(taken), w.u8(started ? 1 : 0), w.u16(socket.port());
         for (const Address& a : beacon_targets) send(a, w);
     }
@@ -1294,6 +1339,12 @@ bool Session::hosting() const {
     const Impl& m = *impl_;
     std::lock_guard guard(m.lock);
     return m.is_host;
+}
+
+bool Session::room_closed() const {
+    const Impl& m = *impl_;
+    std::lock_guard guard(m.lock);
+    return m.room_closed;
 }
 
 } // namespace net

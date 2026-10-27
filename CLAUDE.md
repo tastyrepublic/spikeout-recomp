@@ -98,9 +98,17 @@ a frame at scale 4), the settings menu and widescreen all work.
   code page, goodbyes on every normal exit (all in docs/netplay.md); then
   a player name setting, and gamerun's RAM starting at zero as the
   window's (it was 0xA5: same pictures and sound, but network play
-  compares all of RAM). Next: the two-network test; the late-join music
-  (the owner decides); spectators, Auto delay during play, rollback,
-  Mode A.
+  compares all of RAM). Then (all committed, 2026-10-27): the reorganized
+  Network play menu; lobby list pages with the host's country; rollback
+  step 1 (m3::Snapshots, each OS's own page tracking, proved by gamerun
+  --rollback-test); the Linux lobby fix (curl built when the system's
+  can't do wss); the room shown while in it (ROOM line, "Your room");
+  the host closing a room before the start takes the others out; host
+  migration in a game in progress (the lobby keeps the code: deployed).
+  All in docs/netplay.md. Next: rollback step 2 (re-runs that draw and
+  play nothing); the two-network test; the late-join music (the owner
+  decides); spectators, Auto delay during play, Mode A (the owner's
+  "direct connect": a cable link, decided later).
   What's known and tried: docs/fidelity.md, "Linked games ran in slow motion". Window
   debug: SPIKEOUT_NET_DEBUG=1 prints each board's logic, inputs and
   network board every 300 frames; SPIKEOUT_MENU_KEYS="esc,down,enter,

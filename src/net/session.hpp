@@ -197,7 +197,12 @@ public:
         int round_trip = -1; // ms (-1: not measured yet)
     };
     std::array<SeatView, kMaxSeats> seats() const;
+    // This machine hosts the room: from the start, or since the host left a
+    // game in progress (host migration: the lowest seat still connected).
     bool hosting() const;
+    // A player in a room whose game hadn't started: the host closed it (or
+    // went quiet). The frontend leaves it.
+    bool room_closed() const;
 
     // ---- Internet play (with the lobby, net::LobbyClient) ----
     // Our address as a STUN server sees it (our router's), found in the

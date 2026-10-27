@@ -84,14 +84,16 @@ public:
     // The frame rate in the top right corner, shown with the menu closed
     // too (empty: none).
     void set_fps(const std::string& text);
-    // A network game's seats, under the frame rate (empty: none).
-    void set_net(const std::vector<NetRow>& rows);
+    // A network game's seats, under the frame rate (empty: none), a line above
+    // them (`header`: a room waiting to start; empty: none).
+    void set_net(const std::vector<NetRow>& rows, const std::string& header = {});
 
     bool is_open() const { return open_; }
     void open(MenuPage root);
     void close();
     void push(MenuPage page); // a sub-page
     void pop();               // back a page; closes at the top
+    std::size_t depth() const { return stack_.size(); } // pages open (0: closed)
     void refresh();           // the values again (changed from outside)
     // Waits for a key or pad button: on_event sees each input event until it
     // returns true. Esc cancels. The prompt shows under the items meanwhile.

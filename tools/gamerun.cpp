@@ -1714,6 +1714,8 @@ int main(int argc, char** argv) {
     std::unique_ptr<tools::NetPlay> netplay;
     std::vector<uint8_t> join_state; // (a game joined in progress: every board's state, unpacked)
     const m3::CommBoardOptions link = link_options(o);
+    net::LobbyClient lobby_client; // (the whole run: a room taken over is listed again, below)
+    bool on_lobby = false;
     if (networked) {
         if (o.replay || o.load_state || !o.save_state.empty()) {
             std::fprintf(stderr, "gamerun: network play starts from power-on (no --replay or save states yet)\n");
@@ -1726,7 +1728,7 @@ int main(int argc, char** argv) {
         const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(120);
         const uint64_t build = tools::build_id(roms, functions.size(), o.real_netboard ? &link : nullptr);
         auto log = [](const std::string& s) { std::printf("net: %s\n", s.c_str()), std::fflush(stdout); };
-        net::LobbyClient lobby;
+        net::LobbyClient& lobby = lobby_client;
         std::optional<net::Json> welcome;
         if (!o.lobby_url.empty()) {
             if (!net::LobbyClient::available()) {
@@ -1812,7 +1814,15 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
-        const auto start = netplay->wait_start(std::chrono::seconds(120));
+        on_lobby = welcome.has_value();
+        std::optional<net::StartInfo> start;
+        while (!start && std::chrono::steady_clock::now() < give_up + std::chrono::seconds(120)) {
+            start = netplay->wait_start(std::chrono::milliseconds(100));
+            if (!start && session.room_closed()) {
+                std::fprintf(stderr, "gamerun: the host closed the room\n");
+                return 1;
+            }
+        }
         if (!start) {
             std::fprintf(stderr, "gamerun: the game didn't start\n");
             return 1;
@@ -1840,6 +1850,29 @@ int main(int argc, char** argv) {
                         static_cast<unsigned long long>(*start->state_frame), join_state.size() / 1024, start->state.size() / 1024);
         }
     }
+
+    // Joined through the lobby by its code: if the host leaves the game in
+    // progress and this machine hosts the room then (host migration), the
+    // room is listed again under that code, and players joining it let in.
+    std::jthread relist;
+    if (netplay && on_lobby && !o.net_join.empty())
+        relist = std::jthread([&lobby_client, &session = netplay->session(), code = o.net_join](std::stop_token stop) {
+            bool listed = false;
+            while (!stop.stop_requested()) {
+                if (!listed && session.hosting()) {
+                    listed = true;
+                    const auto again = tools::lobby_offer(lobby_client, session, "gamerun", 2, true, code);
+                    std::printf("net: on the lobby as %s (%s)\n", again ? again->c_str() : "nothing",
+                                again && *again == code ? "taken over" : "a new code");
+                    std::fflush(stdout);
+                    net::Json m = net::Json::object();
+                    m.set("t", "update"), m.set("taken", 1), m.set("started", true);
+                    lobby_client.send(m);
+                }
+                if (listed) tools::lobby_pump(lobby_client, session);
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+        });
 
     std::unique_ptr<m3::LinkRing> ring;
     if (o.boards > 1) {

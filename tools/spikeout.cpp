@@ -1305,6 +1305,8 @@ int main(int argc, char** argv) {
     if (shared.old_link) link.use_old_link();
     const uint64_t build = tools::build_id(roms, tools::game_functions().size(), shared.real_netboard ? &link : nullptr);
     std::unique_ptr<NetGame> netgame;
+    std::string net_notice; // (a line where the room's was, for a while: the host closed it)
+    std::chrono::steady_clock::time_point net_notice_until{};
     int net_seats = 2;      // a game offered: its players
     bool net_listed = true; // on the internet: in the lobby's list, or by its code only
     int net_where = 0;      // a game offered: 0 this network, 1 the internet (listed), 2 the internet (private)
@@ -1830,6 +1832,7 @@ int main(int argc, char** argv) {
         return p;
     };
     // Network play: a game offered or joined, as it gathers its players.
+    std::function<ui::MenuPage()> make_root; // (the main menu: root_page, below)
     auto lobby_page = [&] {
         ui::MenuPage p{"Network game", "", {}};
         p.items.push_back({"Status", "", [&] { return netgame ? netgame->get_status() : std::string("Left"); }, {}, {}, true});
@@ -1849,8 +1852,9 @@ int main(int argc, char** argv) {
                                    return players[s].empty() ? std::string("(free)") : players[s];
                                },
                                {}, {}, true});
-        if (netgame && netgame->host)
-            p.items.push_back({"Start",
+        const bool started = netgame && netgame->running;
+        if (netgame && netgame->host && !started) // (once it has started, nothing to start)
+            p.items.push_back({"Start game",
                                "Every cabinet from power-on, each player's from their own cabinet (the host's country). "
                                "Alone too: the empty cabinets stand in attract mode until players join the game in progress.",
                                {}, {}, [&] {
@@ -1859,11 +1863,27 @@ int main(int argc, char** argv) {
                                    for (const std::string& name : netgame->session().players()) present += name.empty() ? 0 : 1;
                                    if (netgame->session().ready_players() >= present) net_start(); // (each player's cabinet in)
                                }});
-        p.items.push_back({"Leave", "Leave the game (a player who leaves stands idle for the others).", {}, {}, [&] {
+        // What leaving does here: a room not started (the host's closes it), or
+        // a game (the others go on, this player's character standing idle).
+        const bool host = netgame && netgame->host;
+        p.items.push_back({started ? "Leave game" : host ? "Close room" : "Leave room",
+                           started ? "Leave the game: the others go on, your character standing idle; your own cabinet "
+                                     "comes back here."
+                           : host  ? "Close the room: nobody can join it any more."
+                                   : "Leave the room, before the game starts.",
+                           {}, {}, [&] {
                                net_leave();
-                               menu.pop();
+                               menu.open(make_root()); // (out of the room: the main menu as it is now)
                            }});
         return p;
+    };
+    // Into a room (hosted or joined): its page straight over the main menu, so
+    // Back from it never comes to Network play's Host / Join (which would
+    // start another room, closing this one).
+    // The main menu made again (it shows "Your room" in a room only).
+    auto to_room = [&] {
+        menu.open(make_root());
+        menu.push(lobby_page());
     };
     // Looking for games on the networks this computer is on (a broadcast; no
     // internet), from when the Network play page opens.
@@ -1885,9 +1905,7 @@ int main(int argc, char** argv) {
         p.code->length = 6;
         p.code->done = [&](const std::string& code) {
             net_join_code(code);
-            menu.pop();
-            menu.pop();
-            menu.push(lobby_page());
+            to_room();
         };
         return p;
     };
@@ -1911,8 +1929,7 @@ int main(int argc, char** argv) {
             else
                 p.items.push_back({text, g.started ? kInProgress : "Join this game (on this network).", {}, {}, [&, g] {
                                        net_join_nearby(g);
-                                       menu.pop();
-                                       menu.push(lobby_page());
+                                       to_room();
                                    }});
         }
         std::string lobby_note;
@@ -1945,8 +1962,7 @@ int main(int argc, char** argv) {
                                          country.empty() ? std::string("internet") : "internet, " + country, playing),
                                    playing ? kInProgress : "Join this game (through the internet).", {}, {}, [&, code] {
                                        net_join_code(code);
-                                       menu.pop();
-                                       menu.push(lobby_page());
+                                       to_room();
                                    }});
             }
         }
@@ -1998,8 +2014,7 @@ int main(int argc, char** argv) {
                            [&] {
                                net_listed = net_where != 2;
                                net_host(net_where != 0 && net::LobbyClient::available());
-                               menu.pop();
-                               menu.push(lobby_page());
+                               to_room();
                            }});
         p.items.push_back(back_item());
         return p;
@@ -2033,10 +2048,15 @@ int main(int argc, char** argv) {
         look_nearby(); // (so the games nearby are found by the time Join a game opens)
         p.items.push_back({"Join a game", "Games on this network and on the internet, or one by its code.", {}, {},
                            [&] {
+                               if (netgame) return to_room(); // (in a room already: that one)
                                internet_from = 0; // (the lobby's first games)
                                menu.push(join_page());
                            }});
-        p.items.push_back({"Host a game", "Offer a game on this network or on the internet.", {}, {}, [&] { menu.push(host_page()); }});
+        p.items.push_back({"Host a game", "Offer a game on this network or on the internet.", {}, {}, [&] {
+                               if (netgame) return to_room(); // (in a room already)
+                               menu.push(host_page());
+                           }});
+        if (netgame) p.items.erase(p.items.begin(), p.items.begin() + 2); // (in a room: no other until it's left)
         p.items.push_back({"Player name", "The name the other players see. Enter: change it.", [&] { return player_name(settings); },
                            {}, [&] { menu.push(name_page()); }});
         p.items.push_back({"Input delay",
@@ -2049,6 +2069,27 @@ int main(int argc, char** argv) {
     };
     auto root_page = [&] {
         ui::MenuPage p{"", "", {}};
+        // In a room (the menu closed with Esc doesn't leave it): first, and
+        // selected when the menu opens, so Enter goes back to it.
+        if (netgame)
+            p.items.push_back({"Your room",
+                               "You're still in this network game's room: Enter goes back to it (to start the game, or leave).",
+                               [&] {
+                                   if (!netgame) return std::string();
+                                   std::size_t taken = 0;
+                                   const auto players = netgame->session().players();
+                                   for (const std::string& name : players) taken += name.empty() ? 0 : 1;
+                                   const std::string count = std::to_string(taken) + "/" + std::to_string(players.size());
+                                   if (netgame->running) {
+                                       const auto seats = netgame->session().seats();
+                                       for (std::size_t s = 0; s < seats.size(); ++s)
+                                           if (seats[s].state == net::Session::SeatView::State::me)
+                                               return "Playing as " + std::to_string(s + 1) + "P";
+                                       return std::string("Playing");
+                                   }
+                                   return std::string(netgame->host ? "Hosting, " : "Joined, ") + count;
+                               },
+                               {}, [&] { menu.push(lobby_page()); }});
         p.items.push_back({"Resume", "Back to the game.", {}, {}, [&] { menu.close(); }});
         p.items.push_back({"Network play", netgame ? "The game you're in." : "Play with others, on this network or the internet.", {},
                            {}, [&] { menu.push(netgame ? lobby_page() : network_page()); }});
@@ -2064,6 +2105,7 @@ int main(int argc, char** argv) {
                            }});
         return p;
     };
+    make_root = root_page;
     bool menu_was_open = false;
     auto open_menu = [&] {
         if (menu_ready && !menu.is_open()) menu.open(root_page());
@@ -2229,6 +2271,44 @@ int main(int argc, char** argv) {
         // lobby told of players joining; the menu's lobby page kept up to
         // date; the controls let go while the menu is open (the game goes on).
         static auto net_refreshed = now;
+        // The host closed the room before the game started: out of it, and told.
+        if (netgame && !netgame->running && !netgame->host && netgame->session().room_closed()) {
+            net_leave();
+            net_notice = "THE HOST CLOSED THE ROOM";
+            net_notice_until = now + std::chrono::seconds(6);
+#ifdef SPIKEOUT_GPU
+            if (menu_ready && menu.is_open()) menu.open(make_root());
+#endif
+        }
+        // The host left the game in progress and this machine hosts the room
+        // now (host migration): on the internet, the room listed again under
+        // its code (the lobby still knows it), so the others can join it.
+        if (netgame && netgame->running && !netgame->host && netgame->session().hosting()) {
+            netgame->host = true;
+            netgame->set_status("The host left: you host the room now");
+            if (netgame->internet) {
+                netgame->ready = false; // (the listing below waits for this)
+                if (netgame->worker.joinable()) netgame->worker.join();
+                NetGame* g = netgame.get();
+                g->worker = std::thread([g, name = player_name(settings)] {
+                    std::string code;
+                    {
+                        std::lock_guard guard(g->lock);
+                        code = g->code;
+                    }
+                    const auto seats = static_cast<uint8_t>(g->session().players().size());
+                    // (listed or not as it was, if the lobby takes it over; else by its new code only)
+                    const auto again = tools::lobby_offer(g->lobby, g->session(), name, seats, false, code);
+                    {
+                        std::lock_guard guard(g->lock);
+                        g->code = again ? *again : std::string();
+                    }
+                    g->listed_taken = 0; // (the lobby told who's in, below)
+                    g->set_status(again ? "You host the room now" : "You host the room now (the lobby didn't answer)");
+                    g->ready = true;
+                });
+            }
+        }
         if (netgame) {
             if (netgame->host && netgame->internet && netgame->ready) { // (a game in progress too: players join it)
                 tools::lobby_pump(netgame->lobby, netgame->session());
@@ -2259,16 +2339,29 @@ int main(int argc, char** argv) {
 #ifdef SPIKEOUT_GPU
         // Network status (Settings::show_net), 4 times a second: each seat
         // under the frame rate. A seat's news (joined, left) shows in its
-        // row for a few seconds in place of its connection.
+        // row for a few seconds in place of its connection. In a room whose
+        // game hasn't started, a line above them says so (and its code): the
+        // menu can be closed without leaving the room, so it's always shown.
         static auto net_status_at = now;
         static std::array<net::Session::SeatView::State, net::kMaxSeats> seat_was{};
         static std::array<std::chrono::steady_clock::time_point, net::kMaxSeats> seat_news{};
         if (menu_ready && now - net_status_at > std::chrono::milliseconds(250)) {
             net_status_at = now;
             std::vector<ui::NetRow> net_rows;
+            std::string net_header = !netgame && now < net_notice_until ? net_notice : std::string();
             using State = net::Session::SeatView::State;
-            if (netgame && netgame->running) {
+            if (netgame) {
                 const auto seats = netgame->session().seats();
+                if (!netgame->running) {
+                    std::string code;
+                    {
+                        std::lock_guard guard(netgame->lock);
+                        code = netgame->code;
+                    }
+                    const bool in = std::any_of(seats.begin(), seats.end(), [&](const auto& v) { return v.state == State::me; });
+                    net_header = "ROOM " + (code.empty() ? std::string() : code + "  ") +
+                                 (netgame->host ? "(HOSTING)" : in ? "(JOINED)" : "(JOINING...)");
+                }
                 const bool hosting = netgame->session().hosting();
                 for (std::size_t s = 0; s < seats.size(); ++s) {
                     const auto& v = seats[s];
@@ -2308,7 +2401,8 @@ int main(int argc, char** argv) {
                 seat_was.fill(State::none);
                 seat_news.fill({});
             }
-            menu.set_net(settings.show_net ? net_rows : std::vector<ui::NetRow>());
+            // (Network status off: the seats left out, the room's line still shown)
+            menu.set_net(settings.show_net ? net_rows : std::vector<ui::NetRow>(), net_header);
         }
         if (menu_open && now - net_refreshed > std::chrono::milliseconds(250)) {
             net_refreshed = now;

@@ -140,6 +140,7 @@ bool Menu::init(SDL_GPUDevice* device, SDL_Window* window) {
         "#corner { position: absolute; right: 16dp; top: 10dp; } "
         "#fps { display: block; text-align: right; font-size: 26dp; color: #ffd34a; font-effect: outline(2dp #000000); } "
         "#net { display: block; margin-top: 4dp; } "
+        ".head { display: block; text-align: right; height: 24dp; font-size: 20dp; color: #ffd34a; font-effect: outline(2dp #000000); } "
         ".seat { display: flex; justify-content: flex-end; align-items: flex-end; height: 24dp; font-size: 20dp; "
         "color: #ffd34a; font-effect: outline(2dp #000000); } "
         ".seat.player { color: #ffffff; } .seat.fresh { color: #7fe07f; } .seat.dim { color: #9a9a9a; } "
@@ -160,9 +161,9 @@ void Menu::show_corner() {
     else impl_->fps->Hide();
 }
 
-void Menu::set_net(const std::vector<NetRow>& rows) {
+void Menu::set_net(const std::vector<NetRow>& rows, const std::string& header) {
     if (!impl_->fps) return;
-    std::string rml;
+    std::string rml = header.empty() ? std::string() : "<div class=\"head\">" + escape(header) + "</div>";
     for (const NetRow& r : rows) {
         static const char* const kLooks[] = {"you", "player", "fresh", "dim"};
         rml += "<div class=\"seat " + std::string(kLooks[static_cast<int>(r.look)]) + "\"><span class=\"p\">" + escape(r.seat) +
@@ -179,7 +180,7 @@ void Menu::set_net(const std::vector<NetRow>& rows) {
         }
         rml += "</div>";
     }
-    net_shown_ = !rows.empty();
+    net_shown_ = !rows.empty() || !header.empty();
     if (rml != net_rml_) {
         net_rml_ = rml;
         if (Rml::Element* e = impl_->fps->GetElementById("net")) e->SetInnerRML(rml);

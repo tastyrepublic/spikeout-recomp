@@ -4,6 +4,7 @@
 #include "net/session.hpp"
 #include "net/stun.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -206,4 +207,88 @@ TEST_CASE("net session: two machines on this one, inputs each frame, a hash, a g
     guest.reset();
     CHECK(host_seen.wait([&] { return host_seen.idle[1].has_value(); }));
     CHECK_EQ(*host_seen.idle[1], 210u);
+}
+
+TEST_CASE("net session: the host closing the room before the game starts takes the others out") {
+    Session host(Seen{}.callbacks(), 42);
+    CHECK(host.host("host", 2));
+    Seen guest_seen;
+    Session guest(guest_seen.callbacks(), 42);
+    GameInfo game{host.session_id(), 42, "host", 2, 1, false, Address{0x7F000001u, host.port()}, {}};
+    CHECK(guest.join(game, "guest"));
+    for (int i = 0; i < 300 && host.ready_players() < 2; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK_EQ(host.ready_players(), 2u);
+    CHECK(!guest.room_closed());
+    host.leave(); // (its goodbye)
+    bool closed = false;
+    for (int i = 0; i < 300 && !closed; ++i) {
+        closed = guest.room_closed();
+        if (!closed) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(closed);
+    CHECK(!guest.running());
+}
+
+TEST_CASE("net session: the host leaving a game in progress, the room goes on: a player joins it through the new host") {
+    Seen host_seen, a_seen, b_seen;
+    std::atomic<bool> a_wanted{false};
+    auto a_cb = a_seen.callbacks();
+    a_cb.state_wanted = [&] { a_wanted = true; };
+    uint64_t b_taken = 0;
+    auto b_cb = b_seen.callbacks();
+    b_cb.taken = [&](uint8_t seat, uint64_t frame) {
+        std::lock_guard g(b_seen.lock);
+        if (seat == 0) b_taken = frame;
+        b_seen.changed.notify_all();
+    };
+    auto host = std::make_unique<Session>(host_seen.callbacks(), 42);
+    CHECK(host->host("host", 2));
+    Session a(std::move(a_cb), 42);
+    GameInfo game{host->session_id(), 42, "host", 2, 1, false, Address{0x7F000001u, host->port()}, {}};
+    CHECK(a.join(game, "a"));
+    for (int i = 0; i < 300 && host->ready_players() < 2; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    host->start(StartInfo{});
+    CHECK(a_seen.wait([&] { return a_seen.started; }));
+    CHECK(!a.hosting());
+    for (uint64_t f = 1; f <= 50; ++f) {
+        host->local_input(f, {static_cast<uint8_t>(f), 0xFF, 0xFF, 0xFF});
+        a.local_input(f, {0x22, 0xFF, 0xFF, 0xFF});
+    }
+    CHECK(a_seen.wait([&] { return a_seen.inputs[0].size() == 50; }));
+
+    host.reset(); // the host leaves (its goodbye): seat 1 idle, and a hosts the room now
+    CHECK(a_seen.wait([&] { return a_seen.idle[0].has_value(); }));
+    CHECK_EQ(*a_seen.idle[0], 51u);
+    bool hosting = false;
+    for (int i = 0; i < 100 && !hosting; ++i) {
+        hosting = a.hosting();
+        if (!hosting) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(hosting);
+    for (uint64_t f = 51; f <= 80; ++f) a.local_input(f, {0x22, 0xFF, 0xFF, 0xFF}); // (seat 1: none, made by a)
+
+    // b finds the room at a (as its beacons or the lobby would say) and takes the old host's cabinet.
+    Session b(std::move(b_cb), 42);
+    GameInfo moved{a.session_id(), 42, "host", 2, 1, true, Address{0x7F000001u, a.port()}, {}};
+    CHECK(b.join(moved, "b"));
+    for (int i = 0; i < 300 && !a_wanted; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK(a_wanted.load()); // (b waits for every board's state, from a)
+    a.send_state(70, std::vector<uint8_t>(3000, 0x33));
+    CHECK(b_seen.wait([&] { return b_seen.started; }));
+    CHECK_EQ(b_seen.start.my_seat, 0); // the old host's cabinet
+    CHECK(b_seen.start.state_frame.has_value() && *b_seen.start.state_frame == 70u);
+    CHECK(b_seen.wait([&] { return b_seen.inputs[1].size() == 80 && b_seen.inputs[0].size() >= 80; }));
+    b.take_seat();
+    CHECK(b_seen.wait([&] { return b_taken != 0; }));
+    for (uint64_t f = 81; f <= 120; ++f) {
+        a.local_input(f, {0x22, 0xFF, 0xFF, 0xFF});
+        b.local_input(f, {0x44, 0xFF, 0xFF, 0xFF});
+    }
+    CHECK(a_seen.wait([&] { return a_seen.inputs[0].size() >= 120; }));
+    bool right = true; // seat 1 on a: the host's, then none, then b's from the hand-over
+    for (const auto& [f, in] : a_seen.inputs[0])
+        right = right && (f <= 50   ? in[0] == static_cast<uint8_t>(f)
+                          : f < b_taken ? in == InputBytes{0xFF, 0xFF, 0xFF, 0xFF}
+                                        : in == InputBytes{0x44, 0xFF, 0xFF, 0xFF});
+    CHECK(right);
 }

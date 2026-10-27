@@ -276,6 +276,60 @@ player who went quiet is dropped, WAITING for a free seat while hosting
 joiner was stopped, a game joined by code. Not yet seen: JOINED and LEFT
 on screen (they last 4 seconds).
 
+The host leaving (2026-10-27, the owner's choices):
+- Before the game starts, the room goes with the host: its goodbye (or
+  silence for kDropAfter) closes it for the others (Session::room_closed),
+  who leave it and see "THE HOST CLOSED THE ROOM" where the room's line
+  was (gamerun: "the host closed the room", exit). Seen with two windows.
+- In a game in progress, the room goes on (host migration): every machine
+  takes the lowest seat still connected as the room's host (host_seat, the
+  same rule as the authority). It welcomes players, sends the roster and
+  the start, and the boards' state to a player catching up (any machine
+  can), announces the room on its networks, and (the frontend, seeing
+  Session::hosting) lists it on the lobby again. The others take room news
+  from host_seat, not seat 1; a player joining learns it from the welcome;
+  free seats, the old host's included, can be taken. The authority is now
+  the room's host while it's connected (else the lowest connected seat,
+  leaving out a player joined in progress who hasn't its cabinet yet: else
+  the new player in seat 1 would have been in charge before catching up).
+  Proved: unit tests (closing before the start; the host leaving, a player
+  joining through the new host, its seat taken, inputs right), and gamerun
+  on this network: the host left at frame 900, A hosted the room, B
+  (started later) found it by name at A, took seat 1 from frame 2995, both
+  to frame 4000, no hash check differing. And in two windows: the host
+  closed, the joiner hosting the room.
+- The lobby remembers a room in progress whose host went (30 minutes:
+  ROOM_KEPT, Durable Object storage); a player of it, hosting it now, lists
+  it again under the same code, name, seats and listing (`host` with
+  `takeover: code`, matched by the room's session, which only its players
+  know); else a new code. lobby/test: the takeover, and a stranger refused.
+  Deployed by the owner (2026-10-27). Through it: H hosted privately
+  (KKFXVU), A joined by the code, H left at frame 900, A hosted and listed
+  it again ("on the lobby as KKFXVU (taken over)"), B joined by that same
+  code, took seat 1 from frame 2991; no hash check differing anywhere.
+  (Before the deploy it came back under a new code, and the old one found
+  nothing: the fallback.)
+- Menus: entering a room puts its page straight over the main menu, made
+  again (so "Your room" shows); leaving or closing makes it again too.
+  Network play's Host and Join aren't there while in a room.
+
+Being in a room, shown (2026-10-27, the owner's request): Esc closes the
+menu without leaving the room (to change settings), so:
+- the seat list shows from when a room is joined or hosted, not only in a
+  game, with a line above it until the game starts: "ROOM (HOSTING)",
+  "ROOM ABC123 (HOSTING)" on the internet, "ROOM (JOINED)" (that line
+  stays with Network status off: it's the notice, the seats the status);
+- the main menu's first item, while in a room, is "Your room" ("Hosting,
+  1/2", "Joined, 2/2", "Playing as 2P"), selected when the menu opens;
+  Enter goes to the room;
+- the room page: "Start game" only for the host and only before the
+  start; the leave item says what it does: "Close room" (the host before
+  the start), "Leave room" (a player before it), "Leave game" (once
+  playing: the others go on, this player's character idle).
+Seen with two windows: the host alone, then joined (2P JOINED), the
+joiner's ROOM (JOINED) with the host's ping, the menus before and after
+the start.
+
 Join by code (2026-10-26, the owner's choice): one box of the code's six
 letters (`ui::CodeInput`), typed on the keyboard (Backspace deletes one,
 Delete all, Ctrl+V pastes, Enter joins; letters a code never has, I, O,
@@ -298,6 +352,16 @@ Alt+F4 the host froze 3 s (dropped only when silence ran out) because
 the leaving machine went on sending its inputs while it shut down and
 the host took them as signs of life; now nothing heard after a goodbye
 counts, and a machine that has said it sends nothing but the goodbye.
+The host leaving (2026-10-27, the owner saw it Windows host, Linux joiner):
+the joiner dropped the host's seat, then froze. The host's goodbyes come
+a few times; one coming after the drop met the code for "the host before
+its welcome", which marked it present and connected again before seeing
+it dropped. Taken as there, the gone host was the authority again (the
+lowest seat connected), so the joiner stopped making the empty cabinet's
+inputs and nobody made them: its board waited for them (found by a long
+wait reported: the dropped seat's inputs stopped two frames after the
+drop). Now a dropped player's datagrams are ignored first. Two windows,
+the host closed in a game: the joiner on at 57.5 frames a second.
 Only a crash or a lost connection still waits for kDropAfter (3 s);
 shortening that, or showing who is being waited for, is left until
 rollback (the owner's call).

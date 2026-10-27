@@ -242,13 +242,16 @@ inline void find_addresses(net::LobbyClient& lobby, net::Session& session, bool 
 }
 
 // Offers the session's game on the lobby (public: in its list; either way
-// by the code returned).
+// by the code returned). `takeover`: the code of the room this machine hosts
+// now (its host left the game in progress): the lobby lists it under that
+// code again, as it was, if it still remembers it (else a new code).
 inline std::optional<std::string> lobby_offer(net::LobbyClient& lobby, net::Session& session, const std::string& name,
-                                              uint8_t seats, bool listed) {
+                                              uint8_t seats, bool listed, const std::string& takeover = {}) {
     net::Json m = net::Json::object();
     m.set("t", "host"), m.set("name", name), m.set("seats", static_cast<int>(seats)), m.set("public", listed);
     m.set("session", hex64(session.session_id())), m.set("port", static_cast<int>(session.port()));
     m.set("candidates", address_list(session.candidates()));
+    if (!takeover.empty()) m.set("takeover", takeover);
     lobby.send(m);
     const auto hosted = lobby.wait_for("hosted", 10000);
     if (!hosted || (*hosted)["t"].as_string() != "hosted") return std::nullopt;

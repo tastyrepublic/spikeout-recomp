@@ -165,3 +165,39 @@ test("the list: waiting games first, then those in progress, the newest first in
 	assert.deepEqual(page2.games.map((g) => g.name), ["new-playing", "old-playing"]); // (the oldest in progress, last)
 	for (const h of [...hosts, guest]) h.close();
 });
+
+test("a game in progress whose host goes: a player of it takes it over under its code; others can't", async () => {
+	const host = await player();
+	host.send({ t: "hello", build: "takeover", name: "Ann" });
+	await host.next("welcome");
+	host.send({ t: "host", name: "Ann's room", seats: 3, public: true, session: "s3ss10n", port: 1, candidates: [] });
+	const { code } = await host.next("hosted");
+	host.send({ t: "update", taken: 2, started: true });
+	await new Promise((r) => setTimeout(r, 100));
+	host.close(); // (gone: the room remembered)
+	await new Promise((r) => setTimeout(r, 300));
+
+	const stranger = await player(); // (not of that room: a session of its own)
+	stranger.send({ t: "hello", build: "takeover", name: "Cy" });
+	await stranger.next("welcome");
+	stranger.send({ t: "host", name: "Cy", seats: 2, session: "other", takeover: code, port: 1, candidates: [] });
+	assert.notEqual((await stranger.next("hosted")).code, code);
+
+	const bo = await player(); // a player of it, hosting it now
+	bo.send({ t: "hello", build: "takeover", name: "Bo" });
+	await bo.next("welcome");
+	bo.send({ t: "host", name: "Bo", seats: 2, session: "s3ss10n", takeover: code, port: 1, candidates: [] });
+	assert.equal((await bo.next("hosted")).code, code);
+	bo.send({ t: "update", taken: 1, started: true });
+	const guest = await player();
+	guest.send({ t: "hello", build: "takeover", name: "Ed" });
+	await guest.next("welcome");
+	guest.send({ t: "list" });
+	const g = (await guest.next("games")).games.find((x) => x.code === code);
+	assert.ok(g);
+	assert.equal(g.name, "Ann's room"); // (the room's name and seats, as it was)
+	assert.equal(g.seats, 3);
+	guest.send({ t: "join", code, port: 1, candidates: [] });
+	assert.equal((await guest.next("joining")).session, "s3ss10n");
+	for (const p of [stranger, bo, guest]) p.close();
+});
