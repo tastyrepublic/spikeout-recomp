@@ -37,6 +37,14 @@ void TileSides::draw(int layer, int row, int column, uint16_t entry, uint16_t ma
     pending_[static_cast<std::size_t>(index(layer, row, right, i))] = Cell{entry, map, 1, 1};
 }
 
+void TileSides::fade(int layer, int row, int column, uint16_t map) {
+    if (!valid(layer, row)) return;
+    const bool right = column >= kScreen;
+    const int i = right ? column - kScreen : -1 - column;
+    if (i < 0 || i >= kSide) return;
+    pending_[static_cast<std::size_t>(index(layer, row, right, i))] = Cell{0, map, kFadeCell, 1};
+}
+
 void TileSides::fill_edge(int layer, int row, bool right) {
     if (!valid(layer, row)) return;
     for (int i = 0; i < kSide; ++i) {
@@ -52,7 +60,7 @@ void TileSides::copy(int layer) {
             for (int i = 0; i < kSide; ++i) {
                 const auto at = static_cast<std::size_t>(index(layer, row, side != 0, i));
                 Cell& c = pending_[at];
-                shown_[at] = c.full ? name_table_entry(c.entry) : kEmpty;
+                shown_[at] = c.full == kFadeCell ? kFade : c.full ? name_table_entry(c.entry) : kEmpty;
                 c.drawn = 0;
             }
 }

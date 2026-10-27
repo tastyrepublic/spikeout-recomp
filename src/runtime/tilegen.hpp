@@ -77,7 +77,10 @@ public:
     // side into bottom_own() and top_own() (laid out as the sides; nothing
     // where there are none), such lines marked in bottom_real() and
     // top_real() (bit 0 left, bit 1 right), for m3::WideLayer to put over
-    // its sides there.
+    // its sides there. The other layers' sides are drawn there too, in
+    // front of or behind as on the screen. A fade past a picture's edge
+    // (TileSides::kFade) draws nothing there and is marked too (bit 2 left,
+    // bit 3 right): WideLayer continues the fade under what was drawn.
     // Takes effect at begin_frame.
     void set_extend(int extend) { next_extend_ = extend; }
     int extend() const { return extend_; }

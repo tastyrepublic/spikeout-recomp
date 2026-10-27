@@ -212,11 +212,81 @@ void WideLayer::build(std::span<const uint32_t> layer, std::span<const uint32_t>
     if (!has_side || own.size() != side.size() || real.size() != static_cast<std::size_t>(kHeight)) return;
     for (int y = 0; y < kHeight; ++y)
         for (int s = 0; s < 2; ++s) {
-            if (!(real[static_cast<std::size_t>(y)] & (1u << s))) continue;
+            const uint8_t mark = real[static_cast<std::size_t>(y)];
+            if (!(mark & (1u << s))) continue;
             const uint32_t* from = own.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(2 * e) +
                                    static_cast<std::size_t>(s ? e : 0);
-            std::copy_n(from, e, out.begin() + static_cast<std::ptrdiff_t>(y) * wide + (s ? e + kWidth : 0));
+            uint32_t* to = out.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(wide) +
+                           static_cast<std::size_t>(s ? e + kWidth : 0);
+            if (!(mark & (4u << s))) {
+                std::copy_n(from, e, to);
+                continue;
+            }
+            fade(layer, real, own, y, s, e, to);
+            for (int i = 0; i < e; ++i) // what the tile generator drew in front of it
+                if (from[i] >> 24) to[i] = from[i];
         }
+}
+
+// A picture fading out at its edge (the linking screen's spotlight): each
+// row's fade goes on at the rate it changes over the kFadeProbe pixels in
+// from the edge, darkening only, so the spotlight closes in its own curve.
+// The picture is dithered: its colour at the edge and kFadeProbe in are
+// each the average of kFadeSpan pixels, over the fade rows within
+// kFadeRows whose pixels there are all grey and that nothing in front
+// crosses past the edge (`own`: a marquee's letters, whose highlights and
+// outlines can pass for grey); where none are, the nearest such row's.
+void WideLayer::fade(std::span<const uint32_t> layer, std::span<const uint8_t> real, std::span<const uint32_t> own, int y,
+                     int s, int e, uint32_t* to) {
+    auto grey = [](uint32_t p) {
+        const int r = static_cast<int>((p >> 16) & 255), g = static_cast<int>((p >> 8) & 255), b = static_cast<int>(p & 255);
+        return (p >> 24) && std::abs(r - g) <= kGrey && std::abs(g - b) <= kGrey && std::abs(r - b) <= kGrey;
+    };
+    // Adds row's edge and inner colours to the sums, if they're the picture's.
+    std::array<float, 6> sum{};
+    float weights = 0;
+    auto add = [&](int row, float weight) {
+        if (row < 0 || row >= kHeight || !(real[static_cast<std::size_t>(row)] & (4u << s))) return;
+        const uint32_t* front = own.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(2 * e) +
+                                static_cast<std::size_t>(s ? e : 0);
+        if (std::any_of(front, front + e, [](uint32_t p) { return (p >> 24) != 0; })) return;
+        auto px = [&](int i) { return layer[static_cast<std::size_t>(row * kWidth + (s ? kWidth - 1 - i : i))]; };
+        std::array<float, 6> here{};
+        for (int i = 0; i < kFadeSpan; ++i)
+            for (const int at : {i, kFadeProbe + i}) {
+                const uint32_t p = px(at);
+                if (!grey(p)) return;
+                for (int c = 0; c < 3; ++c) here[static_cast<std::size_t>((at == i ? 0 : 3) + c)] += static_cast<float>((p >> (8 * c)) & 255);
+            }
+        for (std::size_t k = 0; k < sum.size(); ++k) sum[k] += weight * here[k] / kFadeSpan;
+        weights += weight;
+    };
+    for (int d = -kFadeRows; d <= kFadeRows; ++d) // nearer rows count more
+        add(y + d, static_cast<float>(kFadeRows + 1 - std::abs(d)));
+    for (int d = kFadeRows + 1; d < kHeight && weights == 0; ++d) {
+        add(y - d, 1);
+        if (weights == 0) add(y + d, 1);
+    }
+    // Out from the edge the fade starts at the picture's rate and eases into
+    // black kFadeEase times as far out as that rate would reach it: with t
+    // the distance over that, at * (1 - 1.5 t + 0.5 t^3), which leaves the
+    // edge at the picture's rate and comes to black flat.
+    for (int d = 1; d <= e; ++d) { // d pixels out from the edge
+        uint32_t p = 0xFF000000u;
+        if (weights > 0)
+            for (int c = 0; c < 3; ++c) {
+                const float at = sum[static_cast<std::size_t>(c)] / weights;
+                const float in = sum[static_cast<std::size_t>(3 + c)] / weights;
+                const float step = (in - at) / kFadeProbe;
+                float v = at;
+                if (step > 0) {
+                    const float t = std::min(1.0f, static_cast<float>(d) * step / (kFadeEase * std::max(at, 1.0f)));
+                    v = at * (1.0f - 1.5f * t + 0.5f * t * t * t);
+                }
+                p |= static_cast<uint32_t>(std::clamp(v, 0.0f, 255.0f) + 0.5f) << (8 * c);
+            }
+        to[s ? d - 1 : e - d] = p;
+    }
 }
 
 } // namespace m3

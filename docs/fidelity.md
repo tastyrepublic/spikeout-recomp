@@ -326,6 +326,28 @@ every other 16:9 picture from power-on through the attract sequence are the
 same (597 of 597, and every frame of the strips but their own), and the
 hooks only read the game's state (save states and replays unchanged).
 
+The tile generator draws the other layers' sides in that pass too, in
+front or behind as on the screen, so a marquee in front of such a picture
+stays in front (the linking screen's "PLEASE WAIT ... LINKING NOW" runs
+the full width, as the character select's does); and a row counts as
+having the game's own columns only where a map put a tile there, the rest
+left to the usual sides (they had shown through as white stripes).
+
+The linking screen (a player joining a game in progress: "THE NEW TEAM",
+one picture for each fighter, maps 0x39-0x3c) is a spotlight on white,
+near black at its left edge, with nothing past it in the map. Past that
+edge the fade goes on (`TileSides::kFade`, `WideLayer::fade`): each row
+starts at the rate the picture darkens over the 12 pixels in from the
+edge (averaged over 4 pixels at each end and over the rows within 12,
+the nearer weighted more, those not grey or crossed by something in front
+past the edge, such as the marquee, left out) and eases into black
+1.5 times as far out as that rate would reach it, so the spotlight closes
+in its own curve, smoothly; the layers in front are drawn over it. Its right edge is white and carried as before.
+Checked against the build before: the title's doors (601 pictures), the
+attract sequence from power-on (1245) and a two-board join (357, both
+boards: select, map, game select, play) are the same but the linking
+screen's frames.
+
 ## Sound board
 
 `m3::SoundBoard` and `m3::Scsp` are adapted from Supermodel's SCSP (ElSemi's,

@@ -28,7 +28,8 @@
 // r23 the map); 0x7e34, the fill's entry; 0x8230, the copy, r16 the layer.
 // The title's doors are one map (0x53, the whole title, 62 x 48), each door
 // a part of it drawn at the screen's edge, wider as it closes; the title's
-// strips after the attract sequence are parts of it too.
+// strips after the attract sequence are parts of it too. The linking
+// screen's pictures (0x39-0x3c) fade out at their left edge: fades_left.
 #include "games/spikeofe_hooks.hpp"
 
 #include "recomp/context.hpp"
@@ -51,6 +52,12 @@ constexpr uint16_t kBlank = 0x20; // the tile the clear flag fills with
 // between neighbouring columns within the photo).
 constexpr uint16_t kTitleMap = 0x53;
 constexpr int32_t kTitleWallRepeat = 31;
+
+// The linking screen (a player joining a game in progress: "THE NEW TEAM",
+// the joining fighter, one map each, 0x39-0x3c, 62 x 48): a spotlight on
+// white, darkening to near black at the left edge; past it the darkening
+// goes on (m3::TileSides::kFade). Its right edge is plain white, carried as usual.
+bool fades_left(uint16_t map) { return map >= 0x39 && map <= 0x3C; }
 
 // The tile layer a descriptor is copied to (-1: none known); its columns and rows.
 int layer_of(recomp::Context& c, uint32_t desc, int& columns, int& rows) {
@@ -122,7 +129,9 @@ void draw(recomp::Context& c) {
     for (int32_t row = std::max(y, 0); row < std::min(y + h, rows); ++row) { // (clipped as the game does)
         const int32_t mr = y0 + (row - y);
         if (mr < 0 || mr >= height) continue;
-        if (reaches_left) {
+        if (reaches_left && !clear && fades_left(map)) {
+            for (int32_t column = -TileSides::kSide; column < 0; ++column) sides.fade(layer, row, column, map);
+        } else if (reaches_left) {
             const bool carry = background(mr, 0);
             if (carry || title)
                 for (int32_t column = -TileSides::kSide; column < 0; ++column) put(row, column, carry);

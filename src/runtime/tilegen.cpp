@@ -173,9 +173,10 @@ void TilegenRenderer::draw_line(std::span<const uint8_t> ram, const std::array<u
             const Layer& l = layers[(mask >> (15 - x / 32)) & 1 ? 0 : 1];
             const int edge = l.edge[sx < 0 ? 0 : 1];
             // The game's own columns past the screen (x scroll 0), from the sides kept.
+            // The other layers' sides are drawn in that pass too, as in the first, so that a
+            // layer in front of one with its own columns stays in front (a marquee over a picture).
             const bool own = pass == 1 && l.enabled && l.own[sx < 0 ? 0 : 1];
-            if (own) (l.above ? top_real_ : bottom_real_)[y] |= static_cast<uint8_t>(sx < 0 ? 1 : 2);
-            if (!l.enabled || (pass == 1 && !own) || (side && !own && !l.loops && edge < 0)) {
+            if (!l.enabled || (side && !own && !l.loops && edge < 0)) {
                 sx += static_cast<int>(mask_end - x);
                 continue;
             }
@@ -191,7 +192,13 @@ void TilegenRenderer::draw_line(std::span<const uint8_t> ram, const std::array<u
             uint32_t entry = 0;
             if (own) {
                 entry = sides->entry(l.index, static_cast<int>(py / 8), sx >> 3);
-                if (entry == TileSides::kEmpty) { // nothing there
+                if (entry == TileSides::kEmpty) { // nothing there: the line's side left to WideLayer
+                    sx += static_cast<int>(end - x);
+                    continue;
+                }
+                (l.above ? top_real_ : bottom_real_)[y] |= static_cast<uint8_t>(sx < 0 ? 1 : 2);
+                if (entry == TileSides::kFade) { // the picture's fade, continued by WideLayer under what's drawn here
+                    (l.above ? top_real_ : bottom_real_)[y] |= static_cast<uint8_t>(sx < 0 ? 4 : 8);
                     sx += static_cast<int>(end - x);
                     continue;
                 }
@@ -221,7 +228,7 @@ void TilegenRenderer::draw_line(std::span<const uint8_t> ram, const std::array<u
             if (!side)
                 out = (l.above ? top_ : bottom_).data() + row + sx;
             else // this line's left pixels, then its right ones
-                out = (own ? (l.above ? top_own_ : bottom_own_) : (l.above ? top_side_ : bottom_side_)).data() +
+                out = (pass == 1 ? (l.above ? top_own_ : bottom_own_) : (l.above ? top_side_ : bottom_side_)).data() +
                       static_cast<std::size_t>(2 * extend_) * y + (sx < 0 ? sx + extend_ : sx - kWidth + extend_);
             const uint32_t n = end - x;
             for (uint32_t i = 0, fx = px & 7; i < n; ++i, ++fx) {

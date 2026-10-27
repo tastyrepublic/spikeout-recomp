@@ -56,6 +56,16 @@ public:
                           std::span<const uint32_t> three_d, int extend);
 
 private:
+    // Fades: the pixels in from the edge their rate is measured over, the
+    // pixels averaged at each end, the rows averaged each way (weighted to
+    // the nearer), how far apart a grey's channels may be, and how much
+    // further out than its rate the fade eases into black.
+    static constexpr int kFadeProbe = 12, kFadeSpan = 4, kFadeRows = 12, kGrey = 12;
+    static constexpr float kFadeEase = 1.5f;
+    // A fade marked past a picture's edge (TileSides::kFade), continued on row y's side s into `to`.
+    static void fade(std::span<const uint32_t> layer, std::span<const uint8_t> real, std::span<const uint32_t> own, int y,
+                     int s, int e, uint32_t* to);
+
     // A row's edge, kept while its pixels there stay the same (the period
     // search is the slow part, and screens hold still).
     struct Edge {

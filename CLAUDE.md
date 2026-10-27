@@ -145,6 +145,19 @@ a frame at scale 4), the settings menu and widescreen all work.
   --wide 93 --screenshot X.png --shot-every 4` (doors close ~1061-1071,
   open ~1204-1214). The layer buffers: 0x188000 + n * 0x2000, 64 entries a
   row; descriptor +8 columns (64), +10 rows, +16 buffer, +20 name table.
+- Widescreen, linking screen (a player joining mid-game, both cabinets'
+  "THE NEW TEAM" screen; uncommitted when written): the marquee runs full
+  width (TileSides' pass draws the other layers too, rows marked only where
+  a tile exists), and the picture's left-edge spotlight fade is continued,
+  easing into black (maps 0x39-0x3c, TileSides::kFade, WideLayer::fade;
+  owner chose this over new art). Repro: `gamerun --boards 2 --parallel
+  --poke 0:10019E=1@0:5000 --poke 1:10019E=2@0:5000 --press 0:coin@1200
+  --press 0:start@1300 --press 0:beat@1700 --press 1:coin@2600 --press
+  1:start@2700 --press 1:beat@3300 --press 1:beat@3650 --blocks 3100000000
+  --renderer gpu --wide 93 --screenshot X.png --shot-every 50` (board 1
+  ~4100-4450 on main's link model). gamerun --dump-layers also writes the
+  tile generator's own sides (-sideabove/-sidebelow, -ownabove/-ownbelow,
+  marked rows red).
 - Smooth motion is no longer read from or saved to settings.ini (only
   `--smooth`), as it's still being tested (uncommitted when written).
 - Next: the owner asked Claude to learn to play the game (a bot driving

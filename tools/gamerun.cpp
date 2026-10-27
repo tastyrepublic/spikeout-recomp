@@ -1059,6 +1059,22 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
                     }
                     tools::write_png(path.substr(0, dot) + "-" + std::to_string(frame) + "-wide3da" + path.substr(dot), alpha,
                                      m3::TilegenRenderer::kWidth + 2 * e, m3::TilegenRenderer::kHeight);
+                    // and the sides the tile generator drew itself, below and above the 3D (left, then right)
+                    // (and from the game's own columns, m3::TileSides: those rows marked red at the edge)
+                    for (const auto& [tag, side, real] :
+                         {std::tuple{"-sidebelow", m.tilegen.bottom_side(), std::span<const uint8_t>()},
+                          std::tuple{"-sideabove", m.tilegen.top_side(), std::span<const uint8_t>()},
+                          std::tuple{"-ownbelow", m.tilegen.bottom_own(), m.tilegen.bottom_real()},
+                          std::tuple{"-ownabove", m.tilegen.top_own(), m.tilegen.top_real()}}) {
+                        if (side.size() != static_cast<std::size_t>(2 * e) * m3::TilegenRenderer::kHeight) continue;
+                        std::vector<uint32_t> img(side.begin(), side.end());
+                        for (uint32_t& p : img) p = (p >> 24) ? p : 0xFF404040u;
+                        for (std::size_t y = 0; y < real.size(); ++y)
+                            for (int s = 0; s < 2; ++s)
+                                if (real[y] & (1u << s)) img[y * static_cast<std::size_t>(2 * e) + (s ? 2 * e - 1 : 0)] = 0xFFFF0000u;
+                        tools::write_png(path.substr(0, dot) + "-" + std::to_string(frame) + tag + path.substr(dot), img, 2 * e,
+                                         m3::TilegenRenderer::kHeight);
+                    }
                 }
             }
             if (o.dump_layers) // each layer's whole name table, for looking at
