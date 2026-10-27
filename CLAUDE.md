@@ -105,7 +105,12 @@ a frame at scale 4), the settings menu and widescreen all work.
   can't do wss); the room shown while in it (ROOM line, "Your room");
   the host closing a room before the start takes the others out; host
   migration in a game in progress (the lobby keeps the code: deployed).
-  All in docs/netplay.md. Next: rollback step 2 (re-runs that draw and
+  All in docs/netplay.md. FIRST (owner's report, 2026-10-27): after a few
+  host changes in a game, a joiner can't catch up, cabinets' fps differ,
+  its game buttons sometimes dead; suspects and the deep test to write
+  (host changes, joins, rejoins, a key test after each join) in
+  docs/netplay.md, "Open: repeated host changes"; scripts in
+  build\speedcheck\scripts. Then: rollback step 2 (re-runs that draw and
   play nothing); the two-network test; the late-join music (the owner
   decides); spectators, Auto delay during play, Mode A (the owner's
   "direct connect": a cable link, decided later).

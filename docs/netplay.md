@@ -589,6 +589,73 @@ differing on either side. The sound under WSLg stutters when the window is
 resized: WSLg's audio goes to Windows over its remote-desktop channel;
 not seen on Windows.
 
+## Open: repeated host changes (reported 2026-10-27)
+
+The owner's report, two or more windows on the internet: after a few host
+changes in a game in progress, a player who joined can't catch up, the
+cabinets' frames a second differ, and sometimes the joiner's game buttons
+do nothing while the menu keys still work. One host change was proven
+(gamerun on the LAN and through the lobby, two windows); several in a row,
+with joins and rejoins between them, never were.
+
+Suspects, none checked in code yet:
+
+- `Session::take_seat` sends `kTake` once, to `authority()` at that
+  moment, with no retry. The receiver answers only if it thinks it is the
+  authority and the cabinet is still open with no `until`. If the authority
+  changes before `kTaken` arrives, or the machines disagree on it, the
+  joiner's `mine_from` is never set and its inputs are dropped: buttons
+  dead, menu keys fine (they never go through the network). A fix: resend
+  until `kTaken`, to the current authority.
+- The window's catch-up test (tools/spikeout.cpp, `catching_up`) compares
+  our frame with `inputs_known` of seat 0, or 1 when we show seat 0. After
+  host changes that seat may be the left host's idle cabinet (its stream
+  made by the authority, maybe stalled or far ahead), so the joiner takes
+  its seat too early or never and stays unpaced (`catching_up` runs fast):
+  that would explain frames a second differing. A fix: the highest stream
+  among the seats still played, or the frame of the state plus the inputs
+  fed.
+- `host_seat` and `authority()` can differ between machines for a moment
+  (who's connected, `drops[].suspected`, a late joiner not yet seated);
+  two machines both acting as host, or none, after several changes.
+- `start_info` on a machine that itself joined in progress may be stale
+  when it becomes the host and sends the start and state to the next joiner.
+- A player rejoining a seat it left: `dropped`, `said_bye`, `gone_name`,
+  `cabinets[s]` and the roster may keep the old player's values.
+
+Deep test to write (gamerun first: the same every run, hashes to prove it;
+the window after):
+
+1. Four gamerun processes, private LAN room of 4 cabinets. H hosts, A and
+   B join at the start. H leaves at frame 900; C joins; A (the new host)
+   leaves at 1800; H joins again (a rejoin); B leaves at 2700 and joins
+   again at once; go on to 5000. Then the same through the lobby (`-Lobby`,
+   by the room code).
+2. After every join, a key test: `--press` on the joiner (e.g. start and
+   attack a few frames after its seat is taken) and check that the other
+   machines' input table has its bits at that frame (log or
+   `--net-trace`), and that the game reacts (a player on the map, the
+   board's logic).
+3. Proofs each run: no hash check differing (every 120 frames), every
+   joiner logs its seat taken (`kTaken`), each process's pictures a second
+   equal (gamerun `--renderer gpu --gpu-scale 1 --gpu-hash-frames`, count
+   new pictures; never 0x1000A8 alone), and the same final hash on every
+   process for the same frame.
+4. Unit tests in tests/test_net.cpp for each case found (authority change
+   while a `kTake` is in flight, rejoining the same seat, two changes in
+   a row).
+5. Windows: the same order with two or three windows
+   (`SPIKEOUT_MENU_KEYS`, `SPIKEOUT_NET_DEBUG=1`), screenshots and logs.
+
+Scripts (git-ignored, build\speedcheck\scripts; outputs to its out\):
+migrate-test.ps1 (gamerun: H hosts 2 cabinets and leaves at 900, A goes
+on, B joins; `-Lobby URL -Tag x`), hostleave-test.ps1 (two windows, the
+host closes after the start), closed-room.ps1 (the host closes before the
+start), room-shots.ps1, shot.ps1 (a window's picture by PrintWindow),
+newpics.ps1 (new pictures counted), exit-test.ps1. The window tests run a
+second copy of the window from build\speedcheck\pA (its own settings,
+player name SPIKE1 X); the scripts copy build\spikeout.exe there first.
+
 ## Plan
 
 1. Single board, single player (milestones 1–4).
