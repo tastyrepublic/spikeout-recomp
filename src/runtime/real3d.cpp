@@ -94,7 +94,7 @@ void Real3d::buffer_range(bool polygon, uint32_t& begin, uint32_t& end) const {
     end = polygon ? second : first;
 }
 
-void Real3d::buffered_write(bool polygon, std::vector<uint32_t>& target, uint32_t word, uint32_t value) {
+void Real3d::buffered_write(bool polygon, WatchedVector<uint32_t>& target, uint32_t word, uint32_t value) {
     UpdateBuffer& buf = polygon ? polygon_buffer_ : high_buffer_;
     uint32_t begin, end;
     buffer_range(polygon, begin, end);
@@ -121,7 +121,7 @@ void Real3d::buffered_write(bool polygon, std::vector<uint32_t>& target, uint32_
     target[word] = value;
 }
 
-void Real3d::apply(bool polygon, std::vector<uint32_t>& target) {
+void Real3d::apply(bool polygon, WatchedVector<uint32_t>& target) {
     UpdateBuffer& buf = polygon ? polygon_buffer_ : high_buffer_;
     if (!buf.used) return;
     uint32_t begin, end;

@@ -369,6 +369,162 @@ Testing it: `cd lobby && npm install && npm test` (the lobby, run here);
 NAME ...` (two terminals), or with `--lobby ws://127.0.0.1:8790/v1/lobby`
 and `wrangler dev --port 8790` for the internet path.
 
+## Rollback: can it work here? (measured 2026-10-26)
+
+Rollback runs ahead on guessed inputs and, when another player's real
+input differs, goes back to a snapshot and runs the frames since again,
+all before the next picture. With every PC running every cabinet, that
+needs a snapshot of every board every frame and re-runs fast enough.
+Measured with `gamerun --rollback-probe FRAME:N[:speed]`, frames 1800-2400
+of the linked attract (the ring model), on the owner's i7-8700K (6 cores):
+
+| boards | full save a board | plain copy a board | changed a frame a board (avg / worst) | re-run, nothing drawn, no sound |
+|---|---|---|---|---|
+| 1 | 30 ms | 5.5 ms | 412 KB / 1.5 MB | 340 a second (5.9x real time, 2.9 ms a frame) |
+| 2 | 35 ms | 7 ms | 420 KB / 1.5 MB | 236 (4.1x, 4.2 ms) |
+| 3 | 44 ms | 10 ms | 420 KB / 1.5 MB | 224 (3.9x, 4.5 ms) |
+| 4 | 53 ms | 13 ms | 420 KB / 1.5 MB | 202 (3.5x, 4.9 ms) |
+
+A board's state is 27 MB (main RAM, texture, culling and polygon RAM, the
+tile generator's, the network board's...; 28 MB with sound). Saved whole,
+as save states are (m3::State field by field), it takes longer than a
+frame (17.4 ms): impossible every frame. But only about 1.5% of it changes
+a frame (420 KB, 1.5 MB at worst), so a snapshot of the changed 4 KB pages
+(and the small rest: CPU and devices) would be well under a millisecond a
+board.
+
+The budget a frame: 17.4 ms, less the frame itself (the window measured
+about 7 ms for 3 cabinets, the shown one drawn) and the snapshots: about
+10 ms left for re-runs, so about 2 frames with 4 cabinets, 2-3 with 2 (more
+cores would not help much: the boards already run in parallel, the
+re-run is one board's frame time, each board a thread). So:
+- rollback of 1-2 frames fits in the frame, unseen;
+- longer ones (a far player, a burst of wrong guesses) take 2-3 frames to
+  catch up: a short hitch. GGPO-style rollback adds a small input delay
+  (1-3 frames) for exactly this: at 100 ms round trip (3 frames one way),
+  a delay of 2 leaves rollbacks of about 1 frame; at 200 ms (6 frames),
+  about 4: hitches now and then with 4 cabinets;
+- slower PCs have less room.
+
+Verdict: feasible, with this work first (each measurable):
+1. Snapshots of the changed pages: knowing which pages a frame wrote
+   (a dirty bit a 4 KB page set by the bus's writes and DMA, or the OS's
+   write watch, Windows' GetWriteWatch / Linux's soft-dirty bits) and the
+   small state apart from the big memories; a ring of a few frames' pages
+   to go back to. Proof: rolled back and run again, the same hashes.
+2. Re-runs that draw and play nothing (the 2D, 3D and sound of the shown
+   board only for the frame shown: gamerun --no-2d already does the 2D).
+3. Sound: the game's sound commands from frames still to be confirmed held
+   back (a few frames' delay on sound) or played and accepted as a glitch
+   when wrong: to decide with the owner.
+4. Rollback in the session: predicted inputs (each player's last), the
+   frame to go back to when a real one differs, a small input delay with
+   it (Auto from the round trip).
+5. The game's own heavy moments: these numbers are the attract; a fight
+   with many enemies may run slower. To measure in gameplay (the bot,
+   save states) before tuning the delay.
+
+Step 1 done (2026-10-26): `m3::Snapshots` (src/runtime/snapshots.*). A
+board's big buffers (the 14 that save states walk with State::fixed: main,
+security, tile and backup RAM; the Real3D's culling, polygon and texture
+RAM; the network and sound boards' RAM) are now `m3::WatchedVector`s: on
+Windows, memory allocated with MEM_WRITE_WATCH, so GetWriteWatch lists
+the pages written since the last look, whoever wrote them (recompiled
+code, DMA, the devices, the 68000s), at no cost to the writes (measured:
+2M writes a frame as fast as plain memory; the list 0.08 ms for 27 MB;
+comparing pages instead 3.8 ms). Linux and macOS have their own ways
+(src/runtime/watched_memory.cpp, below). Each frame: the small
+state (CPU, devices' registers: 64-87 KB) saved whole; for each page
+written, its contents as at the last snapshot kept for that frame, then
+the copy updated. Going back undoes the pages written since, then each
+later frame's pages, newest first, and loads that frame's small state.
+
+Proof (`gamerun --rollback-test FRAME:N:DEPTH:EVERY[:compare]`: a
+snapshot every frame; every EVERY frames, back DEPTH frames and on again;
+each frame's whole save-state hash kept the first time and compared each
+time it's run again; after each going back, the big buffers' hash against
+that frame's), every check equal:
+
+| run | re-run frames checked | went back | snapshot a frame (avg / worst) | going back (avg / worst) |
+|---|---|---|---|---|
+| attract with sound, back 8 every 3 (overlapping) | 1584 | 198 x 8 frames | 0.55 / 3.2 ms (186 pages) | 1.7 / 4.1 ms |
+| gameplay (the owner's state at frame 10044, a fight, punches pressed), back 6 every 4 | 894 | 149 x 6 | 0.54 / 2.5 ms (157 pages) | 1.1 / 2.8 ms |
+| attract, comparing pages, back 4 every 5 | 240 | 60 x 4 | 7.3 / 19 ms | 15 / 38 ms |
+
+So about 0.5 ms a board a frame against 30 ms for a save state. The
+unit tests (tests/test_snapshots.cpp) check every way the system has, and
+comparing, on a made-up board, back to every kept frame. The change of allocator changes
+nothing in the game: 2400 frames' GPU pictures and the sound the same,
+hash for hash. Re-run inputs come from the input table, which now keeps
+the frames that may run again (during the test). Not yet: linked boards
+going back together (the ring's packets in flight too), and the window.
+
+Each system's own way (2026-10-27, the owner's choice: the fastest each
+has, behind one interface, m3::watched):
+- Windows: write watch (above).
+- Linux 6.7 and later: userfaultfd's asynchronous write protection, the
+  pages written listed (and protected again) by PAGEMAP_SCAN: the kernel
+  notes them, no signals (the same Linux added for Wine's write watch).
+  Checked once at startup (a page written, found, nothing else); if it
+  isn't there or fails, write protection.
+- Write protection (older Linux, macOS; Flycast's way for its GGPO
+  rollback, core/hw/mem/mem_watch.h): the memory made read-only when a
+  snapshot starts, the first write to each page after a snapshot caught
+  (SIGSEGV / SIGBUS), noted, made writable; the next snapshot protects
+  those pages again. Faults on Windows cost 3-8 us each (measured: 1-2.2 ms
+  a frame for 160-400 pages, write watch 0.3-0.9 ms), so Windows keeps
+  write watch. Nothing writes these buffers through a system call (a file
+  read into one would fail): they're filled from the programs' own buffers.
+  A debugger stops at each fault unless told (gdb: `handle SIGSEGV nostop
+  noprint`). Memory isn't protected until a snapshot starts: runs without
+  rollback pay nothing.
+
+Measured on Linux (WSL 2, Ubuntu 24.04, kernel 6.6.87: no PAGEMAP_SCAN,
+so write protection; built as CI does, warnings as errors), the same
+rollback tests, every check equal:
+
+| run | re-run frames checked | went back | snapshot a frame (avg / worst) | going back (avg / worst) |
+|---|---|---|---|---|
+| attract with sound, back 8 every 3 | 1584 | 198 x 8 frames | 0.70 / 2.5 ms | 4.4 / 12.5 ms |
+| gameplay (state 10044), back 6 every 4 | 894 | 149 x 6 | 0.70 / 1.8 ms | 2.6 / 3.7 ms |
+
+Going back costs more than on Windows (the pages put back fault again
+before the memory is protected once more); it happens only when a guess
+was wrong.
+
+PAGEMAP_SCAN, after `wsl --update` (WSL 3.0.3, kernel 6.18.54; Microsoft's
+WSL kernel has userfaultfd and PTE_MARKER_UFFD_WP on; unprivileged
+userfaultfd is off there, UFFD_USER_MODE_ONLY is allowed): the startup
+check passed, the unit tests ran it and write protection, and the same
+rollback tests, every check equal, the fastest of the three:
+
+| run | re-run frames checked | went back | snapshot a frame (avg / worst) | going back (avg / worst) |
+|---|---|---|---|---|
+| attract with sound, back 8 every 3 | 1584 | 198 x 8 frames | 0.35 / 1.3 ms | 1.7 / 4.1 ms |
+| gameplay (state 10044), back 6 every 4 | 894 | 149 x 6 | 0.34 / 1.3 ms | 1.1 / 2.0 ms |
+| attract, no sound, back 4 every 10 | 80 | 20 x 4 | 0.26 / 0.7 ms | 0.9 / 1.9 ms |
+
+Cross-OS (the same build on Windows and Linux): whole save states, sound
+included, the same byte for byte at frame 2400 of attract (--clock fixed)
+and at frame 10650 of gameplay from the owner's state with punches
+pressed. So Windows and Linux players on x86 compute the same game.
+Not yet checked: macOS, and ARM CPUs (Apple Silicon).
+
+Network play between them (2026-10-27): the owner's Linux window (WSL,
+WSLg) joined his Windows window's game from the nearby list (WSL's NAT
+networking didn't stop it on one PC) and played about 8000 frames, no
+hash check differing. The internet lobby didn't work on Linux ("the
+lobby: Unsupported protocol"): Ubuntu 24.04's libcurl 8.5 has no
+WebSockets, yet declares curl_ws_send, so CMake's check let it through
+(CI's Linux builds too). Now CMake runs a tiny program asking the system's
+curl for wss (cmake/curl_probe, cmake/curl_ws_check.cpp); without it, curl
+8.15 is built with the project on OpenSSL (libssl-dev, now in CI's list;
+on macOS Homebrew's openssl@3). Then: Linux hosting a private game through
+the lobby, Windows joining by its code, 1500 frames, no hash check
+differing on either side. The sound under WSLg stutters when the window is
+resized: WSLg's audio goes to Windows over its remote-desktop channel;
+not seen on Windows.
+
 ## Plan
 
 1. Single board, single player (milestones 1–4).

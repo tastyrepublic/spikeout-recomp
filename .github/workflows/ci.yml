@@ -30,8 +30,9 @@ jobs:
             libxkbcommon-dev libdrm-dev libgbm-dev libgl1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev \
             libdbus-1-dev libibus-1.0-dev libudev-dev libthai-dev libusb-1.0-0-dev \
             libpipewire-0.3-dev libwayland-dev libdecor-0-dev liburing-dev
-          # the internet lobby's client (WebSockets over TLS)
-          sudo apt-get install -y libcurl4-openssl-dev
+          # the internet lobby's client (WebSockets over TLS): Ubuntu's libcurl has no
+          # WebSockets, so curl is built with the project, on OpenSSL
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSPIKEOUT_WARNINGS_AS_ERRORS=${{ matrix.werror }}
       - name: Build

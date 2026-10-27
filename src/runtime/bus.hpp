@@ -8,6 +8,7 @@
 #pragma once
 
 #include "ppc/cpu_state.hpp"
+#include "runtime/watched_memory.hpp"
 #include "runtime/crypt315_5881.hpp"
 #include "runtime/real3d.hpp"
 #include "runtime/rtc.hpp"
@@ -314,7 +315,7 @@ private:
     uint8_t device_read(const Region& region, uint32_t addr);
 
     const RomSet& roms_;
-    std::vector<uint8_t> ram_;
+    WatchedVector<uint8_t> ram_;
     // Writes below these (by size: 1, 2, 4 bytes) go straight to work RAM.
     std::array<uint32_t, 3> fast_limit_{kWorkRamSize, kWorkRamSize - 1, kWorkRamSize - 3};
     uint32_t watch_lo_ = 0, watch_hi_ = 0;
@@ -362,15 +363,15 @@ private:
     uint64_t midi_bytes_ = 0;
     void midi_write(uint32_t reg, uint8_t value);
     void ack_irq(uint32_t bits);
-    std::vector<uint8_t> security_ram_;
+    WatchedVector<uint8_t> security_ram_;
     Crypt315_5881 crypt_;
     bool security_first_read_ = true;
     uint32_t security_read32(uint32_t reg);
     void security_write32(uint32_t reg, uint32_t value);
     std::array<uint32_t, 64> tile_regs_{};
-    std::vector<uint8_t> tile_ram_;
+    WatchedVector<uint8_t> tile_ram_;
     TileSides tile_sides_;
-    std::vector<uint8_t> backup_ram_;
+    WatchedVector<uint8_t> backup_ram_;
     uint32_t crom_bank_ = 0;
     uint32_t crom_bank_reg_ = 0xFF;
     std::map<std::string_view, Unhandled> unhandled_;

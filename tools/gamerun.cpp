@@ -81,6 +81,14 @@
 // off; --net-old-link puts the link back as it was before the ring model
 // (linked games at 2/(N+1) speed). --net-host-trace FRAME:N adds the main
 // board's accesses to the network board, by time, to the report.
+// --rollback-probe FRAME:N[:speed] measures what rollback would cost over N
+// frames from FRAME (docs/netplay.md): each board's state saved every frame
+// (timed), how much of it changed since the frame before (4 KB pages), a
+// copy of it; :speed only times the frames (run with --no-2d --no-sound).
+// --rollback-test FRAME:N[:DEPTH[:EVERY[:compare]]] proves the rollback
+// snapshots (m3::Snapshots) on one board: a snapshot every frame, back
+// DEPTH frames every EVERY and on again, each frame's whole state hashed
+// and compared when it runs again (:compare: pages compared, not listed).
 //
 // The tile generator draws a line at a time as the frame runs; the 3D is
 // drawn at the end of a frame, only when screenshots are being written.
@@ -132,6 +140,8 @@
 #include "runtime/bus.hpp"
 #include "runtime/commboard.hpp"
 #include "runtime/rom.hpp"
+#include "runtime/snapshots.hpp"
+#include "runtime/watched_memory.hpp"
 #include "runtime/real3d_interp.hpp"
 #include "runtime/real3d_render.hpp"
 #include "runtime/tilegen.hpp"
@@ -158,8 +168,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <span>
 #include <string>
 #include <thread>
@@ -199,7 +211,11 @@ struct Options {
     const char* load_state = nullptr;         // --load-state FILE
     uint32_t watch_lo = 0, watch_hi = 0;      // --watch-write LO-HI@FRAME:N
     uint64_t watch_frame = 0, watch_frames = 1;
+    uint64_t rb_from = 0, rb_frames = 0, rb_depth = 4, rb_every = 10; // --rollback-test FRAME:N[:DEPTH[:EVERY[:compare]]]
+    bool rb_compare = false;
     uint64_t host_trace_frame = 0, host_trace_frames = 0; // --net-host-trace FRAME:N
+    uint64_t rollback_from = 0, rollback_frames = 0;      // --rollback-probe FRAME:N[:speed]
+    bool rollback_speed_only = false;                     // (:speed: only the wall clock, no states)
     bool dump_layers = false;
     // --eeprom [B:]FILE: the settings EEPROM to start with (128 bytes, high byte first), for board B or all
     std::vector<std::pair<int, std::string>> eeprom_files;
@@ -331,6 +347,28 @@ struct Machine {
     std::size_t index;
     m3::Bus bus;
     m3::CommBoard* comm = nullptr;
+    // --rollback-probe: what rollback would cost, a frame at a time (its state saved,
+    // how much of it changed since the frame before, a copy of it), and board 0's wall time.
+    struct Probe {
+        std::vector<uint8_t> before;
+        uint64_t frames = 0;
+        double save_ms = 0, save_ms_worst = 0, copy_ms = 0;
+        std::size_t size = 0;
+        double changed = 0, changed_worst = 0; // bytes in changed 4 KB pages
+        std::chrono::steady_clock::time_point started{};
+        double wall_s = 0;
+    } probe;
+    // --rollback-test: snapshots every frame (m3::Snapshots), going back now
+    // and then and running again; each frame's whole state hashed the first
+    // time and compared the times after.
+    struct RollbackTest {
+        std::unique_ptr<m3::Snapshots> snaps;
+        std::map<uint64_t, uint64_t> hashes, buffers; // the whole state's, the big buffers'
+        std::set<uint64_t> rolled; // frames gone back from
+        uint64_t checked = 0, differed = 0, restores = 0, restored_exact = 0, saves = 0, first_differ = 0;
+        double save_ms = 0, save_worst = 0, restore_ms = 0, restore_worst = 0;
+        std::size_t pages = 0, pages_worst = 0;
+    } rb;
     bool loaded = false; // --load-state: the run resumes where the state was saved
     LinkedState* linked = nullptr; // linked boards' --save-state / --load-state
     tools::InputTable* inputs = nullptr; // every board's inputs by frame
@@ -450,6 +488,42 @@ void replay_frame(Machine& m, const tools::Recording& rec, uint64_t frame) {
 std::function<void(m3::State&)> sound_state(Machine& m, const Options& o) {
     if (o.no_sound) return {};
     return [&m](m3::State& s) { m.sound.state(s); };
+}
+
+// --rollback-test: thrown from a snapshot point once the board is back at an
+// earlier frame; run() goes on from there (as a loaded state does).
+struct Rewound {};
+
+uint64_t hash_bytes(uint64_t h, const uint8_t* d, std::size_t n) {
+    h ^= n;
+    std::size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t w;
+        std::memcpy(&w, d + i, 8);
+        h = (h ^ w) * 0x100000001B3ull;
+        h ^= h >> 29;
+    }
+    for (; i < n; ++i) h = (h ^ d[i]) * 0x100000001B3ull;
+    return h;
+}
+
+// A board's whole state (as a save state has it), hashed.
+uint64_t state_hash(const std::function<void(m3::State&)>& walk) {
+    m3::State s;
+    walk(s);
+    return hash_bytes(0x9E3779B97F4A7C15ull, s.data().data(), s.data().size());
+}
+
+// Only its big buffers (State::fixed's: what snapshots keep by page), hashed.
+uint64_t buffers_hash(const std::function<void(m3::State&)>& walk) {
+    struct Hash : m3::State::Regions {
+        uint64_t h = 0x9E3779B97F4A7C15ull;
+        void region(void* data, std::size_t bytes) override { h = hash_bytes(h, static_cast<const uint8_t*>(data), bytes); }
+    } hash;
+    m3::State s;
+    s.set_regions(&hash);
+    walk(s);
+    return hash.h;
 }
 
 // The network board's options from the switches (also in the build's id
@@ -789,7 +863,9 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             const auto got = m.inputs->wait(m.index, frame);
             if (!got) throw recomp::OutOfBudget(m.c.cpu.pc); // (the session ended)
             const tools::InputTable::Inputs in_table = *got;
-            m.inputs->forget_before(m.index, frame);
+            // (--rollback-test: the frames it may run again keep theirs)
+            const uint64_t keep = o.rb_frames ? o.rb_depth + 1 : 0;
+            if (frame > keep) m.inputs->forget_before(m.index, frame - keep);
             m.bus.inputs.bank0 = in_table.bank0;
             m.bus.inputs.bank1 = in_table.bank1;
             m.bus.inputs.controls = in_table.controls;
@@ -840,6 +916,84 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             m.net_status[0] = s0;
             m.net_status[1] = s1;
         }
+        // --rollback-probe: each frame's state saved (as rollback would, every
+        // frame), timed; compared with the frame before's by 4 KB pages (what
+        // a snapshot of the changes only would copy); copied (a restore's
+        // least). Board 0 also times the frames' wall clock.
+        if (o.rollback_frames && frame >= o.rollback_from && frame <= o.rollback_from + o.rollback_frames) {
+            if (m.index == 0 && frame == o.rollback_from) m.probe.started = std::chrono::steady_clock::now();
+            if (m.index == 0 && frame == o.rollback_from + o.rollback_frames)
+                m.probe.wall_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - m.probe.started).count();
+            if (frame < o.rollback_from + o.rollback_frames && !o.rollback_speed_only)
+                m.c.request_snapshot([&m, &o](uint32_t) {
+                    using clock = std::chrono::steady_clock;
+                    const auto t0 = clock::now();
+                    m3::State s;
+                    tools::board_state(s, m.c, m.timing, sound_state(m, o));
+                    const auto t1 = clock::now();
+                    std::vector<uint8_t> copy(s.data()); // (a restore copies as much back)
+                    const auto t2 = clock::now();
+                    Machine::Probe& p = m.probe;
+                    const double save = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                    p.save_ms += save, p.save_ms_worst = std::max(p.save_ms_worst, save);
+                    p.copy_ms += std::chrono::duration<double, std::milli>(t2 - t1).count();
+                    p.size = copy.size();
+                    if (p.before.size() == copy.size()) {
+                        std::size_t changed = 0;
+                        for (std::size_t at = 0; at < copy.size(); at += 4096) {
+                            const std::size_t n = std::min<std::size_t>(4096, copy.size() - at);
+                            if (std::memcmp(copy.data() + at, p.before.data() + at, n) != 0) changed += n;
+                        }
+                        p.changed += static_cast<double>(changed);
+                        p.changed_worst = std::max(p.changed_worst, static_cast<double>(changed));
+                        ++p.frames;
+                    }
+                    p.before = std::move(copy);
+                });
+        }
+        // --rollback-test: at each frame (the snapshot point after its end), the
+        // whole state hashed (the first time kept, then compared) and a
+        // snapshot taken; every rb_every frames, back rb_depth frames, the
+        // state there checked against its hash, and the run goes on from it.
+        if (o.rb_frames && frame >= o.rb_from && frame < o.rb_from + o.rb_frames)
+            m.c.request_snapshot([&m, &o, frame](uint32_t) {
+                using clock = std::chrono::steady_clock;
+                Machine::RollbackTest& t = m.rb;
+                const auto walk = [&](m3::State& s) { tools::board_state(s, m.c, m.timing, sound_state(m, o)); };
+                if (!t.snaps) {
+                    t.snaps = std::make_unique<m3::Snapshots>(o.rb_depth);
+                    t.snaps->compare_only(o.rb_compare);
+                }
+                const uint64_t h = state_hash(walk);
+                if (auto it = t.hashes.find(frame); it == t.hashes.end()) {
+                    t.hashes[frame] = h;
+                    t.buffers[frame] = buffers_hash(walk);
+                } else {
+                    ++t.checked;
+                    if (it->second != h && t.differed++ == 0) t.first_differ = frame;
+                }
+                const auto t0 = clock::now();
+                t.snaps->save(frame, walk);
+                const double save = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
+                if (t.saves++ > 0) { // (the first copies everything)
+                    t.save_ms += save, t.save_worst = std::max(t.save_worst, save);
+                    t.pages += t.snaps->pages_saved(), t.pages_worst = std::max(t.pages_worst, t.snaps->pages_saved());
+                }
+                if ((frame - o.rb_from) % o.rb_every == o.rb_every - 1 && frame >= o.rb_from + o.rb_depth &&
+                    t.rolled.insert(frame).second) {
+                    const uint64_t back = frame - o.rb_depth;
+                    const auto t1 = clock::now();
+                    t.snaps->restore(back, walk);
+                    const double restore = std::chrono::duration<double, std::milli>(clock::now() - t1).count();
+                    t.restore_ms += restore, t.restore_worst = std::max(t.restore_worst, restore);
+                    ++t.restores;
+                    // (the big buffers: as they were then; the rest is checked by
+                    // the frames run again, a just-loaded state saving its block
+                    // count one less, ready to count it again)
+                    if (buffers_hash(walk) == t.buffers[back]) ++t.restored_exact;
+                    throw Rewound{};
+                }
+            });
         if (m.comm && o.host_trace_frames) // --net-host-trace: the frames after this one
             m.comm->host_tracing = frame >= o.host_trace_frame && frame < o.host_trace_frame + o.host_trace_frames;
         if (o.tilegen_trace && frame % o.tilegen_trace == 0) {
@@ -977,18 +1131,24 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
 void run(Machine& m, tools::Turns& turns) {
     turns.wait(m.index);
     const auto start = std::chrono::steady_clock::now();
-    try {
-        if (m.loaded) m.c.resume_block(m.c.cpu.pc);
-        m.c.call(m.c.cpu.pc);
-        m.why = "the reset code returned";
-    } catch (const recomp::OutOfBudget&) {
-        m.why = "block limit reached";
-    } catch (const recomp::MissingCode& e) {
-        m.why = e.what();
-    } catch (const recomp::GuestError& e) {
-        m.why = e.what();
-    } catch (const std::exception& e) {
-        m.why = std::string("error: ") + e.what();
+    for (bool resume = m.loaded;;) {
+        try {
+            if (resume) m.c.resume_block(m.c.cpu.pc);
+            m.c.call(m.c.cpu.pc);
+            m.why = "the reset code returned";
+        } catch (const Rewound&) { // (--rollback-test: back at an earlier frame, on from there)
+            resume = true;
+            continue;
+        } catch (const recomp::OutOfBudget&) {
+            m.why = "block limit reached";
+        } catch (const recomp::MissingCode& e) {
+            m.why = e.what();
+        } catch (const recomp::GuestError& e) {
+            m.why = e.what();
+        } catch (const std::exception& e) {
+            m.why = std::string("error: ") + e.what();
+        }
+        break;
     }
     m.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     turns.finish(m.index);
@@ -1192,6 +1352,32 @@ void report(Machine& m, const Options& o) {
             std::printf("  %10llu  pc %06x  %s%u %06x  %04x\n", static_cast<unsigned long long>(a.cycle), a.pc,
                         a.write ? "W" : "R", a.size * 8u, a.addr, a.value);
     }
+    if (const Machine::Probe& p = m.probe; p.frames || p.wall_s > 0) { // --rollback-probe
+        std::printf("\nRollback probe:");
+        if (p.wall_s > 0) std::printf(" frames run at %.1f a second (wall clock, board 0);", static_cast<double>(o.rollback_frames) / p.wall_s);
+        if (p.frames)
+            std::printf(" state %zu KB; saved in %.3f ms (worst %.3f), copied in %.3f ms; changed a frame %.0f KB (worst %.0f KB) "
+                        "in 4 KB pages; over %llu frames",
+                        p.size / 1024, p.save_ms / static_cast<double>(p.frames + 1), p.save_ms_worst,
+                        p.copy_ms / static_cast<double>(p.frames + 1), p.changed / static_cast<double>(p.frames) / 1024,
+                        p.changed_worst / 1024, static_cast<unsigned long long>(p.frames));
+        std::printf("\n");
+    }
+    if (const Machine::RollbackTest& t = m.rb; t.snaps) { // --rollback-test
+        const double saves = static_cast<double>(t.saves > 1 ? t.saves - 1 : 1);
+        std::printf("\nRollback test: %llu frames run again and checked, %llu differed%s; %llu times back %llu frames, "
+                    "%llu with the big buffers back exactly\n",
+                    static_cast<unsigned long long>(t.checked), static_cast<unsigned long long>(t.differed),
+                    t.differed ? (" (the first at frame " + std::to_string(t.first_differ) + ")").c_str() : "",
+                    static_cast<unsigned long long>(t.restores), static_cast<unsigned long long>(o.rb_depth),
+                    static_cast<unsigned long long>(t.restored_exact));
+        std::printf("Rollback snapshots (%s): small state %zu KB, big buffers %zu KB; a frame %.3f ms (worst %.3f), "
+                    "%.0f pages (worst %zu) of 4 KB; going back %.3f ms (worst %.3f); %zu pages written by loading\n",
+                    t.snaps->watched() ? m3::watched::name(m3::watched::method()) : "compared", t.snaps->small_bytes() / 1024,
+                    t.snaps->big_bytes() / 1024,
+                    t.save_ms / saves, t.save_worst, static_cast<double>(t.pages) / saves, t.pages_worst,
+                    t.restores ? t.restore_ms / static_cast<double>(t.restores) : 0.0, t.restore_worst, t.snaps->load_writes());
+    }
     if (comm && !comm->host_trace.empty()) {
         static const char* const kRegions[] = {"comm", "io", "netram", "netram"};
         std::printf("\nNetwork board, the main board's accesses (68000 cycles):\n");
@@ -1331,6 +1517,21 @@ int main(int argc, char** argv) {
             if (*end == '-') o.watch_hi = static_cast<uint32_t>(std::strtoul(end + 1, &end, 16));
             if (*end == '@') o.watch_frame = std::strtoull(end + 1, &end, 0);
             if (*end == ':') o.watch_frames = std::strtoull(end + 1, &end, 0);
+        }
+        else if (arg == "--rollback-test" && i + 1 < argc) { // FRAME:N[:DEPTH[:EVERY]]
+            char* end = nullptr;
+            o.rb_from = std::strtoull(argv[++i], &end, 0);
+            o.rb_frames = *end == ':' ? std::strtoull(end + 1, &end, 0) : 600;
+            if (*end == ':') o.rb_depth = std::strtoull(end + 1, &end, 0);
+            if (*end == ':') o.rb_every = std::strtoull(end + 1, &end, 0);
+            if (*end == ':') o.rb_compare = std::string(end + 1) == "compare";
+            if (o.rb_every == 0) o.rb_every = 1;
+        }
+        else if (arg == "--rollback-probe" && i + 1 < argc) { // FRAME:N
+            char* end = nullptr;
+            o.rollback_from = std::strtoull(argv[++i], &end, 0);
+            o.rollback_frames = *end == ':' ? std::strtoull(end + 1, &end, 0) : 600;
+            o.rollback_speed_only = std::string(end) == ":speed";
         }
         else if (arg == "--net-host-trace" && i + 1 < argc) { // FRAME:N
             char* end = nullptr;
@@ -1505,6 +1706,10 @@ int main(int argc, char** argv) {
     // Network play: the game found or offered on the networks this machine
     // is on, every board run here, the boards as the host started them.
     const bool networked = !o.net_host.empty() || !o.net_join.empty();
+    if (o.rb_frames && (o.boards > 1 || networked)) {
+        std::fprintf(stderr, "gamerun: --rollback-test is for one board (linked boards go back together: not yet)\n");
+        return 2;
+    }
     tools::InputTable inputs(networked ? net::kMaxSeats : o.boards);
     std::unique_ptr<tools::NetPlay> netplay;
     std::vector<uint8_t> join_state; // (a game joined in progress: every board's state, unpacked)

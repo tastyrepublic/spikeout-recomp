@@ -24,6 +24,8 @@
 //   0xC0020000  net RAM, 64 KB of 16-bit words, one per 32-bit CPU word
 #pragma once
 
+#include "runtime/watched_memory.hpp"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -220,8 +222,8 @@ private:
     uint8_t* external() { return buffer_.data() + (commbank_ ? 0 : 0x10000); }
 
     std::unique_ptr<NetLink> link_;
-    std::vector<uint8_t> net_ram_;  // 64 KB
-    std::vector<uint8_t> buffer_;   // 128 KB: two comm RAM banks
+    WatchedVector<uint8_t> net_ram_;  // 64 KB
+    WatchedVector<uint8_t> buffer_;   // 128 KB: two comm RAM banks
     bool commbank_ = false;
 
     State state_ = State::Start;

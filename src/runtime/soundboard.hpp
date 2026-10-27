@@ -15,6 +15,7 @@
 // only the parts listed).
 #pragma once
 
+#include "runtime/watched_memory.hpp"
 #include "runtime/dsb2.hpp"
 #include "runtime/scsp.hpp"
 
@@ -85,7 +86,7 @@ private:
     const uint8_t* sample_bank() const;
 
     std::span<const uint8_t> program_, samples_rom_;
-    std::vector<uint8_t> ram1_, ram2_;
+    WatchedVector<uint8_t> ram1_, ram2_;
     Scsp scsp1_, scsp2_;
     std::unique_ptr<Cpu> cpu_;
     std::unique_ptr<Dsb2> dsb_;

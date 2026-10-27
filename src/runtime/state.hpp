@@ -37,6 +37,11 @@ public:
     explicit State(std::vector<uint8_t> data) : data_(std::move(data)), loading_(true) {}
 
     bool loading() const { return loading_; }
+    // Saving into `buffer` (its contents dropped, its room kept: no growing).
+    void reuse(std::vector<uint8_t> buffer) {
+        data_ = std::move(buffer);
+        data_.clear();
+    }
     std::vector<uint8_t>& data() { return data_; }
     // Loading: all of it read.
     bool done() const { return pos_ == data_.size(); }
@@ -73,14 +78,23 @@ public:
         for (T& e : v) io(e);
     }
     // A buffer whose size is fixed by the hardware: loading checks it.
-    template <class T>
+    // With regions set (rollback snapshots, m3::Snapshots), its bytes are
+    // handed to them instead of copied: they keep it by page.
+    template <class T, class A>
         requires Plain<T>::value
-    void fixed(std::vector<T>& v) {
+    void fixed(std::vector<T, A>& v) {
         uint64_t n = v.size();
         io(n);
         if (n != v.size()) throw std::runtime_error("save state: a buffer has the wrong size");
-        bytes(v.data(), v.size() * sizeof(T));
+        if (regions_) regions_->region(v.data(), v.size() * sizeof(T));
+        else bytes(v.data(), v.size() * sizeof(T));
     }
+
+    struct Regions {
+        virtual ~Regions() = default;
+        virtual void region(void* data, std::size_t bytes) = 0;
+    };
+    void set_regions(Regions* r) { regions_ = r; }
 
     // The start of a device's fields.
     void tag(const char* name) {
@@ -113,6 +127,7 @@ private:
     std::vector<uint8_t> data_;
     std::size_t pos_ = 0;
     bool loading_ = false;
+    Regions* regions_ = nullptr;
 };
 
 } // namespace m3

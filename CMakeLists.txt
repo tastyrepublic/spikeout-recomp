@@ -60,6 +60,8 @@ add_library(m3runtime
     src/runtime/memory_map.cpp
     src/runtime/rom.cpp
     src/runtime/usart8251.cpp
+    src/runtime/watched_memory.cpp
+    src/runtime/snapshots.cpp
     src/games/games.cpp
     src/games/spikeofe.cpp)
 target_include_directories(m3runtime PUBLIC src)
@@ -96,25 +98,40 @@ target_include_directories(m3net PUBLIC ${zstd_SOURCE_DIR}/lib)
 
 # The internet lobby's client (src/net/lobby.cpp): a WebSocket over TLS to
 # the lobby Worker (lobby/), through libcurl (curl license): the system's if
-# CMake finds it, else (Windows) built with the project on Windows' own TLS
-# (Schannel). Without it, LAN play only. The lobby's address is fixed in the
-# build (players can't change it).
+# CMake finds it and it speaks wss, else built with the project: on Windows'
+# own TLS (Schannel), elsewhere on OpenSSL. Without it, LAN play only. The
+# lobby's address is fixed in the build (players can't change it).
 include(FetchContent)
 option(SPIKEOUT_LOBBY "Build the internet lobby client (libcurl)" ON)
 set(SPIKEOUT_LOBBY_URL "wss://spikeout-lobby.spikeout-lobby.workers.dev/v1/lobby" CACHE STRING "The internet lobby (wss://.../v1/lobby; lobby/, on the owner's Cloudflare account)")
 if(SPIKEOUT_LOBBY)
-    find_package(CURL QUIET)
-    if(CURL_FOUND) # a system libcurl must have WebSockets (curl 8.11 on; some older builds left them out)
-        include(CheckSymbolExists)
-        set(CMAKE_REQUIRED_LIBRARIES CURL::libcurl)
-        check_symbol_exists(curl_ws_send "curl/curl.h" SPIKEOUT_CURL_WEBSOCKETS)
-        unset(CMAKE_REQUIRED_LIBRARIES)
-        if(NOT SPIKEOUT_CURL_WEBSOCKETS)
-            message(STATUS "The system's libcurl has no WebSockets")
+    # A system libcurl must speak wss: WebSockets are on by default from curl
+    # 8.11, and older builds (Ubuntu 24.04's 8.5, macOS's) leave them out yet
+    # still declare curl_ws_send, which then says "Unsupported protocol". So
+    # it's asked, by running it (cmake/curl_probe: in a directory of its own,
+    # so a curl found there and not wanted leaves no target behind).
+    add_subdirectory(cmake/curl_probe)
+    set(CURL_FOUND OFF)
+    if(SPIKEOUT_SYSTEM_CURL)
+        find_package(CURL REQUIRED)
+    elseif(SPIKEOUT_SYSTEM_CURL_SEEN)
+        message(STATUS "The system's libcurl doesn't speak wss (no WebSockets): curl built with the project")
+    endif()
+    if(NOT CURL_FOUND AND NOT WIN32)
+        if(APPLE AND NOT OPENSSL_ROOT_DIR) # (Homebrew's, which CMake doesn't look in)
+            execute_process(COMMAND brew --prefix openssl@3 OUTPUT_VARIABLE _ssl OUTPUT_STRIP_TRAILING_WHITESPACE
+                            ERROR_QUIET RESULT_VARIABLE _ssl_found)
+            if(_ssl_found EQUAL 0 AND EXISTS "${_ssl}")
+                set(OPENSSL_ROOT_DIR "${_ssl}")
+            endif()
+        endif()
+        find_package(OpenSSL QUIET)
+        if(NOT OPENSSL_FOUND)
+            message(STATUS "No OpenSSL to build curl on")
             set(SPIKEOUT_LOBBY OFF)
         endif()
     endif()
-    if(NOT CURL_FOUND AND WIN32)
+    if(NOT CURL_FOUND AND SPIKEOUT_LOBBY)
         set(BUILD_CURL_EXE OFF CACHE BOOL "" FORCE)
         set(BUILD_LIBCURL_DOCS OFF CACHE BOOL "" FORCE)
         set(BUILD_MISC_DOCS OFF CACHE BOOL "" FORCE)
@@ -123,8 +140,12 @@ if(SPIKEOUT_LOBBY)
         set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
         set(BUILD_STATIC_LIBS ON CACHE BOOL "" FORCE)
         set(CURL_DISABLE_INSTALL ON CACHE BOOL "" FORCE)
-        set(CURL_USE_SCHANNEL ON CACHE BOOL "" FORCE)
-        set(CURL_USE_OPENSSL OFF CACHE BOOL "" FORCE)
+        if(WIN32)
+            set(CURL_USE_SCHANNEL ON CACHE BOOL "" FORCE)
+            set(CURL_USE_OPENSSL OFF CACHE BOOL "" FORCE)
+        else()
+            set(CURL_USE_OPENSSL ON CACHE BOOL "" FORCE)
+        endif()
         set(CURL_USE_LIBPSL OFF CACHE BOOL "" FORCE)
         set(CURL_USE_LIBSSH2 OFF CACHE BOOL "" FORCE)
         set(USE_LIBIDN2 OFF CACHE BOOL "" FORCE)
@@ -448,7 +469,8 @@ if(SPIKEOUT_BUILD_TESTS)
         tests/test_runtime.cpp
         tests/test_analysis.cpp
         tests/test_devices.cpp
-        tests/test_net.cpp)
+        tests/test_net.cpp
+        tests/test_snapshots.cpp)
     target_link_libraries(spikeout_tests PRIVATE analysis m3runtime m3net spikeout_warnings)
     if(SPIKEOUT_GPU)
         target_sources(spikeout_tests PRIVATE tests/test_gpu.cpp)

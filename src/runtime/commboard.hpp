@@ -29,6 +29,7 @@
 // follows its write to control 0xE0.
 #pragma once
 
+#include "runtime/watched_memory.hpp"
 #include "runtime/netboard.hpp"
 
 #include <array>
@@ -199,8 +200,8 @@ private:
     Options options_;
     std::unique_ptr<NetLink> link_;
     std::unique_ptr<Cpu> cpu_;
-    std::vector<uint8_t> ram_;  // 64 KB, 68000 byte order (big-endian)
-    std::vector<uint8_t> comm_; // 128 KB, two banks, 68000 byte order
+    WatchedVector<uint8_t> ram_;  // 64 KB, 68000 byte order (big-endian)
+    WatchedVector<uint8_t> comm_; // 128 KB, two banks, 68000 byte order
     std::array<uint16_t, 128> io_{};
     std::array<uint16_t, 128> ctrl_{};
     uint16_t commbank_ = 0;

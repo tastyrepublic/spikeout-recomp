@@ -17,6 +17,8 @@
 // IRQ 2 is a 1 kHz timer (Supermodel: "fixes music fade outs").
 #pragma once
 
+#include "runtime/watched_memory.hpp"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -77,7 +79,7 @@ private:
     void next_sample(int32_t out[2]);
 
     std::span<const uint8_t> program_, mpeg_;
-    std::vector<uint8_t> ram_;
+    WatchedVector<uint8_t> ram_;
     std::unique_ptr<Cpu> cpu_;
     std::unique_ptr<Decoder> decoder_;
 

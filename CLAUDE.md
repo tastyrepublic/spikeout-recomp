@@ -24,6 +24,11 @@ This machine (Windows):
 - Toolchain: WinLibs GCC + CMake + Ninja (+ gdb) from winget. In PowerShell,
   refresh PATH first: `$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')`.
   Executables need that PATH (run them from PowerShell, not Git Bash). No Python.
+- Linux: WSL 3.0.3, Ubuntu 24.04 (kernel 6.18: PAGEMAP_SCAN), CI's build packages installed
+  (2026-10-27). A copy of the sources at ~/spikeout-recomp (copied with tar
+  from the worktree, without build/ and .git; touch what changed after a
+  build ran), built as CI does; ROMs read from /mnt/z/Emu/spikeout-recomp/
+  build/roms/spikeofe. Don't build on both at once: 16 GB runs out.
 - ROMs: `build/roms/spikeofe` (unpacked from `Z:\Emu\Sega Supermodel 3\ROMs\spikeofe.zip`;
   git-ignored). `SPIKEOUT_ROM_DIR` in build/CMakeCache.txt points there.
 - References outside the repo: `Z:\Emu\refs` (Supermodel and MAME sources,

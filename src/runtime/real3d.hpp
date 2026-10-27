@@ -20,6 +20,8 @@
 // 0x100000 up are in VROM.
 #pragma once
 
+#include "runtime/watched_memory.hpp"
+
 #include <array>
 #include <cstdint>
 #include <span>
@@ -88,7 +90,7 @@ public:
 
 private:
     static uint32_t swap(uint32_t v) { return (v >> 24) | ((v >> 8) & 0xFF00) | ((v << 8) & 0xFF0000) | (v << 24); }
-    static void put(std::vector<uint32_t>& mem, uint32_t offset, uint32_t value) {
+    static void put(WatchedVector<uint32_t>& mem, uint32_t offset, uint32_t value) {
         if (offset / 4 < mem.size()) mem[offset / 4] = swap(value);
     }
     void store(uint32_t x, uint32_t y, uint32_t width, uint32_t height, std::span<const uint16_t> data, size_t& used,
@@ -102,18 +104,18 @@ private:
     };
     bool buffering() const { return flipped_ && config_[2] > config_[0]; }
     void buffer_range(bool polygon, uint32_t& begin, uint32_t& end) const;
-    void buffered_write(bool polygon, std::vector<uint32_t>& target, uint32_t word, uint32_t value);
-    void apply(bool polygon, std::vector<uint32_t>& target);
+    void buffered_write(bool polygon, WatchedVector<uint32_t>& target, uint32_t word, uint32_t value);
+    void apply(bool polygon, WatchedVector<uint32_t>& target);
     void flush_textures();
     void draw_frame(uint32_t mercury_mode);
 
     std::span<const uint8_t> vrom_;
-    std::vector<uint32_t> culling_lo_, culling_hi_, polygon_;
+    WatchedVector<uint32_t> culling_lo_, culling_hi_, polygon_;
     UpdateBuffer high_buffer_, polygon_buffer_;
     bool flipped_ = false, command_written_ = false, tilegen_drew_ = false, block_culling_ = false;
     std::array<uint32_t, 4> config_{};
     std::vector<uint32_t> fifo_;
-    std::vector<uint16_t> texture_;
+    WatchedVector<uint16_t> texture_;
     uint64_t textures_uploaded_ = 0;
     std::vector<uint8_t> rows_written_ = std::vector<uint8_t>(kTextureHeight, 0); // take_written_rows
 };
