@@ -62,9 +62,11 @@ private:
     // further out than its rate the fade eases into black.
     static constexpr int kFadeProbe = 12, kFadeSpan = 4, kFadeRows = 12, kGrey = 12;
     static constexpr float kFadeEase = 1.5f;
+    static constexpr float kHueMatch = 0.98f; // (the cosine between a pixel's colour and the picture's)
+    static constexpr float kColoured = 0.25f; // a picture's colour taken as its own (its channels this far apart), not grey
     // A fade marked past a picture's edge (TileSides::kFade), continued on row y's side s into `to`.
-    static void fade(std::span<const uint32_t> layer, std::span<const uint8_t> real, std::span<const uint32_t> own, int y,
-                     int s, int e, uint32_t* to);
+    static void fade(std::span<const uint32_t> layer, std::span<const uint8_t> real, std::span<const uint32_t> own,
+                     const std::array<float, 3>& hue, int y, int s, int e, uint32_t* to);
 
     // A row's edge, kept while its pixels there stay the same (the period
     // search is the slow part, and screens hold still).

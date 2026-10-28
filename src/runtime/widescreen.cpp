@@ -1,6 +1,7 @@
 #include "runtime/widescreen.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 
 namespace m3 {
@@ -210,6 +211,17 @@ void WideLayer::build(std::span<const uint32_t> layer, std::span<const uint32_t>
     // screen (the title's doors), over whatever was made for them above: the
     // rest is made as it always was, these rows not looked at.
     if (!has_side || own.size() != side.size() || real.size() != static_cast<std::size_t>(kHeight)) return;
+    // Each side's fading picture's own colour at the edge (its pixels there
+    // over all its fade rows, summed): what a fade row's pixels must be like.
+    std::array<std::array<float, 3>, 2> hue{};
+    for (int s = 0; s < 2; ++s)
+        for (int y = 0; y < kHeight; ++y) {
+            if (!(real[static_cast<std::size_t>(y)] & (4u << s))) continue;
+            for (int i = 0; i < kFadeSpan; ++i) {
+                const uint32_t p = layer[static_cast<std::size_t>(y * kWidth + (s ? kWidth - 1 - i : i))];
+                for (int c = 0; c < 3; ++c) hue[static_cast<std::size_t>(s)][static_cast<std::size_t>(c)] += static_cast<float>((p >> (8 * c)) & 255);
+            }
+        }
     for (int y = 0; y < kHeight; ++y)
         for (int s = 0; s < 2; ++s) {
             const uint8_t mark = real[static_cast<std::size_t>(y)];
@@ -222,25 +234,37 @@ void WideLayer::build(std::span<const uint32_t> layer, std::span<const uint32_t>
                 std::copy_n(from, e, to);
                 continue;
             }
-            fade(layer, real, own, y, s, e, to);
+            fade(layer, real, own, hue[static_cast<std::size_t>(s)], y, s, e, to);
             for (int i = 0; i < e; ++i) // what the tile generator drew in front of it
                 if (from[i] >> 24) to[i] = from[i];
         }
 }
 
-// A picture fading out at its edge (the linking screen's spotlight): each
-// row's fade goes on at the rate it changes over the kFadeProbe pixels in
-// from the edge, darkening only, so the spotlight closes in its own curve.
-// The picture is dithered: its colour at the edge and kFadeProbe in are
-// each the average of kFadeSpan pixels, over the fade rows within
-// kFadeRows whose pixels there are all grey and that nothing in front
-// crosses past the edge (`own`: a marquee's letters, whose highlights and
-// outlines can pass for grey); where none are, the nearest such row's.
-void WideLayer::fade(std::span<const uint32_t> layer, std::span<const uint8_t> real, std::span<const uint32_t> own, int y,
-                     int s, int e, uint32_t* to) {
-    auto grey = [](uint32_t p) {
+// A picture fading out at its edge (the linking screen's spotlight, the
+// ranking's): each row's fade goes on at the rate it changes over the
+// kFadeProbe pixels in from the edge, darkening only, so the spotlight
+// closes in its own curve. The picture is dithered: its colour at the edge
+// and kFadeProbe in are each the average of kFadeSpan pixels, over the fade
+// rows within kFadeRows whose pixels there are all the picture's own (grey,
+// or of its colour at that edge, `hue`: the ranking's is red; not text or a
+// figure over it) and that nothing in front crosses past the edge (`own`: a
+// marquee's letters, whose highlights and outlines can pass for grey);
+// where none are, the nearest such row's.
+void WideLayer::fade(std::span<const uint32_t> layer, std::span<const uint8_t> real, std::span<const uint32_t> own,
+                     const std::array<float, 3>& hue, int y, int s, int e, uint32_t* to) {
+    // (a grey picture's colour isn't used: grey pixels alone, as the linking screen was first made)
+    const float hue_most = std::max({hue[0], hue[1], hue[2]}), hue_least = std::min({hue[0], hue[1], hue[2]});
+    const bool coloured = hue_most > 0 && (hue_most - hue_least) / hue_most > kColoured;
+    const float hue_length = coloured ? std::sqrt(hue[0] * hue[0] + hue[1] * hue[1] + hue[2] * hue[2]) : 0.0f;
+    auto grey = [&](uint32_t p) {
+        if (!(p >> 24)) return false;
         const int r = static_cast<int>((p >> 16) & 255), g = static_cast<int>((p >> 8) & 255), b = static_cast<int>(p & 255);
-        return (p >> 24) && std::abs(r - g) <= kGrey && std::abs(g - b) <= kGrey && std::abs(r - b) <= kGrey;
+        if (std::abs(r - g) <= kGrey && std::abs(g - b) <= kGrey && std::abs(r - b) <= kGrey) return true;
+        // (of the picture's colour: in its direction, near enough; with the channels as the sums have them)
+        const float v[3] = {static_cast<float>(b), static_cast<float>(g), static_cast<float>(r)};
+        const float length = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        if (hue_length <= 0 || length <= 0) return false;
+        return (v[0] * hue[0] + v[1] * hue[1] + v[2] * hue[2]) / (length * hue_length) >= kHueMatch;
     };
     // Adds row's edge and inner colours to the sums, if they're the picture's.
     std::array<float, 6> sum{};

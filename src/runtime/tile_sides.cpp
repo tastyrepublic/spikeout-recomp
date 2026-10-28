@@ -53,6 +53,13 @@ void TileSides::fill_edge(int layer, int row, bool right) {
     }
 }
 
+void TileSides::clear_layer(int layer) {
+    if (layer < 0 || layer >= kLayers) return;
+    for (int row = 0; row < kRows; ++row)
+        for (int side = 0; side < 2; ++side)
+            for (int i = 0; i < kSide; ++i) pending_[static_cast<std::size_t>(index(layer, row, side != 0, i))] = Cell{};
+}
+
 void TileSides::copy(int layer) {
     if (layer < 0 || layer >= kLayers) return;
     for (int row = 0; row < kRows; ++row)

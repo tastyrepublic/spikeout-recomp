@@ -52,6 +52,8 @@ public:
     void fade(int layer, int row, int column, uint16_t map);
     // A fill reaching the screen's left (right) edge on `row`.
     void fill_edge(int layer, int row, bool right);
+    // The whole layer cleared: every cell past its edges empty (at the next copy).
+    void clear_layer(int layer);
     // The game copies `layer` to the name table: its sides with it.
     void copy(int layer);
 

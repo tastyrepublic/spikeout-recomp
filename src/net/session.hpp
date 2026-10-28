@@ -178,6 +178,9 @@ public:
     void report_hash(uint64_t frame, uint64_t hash);
     // Leave (a goodbye to the others).
     void leave();
+    // Tests: stop at once without a goodbye, as a machine that crashed or
+    // lost its network (the others drop it after kDropAfter).
+    void vanish();
 
     // How it goes, for an overlay: round trip to each seat (ms, -1: none).
     std::array<int, kMaxSeats> round_trips() const;

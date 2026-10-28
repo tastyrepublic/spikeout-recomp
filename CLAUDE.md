@@ -105,12 +105,25 @@ a frame at scale 4), the settings menu and widescreen all work.
   can't do wss); the room shown while in it (ROOM line, "Your room");
   the host closing a room before the start takes the others out; host
   migration in a game in progress (the lobby keeps the code: deployed).
-  All in docs/netplay.md. FIRST (owner's report, 2026-10-27): after a few
-  host changes in a game, a joiner can't catch up, cabinets' fps differ,
-  its game buttons sometimes dead; suspects and the deep test to write
-  (host changes, joins, rejoins, a key test after each join) in
-  docs/netplay.md, "Open: repeated host changes"; scripts in
-  build\speedcheck\scripts. Then: rollback step 2 (re-runs that draw and
+  All in docs/netplay.md. The owner's report (2026-10-27: after a few
+  host changes a joiner can't catch up, cabinets' fps differ, its buttons
+  sometimes dead): two faults found and fixed (2026-10-28;
+  docs/netplay.md, "Repeated host changes: found and fixed"): the cabinet
+  request (kTake) now asked again until handed over (unit test proves it,
+  Session::vanish), and the window catches up to the furthest of the
+  other seats' inputs. The gamerun deep test (deep-test.ps1 in
+  build\speedcheck\scripts; mini-migrate.ps1 one change then a join) and
+  the three-window test (three-windows.ps1: two host changes, a rejoin,
+  keys held) pass. Still to do: the owner's own test over the internet.
+  Also fixed then (docs/fidelity.md): the 3D's last screen column (the
+  viewport 495.75 wide, drawn at that scale over all 496 pixels: a line of
+  the 2D at the right edge before); the picture shape changed with the
+  game paused (the frame made again for it); the Speakers setting crashing
+  the window (page helpers referenced after the page was made); the
+  ranking after a game over (its fade continued, and the layer clear
+  0x795c hooked: the title's columns had stayed beside every screen after
+  it). The window logs the menu opening and closing and picture shape
+  changes, with the frame (for reports). Then: rollback step 2 (re-runs that draw and
   play nothing); the two-network test; the late-join music (the owner
   decides); spectators, Auto delay during play, Mode A (the owner's
   "direct connect": a cable link, decided later).

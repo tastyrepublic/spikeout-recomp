@@ -12,7 +12,7 @@ namespace {
 constexpr int kMaxDepth = 64;
 constexpr uint32_t kMaxVisits = 200000;
 constexpr uint32_t kMaxPolygonsPerModel = 65536;
-constexpr int kScreenHeight = 384;
+constexpr int kScreenHeight = 384, kScreenWidth = 496;
 
 float as_float(uint32_t w) { return std::bit_cast<float>(w); }
 
@@ -168,14 +168,23 @@ void Real3dSceneBuilder::walk_viewports(uint32_t addr) {
         if (!node) return;
         Real3dScene::Viewport vp;
         vp.priority = static_cast<int>((node[0] >> 3) & 3);
-        // Position 12.4 and size 14.2, in whole pixels (as Supermodel's GL
-        // viewport): its bottom edge is placed from the bottom of the screen.
+        // Position 12.4 and size 14.2 (as Supermodel's GL viewport): its
+        // bottom edge is placed from the bottom of the screen. The width is
+        // the pixels whose centres are inside the game's: a whole screen's is
+        // 495.75 (all 496 pixels: the last one's centre at 495.5), drawn at
+        // its scale, the frustum's right side carried out to them (below).
+        // Rounded down to 495 the screen's last column was never drawn (the
+        // layer below showing through: a line at the right edge, 4 window
+        // pixels at render scale 4); Supermodel scales 495.75 to the window
+        // before it rounds, losing less than a window pixel.
+        float game_width = 0;
         {
             const float x = static_cast<float>(node[0x1A] & 0xFFFF) / 16.0f, y = static_cast<float>(node[0x1A] >> 16) / 16.0f;
             const float w = static_cast<float>(node[0x14] & 0xFFFF) / 4.0f, h = static_cast<float>(node[0x14] >> 16) / 4.0f;
             const int bottom = static_cast<int>(static_cast<float>(kScreenHeight) - (y + h)), height = static_cast<int>(h);
             vp.x = static_cast<float>(static_cast<int>(x));
-            vp.width = static_cast<float>(static_cast<int>(w));
+            vp.width = std::floor(w + 0.5f);
+            game_width = w;
             vp.height = static_cast<float>(height);
             vp.y = static_cast<float>(kScreenHeight - (bottom + height));
         }
@@ -184,6 +193,7 @@ void Real3dSceneBuilder::walk_viewports(uint32_t addr) {
         vp.cota = as_float(node[0x3]);
         vp.left = -jo / cv;
         vp.right = (1.0f - jo) / cv;
+        if (game_width > 0 && vp.width != game_width) vp.right = vp.left + (vp.right - vp.left) * (vp.width / game_width);
         vp.bottom = -(1.0f - io) / cw;
         vp.top = io / cw;
         // The sun as GL axes see it (x, y, z = word 5, -6, -4).
@@ -231,16 +241,21 @@ void Real3dSceneBuilder::walk_viewports(uint32_t addr) {
         lod_table_ = node[0x17] & 0xFFFFFF;
         for (uint32_t i = 0; i < 8; ++i) planes_[i] = as_float(node[0x0C + i]);
         // Widescreen (set_extend): a viewport over the whole screen opened
-        // out to the sides, as Supermodel's CNew3D::CalcViewport: the side
-        // tangents and the side planes' x terms scaled by the width's ratio.
+        // out to the sides, as Supermodel's CNew3D::CalcViewport: over the
+        // whole wide picture (its viewport is the window's), the side planes'
+        // x terms scaled by the width's ratio. The sides go on at the game's
+        // scale from its left edge to the wide picture's right one, so the
+        // middle is drawn as the arcade's.
         if (extend_ > 0 && vp.x == 0 && vp.width >= 495 && vp.y == 0 && vp.height >= 383) {
-            const float widen = (vp.width + 2.0f * static_cast<float>(extend_)) / vp.width;
-            vp.left *= widen;
-            vp.right *= widen;
+            const float e = static_cast<float>(extend_), total = static_cast<float>(kScreenWidth) + 2.0f * e;
+            const float per = (vp.right - vp.left) / vp.width; // the frustum's width a pixel
+            vp.left -= per * e;
+            vp.right = vp.left + per * total;
+            const float widen = total / vp.width; // (culling a little wider than the picture: kept safe)
             planes_[1] /= widen;
             planes_[5] /= widen;
-            vp.x = -static_cast<float>(extend_);
-            vp.width += 2.0f * static_cast<float>(extend_);
+            vp.x = -e;
+            vp.width = total;
         }
         const size_t first_model = models_.size();
         attribs_ = {};

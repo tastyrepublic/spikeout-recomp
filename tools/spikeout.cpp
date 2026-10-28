@@ -189,6 +189,7 @@ struct Shared {
         // be seen (the stage the game draws behind its logo), so isn't drawn.
         bool covered = false;
         uint64_t number = 0;
+        uint64_t version = 0; // the same frame made again (paused, for a new picture shape): drawn again
         int extend = 0; // the widescreen extension the scene was built with
     } gpu_frame;
     // Texture RAM rows the game wrote, copied for the window (its copy kept
@@ -622,6 +623,36 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
     m3::Real3dSceneBuilder builder;
     m3::WideLayer wide_bottom, wide_top;
     Shared::GpuFrame gpu_frame;
+    int built_extend = 0;  // the widescreen extension the last frame was made with (asked for)
+    uint64_t rebuilt = 0;  // frames made again, paused (GpuFrame::version)
+    // The frame for the window: its scene and 2D layers (widescreen: made as wide).
+    auto build_gpu_frame = [&] {
+        built_extend = shared.extend;
+        builder.set_extend(built_extend);
+        builder.build(bus.real3d(), gpu_frame.scene);
+        gpu_frame.extend = builder.extend();
+        gpu_frame.bottom.assign(tilegen.bottom().begin(), tilegen.bottom().end());
+        gpu_frame.top.assign(tilegen.top().begin(), tilegen.top().end());
+        if (gpu_frame.extend > 0) {
+            const bool drawn = tilegen.extend() == gpu_frame.extend; // the tile generator's own sides
+            wide_bottom.build(tilegen.bottom(), drawn ? tilegen.bottom_side() : std::span<const uint32_t>(),
+                              gpu_frame.extend, gpu_frame.bottom_wide, false,
+                              drawn ? tilegen.bottom_own() : std::span<const uint32_t>(),
+                              drawn ? tilegen.bottom_real() : std::span<const uint8_t>());
+            wide_top.build(tilegen.top(), drawn ? tilegen.top_side() : std::span<const uint32_t>(), gpu_frame.extend,
+                           gpu_frame.top_wide, true, drawn ? tilegen.top_own() : std::span<const uint32_t>(),
+                           drawn ? tilegen.top_real() : std::span<const uint8_t>());
+        }
+        tilegen.set_extend(gpu_frame.extend);
+        {
+            const std::vector<uint32_t>& above = gpu_frame.extend > 0 ? gpu_frame.top_wide : gpu_frame.top;
+            gpu_frame.covered = !above.empty() && std::all_of(above.begin(), above.end(), [](uint32_t p) { return (p >> 24) != 0; });
+        }
+        gpu_frame.number = timing.frames();
+        gpu_frame.version = rebuilt;
+        gpu_frame.tile_control = bus.tile_reg(0x20);
+        for (uint32_t n = 0; n < 4; ++n) gpu_frame.tile_scroll[n] = bus.tile_reg(0x60 + 4 * n);
+    };
     bool textures_whole = true; // the next frame sends all of texture RAM
     bool inputs_started = false; // (network play: the frames before the first, with an input delay, set to none)
     // Tests: SPIKEOUT_NET_DEBUG=1 prints, every 300 frames, how long the
@@ -662,29 +693,7 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             pace(); // (no picture: another player's board)
         } else if (shared.gpu_3d && index == shown) { // the scene and layers for the window to draw
             const m3::Real3d& mem = bus.real3d();
-            builder.set_extend(shared.extend);
-            builder.build(mem, gpu_frame.scene);
-            gpu_frame.extend = builder.extend();
-            gpu_frame.bottom.assign(tilegen.bottom().begin(), tilegen.bottom().end());
-            gpu_frame.top.assign(tilegen.top().begin(), tilegen.top().end());
-            if (gpu_frame.extend > 0) {
-                const bool drawn = tilegen.extend() == gpu_frame.extend; // the tile generator's own sides
-                wide_bottom.build(tilegen.bottom(), drawn ? tilegen.bottom_side() : std::span<const uint32_t>(),
-                                  gpu_frame.extend, gpu_frame.bottom_wide, false,
-                                  drawn ? tilegen.bottom_own() : std::span<const uint32_t>(),
-                                  drawn ? tilegen.bottom_real() : std::span<const uint8_t>());
-                wide_top.build(tilegen.top(), drawn ? tilegen.top_side() : std::span<const uint32_t>(), gpu_frame.extend,
-                               gpu_frame.top_wide, true, drawn ? tilegen.top_own() : std::span<const uint32_t>(),
-                               drawn ? tilegen.top_real() : std::span<const uint8_t>());
-            }
-            tilegen.set_extend(gpu_frame.extend);
-            {
-                const std::vector<uint32_t>& above = gpu_frame.extend > 0 ? gpu_frame.top_wide : gpu_frame.top;
-                gpu_frame.covered = !above.empty() && std::all_of(above.begin(), above.end(), [](uint32_t p) { return (p >> 24) != 0; });
-            }
-            gpu_frame.number = timing.frames();
-            gpu_frame.tile_control = bus.tile_reg(0x20);
-            for (uint32_t n = 0; n < 4; ++n) gpu_frame.tile_scroll[n] = bus.tile_reg(0x60 + 4 * n);
+            build_gpu_frame();
             // The texture RAM rows written since the last frame, copied for
             // the window (all of them the first time, or after the software 3D).
             std::vector<Shared::TextureRows> rows;
@@ -722,9 +731,18 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
         if (shared.sound && index == shown) shared.sound->send(bus.midi_out());
         else bus.midi_out().clear();
         if (linked && timing.frames() < tools::kLinkSettingFrames) bus.write8(tools::kLinkSettingAddr, link_setting);
-        // The menu: held here, between frames, until it closes.
+        // The menu: held here, between frames, until it closes. The picture
+        // shape changed meanwhile: this frame made again for it (its 3D from
+        // the Real3D's memory as it is, its 2D's sides from the layers; those
+        // the tile generator draws itself come with the next frame).
         while (shared.paused && !networked && !shared.quit) { // (network play goes on: the others play)
             repace = true;
+            if (shared.gpu_3d && index == shown && shared.extend != built_extend) {
+                build_gpu_frame();
+                gpu_frame.version = ++rebuilt;
+                std::lock_guard<std::mutex> guard(shared.lock);
+                std::swap(shared.gpu_frame, gpu_frame);
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         if (networked) { // this player's inputs in (and out), then every board's for the next frame from the table
@@ -754,10 +772,14 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
                     std::printf("spikeout: test poke, board %u %06x = %02x at frame %llu\n", b, addr, value, at);
                 }
             }
-            // Run on from a state: caught up with the others (another seat's inputs as far as ours), our cabinet then.
+            // Run on from a state: caught up with the others (as far as the
+            // furthest of their inputs: one seat alone may be a cabinet whose
+            // player left, its inputs stopped where they did), our cabinet then.
             if (index == shown && shared.catching_up) {
-                const auto other = static_cast<uint8_t>(shown == 0 ? 1 : 0);
-                if (frame + 4 >= shared.netplay->session().inputs_known(other)) {
+                uint64_t front = 0;
+                for (std::size_t s = 0; s < shared.boards; ++s)
+                    if (s != shown) front = std::max(front, shared.netplay->session().inputs_known(static_cast<uint8_t>(s)));
+                if (frame + 4 >= front) {
                     shared.catching_up = false;
                     shared.netplay->session().take_seat(); // (a cabinet joined in progress; else nothing)
                 }
@@ -1108,6 +1130,13 @@ int main(int argc, char** argv) {
         const bool want = on_gpu && (boards == 1 || shared.netplay) && settings.gpu_3d; // (network play: the local board)
         const int s = wanted_scale(), e = want ? wanted_extend() : 0;
         drawn_number = 0;
+        if (e != shared.extend || s != draw_scale) { // (a log of what the player changed, for reports)
+            std::size_t board = shared.netplay ? shared.local : 0;
+            std::printf("spikeout: picture shape %d, %d pixels each side, render scale %d (board %zu at frame %llu)\n",
+                        settings.picture_shape, e, s, board + 1,
+                        static_cast<unsigned long long>(shared.screens[board].frame_number));
+            std::fflush(stdout);
+        }
         shared.extend = e;
         if (want && real3d_gpu && s == draw_scale && e == real3d_gpu->extend()) {
             real3d_gpu->set_quads(settings.quads);
@@ -1604,6 +1633,12 @@ int main(int argc, char** argv) {
         p.items.push_back(back_item());
         return p;
     };
+    // The outputs opened again for the speaker settings (here, not in the
+    // page: its items run it after the page's making has returned).
+    auto reopen_sound = [&] {
+        if (sound) sound->open(speaker_setup());
+        changed();
+    };
     auto sound_page = [&] {
         ui::MenuPage p{"Sound", "", {}};
         auto volume = [&](const char* label, const char* help, int& v, int most) {
@@ -1633,17 +1668,15 @@ int main(int argc, char** argv) {
             int frames = 0;
             return SDL_GetAudioDeviceFormat(audio_device(name), &spec, &frames) ? spec.channels : 0;
         };
-        auto reopen = [&] {
-            if (sound) sound->open(speaker_setup());
-            changed();
-        };
+        // (The items keep a copy of `channels`: they're used after this page's
+        // making has returned, when a setting changes.)
         static constexpr const char* kSpeakerNames[] = {"Stereo", "Four channels", "Two outputs"};
         p.items.push_back(
             {"Speakers",
              "The cabinet's front pair (first sound chip, music) and rear pair (second chip). Stereo mixes them. Four "
              "channels: both pairs to one output, for quad, 5.1 or 7.1 speakers set up in your system (else mixed to stereo). "
              "Two outputs: each pair to an output of its own.",
-             [&] {
+             [&, channels] {
                  std::string v = kSpeakerNames[settings.speakers];
                  if (settings.speakers == 1) {
                      const int c = channels(settings.front_output);
@@ -1653,7 +1686,7 @@ int main(int argc, char** argv) {
              },
              [&](int d) {
                  settings.speakers = (settings.speakers + d + 3) % 3;
-                 reopen();
+                 reopen_sound();
                  menu.refresh();
              }});
         auto output_item = [&](const char* label, const char* help, std::string& chosen) {
@@ -1666,7 +1699,7 @@ int main(int argc, char** argv) {
                                         if (names[i] == chosen) at = i;
                                     const auto n = static_cast<int>(names.size());
                                     chosen = names[static_cast<std::size_t>((static_cast<int>(at) + d + n) % n)];
-                                    if (settings.speakers != 0) reopen();
+                                    if (settings.speakers != 0) reopen_sound();
                                 }};
         };
         p.items.push_back(output_item("Front output", "Where the front pair (or all four channels) goes.", settings.front_output));
@@ -2250,6 +2283,12 @@ int main(int argc, char** argv) {
         // closing it keeps the settings.
         const bool menu_open = menu_ready && menu.is_open();
         if (menu_open != menu_was_open) {
+            {
+                const std::size_t board = shared.netplay ? shared.local : 0;
+                std::printf("spikeout: menu %s (board %zu at frame %llu)\n", menu_open ? "opened" : "closed", board + 1,
+                            static_cast<unsigned long long>(shared.screens[board].frame_number));
+                std::fflush(stdout);
+            }
             shared.paused = menu_open;
             // (closing it always plays the sound again: a network game started from the menu was paused before it began)
             if (sound && (!menu_open || !shared.netplay)) sound->pause(menu_open);
@@ -2432,8 +2471,10 @@ int main(int argc, char** argv) {
 #ifdef SPIKEOUT_GPU
             // A newer frame for the GPU to draw (the swap leaves the older one
             // in its place, for the game thread to fill next).
-            if (shared.gpu_3d && shared.gpu_frame.number > gpu_frame.number) {
-                const bool keep = settings.smooth_motion;
+            const bool remade = shared.gpu_frame.number == gpu_frame.number && shared.gpu_frame.version > gpu_frame.version;
+            if (shared.gpu_3d && (shared.gpu_frame.number > gpu_frame.number || remade)) {
+                if (remade) drawn_number = 0; // (its 3D drawn again)
+                const bool keep = settings.smooth_motion && !remade;
                 if (keep) { // kept, to draw between it and the newest
                     smooth.before = gpu_frame.scene;
                     smooth.before_number = gpu_frame.number;

@@ -120,8 +120,8 @@ constexpr std::array kCodeEntries = {
 
 // Observers for widescreen's sides from the game's own tile maps
 // (games/spikeofe_hooks.cpp): the draw-a-tile-map routine before it clips,
-// the fill routine and the copy to the name tables.
-constexpr std::array kHooks = {0x00009628u, 0x00007E34u, 0x00008230u};
+// the fill routine, the copy to the name tables and the clear of a layer.
+constexpr std::array kHooks = {0x00009628u, 0x00007E34u, 0x00008230u, 0x0000795Cu};
 
 } // namespace
 

@@ -18,6 +18,8 @@
 //           With flag 0x8000 it fills the rectangle with the blank tile
 //           (0x20) instead, through 0x7e34.
 //   0x7e34  fills w x h entries from byte offset r11 (y << 7 | x << 1) with r6.
+//   0x795c  clears a whole layer (r3 its descriptor) to the blank tile (or 0):
+//           after the ranking's gates, say, before the attract sequence.
 //   0x8200  copies a layer's changed entries to its name table (bit 15 of
 //           an entry in the buffer: copied; bit 14 there becomes bit 7).
 //
@@ -25,11 +27,13 @@
 // nothing clipped yet (r25 the entries less 2 of the part of the map drawn,
 // its top left corner r10/r9 in the map, r26 x r27 its size, r28 the map's
 // width, r6/r5 where it goes, r19 the layer, r29 the table, r18 the flags,
-// r23 the map); 0x7e34, the fill's entry; 0x8230, the copy, r16 the layer.
+// r23 the map); 0x7e34, the fill's entry; 0x8230, the copy, r16 the layer;
+// 0x795c, the clear's entry (its kept columns go with the layer: they had
+// stayed, the title's wall beside every screen after a game over's ranking).
 // The title's doors are one map (0x53, the whole title, 62 x 48), each door
 // a part of it drawn at the screen's edge, wider as it closes; the title's
 // strips after the attract sequence are parts of it too. The linking
-// screen's pictures (0x39-0x3c) fade out at their left edge: fades_left.
+// screen's pictures (0x39-0x3c) and the ranking's (0x81) fade out at their edges: fades.
 #include "games/spikeofe_hooks.hpp"
 
 #include "recomp/context.hpp"
@@ -41,7 +45,7 @@ namespace m3::games {
 
 namespace {
 
-constexpr uint32_t kDrawHook = 0x9628, kFillHook = 0x7E34, kCopyHook = 0x8230;
+constexpr uint32_t kDrawHook = 0x9628, kFillHook = 0x7E34, kCopyHook = 0x8230, kClearHook = 0x795C;
 constexpr uint32_t kNameTables = 0xF10F8000, kNameTableSize = 0x2000;
 constexpr uint16_t kBlank = 0x20; // the tile the clear flag fills with
 // The title (map 0x53) and its wall's repeat past the map's edge: the
@@ -53,11 +57,20 @@ constexpr uint16_t kBlank = 0x20; // the tile the clear flag fills with
 constexpr uint16_t kTitleMap = 0x53;
 constexpr int32_t kTitleWallRepeat = 31;
 
-// The linking screen (a player joining a game in progress: "THE NEW TEAM",
-// the joining fighter, one map each, 0x39-0x3c, 62 x 48): a spotlight on
-// white, darkening to near black at the left edge; past it the darkening
-// goes on (m3::TileSides::kFade). Its right edge is plain white, carried as usual.
-bool fades_left(uint16_t map) { return map >= 0x39 && map <= 0x3C; }
+// Pictures that fade out at an edge, past which the fading goes on
+// (m3::TileSides::kFade): bit 0 the left edge, bit 1 the right.
+// - The linking screen (a player joining a game in progress: "THE NEW
+//   TEAM", the joining fighter, one map each, 0x39-0x3c, 62 x 48): a
+//   spotlight on white, near black at the left edge. Its right edge is plain
+//   white, carried as usual.
+// - The ranking after a game over (TOP SPIKERS, 0x81, 62 x 48): a red
+//   spotlight, near black at both edges (its rows' edge tiles carried on had
+//   made the sides bright red).
+int fades(uint16_t map) {
+    if (map >= 0x39 && map <= 0x3C) return 1;
+    if (map == 0x81) return 3;
+    return 0;
+}
 
 // The tile layer a descriptor is copied to (-1: none known); its columns and rows.
 int layer_of(recomp::Context& c, uint32_t desc, int& columns, int& rows) {
@@ -129,14 +142,17 @@ void draw(recomp::Context& c) {
     for (int32_t row = std::max(y, 0); row < std::min(y + h, rows); ++row) { // (clipped as the game does)
         const int32_t mr = y0 + (row - y);
         if (mr < 0 || mr >= height) continue;
-        if (reaches_left && !clear && fades_left(map)) {
+        if (reaches_left && !clear && (fades(map) & 1)) {
             for (int32_t column = -TileSides::kSide; column < 0; ++column) sides.fade(layer, row, column, map);
         } else if (reaches_left) {
             const bool carry = background(mr, 0);
             if (carry || title)
                 for (int32_t column = -TileSides::kSide; column < 0; ++column) put(row, column, carry);
         }
-        if (reaches_right) {
+        if (reaches_right && !clear && (fades(map) & 2)) {
+            for (int32_t column = TileSides::kScreen; column < TileSides::kScreen + TileSides::kSide; ++column)
+                sides.fade(layer, row, column, map);
+        } else if (reaches_right) {
             const bool carry = background(mr, stride - 1);
             if (carry || title)
                 for (int32_t column = TileSides::kScreen; column < TileSides::kScreen + TileSides::kSide; ++column)
@@ -170,10 +186,18 @@ void copy(recomp::Context& c) {
     if (layer >= 0) c.bus.tile_sides().copy(layer);
 }
 
+// The clear routine: the whole layer blank, what was kept past its edges too.
+void clear(recomp::Context& c) {
+    int columns = 0, rows = 0;
+    const int layer = layer_of(c, c.cpu.gpr[3], columns, rows);
+    if (layer >= 0) c.bus.tile_sides().clear_layer(layer);
+}
+
 void hook(recomp::Context& c, uint32_t pc, void*) {
     if (pc == kDrawHook) draw(c);
     else if (pc == kFillHook) fill(c);
     else if (pc == kCopyHook) copy(c);
+    else if (pc == kClearHook) clear(c);
 }
 
 } // namespace

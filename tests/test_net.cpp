@@ -229,6 +229,66 @@ TEST_CASE("net session: the host closing the room before the game starts takes t
     CHECK(!guest.running());
 }
 
+TEST_CASE("net session: a late joiner asking for its cabinet as the host leaves gets it from the new host") {
+    Seen host_seen, a_seen, b_seen;
+    std::atomic<bool> host_wanted{false};
+    auto host_cb = host_seen.callbacks();
+    host_cb.state_wanted = [&] { host_wanted = true; };
+    uint64_t b_taken = 0;
+    auto b_cb = b_seen.callbacks();
+    b_cb.taken = [&](uint8_t seat, uint64_t frame) {
+        std::lock_guard g(b_seen.lock);
+        if (seat == 2) b_taken = frame;
+        b_seen.changed.notify_all();
+    };
+    auto host = std::make_unique<Session>(std::move(host_cb), 42);
+    CHECK(host->host("host", 3));
+    Session a(a_seen.callbacks(), 42);
+    GameInfo game{host->session_id(), 42, "host", 3, 1, false, Address{0x7F000001u, host->port()}, {}};
+    CHECK(a.join(game, "a"));
+    for (int i = 0; i < 300 && host->ready_players() < 2; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    host->start(StartInfo{}); // (seat 3 empty)
+    CHECK(a_seen.wait([&] { return a_seen.started; }));
+    for (uint64_t f = 1; f <= 50; ++f) {
+        host->local_input(f, {static_cast<uint8_t>(f), 0xFF, 0xFF, 0xFF});
+        a.local_input(f, {0x22, 0xFF, 0xFF, 0xFF});
+    }
+    CHECK(a_seen.wait([&] { return a_seen.inputs[0].size() == 50 && a_seen.inputs[2].size() == 50; }));
+
+    // b joins the game in progress through the host and runs on from its state.
+    Session b(std::move(b_cb), 42);
+    GameInfo running{host->session_id(), 42, "host", 3, 2, true, Address{0x7F000001u, host->port()}, {}};
+    CHECK(b.join(running, "b"));
+    for (int i = 0; i < 300 && !host_wanted; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK(host_wanted.load());
+    host->send_state(40, std::vector<uint8_t>(3000, 0x55));
+    CHECK(b_seen.wait([&] { return b_seen.started; }));
+    CHECK_EQ(b_seen.start.my_seat, 2);
+
+    // The host's machine goes as b asks it for its cabinet (no goodbye: b's
+    // request is never answered); once it's dropped, b asks a, the room's
+    // host then.
+    host->vanish();
+    b.take_seat();
+    uint64_t fed = 50; // (a's own inputs go on: the frames it hands b's cabinet over from follow them)
+    for (int i = 0; i < 750; ++i) {
+        a.local_input(++fed, {0x22, 0xFF, 0xFF, 0xFF});
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        std::lock_guard g(b_seen.lock);
+        if (b_taken) break;
+    }
+    CHECK(b_seen.wait([&] { return b_taken != 0; }, 1000));
+    // and a takes b's inputs from then on
+    const uint64_t first = b_taken;
+    for (uint64_t f = 1; f <= first + 20; ++f) b.local_input(f, {0x44, 0xFF, 0xFF, 0xFF});
+    while (fed < first + 20) a.local_input(++fed, {0x22, 0xFF, 0xFF, 0xFF});
+    CHECK(a_seen.wait([&] {
+        for (const auto& [f, in] : a_seen.inputs[2])
+            if (f >= first && in == InputBytes{0x44, 0xFF, 0xFF, 0xFF}) return true;
+        return false;
+    }));
+}
+
 TEST_CASE("net session: the host leaving a game in progress, the room goes on: a player joins it through the new host") {
     Seen host_seen, a_seen, b_seen;
     std::atomic<bool> a_wanted{false};

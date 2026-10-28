@@ -163,8 +163,22 @@ empty NVRAM, so the demo runs the same):
 - Also as Supermodel: normals divided by the node's model scale rather
   than normalized, signed bytes read as (2b + 1) / 255, the translator map
   (colour x 16), inverted textures, microtextures, format 7 without the
-  alpha test, viewports in whole pixels, translucency layers over the 2D
-  with straight alpha. `--quads` draws quads whole with mean value
+  alpha test, translucency layers over the 2D with straight alpha.
+- Viewport width (2026-10-28, the owner's report of a line of the 2D at
+  the 3D's right edge, which Supermodel doesn't show): the game's whole
+  screen viewport is 495.75 wide (word 0x14, 14.2: 1983). It was rounded
+  down to 495 pixels and drawn at that scale, so the screen's last column
+  never had 3D (4 window pixels at render scale 4). Supermodel scales
+  495.75 to the window before it rounds (`(int)(vpWidth * xRatio)`), so
+  its scale is 495.75 and it loses less than a window pixel. Now the 3D
+  is drawn at the game's scale, 495.75, over every pixel whose centre is
+  inside it (all 496), the frustum's right side carried out the quarter
+  pixel to the last one. The 4:3 picture moved with it (the old scale
+  was 0.15% small: up to 3/4 of a pixel at the right edge; 35% of pixels
+  differ a little, 1.3% by more than 24 levels); GPU and software still
+  agree as before (208 pixels a frame differing either way). Widescreen
+  opens out from there to the whole wide picture, as Supermodel's
+  (its viewport is the window's). `--quads` draws quads whole with mean value
   coordinates (Supermodel's optional quad rendering); by default they are
   two triangles, the same picture for flat, linearly mapped quads.
 
@@ -347,6 +361,23 @@ Checked against the build before: the title's doors (601 pictures), the
 attract sequence from power-on (1245) and a two-board join (357, both
 boards: select, map, game select, play) are the same but the linking
 screen's frames.
+
+After a game over (the owner's report, from a network game, 2026-10-28;
+offline the same): the ranking (TOP SPIKERS, map 0x81 on layer 2, 62 x 48)
+comes in behind gates and goes out through the title's doors; then the
+game clears the layer with a routine of its own (0x795c, the whole layer
+blank), which the hooks didn't see, so the title's kept columns stayed
+past the edges of every screen after it (the red wall and band beside the
+attract sequence's demos). The clear is hooked now: the layer's kept
+columns go with it (`TileSides::clear_layer`). The ranking itself is a
+red spotlight near black at both edges; its rows' edge tiles carried on
+had made the sides bright red, so it fades on past both edges as the
+linking screen's does, each row from its own edge (its pixels taken as
+the picture's own by their colour, red, where the linking screen's are
+grey). Checked on a game played to its end (every 100 frames to 13,500):
+the clear changes the 16:9 pictures from the ranking on only, the fade the
+ranking's only, the 4:3 pictures none; the linking screen's pictures the
+same as before, both cabinets'.
 
 ## Sound board
 

@@ -29,6 +29,7 @@ constexpr std::size_t kChunkFrames = 64;   // input frames a seat a datagram
 constexpr auto kInputResend = std::chrono::milliseconds(4);
 constexpr auto kKeepAlive = std::chrono::milliseconds(100);
 constexpr auto kJoinRetry = std::chrono::milliseconds(400);
+constexpr auto kTakeRetry = std::chrono::seconds(2); // a cabinet asked for again, until it's handed over
 constexpr auto kBeaconEvery = std::chrono::milliseconds(1000);
 
 class Writer {
@@ -243,6 +244,13 @@ struct Session::Impl {
     bool late = false, want_state = false;
     std::optional<StartInfo> late_start;
     std::optional<uint64_t> mine_from;
+    // Our cabinet asked for (kTake), until it's handed over (kTaken): asked
+    // again of whoever is the authority then, now and then and whenever the
+    // authority changes, since an authority that has left, or that a
+    // machine only took for one a moment, never answers.
+    bool take_wanted = false;
+    uint8_t take_asked = kNoSeat;
+    Clock::time_point take_sent{};
     std::optional<uint64_t> state_at; // (the frame of the last state we ran on from: hashes before it not compared)
     std::map<uint64_t, InputBytes> pending_local;
 
@@ -659,7 +667,14 @@ struct Session::Impl {
             if (cb.state_wanted) cb.state_wanted();
             break;
         case kTake: { // (the authority) a player joined in progress takes its cabinet
-            if (authority() != my_seat || from >= seats || !cabinets[from].open || cabinets[from].until) break;
+            if (authority() != my_seat || from >= seats) break; // (it asks the authority again)
+            if (cabinets[from].until) { // already handed over (asked again: the answer lost with a host that left)
+                Writer w;
+                w.u8(kTaken), w.u8(from), w.u64(*cabinets[from].until);
+                send_reliable(from, w.out);
+                break;
+            }
+            if (!cabinets[from].open) break;
             const uint64_t x = streams[from].next() + kTakeMargin;
             Writer w;
             w.u8(kTaken), w.u8(from), w.u64(x);
@@ -796,7 +811,7 @@ struct Session::Impl {
             if (host_seat == my_seat) {
                 is_host = true;
                 targets_asked = Clock::time_point{}; // (the networks to announce it on, at once)
-                log("the host left: this machine hosts the room now");
+                log("the host left: this machine hosts the room now (port " + std::to_string(socket.port()) + ")");
             } else {
                 log("the host left: " + (peers[host_seat].name.empty() ? "seat " + std::to_string(host_seat + 1) : peers[host_seat].name) +
                     " hosts the room now");
@@ -811,10 +826,22 @@ struct Session::Impl {
         log("seat " + std::to_string(s + 1) + " taken from frame " + std::to_string(x));
         if (s == my_seat) {
             mine_from = x;
+            take_wanted = false;
             flush_pending();
         }
         fill_open_to_mine();
         if (cb.taken) cb.taken(s, x);
+    }
+
+    // Our cabinet, asked of the authority (not ourselves: one moment with
+    // no one else connected; asked again once someone is).
+    void ask_take(Clock::time_point now) {
+        const uint8_t a = authority();
+        take_asked = a, take_sent = now;
+        if (a == my_seat || a >= seats) return;
+        Writer w;
+        w.u8(kTake);
+        send_reliable(a, w.out);
     }
 
     // Our boards differ from the authority's: ask it for its state.
@@ -930,6 +957,8 @@ struct Session::Impl {
             }
             if (turn) turn->tick(turn_send());
             if (started && !leaving) check_drops();
+            if (take_wanted && !mine_from && !leaving && (authority() != take_asked || now - take_sent > kTakeRetry))
+                ask_take(now);
             if (!started && !is_host && my_seat != kNoSeat && !room_closed && peers[host_seat].present &&
                 now - peers[host_seat].heard > kDropAfter) { // (before the start, a host gone quiet: the room is gone)
                 room_closed = true;
@@ -981,10 +1010,12 @@ struct Session::Impl {
         for (const Address& a : beacon_targets) send(a, w);
     }
 
-    uint64_t player_id() {
-        static const uint64_t id = std::random_device{}() * 0x9E3779B97F4A7C15ull ^ static_cast<uint64_t>(epoch.time_since_epoch().count());
-        return id;
-    }
+    // This session's player, told to the host with each join (a join asked
+    // again isn't taken for another player). One a session, not a process:
+    // tests run several players in one.
+    uint64_t player_id() { return my_player; }
+    const uint64_t my_player = std::random_device{}() * 0x9E3779B97F4A7C15ull ^ std::random_device{}() ^
+                            static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
 
     bool open() {
         if (socket.is_open()) return true; // (opened to find our addresses first: Session::listen)
@@ -1187,10 +1218,9 @@ void Session::send_state(uint64_t frame, std::vector<uint8_t> state) {
 void Session::take_seat() {
     Impl& m = *impl_;
     std::lock_guard guard(m.lock);
-    if (!m.late || m.mine_from || m.my_seat == kNoSeat) return;
-    Writer w;
-    w.u8(kTake);
-    m.send_reliable(m.authority(), w.out);
+    if (!m.late || m.mine_from || m.my_seat == kNoSeat || m.take_wanted) return;
+    m.take_wanted = true;
+    m.ask_take(Clock::now());
 }
 
 uint64_t Session::inputs_known(uint8_t seat) const {
@@ -1249,6 +1279,14 @@ void Session::leave() {
                     m.pump_reliable(s, m.peers[s]);
                 }
     }
+}
+
+void Session::vanish() {
+    Impl& m = *impl_;
+    m.stop = true;
+    if (m.thread.joinable()) m.thread.join();
+    std::lock_guard guard(m.lock);
+    m.leaving = true; // (no goodbye from the destructor)
 }
 
 void Session::find_public_address(const Address& stun_server) {

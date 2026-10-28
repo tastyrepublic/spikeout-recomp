@@ -589,6 +589,46 @@ differing on either side. The sound under WSLg stutters when the window is
 resized: WSLg's audio goes to Windows over its remote-desktop channel;
 not seen on Windows.
 
+## Repeated host changes: found and fixed (2026-10-27)
+
+The deep test (build\speedcheck\scripts\deep-test.ps1, gamerun, LAN): a
+room of 4; H hosts and leaves at 900, A and B join at the start, C joins
+after H left, A (hosting then) leaves at 1800, H joins again, B leaves at
+2700 and joins again at once, the rest go on to 5000. It passed before and
+after the fixes (every joiner seated, no hash check differing, every
+process the same at the end), so on its own it doesn't show the report:
+gamerun joins its seat at once and has no catch-up. Two faults found in
+the code, each in the report's symptoms:
+
+- Dead buttons: a late joiner asked for its cabinet (`kTake`) once, of
+  whoever it took for the authority then. Reliable delivery gets it there,
+  but a machine that isn't the authority (any more) drops it, and a host
+  whose machine goes without a goodbye never answers: the joiner never had
+  its seat, its inputs never went out. Proved by a unit test that failed
+  so (tests/test_net.cpp, "a late joiner asking for its cabinet as the host
+  leaves"; `Session::vanish` stops a session without a goodbye). Now asked
+  again every 2 s and at once when the authority changes, until handed
+  over; an authority asked again for a cabinet it has handed over answers
+  again with the same frame.
+- Frames a second differing, a joiner never catching up: the window ran
+  fast from the host's state until its frame was within 4 of one other
+  seat's inputs (seat 1, or 2 when it shows seat 1). After host changes
+  that seat may be a cabinet whose player left, its inputs stopped where
+  they did: the joiner stopped catching up far behind, took its seat (the
+  others then waiting for its inputs) and ran on at the arcade's speed,
+  never catching up. Now it catches up to the furthest of the other seats'
+  inputs.
+
+Also: a session's player id is the session's own now (it was the
+process's: in a test with several players in one process, a second
+player's join was taken for the first's asked again). The joining state is
+plain zstd of every board: about 4 MB a few hundred frames in, 18-20 MB
+by frame 2000 (the game's RAM and textures filled), whoever hosts; over
+the internet that's several seconds of a join.
+
+Not yet: the window test with two or three windows across host changes
+(below, step 5), and the internet one.
+
 ## Open: repeated host changes (reported 2026-10-27)
 
 The owner's report, two or more windows on the internet: after a few host
