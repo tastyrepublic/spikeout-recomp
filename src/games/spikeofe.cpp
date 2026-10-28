@@ -121,7 +121,9 @@ constexpr std::array kCodeEntries = {
 // Observers for widescreen's sides from the game's own tile maps
 // (games/spikeofe_hooks.cpp): the draw-a-tile-map routine before it clips,
 // the fill routine, the copy to the name tables and the clear of a layer.
-constexpr std::array kHooks = {0x00009628u, 0x00007E34u, 0x00008230u, 0x0000795Cu};
+// And the camera's update (0x2C4DC, r12 the camera), for gamerun
+// --camera-test (network play: a remote player's camera run here?).
+constexpr std::array kHooks = {0x00009628u, 0x00007E34u, 0x00008230u, 0x0000795Cu, 0x0002C4DCu, 0x00033A6Cu};
 
 } // namespace
 

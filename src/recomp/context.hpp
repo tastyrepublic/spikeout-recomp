@@ -185,6 +185,27 @@ public:
         if (hook_) hook_(*this, pc, hook_user_);
     }
 
+    // Debug aid (gamerun --camera-test): the CPU and the clock set aside, to
+    // run guest code on the side (no scheduler, no interrupts) and then put
+    // everything back as it was; the caller keeps and restores memory.
+    struct Aside {
+        ppc::CpuState cpu;
+        uint64_t blocks, cycles, next_check, scheduler_due, tb_offset, dec_tb, dec_due_tb;
+        uint32_t dec, returned_to, resume_at;
+        bool dec_pending;
+        size_t return_depth;
+        Scheduler* scheduler;
+    };
+    Aside set_aside() const {
+        return {cpu, blocks, cycles_, next_check_, scheduler_due_, tb_offset_, dec_tb_, dec_due_tb_, dec_, returned_to,
+                resume_at, dec_pending_, return_depth_, scheduler_};
+    }
+    void put_back(const Aside& a) {
+        cpu = a.cpu, blocks = a.blocks, cycles_ = a.cycles, next_check_ = a.next_check, scheduler_due_ = a.scheduler_due;
+        tb_offset_ = a.tb_offset, dec_tb_ = a.dec_tb, dec_due_tb_ = a.dec_due_tb, dec_ = a.dec, returned_to = a.returned_to;
+        resume_at = a.resume_at, dec_pending_ = a.dec_pending, return_depth_ = a.return_depth, scheduler_ = a.scheduler;
+    }
+
     // Calls `fn` at the start of the next block run outside any exception
     // (where resume_block can start again), before anything else is done
     // there; it may save the state then.

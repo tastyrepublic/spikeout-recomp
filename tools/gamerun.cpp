@@ -72,7 +72,16 @@
 // slave: `--poke 0:10019E=1@0:2000 --poke 1:10019E=2@0:2000`). --blocks
 // counts for each board. Files from boards after the first get "-bN" before
 // their extension; --net-disasm writes board 0's firmware. --link-trace N
-// prints the first N packets; --net-watch prints each board's network
+// prints the first N packets; --link-dump FILE writes, for every data frame
+// sent, the board, the frame and the sender's own node (its first 0x900
+// bytes: comm RAM 0x100-0x9FF, what its main board wrote); --link-record
+// B:FILE logs board B's main board's calls to its network board, and
+// --link-standin B:FILE runs board B's network board from such a log, its
+// main board not run (--link-standin-at CYCLES: each frame's writes made
+// that long after its start); --camera-record B:FILE records board B's
+// camera as each update starts, and --camera-test B:FILE runs the camera
+// update on board B once more on the side for the other board's camera
+// (docs/netplay.md, "What the cabinets send each other"); --net-watch prints each board's network
 // status registers when they change. The link's open questions
 // (docs/fidelity.md) have switches: --net-e0-irq5 off, --net-send-waits off,
 // --net-other-bank, --link-byte-cycles C (68000 cycles a byte on the wire),
@@ -85,10 +94,17 @@
 // frames from FRAME (docs/netplay.md): each board's state saved every frame
 // (timed), how much of it changed since the frame before (4 KB pages), a
 // copy of it; :speed only times the frames (run with --no-2d --no-sound).
-// --rollback-test FRAME:N[:DEPTH[:EVERY[:compare]]] proves the rollback
-// snapshots (m3::Snapshots) on one board: a snapshot every frame, back
-// DEPTH frames every EVERY and on again, each frame's whole state hashed
-// and compared when it runs again (:compare: pages compared, not listed).
+// --rollback-test FRAME:N[:DEPTH[:EVERY[:compare][:quiet][:timed]]] proves the
+// rollback snapshots (m3::Snapshots): a snapshot every frame, back DEPTH
+// frames every EVERY and on again, each frame's whole state hashed and
+// compared when it runs again (:compare: pages compared, not listed).
+// Linked boards (--boards N --parallel) go back together, with the link
+// ring's packets on their way (its part hashed and compared too). :quiet:
+// the frames run again draw and play nothing (rollback's re-runs), the
+// sound board left out of the snapshots (it hears each frame once): the
+// pictures (--renderer gpu's hash) and the sound (--wav) as without the test.
+// :timed: nothing hashed or checked, to time rollback's own costs (the
+// snapshots, going back, the frames run again).
 //
 // The tile generator draws a line at a time as the frame runs; the 3D is
 // drawn at the end of a frame, only when screenshots are being written.
@@ -98,7 +114,10 @@
 // --press [B:]NAME@FRAME[:N] holds an input for N frames (default 6) from
 // FRAME: coin, start, test, service, beat, charge, shift, jump, up, down,
 // left, right. Repeat it for more presses. --poke [B:]ADDR=VALUE@FRAME[:N]
-// writes a byte of RAM. Without B: they apply to every board. Every board
+// writes a byte of RAM; --peek [B:]ADDR:LENGTH@FRAME[:N] prints LENGTH bytes
+// of RAM at the end of those frames; --ram-dump B:LO-HI@FRAME:N FILE writes
+// board B's main RAM [LO, HI) at the end of each of N frames (after the
+// frame and the logic counter at 0x1000A8, 32 bits each). Without B: they apply to every board. Every board
 // reads its inputs from a table by frame (tools::InputTable), as network
 // play will fill it; --input-delay N sets each one there N frames on, as
 // delay-based network play does (the frames on their way are not in a
@@ -181,6 +200,7 @@
 namespace {
 
 constexpr int kAllBoards = -1;
+constexpr std::size_t kNodeBytes = 0x900; // --link-dump: a board's own part of each data frame
 constexpr int kGpuTimeRepeats = 8; // --gpu-time draws each frame this many times
 
 struct Press {
@@ -193,6 +213,12 @@ struct Press {
 
 // --poke ADDR=VALUE@FRAME[:N]: write a byte of RAM at the end of N frames
 // (default 1) from FRAME, for experiments (a setting the game reads, say).
+struct Peek { // --peek: main RAM printed at the end of frames
+    uint32_t addr = 0, length = 4;
+    uint64_t frame = 0, frames = 1;
+    int board = kAllBoards;
+};
+
 struct Poke {
     uint32_t addr = 0;
     uint8_t value = 0;
@@ -211,8 +237,8 @@ struct Options {
     const char* load_state = nullptr;         // --load-state FILE
     uint32_t watch_lo = 0, watch_hi = 0;      // --watch-write LO-HI@FRAME:N
     uint64_t watch_frame = 0, watch_frames = 1;
-    uint64_t rb_from = 0, rb_frames = 0, rb_depth = 4, rb_every = 10; // --rollback-test FRAME:N[:DEPTH[:EVERY[:compare]]]
-    bool rb_compare = false;
+    uint64_t rb_from = 0, rb_frames = 0, rb_depth = 4, rb_every = 10; // --rollback-test FRAME:N[:DEPTH[:EVERY[:compare][:quiet][:timed]]]
+    bool rb_compare = false, rb_quiet = false, rb_timed = false;
     uint64_t host_trace_frame = 0, host_trace_frames = 0; // --net-host-trace FRAME:N
     uint64_t rollback_from = 0, rollback_frames = 0;      // --rollback-probe FRAME:N[:speed]
     bool rollback_speed_only = false;                     // (:speed: only the wall clock, no states)
@@ -244,6 +270,11 @@ struct Options {
     uint64_t probe_frame = 0;
     std::vector<Press> presses;
     std::vector<Poke> pokes;
+    std::vector<Peek> peeks;
+    const char* ram_dump = nullptr; // --ram-dump B:LO-HI@FRAME:N FILE
+    int ram_dump_board = 0;
+    uint32_t ram_dump_lo = 0, ram_dump_hi = 0;
+    uint64_t ram_dump_from = 0, ram_dump_frames = 0;
     bool show_text = false, real_netboard = true, force_master = false, quads = false, midi_burst = false,
          dma_instant = false;
     std::size_t net_trace = 0;
@@ -256,6 +287,17 @@ struct Options {
     // --no-2d, --no-sound: what a remote cabinet needn't run (the game the same without them)
     bool no_2d = false, no_sound = false;
     uint64_t link_trace = 0;
+    const char* link_dump = nullptr; // --link-dump FILE
+    const char* link_record = nullptr; // --link-record B:FILE
+    const char* link_standin = nullptr; // --link-standin B:FILE
+    int link_record_board = -1, link_standin_board = -1;
+    uint64_t link_standin_at = 0; // --link-standin-at CYCLES
+    std::string link_standin_patch; // --link-standin-patch enemy-flags
+    const char* camera_record = nullptr; // --camera-record B:FILE
+    const char* camera_test = nullptr;   // --camera-test B:FILE
+    int camera_record_board = -1, camera_test_board = -1;
+    uint64_t camera_trace = 0; // --camera-trace N: board 0's camera updates and view tests, where from
+    uint64_t camera_test_from = 0; // --camera-test-from FRAME
     bool net_watch = false;
     // --renderer: the 3D in software, on the GPU, or both, compared.
     enum class Renderer { Software, Gpu, Compare } renderer = Renderer::Software;
@@ -337,6 +379,17 @@ void print_probe(const m3::Real3dRenderer& r, int x, int y, uint64_t frame) {
 
 using tools::LinkedState; // (tools/game_setup.hpp)
 
+// --link-record / --link-standin: what a main board does to its network
+// board, every call in order with the main board's time (`t`, its cycles):
+// sync, the reads (with the value read) and writes, a frame's end, and
+// gamerun's own meeting with the other boards (the link's packets go on
+// there).
+struct HostCall {
+    enum Op : uint32_t { Sync, Read8, Read16, Read32, Write8, Write16, Write32, EndFrame, Pass };
+    uint32_t op = Sync, addr = 0, value = 0, spare = 0;
+    uint64_t t = 0;
+};
+
 // One Model 3 board and what the run keeps of it.
 
 struct Machine {
@@ -368,8 +421,33 @@ struct Machine {
         uint64_t checked = 0, differed = 0, restores = 0, restored_exact = 0, saves = 0, first_differ = 0;
         double save_ms = 0, save_worst = 0, restore_ms = 0, restore_worst = 0;
         std::size_t pages = 0, pages_worst = 0;
+        uint64_t saved_frame = 0;  // (linked boards: the last frame saved)
+        bool rewind = false;       // (linked boards: put back at the slices' meeting; on from there)
+        uint64_t quiet_through = 0; // :quiet: frames up to this one are being run again
+        std::chrono::steady_clock::time_point back_at{}; // the last going back, to time the frames run again
+        double rerun_s = 0;
+        uint64_t rerun_frames = 0;
     } rb;
     bool loaded = false; // --load-state: the run resumes where the state was saved
+    // --camera-record / --camera-test (network play: can a remote player's
+    // camera be run on another board?)
+    struct CameraTest {
+        std::FILE* record = nullptr; // --camera-record: this board's camera as each update starts
+        std::map<uint32_t, std::vector<uint8_t>> recorded; // --camera-test: the other's, by logic counter
+        std::vector<uint8_t> mine; // the second camera, run here from the first recorded
+        bool testing = false, inside = false;
+        uint64_t trace_left = 0; // --camera-trace N
+        std::FILE* view_out = nullptr; // --camera-test: FILE.view, the other camera's view tests
+        uint64_t view_tests = 0;
+        double side_seconds = 0; // the side runs' game code alone
+        uint64_t from = 0; // --camera-test-from FRAME: the second camera started there
+        uint64_t calls = 0, runs = 0, compared = 0, heading_free = 0, object_free = 0, heading_step = 0, object_step = 0;
+        uint32_t first_logic = 0, first_free_miss = 0;
+        std::map<uint32_t, uint64_t> written; // RAM the side runs wrote outside the camera, by 16 bytes
+        std::string failed;
+    } camera;
+    std::vector<HostCall> host_log; // --link-record: this board's main board's calls to its network board
+    bool recording_host = false;
     LinkedState* linked = nullptr; // linked boards' --save-state / --load-state
     tools::InputTable* inputs = nullptr; // every board's inputs by frame
     bool inputs_started = false;
@@ -494,6 +572,173 @@ std::function<void(m3::State&)> sound_state(Machine& m, const Options& o) {
 // earlier frame; run() goes on from there (as a loaded state does).
 struct Rewound {};
 
+// --link-record: a network board that logs its main board's calls.
+class RecordingNetBoard : public m3::NetBoardDevice {
+public:
+    RecordingNetBoard(std::unique_ptr<m3::NetBoardDevice> inner, std::vector<HostCall>& log) : inner_(std::move(inner)), log_(log) {}
+    uint8_t read8(uint32_t a) override { return static_cast<uint8_t>(note(HostCall::Read8, a, inner_->read8(a))); }
+    uint16_t read16(uint32_t a) override { return static_cast<uint16_t>(note(HostCall::Read16, a, inner_->read16(a))); }
+    uint32_t read32(uint32_t a) override { return note(HostCall::Read32, a, inner_->read32(a)); }
+    void write8(uint32_t a, uint8_t v) override { note(HostCall::Write8, a, v), inner_->write8(a, v); }
+    void write16(uint32_t a, uint16_t v) override { note(HostCall::Write16, a, v), inner_->write16(a, v); }
+    void write32(uint32_t a, uint32_t v) override { note(HostCall::Write32, a, v), inner_->write32(a, v); }
+    void sync(uint64_t t) override {
+        now_ = t;
+        note(HostCall::Sync, 0, 0);
+        inner_->sync(t);
+    }
+    void end_frame() override { note(HostCall::EndFrame, 0, 0), inner_->end_frame(); }
+    std::string describe() const override { return inner_->describe(); }
+    void state(m3::State& s) override { inner_->state(s); }
+
+private:
+    uint32_t note(HostCall::Op op, uint32_t addr, uint32_t value) {
+        log_.push_back({op, addr, value, 0, now_});
+        return value;
+    }
+    std::unique_ptr<m3::NetBoardDevice> inner_;
+    std::vector<HostCall>& log_;
+    uint64_t now_ = 0;
+};
+
+// --camera-record / --camera-test: the camera's update (r12 the camera at
+// 0x11D480; +0x2A its heading, as the link sends it), and the logic counter.
+constexpr uint32_t kCameraUpdate = 0x2C4DC, kCamera = 0x11D480, kCameraBytes = 0xC00, kCameraHeading = 0x2A;
+constexpr uint32_t kViewTest = 0x33A6C; // a character (r14) on this camera's screen (flags bit 0x08) or near it (0x10)
+constexpr uint32_t kCameraView = 0x32578; // after the update: the camera's zone, ..., its view matrix at +0x640 (f20-f31)
+constexpr uint32_t kViewMatrix = 0x640;
+double ops_f(uint64_t bits) { // an FPR's double
+    double d;
+    std::memcpy(&d, &bits, sizeof d);
+    return d;
+}
+constexpr uint32_t kLogicCounter = 0x1000A8;
+
+// The hook at each camera update. --camera-record: the camera as the update
+// starts, with the logic counter. --camera-test: the update run once more on
+// the side, with the second camera in the camera's place (no scheduler, no
+// interrupts; RAM, the CPU and the clock put back after), the result
+// compared with the other board's camera as its next update starts, both
+// as the second camera runs on by itself (free) and from the recorded one
+// each time (one step).
+void camera_hook(recomp::Context& c, uint32_t pc, void* user) {
+    Machine& m = *static_cast<Machine*>(user);
+    Machine::CameraTest& t = m.camera;
+    if (t.trace_left && (pc == kCameraUpdate || pc == kViewTest)) { // --camera-trace N
+        --t.trace_left;
+        std::printf("%strace frame %llu logic %u: %s, LR %08x, r12 %08x, r14 %08x, f12-f15 %g %g %g %g, f19 %g\n",
+                    t.inside ? "  (side) " : "", static_cast<unsigned long long>(m.timing.frames()), m.bus.read32(kLogicCounter),
+                    pc == kCameraUpdate ? "camera update" : "view test", c.cpu.lr, c.cpu.gpr[12], c.cpu.gpr[14],
+                    ops_f(c.cpu.fpr[12]), ops_f(c.cpu.fpr[13]), ops_f(c.cpu.fpr[14]), ops_f(c.cpu.fpr[15]), ops_f(c.cpu.fpr[19]));
+        if (pc == kViewTest) { // the view matrix it uses (f20-f31), and where in the camera those values are as floats
+            std::printf("  f20-f31:");
+            for (int k = 20; k < 32; ++k) {
+                const float v = static_cast<float>(ops_f(c.cpu.fpr[k]));
+                uint32_t bits;
+                std::memcpy(&bits, &v, 4);
+                std::printf(" %g", v);
+                for (uint32_t a = kCamera; a < kCamera + kCameraBytes; a += 4)
+                    if (bits != 0 && m.bus.read32(a) == bits) std::printf("@+%x", a - kCamera);
+            }
+            std::printf("\n");
+            const float first = static_cast<float>(ops_f(c.cpu.fpr[20]));
+            uint32_t want;
+            std::memcpy(&want, &first, 4);
+            std::printf("  f20 found in RAM at:");
+            for (uint32_t a = 0; a + 4 <= m.bus.ram().size(); a += 4)
+                if (m.bus.read32(a) == want) std::printf(" %06x", a);
+            std::printf("\n");
+        }
+    }
+    if (t.inside) return; // (the side run: no other hooks either)
+    if (pc != kCameraUpdate && pc != kViewTest) return m3::games::spikeout_hook(c, pc, nullptr);
+    auto ram = m.bus.ram();
+    const uint32_t logic = m.bus.read32(kLogicCounter);
+    // The function at `pc` run on the side with `camera` in the camera's
+    // place: the camera after it, and the character's (r14) flags word.
+    auto side_run = [&](const std::vector<uint8_t>& camera, uint32_t* flags = nullptr) {
+        const recomp::Context::Aside aside = c.set_aside();
+        const std::vector<uint8_t> before(ram.begin(), ram.end());
+        std::copy(camera.begin(), camera.end(), ram.begin() + kCamera);
+        c.set_scheduler(nullptr);
+        c.cpu.msr &= ~recomp::Context::kMsrEE;
+        t.inside = true;
+        const auto started = std::chrono::steady_clock::now();
+        try {
+            if (pc == kViewTest) { // with this camera's view matrix, as the game has it in f20-f31 then
+                for (int k = 0; k < 12; ++k) {
+                    uint32_t bits = m.bus.read32(kCamera + kViewMatrix + 4 * static_cast<uint32_t>(k));
+                    float f;
+                    std::memcpy(&f, &bits, 4);
+                    const double d = f;
+                    std::memcpy(&c.cpu.fpr[static_cast<std::size_t>(20 + k)], &d, 8);
+                }
+                c.call(pc);
+            } else { // the update, then what makes its view
+                c.call(pc);
+                c.cpu = aside.cpu;
+                c.cpu.msr &= ~recomp::Context::kMsrEE;
+                c.cpu.gpr[12] = kCamera;
+                c.call(kCameraView);
+            }
+        } catch (const std::exception& e) {
+            if (t.failed.empty()) t.failed = e.what();
+        }
+        t.side_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count(); // (the game code only)
+        t.inside = false;
+        std::vector<uint8_t> out(ram.begin() + kCamera, ram.begin() + kCamera + kCameraBytes);
+        if (flags) *flags = m.bus.read32(aside.cpu.gpr[14]);
+        if (pc == kCameraUpdate)
+            for (std::size_t i = 0; i < ram.size(); ++i)
+                if (ram[i] != before[i] && (i < kCamera || i >= kCamera + kCameraBytes)) ++t.written[static_cast<uint32_t>(i & ~15u)];
+        std::copy(before.begin(), before.end(), ram.begin());
+        c.put_back(aside);
+        ++t.runs;
+        return out;
+    };
+    if (pc == kViewTest) { // the other camera's view of this character, written down (logic, character, flags word)
+        if (!t.testing || t.mine.empty() || !t.view_out) return;
+        uint32_t flags = 0;
+        side_run(t.mine, &flags);
+        const uint32_t row[3] = {logic, c.cpu.gpr[14], flags};
+        std::fwrite(row, sizeof row, 1, t.view_out);
+        ++t.view_tests;
+        return;
+    }
+    ++t.calls;
+    if (t.record) {
+        std::fwrite(&logic, sizeof logic, 1, t.record);
+        std::fwrite(ram.data() + kCamera, 1, kCameraBytes, t.record);
+        return;
+    }
+    if (!t.testing) return;
+    const auto in = t.recorded.find(logic), next = t.recorded.find(logic + 1);
+    if (in == t.recorded.end()) return;
+    if (t.mine.empty() && m.timing.frames() < t.from) return; // (--camera-test-from FRAME)
+    if (t.mine.empty()) t.mine = in->second, t.first_logic = logic;
+    auto heading = [](const std::vector<uint8_t>& cam) { return cam[kCameraHeading] << 8 | cam[kCameraHeading + 1]; };
+    t.mine = side_run(t.mine);
+    if (t.view_out) { // (and the second camera's heading: character 0xFFFFFFFF)
+        const uint32_t row[3] = {logic, 0xFFFFFFFFu, static_cast<uint32_t>(heading(t.mine))};
+        std::fwrite(row, sizeof row, 1, t.view_out);
+    }
+    const std::vector<uint8_t> step = side_run(in->second);
+    if (next == t.recorded.end()) return;
+    ++t.compared;
+    const bool free_same = heading(t.mine) == heading(next->second);
+    t.heading_free += free_same, t.object_free += t.mine == next->second;
+    if (!free_same && !t.first_free_miss) t.first_free_miss = logic;
+    t.heading_step += heading(step) == heading(next->second), t.object_step += step == next->second;
+}
+
+// --rollback-test: what a snapshot walks (:quiet: not the sound board, which
+// hears each frame once).
+std::function<void(m3::State&)> rollback_walk(Machine& m, const Options& o) {
+    return [&m, &o, sound = o.rb_quiet ? std::function<void(m3::State&)>() : sound_state(m, o)](m3::State& s) {
+        tools::board_state(s, m.c, m.timing, sound);
+    };
+}
+
 uint64_t hash_bytes(uint64_t h, const uint8_t* d, std::size_t n) {
     h ^= n;
     std::size_t i = 0;
@@ -525,6 +770,66 @@ uint64_t buffers_hash(const std::function<void(m3::State&)>& walk) {
     walk(s);
     return hash.h;
 }
+
+// --rollback-test on linked boards (--parallel): each board keeps its own
+// snapshots (Machine::RollbackTest, at its own point after each frame); the
+// link ring's part of each frame (m3::LinkRing::cut_state: the packets on
+// their way between those points) is kept here, cut at the slices' meeting
+// once every board has saved that frame. Going back is done there too, with
+// every board stopped: each board and the ring as they were at the same
+// frame, as a linked save state loads; each board then goes on from its
+// own point (Rewound, thrown as it leaves the meeting).
+struct LinkedRollback {
+    m3::LinkRing* ring = nullptr;
+    std::vector<Machine*> boards;
+    std::map<uint64_t, std::vector<uint8_t>> cuts; // the ring's part, by frame
+    std::map<uint64_t, uint64_t> hashes;           // its hash the first time
+    std::set<uint64_t> rolled;
+    uint64_t checked = 0, differed = 0, first_differ = 0, restores = 0, unmatched = 0;
+    double restore_ms = 0, restore_worst = 0;
+
+    void between(const Options& o) { // (at the meeting, every board stopped)
+        if (!ring->cut_complete()) return;
+        const uint64_t frame = boards[0]->rb.saved_frame;
+        for (Machine* m : boards)
+            if (m->rb.saved_frame != frame && unmatched++ == 0)
+                std::fprintf(stderr, "gamerun: --rollback-test: the boards saved different frames (%llu, %llu)\n",
+                             static_cast<unsigned long long>(frame), static_cast<unsigned long long>(m->rb.saved_frame));
+        m3::State s;
+        ring->cut_state(s);
+        const uint64_t h = hash_bytes(0x9E3779B97F4A7C15ull, s.data().data(), s.data().size());
+        if (auto it = hashes.find(frame); it == hashes.end()) {
+            hashes[frame] = h;
+        } else {
+            ++checked;
+            if (it->second != h && differed++ == 0) first_differ = frame;
+        }
+        cuts[frame] = std::move(s.data());
+        if (frame > o.rb_depth) cuts.erase(cuts.begin(), cuts.lower_bound(frame - o.rb_depth));
+        if ((frame - o.rb_from) % o.rb_every != o.rb_every - 1 || frame < o.rb_from + o.rb_depth || !rolled.insert(frame).second)
+            return;
+        const uint64_t back = frame - o.rb_depth;
+        const auto start = std::chrono::steady_clock::now();
+        for (Machine* m : boards) { // (each board's own walk marks the ring's port saved: the ring's load after clears it)
+            Machine::RollbackTest& t = m->rb;
+            const auto walk = rollback_walk(*m, o);
+            const auto t1 = std::chrono::steady_clock::now();
+            t.snaps->restore(back, walk);
+            const double restore = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
+            t.restore_ms += restore, t.restore_worst = std::max(t.restore_worst, restore);
+            ++t.restores;
+            if (!o.rb_timed && buffers_hash(walk) == t.buffers[back]) ++t.restored_exact;
+            t.rewind = true;
+            t.quiet_through = frame;
+            t.back_at = start;
+        }
+        m3::State load(std::vector<uint8_t>(cuts.at(back)));
+        ring->cut_state(load);
+        const double took = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        restore_ms += took, restore_worst = std::max(restore_worst, took);
+        ++restores;
+    }
+};
 
 // The network board's options from the switches (also in the build's id
 // for network play: machines with others can't play together).
@@ -572,7 +877,9 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         m.comm = board.get();
         m.comm->trace_limit = o.net_trace;
         m.comm->force_master = o.force_master;
-        bus.use_netboard(std::move(board));
+        m.recording_host = o.link_record && static_cast<int>(m.index) == o.link_record_board;
+        if (m.recording_host) bus.use_netboard(std::make_unique<RecordingNetBoard>(std::move(board), m.host_log));
+        else bus.use_netboard(std::move(board));
     } else if (ring) {
         bus.use_netboard(std::make_unique<m3::SimNetBoard>(ring->port(m.index)));
     }
@@ -599,10 +906,10 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             if (frame < w.watch_from || frame >= w.watch_to) return;
             const auto& r = w.c.cpu.gpr;
             std::printf("%sframe %llu: write%u %08x = %08x at block %08x, LR %08x; r3-r12 %08x %08x %08x %08x %08x %08x %08x %08x "
-                        "%08x %08x, r24-r31 %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                        "%08x %08x, r14 %08x, r24-r31 %08x %08x %08x %08x %08x %08x %08x %08x\n",
                         w.index ? ("board " + std::to_string(w.index) + " ").c_str() : "",
                         static_cast<unsigned long long>(frame), 8 * size, addr, value, w.c.cpu.pc, w.c.cpu.lr, r[3], r[4], r[5],
-                        r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[24], r[25], r[26], r[27], r[28], r[29], r[30], r[31]);
+                        r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[14], r[24], r[25], r[26], r[27], r[28], r[29], r[30], r[31]);
         }, &m);
     }
     m.real3d.set_probe(o.probe_x, o.probe_y);
@@ -612,8 +919,8 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
     // The 2D layers, a line at a time; each finished frame is kept for --screenshot.
     // With several boards, the turn passes on every o.slice lines, the
     // network board caught up first so what it sent is on the link.
-    m.timing.on_display_line = [&m, &turns, slice = o.slice, no_2d = o.no_2d](uint32_t line) {
-        if (!no_2d) {
+    m.timing.on_display_line = [&m, &turns, slice = o.slice, no_2d = o.no_2d, quiet = o.rb_quiet](uint32_t line) {
+        if (!no_2d && !(quiet && m.timing.frames() < m.rb.quiet_through)) { // (:quiet: not in a frame run again)
             const auto start = std::chrono::steady_clock::now();
             if (line == 0) {
                 m.tilegen.begin_frame();
@@ -624,11 +931,24 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         }
         if (turns.boards() > 1 && line % slice == slice - 1) {
             m.bus.netboard().sync(m.c.cycles());
+            if (m.recording_host) m.host_log.push_back({HostCall::Pass, 0, 0, 0, m.c.cycles()});
             turns.pass(m.index);
+            if (m.rb.rewind) { // (--rollback-test: put back at the meeting, with the others)
+                m.rb.rewind = false;
+                throw Rewound{};
+            }
         }
     };
     m.timing.on_frame_end = [&m, &o] {
         const uint64_t frame = m.timing.frames();
+        // --rollback-test: a frame run again after going back (:quiet: drawn
+        // and heard the first time only); the re-runs timed.
+        const bool quiet = o.rb_quiet && frame <= m.rb.quiet_through;
+        if (frame == m.rb.quiet_through && m.rb.back_at != std::chrono::steady_clock::time_point{}) {
+            m.rb.rerun_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - m.rb.back_at).count();
+            m.rb.rerun_frames += o.rb_depth;
+            m.rb.back_at = {};
+        }
         if (const uint64_t up = m.bus.real3d().textures_uploaded(); up != m.textures_seen) { // a frame that changed textures
             m.textures_seen = up;
             ++m.texture_frames;
@@ -702,7 +1022,7 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         }
         // The 3D is drawn only when it will be seen.
         using R = Options::Renderer;
-        const bool drawn = o.screenshot || (o.probe_frame && frame == o.probe_frame);
+        const bool drawn = !quiet && (o.screenshot || (o.probe_frame && frame == o.probe_frame));
         if (drawn && o.renderer != R::Gpu) { // in software
             const auto render_start = std::chrono::steady_clock::now();
             m.real3d.render(m.bus.real3d());
@@ -807,8 +1127,8 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         }
 #endif
         if (o.probe_frame && frame == o.probe_frame && m.index == 0) print_probe(m.real3d, o.probe_x, o.probe_y, frame);
-        if (!o.no_2d) m.tilegen.composite(m.screen, o.renderer == R::Gpu ? std::span<const uint32_t>(m.gpu_image) : m.real3d.image());
-        if (const int e = m.tilegen.extend(); e > 0 && !o.no_2d) { // --wide: the sides made every frame, as the window does
+        if (!o.no_2d && !quiet) m.tilegen.composite(m.screen, o.renderer == R::Gpu ? std::span<const uint32_t>(m.gpu_image) : m.real3d.image());
+        if (const int e = m.tilegen.extend(); e > 0 && !o.no_2d && !quiet) { // --wide: the sides made every frame, as the window does
             const auto start = std::chrono::steady_clock::now();
             m.wide_bottom.build(m.tilegen.bottom(), m.tilegen.bottom_side(), e, m.bottom_wide, false, m.tilegen.bottom_own(),
                                 m.tilegen.bottom_real());
@@ -823,8 +1143,8 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             ++m.wide_frames;
         }
         const auto sound_start = std::chrono::steady_clock::now();
-        if (o.no_sound) m.bus.midi_out().clear();
-        const std::span<const int16_t> pcm = o.no_sound ? std::span<const int16_t>() :
+        if (o.no_sound || quiet) m.bus.midi_out().clear(); // (:quiet: heard the first time)
+        const std::span<const int16_t> pcm = o.no_sound || quiet ? std::span<const int16_t>() :
             m.sound.frame(m.bus.midi_out(), m.timing.frame_start(frame - 1), m.timing.frame_cycles());
         m.sound_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - sound_start).count();
         if (o.wav) m.audio.insert(m.audio.end(), pcm.begin(), pcm.end());
@@ -835,6 +1155,22 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         for (const Poke& k : o.pokes)
             if (for_board(k.board, m.index) && frame >= k.frame && frame < k.frame + k.frames)
                 m.bus.write8(k.addr, k.value);
+        if (o.ram_dump && m.index == static_cast<std::size_t>(o.ram_dump_board) && frame >= o.ram_dump_from &&
+            frame < o.ram_dump_from + o.ram_dump_frames) { // --ram-dump: the frame, the logic counter (0x1000A8), the range
+            static std::FILE* file = std::fopen(o.ram_dump, "wb");
+            const uint32_t head[2] = {static_cast<uint32_t>(frame), m.bus.read32(0x1000A8)};
+            std::fwrite(head, sizeof head, 1, file);
+            std::fwrite(m.bus.ram().data() + o.ram_dump_lo, 1, o.ram_dump_hi - o.ram_dump_lo, file);
+            if (frame + 1 == o.ram_dump_from + o.ram_dump_frames) std::fflush(file);
+        }
+        for (const Peek& k : o.peeks)
+            if (for_board(k.board, m.index) && frame >= k.frame && frame < k.frame + k.frames) {
+                std::printf("%sframe %llu: %06x:", m.index ? ("board " + std::to_string(m.index) + " ").c_str() : "",
+                            static_cast<unsigned long long>(frame), k.addr);
+                for (uint32_t i = 0; i < k.length && k.addr + i < m.bus.ram().size(); ++i)
+                    std::printf("%s%02x", i % 4 ? "" : " ", m.bus.ram()[k.addr + i]);
+                std::printf("\n");
+            }
         // --press: inputs held for the coming frame (active low).
         uint8_t in[2] = {0xFF, 0xFF};
         for (const Press& p : o.presses)
@@ -859,6 +1195,16 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             put(frame + o.input_delay, source);
         }
         if (o.netplay && frame % 120 == 0) o.netplay->hash(frame, m.index, tools::Recording::ram_hash(m.bus.ram()));
+        if (o.link_record || o.link_standin || o.camera_test) { // (each frame's main RAM, and every 100th the whole board's, to compare the two runs)
+            std::printf("board %zu frame %llu: RAM %016llx\n", m.index, static_cast<unsigned long long>(frame),
+                        static_cast<unsigned long long>(tools::Recording::ram_hash(m.bus.ram())));
+            if (frame % 100 == 0)
+                m.c.request_snapshot([&m, &o, frame](uint32_t) {
+                    std::printf("board %zu frame %llu: whole state %016llx\n", m.index, static_cast<unsigned long long>(frame),
+                                static_cast<unsigned long long>(state_hash(
+                                    [&](m3::State& s) { tools::board_state(s, m.c, m.timing, sound_state(m, o)); })));
+                });
+        }
         {
             const auto got = m.inputs->wait(m.index, frame);
             if (!got) throw recomp::OutOfBudget(m.c.cpu.pc); // (the session ended)
@@ -959,13 +1305,14 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             m.c.request_snapshot([&m, &o, frame](uint32_t) {
                 using clock = std::chrono::steady_clock;
                 Machine::RollbackTest& t = m.rb;
-                const auto walk = [&](m3::State& s) { tools::board_state(s, m.c, m.timing, sound_state(m, o)); };
+                const auto walk = rollback_walk(m, o);
                 if (!t.snaps) {
                     t.snaps = std::make_unique<m3::Snapshots>(o.rb_depth);
                     t.snaps->compare_only(o.rb_compare);
                 }
-                const uint64_t h = state_hash(walk);
-                if (auto it = t.hashes.find(frame); it == t.hashes.end()) {
+                const uint64_t h = o.rb_timed ? 0 : state_hash(walk);
+                if (o.rb_timed) { // (:timed: nothing hashed, rollback's own costs alone)
+                } else if (auto it = t.hashes.find(frame); it == t.hashes.end()) {
                     t.hashes[frame] = h;
                     t.buffers[frame] = buffers_hash(walk);
                 } else {
@@ -979,6 +1326,8 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
                     t.save_ms += save, t.save_worst = std::max(t.save_worst, save);
                     t.pages += t.snaps->pages_saved(), t.pages_worst = std::max(t.pages_worst, t.snaps->pages_saved());
                 }
+                t.saved_frame = frame;
+                if (o.boards > 1) return; // (linked boards go back together: LinkedRollback, at the slices' meeting)
                 if ((frame - o.rb_from) % o.rb_every == o.rb_every - 1 && frame >= o.rb_from + o.rb_depth &&
                     t.rolled.insert(frame).second) {
                     const uint64_t back = frame - o.rb_depth;
@@ -990,7 +1339,9 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
                     // (the big buffers: as they were then; the rest is checked by
                     // the frames run again, a just-loaded state saving its block
                     // count one less, ready to count it again)
-                    if (buffers_hash(walk) == t.buffers[back]) ++t.restored_exact;
+                    if (!o.rb_timed && buffers_hash(walk) == t.buffers[back]) ++t.restored_exact;
+                    t.quiet_through = frame;
+                    t.back_at = t1;
                     throw Rewound{};
                 }
             });
@@ -1002,7 +1353,7 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             for (uint32_t reg : {0x20u, 0x40u, 0x44u, 0x60u, 0x64u, 0x68u, 0x6Cu}) std::printf(" %02x=%08x", reg, m.bus.tile_reg(reg));
             std::printf("\n");
         }
-        if (o.screenshot && o.shot_every && frame % o.shot_every == 0) {
+        if (o.screenshot && o.shot_every && frame % o.shot_every == 0 && !quiet) {
             const std::string path = board_path(o.screenshot, m.index);
             const size_t dot = path.find_last_of('.');
 #ifdef SPIKEOUT_GPU
@@ -1167,6 +1518,62 @@ void run(Machine& m, tools::Turns& turns) {
         break;
     }
     m.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    turns.finish(m.index);
+}
+
+// --link-standin: a board whose main board isn't run, its network board
+// (loaded from the same state) driven by the calls its main board made in
+// a run recorded with --link-record; each read checked against the value
+// it gave then.
+// `write_at` (--link-standin-at CYCLES): each frame's writes held, and
+// made together that many main cycles after the frame's end before
+// (rather than when the main board made them).
+void stand_in(Machine& m, tools::Turns& turns, const std::vector<HostCall>& log, uint64_t write_at, bool patch_enemy_flags) {
+    turns.wait(m.index);
+    m3::NetBoardDevice& nb = m.bus.netboard();
+    uint64_t reads = 0, differed = 0, first = 0, frame_end = 0;
+    std::vector<HostCall> held;
+    const auto start = std::chrono::steady_clock::now();
+    for (const HostCall& e : log) {
+        if (write_at && !held.empty() && frame_end && e.t >= frame_end + write_at) {
+            nb.sync(frame_end + write_at);
+            for (const HostCall& w : held) nb.write32(w.addr, w.value);
+            held.clear();
+        }
+        if (e.op == HostCall::EndFrame) frame_end = e.t;
+        if (write_at && e.op == HostCall::Write32 && frame_end) {
+            held.push_back(e);
+            continue;
+        }
+        uint32_t got = e.value;
+        if (patch_enemy_flags && e.op == HostCall::Write32 && e.addr >= 0xC0000200 && e.addr < 0xC0000A00) {
+            // (--link-standin-patch enemy-flags: each record's enemies' flags low byte as 0x03)
+            const uint32_t at = (e.addr - 0xC0000200) % 0x200;
+            if (at >= 0x44 && at <= 0x98 && (at - 0x44) % 12 == 0) {
+                nb.write32(e.addr, (e.value & ~0xFFu) | 0x03);
+                continue;
+            }
+        }
+        switch (e.op) {
+        case HostCall::Sync: nb.sync(e.t); break;
+        case HostCall::Read8: got = nb.read8(e.addr); break;
+        case HostCall::Read16: got = nb.read16(e.addr); break;
+        case HostCall::Read32: got = nb.read32(e.addr); break;
+        case HostCall::Write8: nb.write8(e.addr, static_cast<uint8_t>(e.value)); break;
+        case HostCall::Write16: nb.write16(e.addr, static_cast<uint16_t>(e.value)); break;
+        case HostCall::Write32: nb.write32(e.addr, e.value); break;
+        case HostCall::EndFrame: nb.end_frame(); break;
+        case HostCall::Pass: turns.pass(m.index); break;
+        }
+        if (e.op >= HostCall::Read8 && e.op <= HostCall::Read32) {
+            ++reads;
+            if (got != e.value && differed++ == 0) first = e.t;
+        }
+    }
+    m.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    m.why = "stood in: " + std::to_string(log.size()) + " calls replayed, " + std::to_string(reads) + " reads, " +
+            std::to_string(differed) + " read differently" +
+            (differed ? " (the first at main cycle " + std::to_string(first) + ")" : std::string());
     turns.finish(m.index);
 }
 
@@ -1393,6 +1800,10 @@ void report(Machine& m, const Options& o) {
                     t.snaps->big_bytes() / 1024,
                     t.save_ms / saves, t.save_worst, static_cast<double>(t.pages) / saves, t.pages_worst,
                     t.restores ? t.restore_ms / static_cast<double>(t.restores) : 0.0, t.restore_worst, t.snaps->load_writes());
+        if (t.rerun_frames)
+            std::printf("Rollback re-runs%s: %llu frames run again at %.1f a second (wall clock, from going back)\n",
+                        o.rb_quiet ? " (drawing and playing nothing)" : "", static_cast<unsigned long long>(t.rerun_frames),
+                        static_cast<double>(t.rerun_frames) / t.rerun_s);
     }
     if (comm && !comm->host_trace.empty()) {
         static const char* const kRegions[] = {"comm", "io", "netram", "netram"};
@@ -1540,7 +1951,19 @@ int main(int argc, char** argv) {
             o.rb_frames = *end == ':' ? std::strtoull(end + 1, &end, 0) : 600;
             if (*end == ':') o.rb_depth = std::strtoull(end + 1, &end, 0);
             if (*end == ':') o.rb_every = std::strtoull(end + 1, &end, 0);
-            if (*end == ':') o.rb_compare = std::string(end + 1) == "compare";
+            while (*end == ':') {
+                char* word = end + 1;
+                end = std::strchr(word, ':');
+                if (!end) end = word + std::strlen(word);
+                const std::string w(word, end);
+                if (w == "compare") o.rb_compare = true;
+                else if (w == "quiet") o.rb_quiet = true;
+                else if (w == "timed") o.rb_timed = true;
+                else {
+                    std::fprintf(stderr, "gamerun: --rollback-test: unknown %s\n", w.c_str());
+                    return 2;
+                }
+            }
             if (o.rb_every == 0) o.rb_every = 1;
         }
         else if (arg == "--rollback-probe" && i + 1 < argc) { // FRAME:N
@@ -1638,6 +2061,24 @@ int main(int argc, char** argv) {
         else if (arg == "--no-2d") o.no_2d = true;
         else if (arg == "--no-sound") o.no_sound = true;
         else if (arg == "--link-trace" && i + 1 < argc) o.link_trace = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--link-dump" && i + 1 < argc) o.link_dump = argv[++i];
+        else if (arg == "--link-standin-at" && i + 1 < argc) o.link_standin_at = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--link-standin-patch" && i + 1 < argc) o.link_standin_patch = argv[++i];
+        else if (arg == "--camera-trace" && i + 1 < argc) o.camera_trace = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--camera-test-from" && i + 1 < argc) o.camera_test_from = std::strtoull(argv[++i], nullptr, 0);
+        else if ((arg == "--link-record" || arg == "--link-standin" || arg == "--camera-record" || arg == "--camera-test") &&
+                 i + 1 < argc) { // B:FILE
+            char* end = nullptr;
+            const int board = static_cast<int>(std::strtol(argv[++i], &end, 0));
+            if (*end != ':') {
+                std::fprintf(stderr, "gamerun: %s B:FILE\n", arg.c_str());
+                return 2;
+            }
+            if (arg == "--link-record") o.link_record = end + 1, o.link_record_board = board;
+            else if (arg == "--link-standin") o.link_standin = end + 1, o.link_standin_board = board;
+            else if (arg == "--camera-record") o.camera_record = end + 1, o.camera_record_board = board;
+            else o.camera_test = end + 1, o.camera_test_board = board;
+        }
         else if (arg == "--probe" && i + 1 < argc) { // X,Y@FRAME
             unsigned long long frame = 0;
             if (std::sscanf(argv[++i], "%d,%d@%llu", &o.probe_x, &o.probe_y, &frame) == 3) o.probe_frame = frame;
@@ -1658,6 +2099,30 @@ int main(int argc, char** argv) {
             k.frame = frame;
             k.frames = n == 4 ? frames : 1;
             o.pokes.push_back(k);
+        }
+        else if (arg == "--ram-dump" && i + 2 < argc) { // B:LO-HI@FRAME:N FILE
+            unsigned board = 0, lo = 0, hi = 0;
+            unsigned long long frame = 0, frames = 0;
+            if (std::sscanf(argv[++i], "%u:%x-%x@%llu:%llu", &board, &lo, &hi, &frame, &frames) != 5 || hi <= lo ||
+                hi > m3::kWorkRamSize) {
+                std::fprintf(stderr, "gamerun: --ram-dump B:LO-HI@FRAME:N FILE (hex addresses in main RAM)\n");
+                return 2;
+            }
+            o.ram_dump_board = static_cast<int>(board), o.ram_dump_lo = lo, o.ram_dump_hi = hi;
+            o.ram_dump_from = frame, o.ram_dump_frames = frames, o.ram_dump = argv[++i];
+        }
+        else if (arg == "--peek" && i + 1 < argc) { // [B:]ADDR:LENGTH@FRAME[:N], hex address and length
+            Peek k;
+            const std::string spec = board_prefix(argv[++i], k.board);
+            unsigned addr = 0, length = 4;
+            unsigned long long frame = 0, frames = 1;
+            const int n = std::sscanf(spec.c_str(), "%x:%x@%llu:%llu", &addr, &length, &frame, &frames);
+            if (n < 3) {
+                std::fprintf(stderr, "gamerun: --peek [B:]ADDR:LENGTH@FRAME[:N] (hex address and length)\n");
+                return 2;
+            }
+            k.addr = addr, k.length = length, k.frame = frame, k.frames = n == 4 ? frames : 1;
+            o.peeks.push_back(k);
         }
         else if (arg == "--press" && i + 1 < argc) {
             // [B:]NAME@FRAME[:N]: hold NAME for N frames (default 6) from FRAME.
@@ -1722,8 +2187,9 @@ int main(int argc, char** argv) {
     // Network play: the game found or offered on the networks this machine
     // is on, every board run here, the boards as the host started them.
     const bool networked = !o.net_host.empty() || !o.net_join.empty();
-    if (o.rb_frames && (o.boards > 1 || networked)) {
-        std::fprintf(stderr, "gamerun: --rollback-test is for one board (linked boards go back together: not yet)\n");
+    if (o.rb_frames && (networked || (o.boards > 1 && !o.parallel) || !o.save_state.empty() || o.load_state)) {
+        std::fprintf(stderr, "gamerun: --rollback-test is for one board or linked boards run at once (--parallel), "
+                             "not with network play or save states\n");
         return 2;
     }
     tools::InputTable inputs(networked ? net::kMaxSeats : o.boards);
@@ -1904,6 +2370,16 @@ int main(int argc, char** argv) {
                 for (std::size_t k = 0; k < std::min<std::size_t>(data.size(), 24); ++k) std::printf(" %02x", data[k]);
                 std::printf("\n");
             });
+        else if (o.link_dump) // each data frame's first part, the sender's own node (comm RAM 0x100-0x9FF)
+            ring->on_send([file = std::shared_ptr<std::FILE>(std::fopen(o.link_dump, "wb"), std::fclose),
+                           lock = std::make_shared<std::mutex>()](std::size_t from, uint64_t at, const std::vector<uint8_t>& data) {
+                if (!file || data.size() < kNodeBytes) return; // (the small sync frames)
+                const uint32_t head[2] = {static_cast<uint32_t>(from),
+                                          static_cast<uint32_t>(at / recomp::FrameTiming().frame_cycles())};
+                std::lock_guard guard(*lock);
+                std::fwrite(head, sizeof head, 1, file.get());
+                std::fwrite(data.data(), 1, kNodeBytes, file.get());
+            });
     }
     // Parallel: the boards run at once, meeting every slice; the link's
     // packets go on there, so they take at least a slice to arrive.
@@ -1942,10 +2418,13 @@ int main(int argc, char** argv) {
                 netplay->session().send_state(frame, std::move(packed));
             };
     }
+    LinkedRollback rollback; // (--rollback-test, linked boards)
+    if (ring && o.rb_frames) rollback.ring = ring.get();
     auto make_turns = [&] {
-        return std::make_unique<tools::Turns>(o.boards, parallel, parallel ? std::function<void()>([&ring, &linked] {
+        return std::make_unique<tools::Turns>(o.boards, parallel, parallel ? std::function<void()>([&ring, &linked, &rollback, &o] {
             ring->exchange();
             if (linked.ring && (!linked.path.empty() || linked.sink)) linked.finish();
+            if (rollback.ring) rollback.between(o);
         }) : std::function<void()>());
     };
     std::unique_ptr<tools::Turns> turns_ptr = make_turns();
@@ -1975,6 +2454,29 @@ int main(int argc, char** argv) {
         machines.push_back(std::make_unique<Machine>(i, roms, functions));
         machines.back()->c.set_blocks(blocks);
         m3::games::install_spikeout_hooks(machines.back()->c);
+        if (o.camera_trace && i == 0) {
+            machines.back()->camera.trace_left = o.camera_trace;
+            machines.back()->c.set_hook(camera_hook, machines.back().get());
+        }
+        if ((o.camera_record && static_cast<int>(i) == o.camera_record_board) ||
+            (o.camera_test && static_cast<int>(i) == o.camera_test_board)) {
+            Machine& m = *machines.back();
+            if (o.camera_record) {
+                m.camera.record = std::fopen(o.camera_record, "wb");
+            } else {
+                const std::vector<uint8_t> bytes = tools::read_file(o.camera_test);
+                for (std::size_t at = 0; at + 4 + kCameraBytes <= bytes.size(); at += 4 + kCameraBytes) {
+                    uint32_t logic = 0;
+                    std::memcpy(&logic, bytes.data() + at, 4);
+                    m.camera.recorded[logic].assign(bytes.begin() + static_cast<std::ptrdiff_t>(at + 4),
+                                                    bytes.begin() + static_cast<std::ptrdiff_t>(at + 4 + kCameraBytes));
+                }
+                m.camera.testing = true;
+                m.camera.from = o.camera_test_from;
+                m.camera.view_out = std::fopen((std::string(o.camera_test) + ".view").c_str(), "wb");
+            }
+            m.c.set_hook(camera_hook, &m);
+        }
         if (linked.ring) machines.back()->linked = &linked;
         machines.back()->inputs = &inputs;
         set_up(*machines.back(), o, game, ring.get(), turns);
@@ -2019,12 +2521,34 @@ int main(int argc, char** argv) {
         std::printf(" on each of %zu linked boards, %s every %u lines", o.boards, parallel ? "running at once, meeting" : "taking turns", o.slice);
     std::printf("\n\n");
 
+    rollback.boards.clear();
+    for (auto& m : machines) rollback.boards.push_back(m.get());
     if (o.boards == 1) {
         run(*machines[0], turns);
     } else {
+        std::vector<HostCall> standin_log; // (--link-standin: the calls to replay)
+        if (o.link_standin) {
+            const std::vector<uint8_t> bytes = tools::read_file(o.link_standin);
+            standin_log.resize(bytes.size() / sizeof(HostCall));
+            std::memcpy(standin_log.data(), bytes.data(), standin_log.size() * sizeof(HostCall));
+            std::printf("Board %d stands in: %zu calls to its network board replayed, its main board not run\n",
+                        o.link_standin_board, standin_log.size());
+        }
         std::vector<std::thread> threads;
-        for (auto& m : machines) threads.emplace_back([&m, &turns] { run(*m, turns); });
+        for (auto& m : machines) {
+            if (static_cast<int>(m->index) == o.link_standin_board)
+                threads.emplace_back([&m, &turns, &standin_log, &o] { stand_in(*m, turns, standin_log, o.link_standin_at, o.link_standin_patch == "enemy-flags"); });
+            else
+                threads.emplace_back([&m, &turns] { run(*m, turns); });
+        }
         for (auto& t : threads) t.join();
+        for (auto& m : machines)
+            if (m->recording_host) {
+                if (tools::write_file(o.link_record, std::span(reinterpret_cast<const uint8_t*>(m->host_log.data()),
+                                                               m->host_log.size() * sizeof(HostCall))))
+                    std::printf("Recorded board %zu's %zu calls to its network board in %s\n", m->index, m->host_log.size(),
+                                o.link_record);
+            }
     }
     // Network play: our boards out of step with the host's; every board
     // again from its state, the inputs since fed again.
@@ -2056,6 +2580,46 @@ int main(int argc, char** argv) {
         report(*m, o);
     }
     if (ring) std::printf("\nLink: %llu packets delivered around the ring\n", static_cast<unsigned long long>(ring->delivered()));
+    for (auto& mp : machines) {
+        Machine::CameraTest& t = mp->camera;
+        if (t.record) {
+            std::fclose(t.record);
+            std::printf("Camera: board %zu's camera at %llu updates recorded in %s\n", mp->index,
+                        static_cast<unsigned long long>(t.calls), o.camera_record);
+        }
+        if (!t.testing) continue;
+        if (t.view_out) {
+            std::fclose(t.view_out);
+            std::printf("Camera test: %llu view tests run on the side, in %s.view\n", static_cast<unsigned long long>(t.view_tests),
+                        o.camera_test);
+        }
+        std::printf("Camera test: the side runs' game code %.3f ms a frame (%.1f us a run; the test's own copies of RAM not counted)\n",
+                    t.calls ? 1000.0 * t.side_seconds / static_cast<double>(t.calls) : 0.0,
+                    t.runs ? 1e6 * t.side_seconds / static_cast<double>(t.runs) : 0.0);
+        const double n = t.compared ? static_cast<double>(t.compared) : 1.0;
+        std::printf("Camera test, board %zu: %llu updates, %llu run on the side from logic %u, %llu compared with the "
+                    "other board's camera at its next update%s%s\n"
+                    "  run on by itself: heading the same %.1f%%, the whole camera %.1f%% (first heading differing at logic %u)\n"
+                    "  one step from the recorded camera: heading %.1f%%, the whole camera %.1f%%\n"
+                    "  written outside the camera by the side runs (16-byte blocks):",
+                    mp->index, static_cast<unsigned long long>(t.calls), static_cast<unsigned long long>(t.runs), t.first_logic,
+                    static_cast<unsigned long long>(t.compared), t.failed.empty() ? "" : "; failed: ", t.failed.c_str(),
+                    100.0 * static_cast<double>(t.heading_free) / n, 100.0 * static_cast<double>(t.object_free) / n,
+                    t.first_free_miss, 100.0 * static_cast<double>(t.heading_step) / n,
+                    100.0 * static_cast<double>(t.object_step) / n);
+        std::size_t shown = 0;
+        for (const auto& [at, count] : t.written)
+            if (shown++ < 40) std::printf(" %06x(%llu)", at, static_cast<unsigned long long>(count));
+        std::printf("%s\n", t.written.size() > 40 ? (" ... " + std::to_string(t.written.size()) + " blocks").c_str() : "");
+    }
+    if (rollback.ring)
+        std::printf("Rollback test, the link ring: %llu frames' packets on their way checked, %llu differed%s; all the boards "
+                    "%llu times back together, in %.3f ms (worst %.3f)%s\n",
+                    static_cast<unsigned long long>(rollback.checked), static_cast<unsigned long long>(rollback.differed),
+                    rollback.differed ? (" (the first at frame " + std::to_string(rollback.first_differ) + ")").c_str() : "",
+                    static_cast<unsigned long long>(rollback.restores),
+                    rollback.restores ? rollback.restore_ms / static_cast<double>(rollback.restores) : 0.0, rollback.restore_worst,
+                    rollback.unmatched ? "; THE BOARDS SAVED DIFFERENT FRAMES" : "");
     if (netplay) {
         netplay->session().leave();
         std::printf("Network: %llu hash checks differed\n", static_cast<unsigned long long>(netplay->desyncs()));

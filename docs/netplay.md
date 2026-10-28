@@ -520,8 +520,9 @@ unit tests (tests/test_snapshots.cpp) check every way the system has, and
 comparing, on a made-up board, back to every kept frame. The change of allocator changes
 nothing in the game: 2400 frames' GPU pictures and the sound the same,
 hash for hash. Re-run inputs come from the input table, which now keeps
-the frames that may run again (during the test). Not yet: linked boards
-going back together (the ring's packets in flight too), and the window.
+the frames that may run again (during the test). Linked boards going back
+together and re-runs that draw nothing: below (2026-10-28). Not yet: the
+window.
 
 Each system's own way (2026-10-27, the owner's choice: the fastest each
 has, behind one interface, m3::watched):
@@ -573,6 +574,38 @@ included, the same byte for byte at frame 2400 of attract (--clock fixed)
 and at frame 10650 of gameplay from the owner's state with punches
 pressed. So Windows and Linux players on x86 compute the same game.
 Not yet checked: macOS, and ARM CPUs (Apple Silicon).
+
+Linked boards going back together, and re-runs that draw and play nothing
+(2026-10-28; gamerun --rollback-test on `--boards N --parallel`, and its
+`:quiet` and `:timed`). Each board keeps its own snapshots, at its own
+point after each frame (as before). The link ring's part of each frame
+(`m3::LinkRing::cut_state`: the packets on their way between the boards'
+points, as a linked save state keeps them) is cut at the slices' meeting
+once every board has saved that frame, all of them stopped. Going back is
+done there too: every board's snapshot and the ring's cut of the same
+frame put back, as a linked save state loads; each board then leaves the
+meeting by going on from its own point. `:quiet`: the frames run again
+draw nothing (2D, 3D, the widescreen sides, screenshots) and play nothing,
+and the sound board is left out of the snapshots: it hears each frame
+once, the first time (what a wrong guess does to the sound is step 3,
+the owner's choice). `:timed`: nothing hashed, rollback's own costs alone.
+Two boards linked through a player joining in progress (the linking
+screen's repro: board 1 coins in at frame 2600, 15848 packets over the
+link), back 7 frames every 10 from frame 3000 to 4200; and attract on one
+board, back 7 every 10 from frame 2000 to 2600:
+
+| run | checked | went back | the result |
+|---|---|---|---|
+| 2 boards | 840 frames a board, and the ring's part of 840 frames | 120 x 7, all the boards together | every check equal |
+| 2 boards, `:quiet`, GPU pictures and sound | the same | the same | every check equal; each board's GPU hash and WAV the same as the run without the test |
+| 1 board, `:quiet`, GPU pictures and sound | 420 | 60 x 7 | every check equal; the GPU hash and WAV the same as without |
+| 1 board, `:quiet:timed` | - | 60 x 7 | re-runs at 278 frames a second (4.6x real time); going back 1.2 ms |
+| 2 boards, `:quiet:timed` | - | 120 x 7 | re-runs at 221 frames a second each (3.7x); going back 1.4 ms for both and the ring |
+
+So a re-run frame costs about 3.6 ms on one board and 4.5 ms with two
+running at once (i7-8700K), against the 10 ms the budget above leaves: 2
+frames of rollback fit in a frame for 2 cabinets, as estimated. The
+4-cabinet number and gameplay's heavy moments are still to measure (step 5).
 
 Network play between them (2026-10-27): the owner's Linux window (WSL,
 WSLg) joined his Windows window's game from the nearby list (WSL's NAT
@@ -695,6 +728,216 @@ start), room-shots.ps1, shot.ps1 (a window's picture by PrintWindow),
 newpics.ps1 (new pictures counted), exit-test.ps1. The window tests run a
 second copy of the window from build\speedcheck\pA (its own settings,
 player name SPIKE1 X); the scripts copy build\spikeout.exe there first.
+
+## What the cabinets send each other (investigated 2026-10-28)
+
+The owner asked whether a PC could run only its own board (all four cost
+too much on tablets). That depends on what the link carries, so it was
+recorded: `gamerun --link-dump FILE` writes, for each data frame a board
+sends, the sender's own part (its first 0x900 bytes, comm RAM
+0x100-0x9FF, what its main board wrote that frame). Two boards, the
+linking repro, then both players in one fight (frames 4600-5800, presses
+on each board at known frames). Read with a scratch tool (not in the repo).
+
+- The layout (the same through attract, joining, select and play): a
+  header 0x000-0x0FF (counters changing every frame: 0x01C the logic
+  counter, 0x058 the frame counter, 0x000 another), then four records of
+  0x200 bytes (0x100, 0x300, 0x500, 0x700), one written each frame in turn:
+  the last four frames.
+- **Most of a record is the same on every cabinet.** Taking both boards'
+  blocks at the same logic counter, about 100 of the ~120 bytes a record
+  that change each frame are identical: every cabinet computes them itself
+  (the game is lock-step: each runs the whole world). Several look like
+  check values (16-bit words that jump every frame).
+- **About 20 bytes a record are each cabinet's own:** 0x05 its buttons
+  (0x40 right, 0x80 left, 0x01 beat, a frame after the press); 0x08-0x0B
+  two 16-bit values that start moving a few frames after its player turns
+  (its camera's angle, by the look: movement is relative to each player's
+  own camera, so the others need it); 0x0E-0x0F, 0x11-0x13, 0x34-0x37,
+  0x40-0x44, 0x5C, 0x68, 0x74 (slowly changing values and flags). The
+  header has a few own bytes too (0x000-0x001, 0x014-0x015, 0x020,
+  0x025-0x026, 0x042-0x047, 0x04C-0x04D, 0x058-0x059).
+
+So a PC could run its own board alone, the link answered there (the
+firmware's round trips stay local, unlike Mode A above), with only each
+cabinet's own bytes travelling: a remote cabinet's block made from this
+board's shared bytes and the remote's own bytes as received. Under
+rollback the remote's own bytes would be guessed until they arrive: the
+buttons change seldom, but the camera-like values change whenever that
+player moves, so guessing them (the last ones, or carried on) would be
+wrong more often than Mode B's guessed buttons. Computing them here
+instead would mean running the game's own camera code for each remote
+player (a change to the game's code).
+
+**Tested (2026-10-28): a cabinet can be stood in for by its network board
+and the block its main board writes.** `gamerun --link-record B:FILE`
+logs every call a board's main board makes to its network board (syncs,
+reads with the value read, writes, frame ends, gamerun's slice meetings);
+`--link-standin B:FILE` runs that board's network board alone, from the
+same state, driven by the log, its main board not run; both print board
+0's main RAM hash every frame and its whole-state hash every 100. From a
+linked state at frame 4700 of the fight above (`--save-state`), 1100
+frames with presses on both boards: board 0 the same every frame (1100
+RAM hashes, 11 whole-state hashes), and the stood-in network board gave
+every one of the 1,271,600 reads the value it gave linked. In play the
+main board's only writes are its block (0x900 bytes, 576 32-bit writes,
+about 0.68 of a frame in, in one burst of 2,000 cycles); the rest is
+reads and the clock. When it's written doesn't matter: the block held and
+written at 2.0M, 2.4M or 2.8M main cycles after the frame's end (0.69,
+0.83, 0.97 of a frame; `--link-standin-at CYCLES`), board 0 the same every
+frame (the network board sends it only early in the next frame).
+
+So with one board a PC, each remote cabinet is its network board (a small
+68000) plus its block each frame, which is this board's shared bytes and
+the remote's own; it could even send its whole block XORed with the one
+predicted here (no need to know what each byte means). Guessing a
+remote's own bytes until they arrive (`gamerun`-free scratch analysis,
+frames 4600-5790): the buttons as the frame before 99.3% of frames; all
+of a record's own bytes as before only 3-12%, or as before or carried on
+at the same rate 22-39%. Almost all the misses are one 16-bit value,
+record offset 0x0E-0x0F (wrong in 685 and 894 of 1189 frames on the two
+boards); the camera-like 0x08-0x0B in 30-109, the rest under 70, the
+buttons 8. What 0x0E is (a value that wobbles each frame) is the next
+question: if the game's own code can compute it here, guesses would miss
+about as seldom as Mode B's.
+
+**What the own bytes are (2026-10-28).** Found with `--watch-write` (now
+also printing r14), `--peek [B:]ADDR:LENGTH@FRAME[:N]` and `--ram-dump
+B:LO-HI@FRAME:N FILE` (board 0's RAM each frame, searched for the values
+board 1 sends, at the same logic counter ±2: a value found at the same
+frame is computed on every board; found only 2 frames later, at the
+received copies, it is that cabinet's alone). The block is copied each
+frame (0x4E88, a copy adding a checksum) from main RAM 0x141000; each
+record from the game's own at 0x140200 (r13 = 0x108000; players' objects
+at 0x1A0000 + 0x4000 n, enemies' at 0x1B0000 + 0x4000 n). Record fields
+(block offsets; the block's bytes are each 32-bit word reversed):
+- 0x04-0x07: the cabinet's inputs (0x100100, bits moved): its own.
+- 0x08-0x0B: its player's facing (player +0x2A, and +0x74 or +0x76),
+  written by 0x55048. Computed by every board (board 0's copy of player
+  2 the same, 100% of frames, before the record reaches it).
+- 0x0E-0x0F: **its camera's heading**, camera object (pointer at
+  0x104150, 0x11D480) +0x2A: written by 0x2C4DC each frame from the
+  camera's position (+0x10-0x18) to the point it looks at (+0x404-0x40C)
+  through an atan2 (0xC120); +0x28 the pitch. Moving that value doesn't
+  turn the picture (the renderer uses the two points); every board puts
+  it in that player's object (+0x3334) with the facing, two frames on:
+  the stick moves each player relative to their own camera. Only that
+  cabinet has its camera: its own, changing almost every frame as the
+  camera eases after its player.
+- 0x10-0x13: its player's state flags (player +0x00): computed by every
+  board.
+- 0x14-0xD7: a sync check entry for each character, the 4 players then
+  the 8 enemies (0x747DC): its flags word, four status bytes and the sum
+  of +0x74, +0x76, +0x3C, +0x3E and the position floats +0x380-0x388.
+  The same on every board, but for the players not playing (their
+  objects keep each board's own leftovers; constant) and the enemies'
+  flags' low byte (bits 0x08 and 0x10, differing now and then between
+  boards, a few values in 1100 frames: per cabinet, perhaps whether it's
+  in that cabinet's view).
+- 0xD8-0xDF: the logic counter and frame bits (the same on every board).
+- The header: two per-cabinet counters (0x000, 0x058, one up each frame)
+  and constants.
+
+So in play a cabinet's own data is its buttons (seldom changing), its
+camera's heading (every frame), a few enemy flag bits (seldom) and two
+counters (one up a frame). Through a long fight (boss, players beaten
+down; 4705-9690) the same list. Outside a shared game (a player joining,
+CONTINUE?, game over, attract: the cabinets each on their own screens)
+nearly the whole block is the cabinet's own: those phases would send it
+whole. Not understood: 9000-9900 (players being knocked down) the shared
+check words differed between the boards in about a quarter of frames
+(the pairing by logic counter slipping, or a real difference).
+
+**Tested (2026-10-28): a remote player's camera can be run here, exactly.**
+`gamerun --camera-record 1:FILE` records board 1's camera (0x420 bytes
+from 0x11D480) as each of its updates starts, with the logic counter;
+`--camera-test 0:FILE` hooks board 0's camera update (0x2C4DC, a hook
+added to kHooks for it) and runs the same game code once more on the
+side, with a second camera in the camera's place: started from board
+1's recorded camera at the first update, then run on by itself. The side
+run has no scheduler and no interrupts, and RAM, the CPU and the clock
+are put back after (`recomp::Context::set_aside` / `put_back`, a debug
+aid), so board 0 runs on as without it: its main RAM hash the same every
+frame, and its whole state every 100 (1100 frames, checked against the
+recording run). The second camera's heading against board 1's at its
+next update:
+
+| run (from the fight state at 4700) | updates compared | heading the same, run on by itself | from the recorded camera each time |
+|---|---|---|---|
+| both players moving and punching, to 5800 | 1098 | 100% | 100% |
+| player 2 moving, the boss coming in, players knocked down, to 9700 | 4998 | 100% | 100% |
+
+So the camera's heading follows from the shared world and the camera's
+own past alone: a PC can run each remote player's camera itself (the
+game's own code, a second camera object for each), and the remote's own
+data left to guess is its buttons, a few enemy flag bits and the two
+counters. The whole 0x420 bytes copied matched only now and then (0.1-61%):
+some of that range changes outside the update (not all of it the camera,
+or the renderer's), but the heading never drifted. The update also writes
+outside the camera: each character's +0x34A0-0x34BF (players' and
+enemies' objects; one of the sync list's status bytes is +0x34A0: values
+for that camera, made by the side run too) and the stack (0x73EE40-
+0x73EFA0).
+
+**Every check (2026-10-28): board 1's link data rebuilt from board 0
+alone, exactly.**
+- The shared check words: with each record paired by its own logic
+  counter (+0xDC; the earlier pairing took only the newest slot and
+  slipped), every character's checksum the same on both boards in 4959
+  of 4960 game frames. The one left is player 2 dropping out (below).
+- The enemy flags' low byte: bits 0x08 (on that cabinet's screen) and
+  0x10 (just outside it), set by the view test 0x33A6C in each
+  character's update (players from 0x51824, enemies from 0x52230): the
+  character's position through the view matrix (0xBCEC, f20-f31) against
+  the screen's edges (f12-f15, widened by f19). Board 0 uses board 1's:
+  the stand-in's blocks with them all 0x03 (`--link-standin-patch
+  enemy-flags`) changed board 0's RAM beyond the received copies
+  (0x100033-0x10004F, 0x10009B, 0x103073, objects' flags). The view matrix
+  is camera +0x640 (0x11DAC0), made after the update by 0x32578 (the
+  camera's zone 0x4FDD4 at +0xAFC and +0x170, ..., the matrix): so the
+  "camera" is 0xC00 bytes, and the side run is the update then 0x32578.
+  Each view test run on the side with the second camera's matrix in
+  f20-f31: the flags low byte as board 1's in 100.00% of 35,000
+  character-frames (board 1's record of logic L carries the tests of
+  L-2).
+- The rebuild (scratch tool, not in the repo): each record of board 1 =
+  board 0's of the same logic counter, with board 1's buttons (sent), the
+  facing and flags from board 0's copy of player 2 (0x1A4000, `--ram-dump`),
+  the second camera's heading and every character's view bits from the
+  side runs (`--camera-test` writes them to FILE.view), the players not
+  playing as board 1 had them when the test began; each header = board
+  0's, board 1's two counters one up from its last and its constants.
+  Byte for byte against board 1's real ones:
+
+  | run | records exact | headers exact |
+  |---|---|---|
+  | from the fight state, player 2 moving, the boss, players knocked down (to 9700) | 4995 of 4995 | 4996 of 4996 |
+  | from power-on, the second camera started just after player 2 joins (frame 4460) | 1527 of 1527 | 1528 of 1528 |
+
+  So a joiner's camera need only be sent once, in the join state.
+- The cost: the side runs' game code 0.35-0.81 ms a frame in the tests
+  (two camera runs, the test's free one and its one-step check, and 7
+  view tests), so about 0.4 ms a frame a remote player: against about 6
+  ms for running its whole board.
+- Out of the shared game: with nobody pressing anything, player 2 knocked
+  out (frame ~9622, time running out) writes record +0x100 alone (0x08
+  from 0x4C21C, then 0x04 and 0x14 from the link code 0x6EBCC / 0x6EDD4)
+  and leaves the shared game for CONTINUE?: that is the one frame whose
+  checksums differed (logic 8479), the second camera stops matching from
+  there (logic 8482 on: board 1's own screen now), and header +0x04 is
+  that cabinet's own in those phases. As with joining, a cabinet out of
+  the shared game (knocked out, continue, game over, attract) would send
+  its block whole until it is back in.
+- Not tested: a stage's change (no two-player state reaches one: mashing
+  punches on both boards cleared enemies but not the room before time
+  ran out; the bot plays one board); a third and fourth player.
+
+Debug aids added for these (gamerun): `--camera-trace N` (board 0's camera
+updates and view tests: return address, r12, r14, the screen edges, the
+view matrix and where it is in RAM), `--camera-test-from FRAME`,
+`--link-standin-patch enemy-flags`; the hook list has 0x2C4DC and 0x33A6C
+(observers: single-player's sound and save state the same, byte for
+byte, with them).
 
 ## Plan
 

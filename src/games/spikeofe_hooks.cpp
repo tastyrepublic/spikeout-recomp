@@ -193,15 +193,15 @@ void clear(recomp::Context& c) {
     if (layer >= 0) c.bus.tile_sides().clear_layer(layer);
 }
 
-void hook(recomp::Context& c, uint32_t pc, void*) {
+} // namespace
+
+void spikeout_hook(recomp::Context& c, uint32_t pc, void*) {
     if (pc == kDrawHook) draw(c);
     else if (pc == kFillHook) fill(c);
     else if (pc == kCopyHook) copy(c);
     else if (pc == kClearHook) clear(c);
 }
 
-} // namespace
-
-void install_spikeout_hooks(recomp::Context& c) { c.set_hook(hook, nullptr); }
+void install_spikeout_hooks(recomp::Context& c) { c.set_hook(spikeout_hook, nullptr); }
 
 } // namespace m3::games
