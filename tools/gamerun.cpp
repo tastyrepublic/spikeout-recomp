@@ -298,6 +298,9 @@ struct Options {
     int camera_record_board = -1, camera_test_board = -1;
     uint64_t camera_trace = 0; // --camera-trace N: board 0's camera updates and view tests, where from
     uint64_t camera_test_from = 0; // --camera-test-from FRAME
+    bool camera_test_flags = false; // --camera-test-flags
+    bool camera_test_mirror = false; // --camera-test-mirror
+    bool camera_events = false; // --camera-events: board 0's camera written by other code, counted
     bool net_watch = false;
     // --renderer: the 3D in software, on the GPU, or both, compared.
     enum class Renderer { Software, Gpu, Compare } renderer = Renderer::Software;
@@ -438,9 +441,22 @@ struct Machine {
         bool testing = false, inside = false;
         uint64_t trace_left = 0; // --camera-trace N
         std::FILE* view_out = nullptr; // --camera-test: FILE.view, the other camera's view tests
+        std::FILE* mine_out = nullptr; // and FILE.mine, the second camera after each update
         uint64_t view_tests = 0;
         double side_seconds = 0; // the side runs' game code alone
         uint64_t from = 0; // --camera-test-from FRAME: the second camera started there
+        bool copy_flags = false; // --camera-test-flags: its flags word from this board's camera each frame
+        bool mirror = false; // --camera-test-mirror: other code's changes to this board's camera made to the second too
+        bool in_view = false, in_update = false; // (this board's view routine, or its update, running)
+        bool events = false; // --camera-events: code other than the camera's own writing into it, counted
+        struct Writer {
+            uint64_t writes = 0, first = 0, last = 0;
+            std::set<uint32_t> offsets;
+            std::vector<std::array<uint32_t, 3>> seen; // (logic counter, offset, value)
+        };
+        std::map<uint32_t, Writer> event_writers; // by the writing block
+
+        uint64_t mirrored = 0;
         uint64_t calls = 0, runs = 0, compared = 0, heading_free = 0, object_free = 0, heading_step = 0, object_step = 0;
         uint32_t first_logic = 0, first_free_miss = 0;
         std::map<uint32_t, uint64_t> written; // RAM the side runs wrote outside the camera, by 16 bytes
@@ -606,13 +622,44 @@ private:
 constexpr uint32_t kCameraUpdate = 0x2C4DC, kCamera = 0x11D480, kCameraBytes = 0xC00, kCameraHeading = 0x2A;
 constexpr uint32_t kViewTest = 0x33A6C; // a character (r14) on this camera's screen (flags bit 0x08) or near it (0x10)
 constexpr uint32_t kCameraView = 0x32578; // after the update: the camera's zone, ..., its view matrix at +0x640 (f20-f31)
+constexpr uint32_t kLogicCounter = 0x1000A8;
+// --camera-test-mirror: what code other than the camera's own writes into
+// the camera (the game's events: 0x5D21C at a gate sets its mode, +0x48,
+// and more), written into the second camera too (a write watch). The
+// camera's own: the update (from its hook until 0xC670 is called from
+// 0x32514, just after it returns), the view routine (from its hook until
+// the first view test), the flags and counter at +0x00-0x07 (each
+// cabinet's), 0x32470's positions from player 1 (+0x4A8-0x4BF).
+constexpr uint32_t kAfterUpdate = 0xC670, kAfterUpdateReturn = 0x32514;
+void camera_written(void* user, uint32_t addr, uint32_t value, uint32_t size) {
+    Machine& m = *static_cast<Machine*>(user);
+    Machine::CameraTest& t = m.camera;
+    const uint32_t pc = m.c.cpu.pc;
+    if (t.events && !t.inside && !t.in_view && !t.in_update && addr - kCamera >= 8) { // --camera-events: who, how often
+        auto& e = t.event_writers[pc];
+        if (e.writes++ == 0) e.first = m.timing.frames();
+        e.last = m.timing.frames();
+        e.offsets.insert(addr - kCamera);
+        e.seen.push_back({m.bus.read32(kLogicCounter), addr - kCamera, value}); // (by game frame: compared between boards)
+        return;
+    }
+    if (t.inside || t.in_view || t.in_update || t.mine.empty()) return;
+    for (uint32_t k = 0; k < size; ++k) {
+        const uint32_t at = addr + k - kCamera;
+        if (at < 8 || at >= kCameraBytes || (at >= 0x4A8 && at < 0x4C0)) continue;
+        const auto byte = static_cast<uint8_t>(value >> (8 * (size - 1 - k)));
+        if (t.mirrored++ < 4000)
+            std::printf("camera test: logic %u, the camera's +%03x set to %02x by %08x (the second camera's %02x)\n",
+                        m.bus.read32(kLogicCounter), at, byte, pc, t.mine[at]);
+        t.mine[at] = byte;
+    }
+}
 constexpr uint32_t kViewMatrix = 0x640;
 double ops_f(uint64_t bits) { // an FPR's double
     double d;
     std::memcpy(&d, &bits, sizeof d);
     return d;
 }
-constexpr uint32_t kLogicCounter = 0x1000A8;
 
 // The hook at each camera update. --camera-record: the camera as the update
 // starts, with the logic counter. --camera-test: the update run once more on
@@ -651,6 +698,16 @@ void camera_hook(recomp::Context& c, uint32_t pc, void* user) {
         }
     }
     if (t.inside) return; // (the side run: no other hooks either)
+    if (pc == kCameraView) { // (--camera-test-mirror: its writes are the camera's own, until the next view test)
+        t.in_view = true;
+        return;
+    }
+    if (pc == kAfterUpdate) { // (and the update's, until it returns)
+        if (c.cpu.lr == kAfterUpdateReturn) t.in_update = false;
+        return;
+    }
+    if (pc == kCameraUpdate) t.in_update = true;
+    if (pc == kCameraUpdate || pc == kViewTest) t.in_view = false;
     if (pc != kCameraUpdate && pc != kViewTest) return m3::games::spikeout_hook(c, pc, nullptr);
     auto ram = m.bus.ram();
     const uint32_t logic = m.bus.read32(kLogicCounter);
@@ -717,7 +774,17 @@ void camera_hook(recomp::Context& c, uint32_t pc, void* user) {
     if (t.mine.empty() && m.timing.frames() < t.from) return; // (--camera-test-from FRAME)
     if (t.mine.empty()) t.mine = in->second, t.first_logic = logic;
     auto heading = [](const std::vector<uint8_t>& cam) { return cam[kCameraHeading] << 8 | cam[kCameraHeading + 1]; };
+    if (t.copy_flags) { // the camera's flags word as this board's code made it this frame, but its own 0x00200000 bit
+        const uint32_t own = (static_cast<uint32_t>(t.mine[1]) << 16) & 0x00200000u;
+        const uint32_t here = m.bus.read32(kCamera);
+        const uint32_t flags = (here & ~0x00200000u) | own;
+        for (int k = 0; k < 4; ++k) t.mine[static_cast<std::size_t>(k)] = static_cast<uint8_t>(flags >> (24 - 8 * k));
+    }
     t.mine = side_run(t.mine);
+    if (t.mine_out) { // FILE.mine: the second camera after each update (the logic counter, its bytes)
+        std::fwrite(&logic, sizeof logic, 1, t.mine_out);
+        std::fwrite(t.mine.data(), 1, t.mine.size(), t.mine_out);
+    }
     if (t.view_out) { // (and the second camera's heading: character 0xFFFFFFFF)
         const uint32_t row[3] = {logic, 0xFFFFFFFFu, static_cast<uint32_t>(heading(t.mine))};
         std::fwrite(row, sizeof row, 1, t.view_out);
@@ -2066,6 +2133,9 @@ int main(int argc, char** argv) {
         else if (arg == "--link-standin-patch" && i + 1 < argc) o.link_standin_patch = argv[++i];
         else if (arg == "--camera-trace" && i + 1 < argc) o.camera_trace = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--camera-test-from" && i + 1 < argc) o.camera_test_from = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--camera-test-flags") o.camera_test_flags = true;
+        else if (arg == "--camera-test-mirror") o.camera_test_mirror = true;
+        else if (arg == "--camera-events") o.camera_events = true;
         else if ((arg == "--link-record" || arg == "--link-standin" || arg == "--camera-record" || arg == "--camera-test") &&
                  i + 1 < argc) { // B:FILE
             char* end = nullptr;
@@ -2454,9 +2524,14 @@ int main(int argc, char** argv) {
         machines.push_back(std::make_unique<Machine>(i, roms, functions));
         machines.back()->c.set_blocks(blocks);
         m3::games::install_spikeout_hooks(machines.back()->c);
-        if (o.camera_trace && i == 0) {
-            machines.back()->camera.trace_left = o.camera_trace;
-            machines.back()->c.set_hook(camera_hook, machines.back().get());
+        if ((o.camera_trace && i == 0) || o.camera_events) { // (--camera-events: every board)
+            Machine& m = *machines.back();
+            m.camera.trace_left = i == 0 ? o.camera_trace : 0;
+            m.c.set_hook(camera_hook, &m);
+            if (o.camera_events) {
+                m.camera.events = true;
+                m.bus.watch_writes(kCamera, kCamera + kCameraBytes, camera_written, &m);
+            }
         }
         if ((o.camera_record && static_cast<int>(i) == o.camera_record_board) ||
             (o.camera_test && static_cast<int>(i) == o.camera_test_board)) {
@@ -2473,7 +2548,11 @@ int main(int argc, char** argv) {
                 }
                 m.camera.testing = true;
                 m.camera.from = o.camera_test_from;
+                m.camera.copy_flags = o.camera_test_flags;
+                m.camera.mirror = o.camera_test_mirror;
+                if (o.camera_test_mirror) m.bus.watch_writes(kCamera, kCamera + kCameraBytes, camera_written, &m);
                 m.camera.view_out = std::fopen((std::string(o.camera_test) + ".view").c_str(), "wb");
+                m.camera.mine_out = std::fopen((std::string(o.camera_test) + ".mine").c_str(), "wb");
             }
             m.c.set_hook(camera_hook, &m);
         }
@@ -2580,6 +2659,24 @@ int main(int argc, char** argv) {
         report(*m, o);
     }
     if (ring) std::printf("\nLink: %llu packets delivered around the ring\n", static_cast<unsigned long long>(ring->delivered()));
+    if (o.camera_events && machines.size() > 1) { // each event writer: the same writes at the same game frames on boards 0 and 1?
+        const auto& a = machines[0]->camera.event_writers;
+        const auto& b = machines[1]->camera.event_writers;
+        std::set<uint32_t> writers;
+        for (const auto& [pc, w] : a) writers.insert(pc);
+        for (const auto& [pc, w] : b) writers.insert(pc);
+        std::printf("Camera events, board 0 against board 1 (each write by game frame, offset and value):\n");
+        for (uint32_t pc : writers) {
+            std::multiset<std::array<uint32_t, 3>> sa, sb;
+            if (auto it = a.find(pc); it != a.end()) sa.insert(it->second.seen.begin(), it->second.seen.end());
+            if (auto it = b.find(pc); it != b.end()) sb.insert(it->second.seen.begin(), it->second.seen.end());
+            std::size_t both = 0;
+            for (const auto& w : sa) both += sb.count(w) != 0;
+            const char* kind = sa == sb ? "shared (the same on both)" : both == 0 ? "each board's own (none the same)" : "partly the same";
+            std::printf("  %08x: board 0 %zu writes, board 1 %zu, %zu of board 0's on board 1 too: %s\n", pc, sa.size(), sb.size(), both,
+                        kind);
+        }
+    }
     for (auto& mp : machines) {
         Machine::CameraTest& t = mp->camera;
         if (t.record) {
@@ -2587,9 +2684,22 @@ int main(int argc, char** argv) {
             std::printf("Camera: board %zu's camera at %llu updates recorded in %s\n", mp->index,
                         static_cast<unsigned long long>(t.calls), o.camera_record);
         }
+        if (t.events) { // --camera-events
+            std::printf("Camera events, board %zu: %zu blocks wrote into the camera besides its own code\n", mp->index,
+                        t.event_writers.size());
+            for (const auto& [pc, w] : t.event_writers) {
+                std::printf("  %08x: %llu writes, frames %llu-%llu, at", pc, static_cast<unsigned long long>(w.writes),
+                            static_cast<unsigned long long>(w.first), static_cast<unsigned long long>(w.last));
+                std::size_t shown = 0;
+                for (uint32_t off : w.offsets)
+                    if (shown++ < 16) std::printf(" +%03x", off);
+                std::printf("%s\n", w.offsets.size() > 16 ? " ..." : "");
+            }
+        }
         if (!t.testing) continue;
         if (t.view_out) {
             std::fclose(t.view_out);
+            if (t.mine_out) std::fclose(t.mine_out);
             std::printf("Camera test: %llu view tests run on the side, in %s.view\n", static_cast<unsigned long long>(t.view_tests),
                         o.camera_test);
         }

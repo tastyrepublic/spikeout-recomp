@@ -266,6 +266,10 @@ struct LinkedState {
     // for it, handed to `sink` (again each time asked).
     std::atomic<uint64_t> capture_frame{0};
     std::function<void(uint64_t, std::vector<uint8_t>)> sink;
+    // The window's F9 in network play: this capture written to `path`
+    // rather than handed to `sink` (then ready for the next capture). Set
+    // before capture_frame.
+    bool to_file = false;
 
     void finish() {
         {
@@ -275,7 +279,7 @@ struct LinkedState {
         }
         m3::State s;
         io(s);
-        if (sink) {
+        if (sink && !to_file) {
             sink(capture_frame, std::move(s.data()));
             std::lock_guard guard(lock);
             capture_frame = 0, saved = 0, written = false;
@@ -285,7 +289,14 @@ struct LinkedState {
         if (tools::write_file(path, s.data()))
             std::printf("Saved %s: %zu linked boards, %zu bytes\n", path.c_str(), boards.size(), s.data().size());
         else
-            std::fprintf(stderr, "gamerun: cannot write %s\n", path.c_str());
+            std::fprintf(stderr, "cannot write %s\n", path.c_str());
+        if (sink) { // (the window: ready for the next capture)
+            std::lock_guard guard(lock);
+            to_file = false;
+            capture_frame = 0, saved = 0, written = false;
+            boards.assign(boards.size(), {});
+        }
+        std::fflush(stdout);
     }
     // The file: saving or loading (before the boards run).
     void io(m3::State& s) {

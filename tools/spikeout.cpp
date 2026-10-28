@@ -54,7 +54,10 @@
 // Save states (one board): F9 saves the game as it is at the end of the
 // frame (spikeout-<frame>.state, the same as gamerun --save-state writes,
 // so gamerun --load-state runs on from it exactly); F10 starts again from
-// the last one saved; --load-state FILE starts from FILE.
+// the last one saved; --load-state FILE starts from FILE. In a network game
+// F9 saves every cabinet together (spikeout-net-<frame>.state, as gamerun
+// --save-state writes linked boards: gamerun --boards N --parallel
+// --load-state FILE runs on from it); F10 doesn't load those.
 //
 // Smooth motion (the menu, or --smooth; the GPU 3D only): a picture each
 // refresh of the display (at most 120 a second, timed as the game's frames
@@ -220,6 +223,7 @@ struct Shared {
     // the host's to run on from; then the boards run unpaced until they've
     // caught up with the others (and a cabinet joined in progress is taken).
     tools::LinkedState linked;
+    std::atomic<bool> net_save_request{false}; // F9 in network play: every board's state in a file
     std::vector<uint8_t> net_state;
     std::atomic<bool> catching_up{false};
 };
@@ -751,6 +755,13 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             // every board is yet to finish (the last to save sends it: start_games).
             if (index == shown && shared.linked.capture_frame == 0 && shared.netplay->take_state_request())
                 shared.linked.capture_frame = frame + 2;
+            // F9: every board's state in a file, the same way (gamerun --boards N
+            // --parallel --load-state runs on from it).
+            if (index == shown && shared.linked.capture_frame == 0 && shared.net_save_request.exchange(false)) {
+                shared.linked.to_file = true;
+                shared.linked.path = "spikeout-net-" + std::to_string(frame + 2) + ".state";
+                shared.linked.capture_frame = frame + 2;
+            }
             if (shared.linked.capture_frame != 0 && frame == shared.linked.capture_frame)
                 c.request_snapshot([&](uint32_t) {
                     m3::State s;
@@ -2252,12 +2263,16 @@ int main(int argc, char** argv) {
                 if (tools::write_png(path, shown, width, height)) std::printf("screenshot: %s\n", path.c_str());
             }
             if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_F9 && !e.key.repeat) {
-                if (boards == 1) {
+                if (shared.netplay) {
+                    shared.net_save_request = true;
+                    std::printf("spikeout: saving every cabinet at the end of a frame (spikeout-net-<frame>.state)\n");
+                } else if (boards == 1) {
                     shared.save_request = true;
                     std::printf("spikeout: saving at the end of the frame\n");
                 } else {
-                    std::printf("spikeout: save states are for one board\n");
+                    std::printf("spikeout: save states are for one board, or a network game\n");
                 }
+                std::fflush(stdout);
             }
             if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_F10 && !e.key.repeat && boards == 1) {
                 std::string last;

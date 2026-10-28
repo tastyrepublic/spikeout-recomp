@@ -932,6 +932,60 @@ alone, exactly.**
   punches on both boards cleared enemies but not the room before time
   ran out; the bot plays one board); a third and fourth player.
 
+**Across a gate (2026-10-28): the camera also takes the game's events.**
+The owner played a network game hosted alone (the window's F9 in network
+play now saves every cabinet: spikeout-net-<frame>.state, which gamerun
+--boards N --parallel --load-state runs on from) to "BREAK THE GATE!!",
+stage 1; player 2 joined from it in gamerun (coin, start, the game
+select, "HERE COMES A NEW PLAYER."), both broke the gate and went on
+through two areas (frames 6250-8400). The second camera, run one step
+from board 1's each time: 100%. Run by itself it went wrong at the gate:
+code other than the camera's writes straight into "the camera" (board
+0's), as the gate's script does (0x5D21C sets its mode, +0x48, to 8,
+with 0x345EC and 0x372D4 setting its parameters, at the same game frame
+on both boards). `--camera-test-mirror` passes such writes on to the
+second camera (a write watch on the camera; the camera's own being the
+update, from its hook until 0xC670 is called from 0x32514 just after it
+returns, and the view routine, 0x32578, until the first view test: two
+more observer hooks): the gate then right, 83.8% of frames by itself
+(from 72.6%). But not every such event is shared: at logic 5485 0x5E550
+writes camera +0xB80-0xB87 on board 0 with values board 1's camera
+didn't get (a per-cabinet effect, perhaps a shake for its own player),
+and from there and the next area (0x30154 sets mode 0x15 at 5614) the
+second camera drifts. So running a remote player's camera means knowing,
+for each kind of camera event, whether it is shared (copied) or that
+player's own (to be made for the remote player): the events seen so far
+0x5D21C, 0x345EC, 0x372D4 (the gate), 0x5E550, 0x30154; later stages
+may have more.
+
+How many there can be (2026-10-28). A scan of the recompiled code (every
+function loading the camera pointer, `lwz rX, -16048(r13)`, and what it
+stores through it; a scratch tool): 112 functions load it, 59 store into
+the camera: about 10 the camera's own (setting it up, the update, the
+view), about 10 only its flags word (+0x00), about 24 setting its mode
+(+0x48, mostly a few lines each, as 0x5D21C: stage script commands), and
+about 15 other fields (placing it and its target, and an area at
++0xB00-0xB9F, effects). Plus helpers given the pointer (0x345EC,
+0x372D4). `gamerun --camera-events` counts, on every board, the writes
+into the camera by code other than its own (the update's and the view
+routine's times from their hooks, as for --camera-test-mirror), and with
+two boards compares each writer's writes by game frame, offset and value:
+- attract mode, 30,000 frames (the game's own demo play): 22 writing
+  blocks, of them start-up (memory cleared, the camera set up at frame
+  213) and 0xBE14 (0x32470's positions from player 1), so about 12 events:
+  mode and placement (0x372D4, 0x345EC, 0x69E30, 0x6AD9C, 0x2C480) and the
+  +0xB00 area (0x34348, 0x3442C, 0x4A1B0, 0x6B18C, 0x6B5DC/0x6B618 written
+  every frame for long stretches, 0x6B6C8/0x6B6D8, 0x6C01C);
+- the gate run (two players): 0x372D4, 0x5D21C and 0x5E550 the same on
+  both boards (shared), 0x345EC not (18 writes on board 0, 3 on board 1:
+  each cabinet's player's, it seems), 0xBE14 each board's own;
+- the long fight: 0x32A80 nearly the same (112 against 114), 0xBE14.
+So 0x5E550 (above) is shared: the drift after logic 5485 is something
+else (0x345EC, or when the copied write lands). The +0xB00 area's
+writers, seen in attract, are still to be classified in a two-player run. The empty enemy slots (enemies beaten before player 2
+joined) keep different leftovers on each cabinet, as the empty player
+slots do, until reused.
+
 Debug aids added for these (gamerun): `--camera-trace N` (board 0's camera
 updates and view tests: return address, r12, r14, the screen edges, the
 view matrix and where it is in RAM), `--camera-test-from FRAME`,

@@ -172,11 +172,44 @@ a frame at scale 4), the settings menu and widescreen all work.
   tile generator's own sides (-sideabove/-sidebelow, -ownabove/-ownbelow,
   marked rows red).
 - Smooth motion is no longer read from or saved to settings.ini (only
-  `--smooth`), as it's still being tested (uncommitted when written).
-- Next: the owner asked Claude to learn to play the game (a bot driving
-  gamerun with save states and --press) so bugs can be reached without the
-  owner playing; then the smooth-motion ghosts; online play later
-  (docs/netplay.md).
+  `--smooth`), as it's still being tested.
+- Main is the LAN branch's line since 2026-10-28 (claude/lan-play-f60b31
+  fast-forwarded onto main after the host-change fixes; single-player
+  checked the same: sound, tile RAM and backup RAM byte for byte over
+  boot, select, map and play). Work goes on on main.
+- The bot (2026-10-25, uncommitted when written; paused at the owner's
+  request): tools/spikebot.cpp, docs/bot.md (how it plays, the RAM it
+  reads, the coast road, the longplay's stages, the player's guide, what it
+  costs). It clears stage 1 and reaches stage 2's coast road enemies; ~13
+  frames a second while fighting (3x faster than at first; same play,
+  frame for frame). Checkpoint states in build/bot/ (git-ignored); the
+  owner's F9 states in the repo root are not to be committed. Next for it:
+  a run to the end with no frame limit (8-12 hours estimated), fixing where
+  it stops and going on from its last state; running and charge levels not
+  used yet.
+- Rollback steps 2-3 done (2026-10-28, docs/netplay.md): linked boards
+  going back together (gamerun --rollback-test on --boards N --parallel),
+  quiet re-runs (:quiet, :timed). Then the owner's goal changed to ONE
+  BOARD PER PC (tablets): proved that a remote cabinet can be stood in for
+  by its network board and the 0x900-byte block its main board writes each
+  frame, and that block rebuilt byte for byte from this board alone plus
+  the remote's buttons, by running the remote player's camera with the
+  game's own code on the side (gamerun --camera-test; docs/netplay.md,
+  "What the cabinets send each other"). Open: the game's camera events
+  (script commands writing straight into the camera, e.g. 0x5D21C at a
+  gate): shared ones are copied (--camera-test-mirror), per-player ones
+  (0x345EC so far) to work out; --camera-events lists and sorts them
+  (shared / each board's own) in any two-player run. Needed: two-player
+  runs reaching every stage.
+- The window's F9 in network play saves every cabinet
+  (spikeout-net-<frame>.state; gamerun --boards N --parallel --load-state
+  runs on from it, player 2 joined by --press). The owner's save at stage
+  1's gate: spikeout-net-4387.state (repo root, never committed);
+  build/linkstudy/joined-6250.state is both players in, at the gate.
+- Next: the bot playing the whole game (a separate session); then the
+  camera events over the whole game, two players (the bot driving two
+  boards would give those runs); the owner's internet test of network
+  play; the smooth-motion ghosts.
 
 Owner's decisions for online play: each player on their own cabinet
 (board) on their own computer; rollback netcode (Mode B: every PC runs all
