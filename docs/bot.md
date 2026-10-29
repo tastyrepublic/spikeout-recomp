@@ -32,6 +32,37 @@ spikebot <rom_dir> --load-state FILE [--out DIR] [--frames N] [--no-sound]
   next piece the game starts).
 - `SPIKEBOT_VERBOSE=1` prints every try's result.
 
+## Runs from stage 1 with the newer bot (2026-10-29, later)
+
+From `build/bot/bot-3500.state` (stage 1's gym), unhelped:
+
+- A hold (an enemy grabbing the player) looked like a scene to the "held"
+  check, so the bot waited until time ran out (stage 1's boss): with
+  enemies within reach it now struggles (beat taps and the lever wiggled).
+- In a boss fight (the phase's boss bit) the boss, the enemy with the most
+  health at full, is the target, and damage to him counts three times (the
+  owner: "every stage the goal is to kill the boss").
+- **`--weak-enemies`** (the owner's request, for getting through the stages):
+  each turn every enemy in play is set to 1 health, so any hit knocks it
+  out; the game's own knock-out still runs (counts, time bonuses). With it
+  the bot uses quick hits only (the 20-frame tries, no charges: the owner).
+  Run `weak1`/`weak2`: the shipyard's stairs gate (by the floor grid) and a
+  fence gate in Diesel Town passed alone; the hedge maze at frame ~100,500
+  (the long run: ~188,000), 1 h 45 min from the start.
+- At a gate, nearness counts a little (0.1 a unit): at the fence gate the
+  bot beat the bars 1.65 from its door until time ran out.
+- Planes flagged 0 (ceilings, it seems) aren't floors or room-takers: taken
+  as room-takers they hid the opera house's stairs. A wall is planned as
+  jumped only when its top is within 1.0 of the floor (the theatre stage's,
+  0.85, was jumped; the walls by the opera house's stairs, with 2.4, sent
+  the bot shuttling instead of round by the outdoor area); a jump that gets
+  no nearer the point aimed at bars it at once. With these the opera gate
+  was broken alone (frame 123023).
+- Running (the lever tapped twice, then held, per the guide) didn't start a
+  run with taps of 2-8 frames (`--route 30-37`, `SPIKEBOT_RUNTAP`); left out.
+- The run was stopped in the Reception Hall (frame ~128,400) at the owner's
+  word: good enough for the next work, the stages and scene changes.
+
 ## Fighting faster (2026-10-29)
 
 The opera house's hall timed out twice with the old fighting. Now each move

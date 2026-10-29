@@ -4,7 +4,8 @@
 //
 //   spikebot <rom_dir> --load-state FILE [--out DIR] [--frames N] [--no-sound]
 //            [--play] [--workers N] [--inspect EVERY] [--dump LO-HI]
-//            [--route D:N,...] [--explore-test] [--moves-test] [--floor-map] [--bench] [--selftest]
+//            [--route D:N,...] [--explore-test] [--moves-test] [--floor-map] [--weak-enemies]
+//            [--bench] [--selftest]
 //
 // The game runs on its own thread and stops at the end of every frame for
 // the bot's next command (Emulator below): run some frames with some inputs
@@ -204,6 +205,11 @@ public:
         return f;
     }
     uint32_t read32(uint32_t addr) const { return static_cast<uint32_t>(read16(addr)) << 16 | read16(addr + 2); }
+    // Writing it (between frames, the game's thread waiting: as reading).
+    void write16(uint32_t addr, uint16_t v) {
+        bus_.ram()[addr] = static_cast<uint8_t>(v >> 8);
+        bus_.ram()[addr + 1] = static_cast<uint8_t>(v);
+    }
     uint32_t r13() const { return c_.cpu.gpr[13]; } // (the game's small-data base: its globals are off it)
     uint64_t frame() const { return timing_.frames(); }
     const std::string& stopped() const { return stopped_; }
@@ -468,7 +474,8 @@ struct Floor {
                 // (crossing it either way: the game pushes only from the front, but the theatre's
                 // seat rows stopped the player crossing from behind, the planner's way through)
                 const float vfa = va + 2 * kRadius, vfb = vb + 2 * kRadius; // (its back, pushed out too)
-                if (!((va >= 0 && vb < 0) || (vfa <= 0 && vfb > 0))) continue;
+                static const bool one_sided = std::getenv("SPIKEBOT_ONESIDED") != nullptr;
+                if (!((va >= 0 && vb < 0) || (!one_sided && vfa <= 0 && vfb > 0))) continue;
                 const float t = va / (va - vb);
                 const float ua = ax * w.s - az * w.c, ub = bx * w.s - bz * w.c, u = ua + (ub - ua) * t;
                 const float lo = std::min(w.u0, w.u1), hi = std::max(w.u0, w.u1);
@@ -501,7 +508,11 @@ struct Floor {
             // (as the game's floor query takes them: 0x04000000 never; 0x02000000 only while the
             // switch is on; a solid block's top takes room, but isn't stood on)
             if (p.flags & 0x04000000u) continue;
-            if ((p.flags & 0x02000000u) && !switched) continue;
+            static const bool no_switch = std::getenv("SPIKEBOT_NOSWITCH") != nullptr;
+            if ((p.flags & 0x02000000u) && (!switched || no_switch)) continue;
+            // (planes with flags 0: not floors, ceilings it seems; taken as room-takers they hid
+            // the opera house's stairs under them)
+            if (p.flags == 0) continue;
             all.push_back(p.d + p.a * fx + p.c * fz);
             if (!(p.flags & skip)) floors.push_back(all.back());
         }
@@ -519,7 +530,14 @@ const float kWalkUp = std::getenv("SPIKEBOT_STEP") ? static_cast<float>(std::ato
 // A jump goes higher the longer the button is held (the owner): tapped 2 frames it lifts 1.5, held
 // 20 it lifts 2.8 and carries on forward (over the theatre's stage wall, which no tap crossed).
 constexpr int kJumpHold = 20;
+// Running: the lever tapped (kRunTap frames), let go as long, then held (the guide; the owner:
+// "always run to our enemy instead of walk").
+const int kRunTap = std::getenv("SPIKEBOT_RUNTAP") ? std::atoi(std::getenv("SPIKEBOT_RUNTAP")) : 2;
 constexpr float kJumpUp = 2.4f, kDropDown = 4.0f;
+// A wall is jumped only when its top is this little above the floor (the theatre's stage wall,
+// 0.85, was; the opera house's walls by its stairs, planned with 2.4, weren't: the bot shuttled
+// at them instead of going round by the outdoor area).
+constexpr float kWallJump = 1.0f;
 struct Waypoint {
     float x, y, z;
     bool jump;
@@ -605,7 +623,7 @@ std::vector<Waypoint> plan_way(const Floor& f, float x, float y, float z, float 
                     // aisle, "jump 1 step up to the stage", the owner).
                     bool over = false;
                     if (f.blocked(cell, next, ax, az, bx, bz, std::max(h, there[l]))) {
-                        if (f.blocked(cell, next, ax, az, bx, bz, std::max(h, there[l]) + kJumpUp)) continue;
+                        if (f.blocked(cell, next, ax, az, bx, bz, std::max(h, there[l]) + kWallJump)) continue;
                         over = true;
                     }
                     const float g = cost[node] + step * (dx && dz ? 1.414f : 1.0f) + (rise > kWalkUp || over ? 2.0f : 0.0f);
@@ -768,10 +786,13 @@ std::vector<Move> moves() {
     return m;
 }
 
+const Character* boss_of(const Emulator& e, const std::vector<Character>& foes);
+
 // How things stand, for comparing tries.
 struct Score {
     int player_health = 0, enemy_health = 0, enemies = 0;
-    float player_y = 0; // (a fall off a walkway shows here)
+    int boss_health = 0; // (in a boss fight: the boss's, the one with the most health at full)
+    float player_y = 0;  // (a fall off a walkway shows here)
     float nearest = 0; // distance to the nearest enemy (on the ground), else to where the arrow points
     bool arrow = false; // the red arrow shown
 };
@@ -794,25 +815,42 @@ Score score(const Emulator& e) {
         return s;
     }
     s.nearest = 1e9f;
-    for (const Character& en : enemies(e)) {
+    const std::vector<Character> foes = enemies(e);
+    const Character* boss = boss_of(e, foes);
+    for (const Character& en : foes) {
         s.enemy_health += en.health;
         ++s.enemies;
+        if (boss && &en != boss) continue; // (in a boss fight, the boss is the one to reach)
         // (height beyond 1.5 counts: one on the floor below a balcony is no nearer for being
         // under it; a crouching one is about 1 lower than one standing)
         const float below = 2 * std::max(0.0f, std::fabs(en.y - p.y) - 1.5f); // (double: one 4.6 under the
                                                                                  // balcony stays out of reach)
         s.nearest = std::min(s.nearest, std::hypot(std::hypot(en.x - p.x, en.z - p.z), below));
     }
+    if (boss) s.boss_health = boss->health;
     if (s.enemies == 0) s.nearest = 0;
     return s;
 }
 
-// Where the bot is headed: the nearest enemy, else where the arrow points
-// while the game asks for the gate.
+// In a boss fight (the phase's boss bit), the boss: the enemy with the most health at full, by
+// far (Mikhail 1500, his guards 200); only he needs to go down (the owner: "every stage the goal
+// is to kill the boss"; guards keep coming). Else none.
+const Character* boss_of(const Emulator& e, const std::vector<Character>& foes) {
+    if (!(area_phase(e) & ram::kPhaseBoss)) return nullptr;
+    const Character* boss = nullptr;
+    for (const Character& en : foes)
+        if (!boss || en.max_health > boss->max_health) boss = &en;
+    return boss;
+}
+
+// Where the bot is headed: the boss in a boss fight, else the nearest enemy, else where the
+// arrow points while the game asks for the gate.
 std::optional<Character> target(const Emulator& e) {
     const Character p = character(e, ram::kPlayer);
+    const std::vector<Character> foes = enemies(e);
+    if (const Character* boss = boss_of(e, foes)) return *boss;
     std::optional<Character> best;
-    for (const Character& en : enemies(e))
+    for (const Character& en : foes)
         if (!best || std::hypot(en.x - p.x, en.z - p.z) < std::hypot(best->x - p.x, best->z - p.z)) best = en;
     if (!best && arrow_target(e)) {
         Character gate;
@@ -825,12 +863,15 @@ std::optional<Character> target(const Emulator& e) {
 // Better is more damage dealt, less taken, closer to the nearest enemy; at
 // the gate, the arrow gone (the gate broken).
 double value(const Score& before, const Score& after) {
-    const double dealt = before.enemy_health - after.enemy_health;
+    // (the boss's damage counts three times: the fight ends when he does)
+    const double dealt = (before.enemy_health - after.enemy_health) + 2.0 * (before.boss_health - after.boss_health);
     const double taken = before.player_health - after.player_health;
     const double broken = before.arrow && !after.arrow ? 1000.0 : 0.0;
     // (at a gate within reach, nearer is no better: it takes more hits than a try lands, and
     // with nothing breaking it the walks won by a little; now ties go to the first, beat taps)
-    const double near = before.arrow && before.enemies == 0 ? 0.0 : 0.5 * after.nearest;
+    // (a little, though: at Diesel Town's fence gate the bot beat the bars 1.65 from the door
+    // until the time ran out; with this the moves that step and hit win, and it drifts there)
+    const double near = (before.arrow && before.enemies == 0 ? 0.1 : 0.5) * after.nearest;
     // (falling off where the fight is costs a long way back: Mikhail's walkway, 6.7 up, "stay
     // on the center of the stage", the owner)
     const double fell = after.player_y < before.player_y - 1.5f ? 500.0 : 0.0;
@@ -915,6 +956,10 @@ void explore_leg(Emulator& b, uint8_t d) {
 }
 
 std::optional<std::pair<float, float>> g_goal; // (SPIKEBOT_GOAL=x,z: --explore-test heads there instead)
+// --weak-enemies: the bot sets every enemy in play to 1 health each turn, so any hit knocks it out
+// (the game's own knock-out still runs: its counts and time bonuses) - for getting through the
+// stages, not for playing them.
+bool g_weak_enemies = false;
 
 float apart(const Emulator& e) {
     const Character p = character(e, ram::kPlayer);
@@ -1084,6 +1129,11 @@ void play(Emulator& e, Workers& w, int frames, const std::string& out) {
     constexpr int kWayStalled = 6;
     uint64_t playing_at = e.frame(); // (the last frame a game was being played)
     while (e.frame() < end && e.stopped().empty()) {
+        if (g_weak_enemies) // (--weak-enemies: each turn, every enemy in play down to 1 health)
+            for (int i = 0; i < ram::kEnemySlots; ++i) {
+                const uint32_t base = ram::kEnemies + static_cast<uint32_t>(i) * ram::kSlot;
+                if (e.read16(base + ram::kLive) >> 8 != 0 && e.read16(base + ram::kHealth) > 1) e.write16(base + ram::kHealth, 1);
+            }
         if (e.read32(ram::kPlaying) != 0) playing_at = e.frame();
         else if (e.frame() - playing_at > 600) {
             std::printf("frame %llu: game over (the attract mode)\n", static_cast<unsigned long long>(e.frame()));
@@ -1177,8 +1227,16 @@ void play(Emulator& e, Workers& w, int frames, const std::string& out) {
         }
         if ((now.nearest > (to_gate ? kGateReach : kReach) && !gate_reached) || (now.enemies > 0 && walk_for > 0)) {
             if (walk_for > 0) --walk_for;
-            if (frozen(w, snap)) { // (a scene: the player held; no search)
-                e.step({}, kLeg);
+            if (frozen(w, snap)) {
+                // With enemies within reach it's a hold, not a scene: struggle (beat taps free the
+                // player; waiting, stage 1's boss held him until the time ran out).
+                if (now.enemies > 0 && now.nearest <= kReach) {
+                    walk_for = 0;
+                    for (int i = 0; i < kDecide; ++i) e.step(i % 6 < 2 ? press({Beat}) : press({i % 4 < 2 ? Left : Right}));
+                    std::printf("frame %llu: struggle (held)\n", static_cast<unsigned long long>(e.frame()));
+                    continue;
+                }
+                e.step({}, kLeg); // (a scene: no search)
                 std::printf("frame %llu: wait (held)\n", static_cast<unsigned long long>(e.frame()));
                 continue;
             }
@@ -1225,10 +1283,13 @@ void play(Emulator& e, Workers& w, int frames, const std::string& out) {
                     // (an aim within a unit is the same one: at the balcony it moved by half a cell a turn)
                     if (std::hypot(aim->x - way_aim.x, aim->z - way_aim.z) > 1.0f || std::fabs(aim->y - way_aim.y) > 0.5f)
                         way_aim = *aim, way_best = before, way_stalled = 0;
-                    if (off(e) < way_best - 0.3f) {
+                    // (a jump at a point jumped up to that gets no nearer bars it at once: the opera
+                    // house's pole, "jumped" over on the map, the bot back where it was every time)
+                    const bool jump_failed = aim->jump && k >= 8 && off(e) >= before - 0.3f;
+                    if (!jump_failed && off(e) < way_best - 0.3f) {
                         way_best = off(e);
                         way_stalled = 0;
-                    } else if (++way_stalled >= kWayStalled) { // (that step can't be made: plan round it)
+                    } else if (jump_failed || ++way_stalled >= kWayStalled) { // (that step can't be made: plan round it)
                         const Floor f = read_floor(e);
                         for (int dz = -1; dz <= 1; ++dz) // (and the cells round it: the next try would be one along)
                             for (int dx = -1; dx <= 1; ++dx)
@@ -1264,7 +1325,8 @@ void play(Emulator& e, Workers& w, int frames, const std::string& out) {
         // Each move tried for the same time: its own inputs, then beat taps (a charge takes longer
         // to land than a tap; scored on 20 frames it never paid). SPIKEBOT_OLDFIGHT=1: 20 frames of
         // each move's own inputs, no charges (as before, for comparing).
-        static const bool old_fight = std::getenv("SPIKEBOT_OLDFIGHT") != nullptr;
+        // (with --weak-enemies too: any hit knocks one out, so quick hits, not charges; the owner)
+        static const bool old_fight = std::getenv("SPIKEBOT_OLDFIGHT") != nullptr || g_weak_enemies;
         const bool gate = now.enemies == 0 && now.arrow;
         const int horizon = gate ? kGateHorizon : old_fight ? kHorizon : kFightHorizon; // (the gate takes longer to show)
         auto tap = [](int i) { return i % 6 < 2 ? press({Beat}) : Inputs{}; };
@@ -1322,6 +1384,7 @@ int main(int argc, char** argv) {
         else if (arg == "--moves-test") moves_test = true;
         else if (arg == "--bench") bench = true;
         else if (arg == "--floor-map") floor_map = true;
+        else if (arg == "--weak-enemies") g_weak_enemies = true;
         else if (arg == "--route" && i + 1 < argc) route_spec = argv[++i];
         else if (arg == "--workers" && i + 1 < argc) workers = std::atoi(argv[++i]);
         else if (arg == "--dump" && i + 1 < argc) std::sscanf(argv[++i], "%x-%x", &dump_lo, &dump_hi);
@@ -1330,7 +1393,8 @@ int main(int argc, char** argv) {
     if (!dir || load.empty()) {
         std::fprintf(stderr, "usage: spikebot <rom_dir> --load-state FILE [--out DIR] [--frames N] [--no-sound]\n"
                              "                [--play] [--workers N] [--inspect EVERY] [--dump LO-HI]\n"
-                             "                [--route D:N,...] [--explore-test] [--moves-test] [--floor-map] [--bench] [--selftest]\n");
+                             "                [--route D:N,...] [--explore-test] [--moves-test] [--floor-map] [--weak-enemies]\n"
+                             "                [--bench] [--selftest]\n");
         return 2;
     }
     const m3::GameSpec& game = m3::games::kSpikeoutFinalEdition;
@@ -1372,7 +1436,11 @@ int main(int argc, char** argv) {
             if (std::sscanf(route_spec.c_str() + at, "%d:%d%n", &d, &n, &used) != 2) break;
             at += static_cast<std::size_t>(used) + 1;
             for (int i = 0; i < n; i += 20) { // (direction 8: no input; 9: beat taps where it stands; 10-17: 0-7 jumping first)
-                if (d >= 20 && d < 28) { // (20-27: 0-7 with jump held: held longer, it goes higher)
+                if (d >= 30 && d < 38) { // (30-37: 0-7 run: tapped, let go, then held)
+                    const Inputs lever = press({kWalk[d - 30][0], kWalk[d - 30][1]});
+                    if (i == 0) e.step(lever, kRunTap), e.step({}, kRunTap);
+                    e.step(lever, std::min(20, n - i) - (i == 0 ? 2 * kRunTap : 0));
+                } else if (d >= 20 && d < 28) { // (20-27: 0-7 with jump held: held longer, it goes higher)
                     const Button a = kWalk[d - 20][0], c = kWalk[d - 20][1];
                     e.step(press({a, c, Jump}), std::min(20, n - i));
                 } else if (d >= 10 && d < 18) {
@@ -1448,8 +1516,12 @@ int main(int argc, char** argv) {
                     tx = e.readf(ram::kArrowTarget), ty = e.readf(ram::kArrowTarget + 4), tz = e.readf(ram::kArrowTarget + 8);
                 }
                 way = plan_way(f, p.x, p.y, p.z, tx, ty, tz);
-                std::printf("way to %.2f %.2f %.2f: %zu points\n", static_cast<double>(tx), static_cast<double>(ty), static_cast<double>(tz),
+                std::printf("way to %.2f %.2f %.2f: %zu points", static_cast<double>(tx), static_cast<double>(ty), static_cast<double>(tz),
                             way.size());
+                if (!way.empty())
+                    std::printf(", ending at %.2f %.2f %.2f", static_cast<double>(way.back().x), static_cast<double>(way.back().y),
+                                static_cast<double>(way.back().z));
+                std::printf("\n");
             }
             for (float z = p.z - 30 * step; z <= p.z + 30 * step; z += step) {
                 std::string row;
