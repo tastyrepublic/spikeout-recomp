@@ -17,6 +17,7 @@
 #include <deque>
 #include <stdexcept>
 #include <string>
+#include <span>
 #include <type_traits>
 #include <vector>
 
@@ -33,8 +34,14 @@ class State {
 public:
     // Saving: fields are appended to data().
     State() = default;
+    // Saving, with room for `expected` bytes (a state's size: no growing).
+    explicit State(std::size_t expected) { data_.reserve(expected); }
     // Loading `data`.
-    explicit State(std::vector<uint8_t> data) : data_(std::move(data)), loading_(true) {}
+    explicit State(std::vector<uint8_t> data) : data_(std::move(data)), loading_(true) {
+        in_ = data_.data(), in_size_ = data_.size();
+    }
+    // Loading from bytes kept elsewhere (not copied: they must outlive this).
+    explicit State(std::span<const uint8_t> data) : loading_(true) { in_ = data.data(), in_size_ = data.size(); }
 
     bool loading() const { return loading_; }
     // Saving into `buffer` (its contents dropped, its room kept: no growing).
@@ -44,12 +51,12 @@ public:
     }
     std::vector<uint8_t>& data() { return data_; }
     // Loading: all of it read.
-    bool done() const { return pos_ == data_.size(); }
+    bool done() const { return pos_ == in_size_; }
 
     void bytes(void* p, std::size_t n) {
         if (loading_) {
-            if (n > data_.size() - pos_) throw std::runtime_error("save state: ends early");
-            std::memcpy(p, data_.data() + pos_, n);
+            if (n > in_size_ - pos_) throw std::runtime_error("save state: ends early");
+            std::memcpy(p, in_ + pos_, n);
             pos_ += n;
         } else {
             const auto* b = static_cast<const uint8_t*>(p);
@@ -103,7 +110,7 @@ public:
             bytes(const_cast<char*>(name), n + 1);
             return;
         }
-        if (n + 1 > data_.size() - pos_ || std::memcmp(data_.data() + pos_, name, n + 1) != 0)
+        if (n + 1 > in_size_ - pos_ || std::memcmp(in_ + pos_, name, n + 1) != 0)
             throw std::runtime_error(std::string("save state: expected ") + name);
         pos_ += n + 1;
     }
@@ -113,7 +120,7 @@ private:
         uint64_t n = c.size();
         io(n);
         if (loading_) {
-            if (n > data_.size() - pos_) throw std::runtime_error("save state: ends early");
+            if (n > in_size_ - pos_) throw std::runtime_error("save state: ends early");
             c.resize(static_cast<std::size_t>(n));
         }
         if constexpr (Plain<typename C::value_type>::value &&
@@ -125,6 +132,8 @@ private:
     }
 
     std::vector<uint8_t> data_;
+    const uint8_t* in_ = nullptr; // (loading: what is read)
+    std::size_t in_size_ = 0;
     std::size_t pos_ = 0;
     bool loading_ = false;
     Regions* regions_ = nullptr;

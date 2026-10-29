@@ -442,6 +442,9 @@ if(SPIKEOUT_ROM_DIR)
     add_executable(boottest tools/boottest.cpp)
     target_link_libraries(boottest PRIVATE boot_rom spikeout_warnings)
 
+    add_executable(spikebot tools/spikebot.cpp)
+    target_link_libraries(spikebot PRIVATE game_ram boot_rom spikeout_warnings)
+
     add_executable(gamerun tools/gamerun.cpp)
     target_link_libraries(gamerun PRIVATE game_ram boot_rom m3net spikeout_warnings)
     if(SPIKEOUT_GPU)
