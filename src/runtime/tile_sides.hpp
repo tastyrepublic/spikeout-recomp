@@ -27,6 +27,7 @@
 #pragma once
 
 #include <array>
+#include <functional>
 #include <cstdint>
 
 namespace m3 {
@@ -36,7 +37,7 @@ class State;
 class TileSides {
 public:
     // The buffer's columns, those on the screen (496 pixels), and those kept past each side.
-    static constexpr int kLayers = 4, kRows = 64, kColumns = 64, kScreen = 62, kSide = 12;
+    static constexpr int kLayers = 4, kRows = 64, kColumns = 64, kScreen = 62, kSide = 12, kScreenRows = 48;
     static constexpr uint32_t kEmpty = 0xFFFFFFFFu;
     // A cell past the edge of a picture whose edge is a fade (the linking
     // screen's spotlight): no tile, the fade continued there (m3::WideLayer).
@@ -46,6 +47,8 @@ public:
     // Map `map` is about to be drawn on `layer` over rows [first_row,
     // end_row): its cells there from before the last copy go.
     void begin_map(int layer, uint16_t map, int first_row, int end_row);
+    // Debug aid (gamerun --map-trace): told of each map drawn (layer, map, rows).
+    std::function<void(int layer, uint16_t map, int first_row, int end_row)> on_map;
     // A map's entry (the layer buffer's form) at (row, column), column outside [0, kScreen).
     void draw(int layer, int row, int column, uint16_t entry, uint16_t map);
     // Map `map`'s picture fades out at the edge here: the fade continued.
@@ -64,6 +67,31 @@ public:
     // Whether `row` has any entry on the left (right) side.
     bool any(int layer, int row, bool right) const;
 
+    // ---- Full-screen pictures ----
+    // A map drawn over the whole screen as a still picture, with nothing of
+    // its own past the screen's edges (a stage's "NEXT STAGE COMING UP!!"
+    // card, a story scene's picture): widescreen makes its sides from the
+    // picture itself, enlarged and blurred (m3::WideLayer; the owner's choice
+    // over the edges carried on, which made patterns and blocks there).
+    static bool blurred(uint16_t map);
+    // Whether `layer` shows such a picture: as last drawn (not every layer's
+    // pictures go through the copy routine watched: a card's doesn't).
+    bool picture(int layer) const { return layer >= 0 && layer < kLayers && picture_[layer] != 0; }
+
+    // ---- The staff credits ----
+    // From their set-up (begin_credits: games/spikeofe_hooks.cpp) or their
+    // maps (the heading and names, 0xE7-0xEA, layer 0: a state loaded after
+    // the set-up) until the next map over the whole screen (the title after
+    // them): widescreen's 2D past the left side is the picture mirrored at
+    // its edge (the sunset's sky, behind its 3D opened out), past the right
+    // the names' black carried on, no wider than 16:9 (black past that);
+    // m3::WideLayer. The owner's choice of three previews.
+    static bool credits(uint16_t map) { return map >= 0xE7 && map <= 0xEA; }
+    void begin_credits() { black_ = true; }
+    bool black() const { return black_; } // (the credits' sides)
+
+    // Save states: the cells. The pictures and the credits aren't kept (a
+    // state from before them still loads): set again as the game next draws them.
     void state(State& s);
 
 private:
@@ -81,6 +109,8 @@ private:
     static constexpr int kCells = kLayers * kRows * 2 * kSide;
     std::array<Cell, kCells> pending_{};
     std::array<uint32_t, kCells> shown_ = filled();
+    std::array<uint16_t, kLayers> picture_{}; // (the picture's map; 0: none)
+    bool black_ = false;                     // (the credits)
     static constexpr std::array<uint32_t, kCells> filled() {
         std::array<uint32_t, kCells> a{};
         for (uint32_t& v : a) v = kEmpty;

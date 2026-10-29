@@ -69,7 +69,9 @@
 //
 // --frames N quits after N frames and writes the last one to
 // spikeout-<N>.png (for testing). --quads draws quads whole, as Supermodel's
-// "quad rendering" option. --midi-burst sends the sound board its bytes with
+// "quad rendering" option. --fog-over-nothing draws scroll fog in frames
+// with no 3D too, as Supermodel (the ranking after the staff credits:
+// orange). --midi-burst sends the sound board its bytes with
 // Supermodel's timing instead of the serial chip's; --dma-instant finishes
 // Real3D DMA copies at once (Supermodel, MAME). --sound-volume and
 // --music-volume set the sound effects (the two SCSPs) and the music board
@@ -167,6 +169,7 @@ struct Shared {
     std::string load_path, last_state; // (under `lock`)
     bool real_netboard = true;
     bool old_link = false; // --net-old-link: the link before the ring model (docs/fidelity.md)
+    bool fog_over_nothing = false; // --fog-over-nothing: scroll fog with no 3D too, as Supermodel (docs/fidelity.md)
     std::atomic<bool> quads{false}; // draw quads whole
     bool midi_burst = false;        // Supermodel's MIDI timing
     bool dma_instant = false;       // Real3D DMA done at once (Supermodel, MAME)
@@ -579,6 +582,7 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
     }
     m3::TilegenRenderer tilegen;
     m3::Real3dRenderer real3d;
+    real3d.set_fog_over_nothing(shared.fog_over_nothing);
     std::vector<uint32_t> screen(kWidth * kHeight);
 
     using clock = std::chrono::steady_clock;
@@ -625,6 +629,7 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
         while (clock::now() < due) std::this_thread::yield();
     };
     m3::Real3dSceneBuilder builder;
+    builder.set_fog_over_nothing(shared.fog_over_nothing);
     m3::WideLayer wide_bottom, wide_top;
     Shared::GpuFrame gpu_frame;
     int built_extend = 0;  // the widescreen extension the last frame was made with (asked for)
@@ -964,7 +969,7 @@ int main(int argc, char** argv) {
     const char* dir = nullptr;
     std::string record_path, load_state;
     int scale = 0, cli_render_scale = 0, cli_sound = -1, cli_music = -1;
-    bool real_netboard = true, old_link = false;
+    bool real_netboard = true, old_link = false, fog_over_nothing = false;
     uint64_t max_frames = 0;
     bool mute = false, cli_quads = false, cli_smooth = false, cli_smooth_log = false, midi_burst = false, dma_instant = false, use_gpu = true, cli_soft_3d = false, fifo = false,
          sleep_pacing = false, list_audio = false;
@@ -974,6 +979,7 @@ int main(int argc, char** argv) {
         if (arg == "--scale" && i + 1 < argc) scale = std::max(1, std::atoi(argv[++i]));
         else if (arg == "--netboard" && i + 1 < argc) real_netboard = std::string(argv[++i]) == "real";
         else if (arg == "--net-old-link") old_link = true;
+        else if (arg == "--fog-over-nothing") fog_over_nothing = true;
         else if (arg == "--frames" && i + 1 < argc) max_frames = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--boards" && i + 1 < argc)
             boards = std::clamp<std::size_t>(std::strtoull(argv[++i], nullptr, 0), 1, kMaxBoards);
@@ -1095,6 +1101,7 @@ int main(int argc, char** argv) {
     shared.load_path = shared.last_state = load_state;
     shared.real_netboard = real_netboard;
     shared.old_link = old_link;
+    shared.fog_over_nothing = fog_over_nothing;
     shared.quads = settings.quads;
     shared.midi_burst = midi_burst;
     shared.dma_instant = dma_instant;

@@ -206,10 +206,34 @@ a frame at scale 4), the settings menu and widescreen all work.
   runs on from it, player 2 joined by --press). The owner's save at stage
   1's gate: spikeout-net-4387.state (repo root, never committed);
   build/linkstudy/joined-6250.state is both players in, at the gate.
-- Next: the bot playing the whole game (a separate session); then the
-  camera events over the whole game, two players (the bot driving two
-  boards would give those runs); the owner's internet test of network
-  play; the smooth-motion ghosts.
+- The bot's run to the end replayed (2026-10-29): spikebot
+  --record-inputs FILE (tools/input_log.hpp: each frame's buttons and the
+  bot's RAM writes, a RAM hash every 60 frames), gamerun --load-state S
+  --inputs FILE (every hash matched over 4 segments: docs/netplay.md, "The
+  camera events over the whole game"; the segments' states and inputs in
+  build/bot and build/linkstudy, git-ignored). Used for: the camera events
+  over one player's whole game (docs/netplay.md: the script's 11 camera
+  actions, 0x09 used by no script, 0x3F never run, 0x18 seen through its
+  helpers 0x37258/0x372D4; the Kind C list), the area scripts run (the
+  interpreter task's +16), and widescreen's cut scenes in 16:9: the stage
+  cards and Mikhail's eyes get sides of the picture enlarged and blurred
+  (TileSides::blurred, WideLayer::blurred_sides; the faces 0x96 scroll and
+  are left alone, the owner says that's right); the staff credits
+  (TileSides::black, from their set-up's fill at 0xA164) mirror the sky
+  on the left, the names' black on the right, the sunset's 3D opened out
+  on the left only (a full-height viewport at one edge), and no wider than
+  16:9 (21:9's dog popped in); the ranking after them lost the credits'
+  scroll fog (docs/fidelity.md; --fog-over-nothing for Supermodel's).
+  Checked: seg2/seg3 pictures in 4:3 and 16:9 the same as before but the
+  card; stage 1 and seg4 not re-compared.
+- Next (a separate session): the camera events still to sort. Kind A's
+  0x3F (0xB4EA0 in area script 0xB4800, behind a condition not met;
+  0xB2A64 in a script never run, perhaps the hidden route) and the area
+  scripts never run (the hidden stages). Kind C as shared or per-player,
+  with each write's caller (LR, which --camera-events doesn't report yet:
+  0x37258/0x372D4 are the script's when called from 0x5D81C), needing
+  two-player runs over the whole game (the bot driving two boards). Then
+  the owner's internet test of network play; the smooth-motion ghosts.
 
 Owner's decisions for online play: each player on their own cabinet
 (board) on their own computer; rollback netcode (Mode B: every PC runs all

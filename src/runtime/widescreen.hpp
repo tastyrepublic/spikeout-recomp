@@ -64,6 +64,18 @@ private:
     static constexpr float kFadeEase = 1.5f;
     static constexpr float kHueMatch = 0.98f; // (the cosine between a pixel's colour and the picture's)
     static constexpr float kColoured = 0.25f; // a picture's colour taken as its own (its channels this far apart), not grey
+    // A still full-screen picture's sides (the tile generator's mark bit 4):
+    // the picture enlarged, blurred and darkened (the owner's idea; "medium"
+    // of three previews, light 6 / 0.85, medium 12 / 0.7, strong 20 / 0.55).
+    static constexpr int kBlurRadius = 12, kBlurPasses = 3;
+    // The staff credits' widest sides: 16:9's (384 * 16 / 9 = 682.7 wide);
+    // past them black (wider, the dog leaping in from 160 pixels past the
+    // left edge appeared there out of nothing; the owner's choice).
+    static constexpr int kCreditsSide = 93;
+    static constexpr float kBlurDark = 0.7f;
+    void blurred_sides(std::span<const uint32_t> layer, std::span<const uint8_t> real, int e, std::vector<uint32_t>& out);
+    uint64_t blur_hash_ = 0;
+    std::vector<uint32_t> blur_; // (the last picture's, as wide as the frame)
     // A fade marked past a picture's edge (TileSides::kFade), continued on row y's side s into `to`.
     static void fade(std::span<const uint32_t> layer, std::span<const uint8_t> real, std::span<const uint32_t> own,
                      const std::array<float, 3>& hue, int y, int s, int e, uint32_t* to);

@@ -60,8 +60,9 @@ public:
     // lines where a layer is scrolled by 8 to 504 pixels (a picture panning
     // across its name table, the map screen's faces), or scrolled apart from
     // most of its lines (a band scrolling through a still picture: the
-    // character select's marquee), or (without line scroll) whose scroll
-    // register changed in the last 120 frames, or (always) whose map row is
+    // character select's marquee), or (without line scroll) whose x scroll
+    // changed in the last 120 frames (not y: the staff credits' names scroll
+    // up and don't wrap at the sides), or (always) whose map row is
     // a panorama one screen wide: the stages' skies are runs of 62 tiles
     // written round the map's 64 (its last two columns the first two again;
     // scrolled 0-7 as the camera turns while the game rewrites the tiles),
@@ -80,7 +81,13 @@ public:
     // its sides there. The other layers' sides are drawn there too, in
     // front of or behind as on the screen. A fade past a picture's edge
     // (TileSides::kFade) draws nothing there and is marked too (bit 2 left,
-    // bit 3 right): WideLayer continues the fade under what was drawn.
+    // bit 3 right): WideLayer continues the fade under what was drawn. A line
+    // where a layer shows a still full-screen picture (TileSides::picture;
+    // not scrolled across) is marked bit 4: WideLayer makes both its sides
+    // from the picture, enlarged and blurred. During the staff credits
+    // (TileSides::black) every line is marked bit 5: WideLayer mirrors the
+    // left side and carries the names' black on past the right, no wider
+    // than 16:9.
     // Takes effect at begin_frame.
     void set_extend(int extend) { next_extend_ = extend; }
     int extend() const { return extend_; }

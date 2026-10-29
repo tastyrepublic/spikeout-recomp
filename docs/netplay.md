@@ -993,6 +993,73 @@ view matrix and where it is in RAM), `--camera-test-from FRAME`,
 (observers: single-player's sound and save state the same, byte for
 byte, with them).
 
+### The camera events over the whole game, one player (2026-10-29)
+
+The bot's run to the end (tools/spikebot.cpp, `--record-inputs`; docs/
+bot.md) replayed by gamerun (`--load-state S --inputs FILE`: the bot's
+buttons and RAM writes each frame, its RAM hash every 60 frames checked;
+4 segments, every hash matched) with `--camera-events`. Segments (states
+and inputs git-ignored, in build/bot and build/linkstudy): stage 1
+(build/bot/bot-3500.state, build/linkstudy/stage1/inputs.bin, to frame
+50904), seg2 (build/bot/fullrec2/owner-50707.state, seg2/inputs.bin, to
+54639), seg3 (fullrec3/owner-62721.state, seg3/inputs.bin, to 72089), seg4
+(fullrec4/owner-72989.state, seg4/inputs.bin, to 198905: the last stages,
+the final boss, the ending). Between them the owner played (no inputs).
+
+Three kinds of camera event, for one board per PC:
+- **A. Stage script commands** (shared: the script runs the same on every
+  cabinet; copied to the remote camera). The interpreter (0x5A980, a task:
+  the task's +16 the current area's script, in the program image in RAM,
+  walked from its start each frame) reads records: byte 0 the type (0 the
+  end, 1 a condition, 2 an action), byte 1 the command, byte 2 the
+  record's length. Conditions' handlers are at 0x8BA60 (22), actions' at
+  0x8BAB8 (86). 11 actions write into the camera. Seen (the writing block,
+  the action): 0x05 (0x5C73C; block 0x5C888, +0xB88/+0xB8A), 0x0A
+  (0x5D21C, the gate's mode: +0x48, +0xC8, +0x514), 0x24 (0x5DB54,
+  +0x400), 0x2B (0x5DE28, +0x154), 0x2D (0x5E004; 0x5E048,
+  +0xAD4-0xAF4), 0x39 (0x5E230; 0x5E28C and 0x5E2B8,
+  +0xB00/+0xB02/+0xB74), 0x40 (0x5E520, +0xB70/+0xB72), 0x4A (0x5E538;
+  0x5E550, +0xB80-0xB86). **Never seen yet:** 0x09 (0x5D20C: +0x840),
+  0x18 (0x5D81C: +0x400, the position +0x10/+0x14/+0x18, +0x28/+0x2A) and
+  0x3F (0x5E48C: +0x404-0x40C and +0x10-0x18, floats, +0x28/+0x2A).
+  Where the scripts use them (a scan of the program image for action
+  records, each starting a chain of records that ends): 0x09 nowhere (no
+  script uses it); 0x18 (4 bytes, no argument) at 0xAEA84, 0xAEE54,
+  0xBFC70, 0xC00FC, 0xCC08C, 0xD31C4, 0xD3660; 0x3F (8 bytes: a pointer)
+  at 0xB2A64 (0xB342C) and 0xB4EA0 (0xB5934). Which areas' scripts ran
+  when (the task's +16, `--peek 11BA8C:8@FRAME:N` over the bot's run;
+  0xAF288 between areas): 0xD44EC (stage 1's start, frame 3501), 0xD538C,
+  0xD5C44, 0xD6476, 0xAEE28 (19609), 0xAE6C8, 0xA83DC, 0xA9238 (50708),
+  0xAADD4, 0xAF85C, 0xD31A4 (66225), 0xCCDCC, 0xCEB8C, 0xCF724, 0xD0714,
+  0xD1DBC, 0xD3DF4, 0xBFC50 (102655), 0xB2C08, 0xB7670, 0xB82DC, 0xB4800
+  (123472), 0xBBAC8, 0xB3E84, 0xBC1F0, 0xBCE20, 0xC0C29, 0xCC06C
+  (151913), 0xC367C, 0xC4888, 0xC7340, 0xC7688, 0xC8F60, 0xC9D84 (the
+  final boss, 191314), 0xCC650, 0xCA878 (the ending, 195746). So 0x18 was
+  seen after all: its handler only calls 0x37258 then 0x372D4 (the
+  report names the writing block, not its caller), which wrote the camera
+  the frame before the scripts holding 0x18 started (0xAEE28: 19608,
+  0xD31A4: 66224, 0xBFC50: 102654, 0xCC06C: 151912). 0x37258 and 0x372D4
+  are called from other code too: to sort them, the caller (LR) of each
+  write is needed, a script's meaning shared. 0x3F: 0xB4EA0 is in 0xB4800's
+  script, which ran (123472-126096) without it (behind a condition not
+  met); 0xB2A64 is in a script that never ran (between 0xAF85C and
+  0xB2C08: an area the bot never entered, the hidden route perhaps). The
+  areas' scripts never run in this run are the ones to look at for the
+  hidden stages: their starts can be found from what points at them.
+- **B. The camera's own code** (run for the remote player: proven exact,
+  `--camera-test`). 0xBE14 (+0x4A8-0x4BF, every frame) is each board's own.
+- **C. Other code**, to sort as shared or that player's own: 0x32A80
+  (+0xAC6), 0x33490 (+0xAC8-0xAE8), 0x345EC (+0xD2-0xD4: per player, from
+  the gate run), 0x37258 (the position, +0x400), 0x372D4 (+0x48, +0x4A,
+  +0x400, +0xAC6), 0x7682C (+0xB10-0xB1A); only at the final boss 0x33078
+  (+0xB72, frames 191313-193046); only at the ending 0x2C480 (frame
+  198414: +0x4B, +0xD1-0xD4, +0x113-0x128, +0x400), 0x69E30 (+0x48,
+  +0xC8) and 0x6C01C (+0xB80). The static scan's other writers (about 40
+  functions) weren't seen in one player's run. Sorting them needs
+  two-player runs over the whole game (`--camera-events` with two boards
+  compares each writer's writes by frame, offset and value): the bot
+  driving two boards.
+
 ## Plan
 
 1. Single board, single player (milestones 1–4).

@@ -19,7 +19,10 @@
 // --replay FILE plays a recording (spikeout --record; tools::Recording) from
 // power-on: its clock, EEPROM and backup RAM, its inputs each frame, main RAM
 // checked against its hashes (the report says if the run parted from it, and
-// where), to its end unless --blocks says otherwise.
+// where), to its end unless --blocks says otherwise. --inputs FILE plays a
+// run spikebot recorded (--record-inputs; tools::InputLog) from the state it
+// began from (--load-state): board 0's inputs each frame, the bot's RAM
+// writes, main RAM checked against its hashes, to its end.
 // --save-state FILE@FRAME saves the whole board at the end of FRAME (in the
 // first block after it outside an exception; tools::board_state), and
 // --load-state FILE runs on from such a state (or the window's, F9) instead
@@ -33,7 +36,8 @@
 // registers (finding the code that draws something; work RAM too).
 // --dump-backup writes the backup RAM (128 KB) at the end. --dump-layers
 // writes each tile layer's whole 512x512 name table with every screenshot
-// (FILE-<frame>-L<n>.png).
+// (FILE-<frame>-L<n>.png). --map-trace FROM:N prints each tile map the game
+// draws in N frames from FROM (m3::TileSides: its number, layer and rows).
 // --eeprom [B:]FILE starts with that settings EEPROM (128 bytes, as the window's
 // nvram/board<N>.eeprom; else a blank one, which the game sets up); with B:,
 // board B's only (linked cabinets set up differently).
@@ -130,6 +134,8 @@
 // covered pixel (X, Y), with its polygon header and what became of it there
 // (drawn, behind, cut out, blended): for finding holes and wrong pixels.
 // --quads draws quads whole, as Supermodel's "quad rendering" option (slower).
+// --fog-over-nothing draws scroll fog in frames with no polygons too, as
+// Supermodel (the ranking after the staff credits: orange; m3::Real3dScene::background_fog).
 //
 // --renderer gpu draws the 3D on the GPU instead (gpu::Real3dGpu, read back
 // for the screenshots); --renderer compare draws it both ways and reports
@@ -169,6 +175,7 @@
 #include "input_table.hpp"
 #include "netplay.hpp"
 #include "net/compress.hpp"
+#include "input_log.hpp"
 #include "recording.hpp"
 #include "png_write.hpp"
 #include "wav_write.hpp"
@@ -232,6 +239,7 @@ struct Options {
     const char* dump_textures = nullptr;
     const char* dump_backup = nullptr;
     const tools::Recording* replay = nullptr; // --replay FILE
+    const tools::InputLog* input_log = nullptr; // --inputs FILE (spikebot --record-inputs)
     std::string save_state;                   // --save-state FILE@FRAME
     uint64_t save_frame = 0;
     const char* load_state = nullptr;         // --load-state FILE
@@ -276,7 +284,7 @@ struct Options {
     uint32_t ram_dump_lo = 0, ram_dump_hi = 0;
     uint64_t ram_dump_from = 0, ram_dump_frames = 0;
     bool show_text = false, real_netboard = true, force_master = false, quads = false, midi_burst = false,
-         dma_instant = false;
+         dma_instant = false, fog_over_nothing = false;
     std::size_t net_trace = 0;
     int64_t blocks = 200'000'000;
     std::size_t boards = 1;
@@ -298,6 +306,7 @@ struct Options {
     int camera_record_board = -1, camera_test_board = -1;
     uint64_t camera_trace = 0; // --camera-trace N: board 0's camera updates and view tests, where from
     uint64_t camera_test_from = 0; // --camera-test-from FRAME
+    uint64_t map_trace_from = 0, map_trace_frames = 0; // --map-trace FROM:N
     bool camera_test_flags = false; // --camera-test-flags
     bool camera_test_mirror = false; // --camera-test-mirror
     bool camera_events = false; // --camera-events: board 0's camera written by other code, counted
@@ -962,8 +971,30 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         m.loaded = true;
         std::printf("Loaded %s: frame %llu, block %08x\n", o.load_state ? o.load_state : "the host's state",
                     static_cast<unsigned long long>(m.timing.frames()), m.c.cpu.pc);
+        // --inputs: the bot's writes after the state's frame and the first
+        // frame's inputs, here where it resumed (as it did after its load)
+        if (o.input_log && m.index == 0) {
+            if (auto it = o.input_log->frames.find(m.timing.frames()); it != o.input_log->frames.end())
+                for (const auto& [addr, value] : it->second.writes) {
+                    m.bus.ram()[addr] = static_cast<uint8_t>(value >> 8);
+                    m.bus.ram()[addr + 1] = static_cast<uint8_t>(value);
+                }
+            if (auto it = o.input_log->frames.find(m.timing.frames() + 1); it != o.input_log->frames.end()) {
+                m.bus.inputs.bank0 = it->second.bank0;
+                m.bus.inputs.controls = it->second.controls;
+            }
+        }
     }
     m.c.limit_blocks(static_cast<uint64_t>(o.blocks));
+    if (o.map_trace_frames) // --map-trace FROM:N: each tile map the game draws, its layer and rows
+        bus.tile_sides().on_map = [&m, from = o.map_trace_from, to = o.map_trace_from + o.map_trace_frames](int layer, uint16_t map,
+                                                                                                             int first, int end) {
+            const uint64_t frame = m.timing.frames();
+            if (frame >= from && frame < to)
+                std::printf("%sframe %llu: map %02x on layer %d, rows %d-%d\n",
+                            m.index ? ("board " + std::to_string(m.index) + " ").c_str() : "", static_cast<unsigned long long>(frame),
+                            map, layer, first, end - 1);
+        };
     if (o.watch_hi > o.watch_lo) { // --watch-write: each write there, where the code was, and its registers
         m.watch_from = o.watch_frame;
         m.watch_to = o.watch_frame + o.watch_frames;
@@ -981,6 +1012,9 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
     }
     m.real3d.set_probe(o.probe_x, o.probe_y);
     m.real3d.set_quads(o.quads);
+    m.real3d.set_fog_over_nothing(o.fog_over_nothing);
+    m.builder.set_fog_over_nothing(o.fog_over_nothing);
+    m.match_builder.set_fog_over_nothing(o.fog_over_nothing);
     m.sound.board.set_volumes(o.sound_volume, o.music_volume);
 
     // The 2D layers, a line at a time; each finished frame is kept for --screenshot.
@@ -1246,6 +1280,29 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         m.bus.inputs.bank0 = in[0];
         m.bus.inputs.controls = in[1];
         if (o.replay && m.index == 0) replay_frame(m, *o.replay, frame);
+        if (o.input_log && m.index == 0) { // --inputs: main RAM checked, the run's writes made, the next frame's inputs set
+            const auto& frames = o.input_log->frames;
+            if (auto it = frames.find(frame); it != frames.end()) {
+                if (it->second.hash) {
+                    if (tools::Recording::ram_hash(m.bus.ram()) == it->second.hash) {
+                        ++m.replay_matched;
+                    } else if (!m.replay_parted) {
+                        m.replay_parted = frame;
+                        std::printf("inputs: main RAM differs from the recorded run's at frame %llu\n", static_cast<unsigned long long>(frame));
+                    }
+                }
+                for (const auto& [addr, value] : it->second.writes) {
+                    m.bus.ram()[addr] = static_cast<uint8_t>(value >> 8);
+                    m.bus.ram()[addr + 1] = static_cast<uint8_t>(value);
+                }
+            }
+            if (auto next = frames.find(frame + 1); next != frames.end()) {
+                m.bus.inputs.bank0 = next->second.bank0;
+                m.bus.inputs.controls = next->second.controls;
+            } else if (!frames.empty() && frame >= frames.rbegin()->first) {
+                m.c.limit_blocks(0); // (the recorded run's end)
+            }
+        }
         // Into the board's input table (--input-delay frames on), and the
         // next frame's out of it.
         // Network play: only this machine's player's board has a source
@@ -1717,6 +1774,9 @@ void report(Machine& m, const Options& o) {
         std::printf("Replay: %llu of %zu hashes matched the recording's%s\n", static_cast<unsigned long long>(m.replay_matched),
                     o.replay->hashes.size(),
                     m.replay_parted ? (", parted at frame " + std::to_string(m.replay_parted)).c_str() : " (the same run)");
+    if (o.input_log && m.index == 0)
+        std::printf("Inputs: %llu of the recorded run's hashes matched%s\n", static_cast<unsigned long long>(m.replay_matched),
+                    m.replay_parted ? (", parted at frame " + std::to_string(m.replay_parted)).c_str() : " (the same run)");
     const double played = static_cast<double>(m.sound.board.samples());
     std::printf("Sound board: %s; %d slots playing, %llu MIDI bytes dropped; output peak %d, RMS %.0f; %.2f s to run it\n",
                 m.sound.board.describe().c_str(), m.sound.board.active_slots(),
@@ -1981,10 +2041,18 @@ void report(Machine& m, const Options& o) {
 int main(int argc, char** argv) {
     Options o;
     tools::Recording recording;
+    tools::InputLog input_log; // (--inputs)
     bool blocks_given = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--blocks" && i + 1 < argc) o.blocks = std::strtoll(argv[++i], nullptr, 0), blocks_given = true;
+        else if (arg == "--inputs" && i + 1 < argc) { // FILE (spikebot --record-inputs; with --load-state, the state it began from)
+            if (!input_log.load(argv[++i])) {
+                std::fprintf(stderr, "gamerun: %s: not a recorded run (spikebot --record-inputs)\n", argv[i]);
+                return 1;
+            }
+            o.input_log = &input_log;
+        }
         else if (arg == "--replay" && i + 1 < argc) {
             std::string error;
             if (!recording.load(argv[++i], error)) {
@@ -2086,6 +2154,7 @@ int main(int argc, char** argv) {
         else if (arg == "--screenshot" && i + 1 < argc) o.screenshot = argv[++i];
         else if (arg == "--wav" && i + 1 < argc) o.wav = argv[++i];
         else if (arg == "--quads") o.quads = true;
+        else if (arg == "--fog-over-nothing") o.fog_over_nothing = true;
         else if (arg == "--gpu-time" && i + 1 < argc) o.gpu_time_scale = std::clamp(std::atoi(argv[++i]), 1, 8);
         else if (arg == "--gpu-scale" && i + 1 < argc) o.gpu_scale = std::clamp(std::atoi(argv[++i]), 1, 8);
         else if (arg == "--wide" && i + 1 < argc) o.wide = std::clamp(std::atoi(argv[++i]), 0, 400);
@@ -2136,6 +2205,11 @@ int main(int argc, char** argv) {
         else if (arg == "--camera-test-flags") o.camera_test_flags = true;
         else if (arg == "--camera-test-mirror") o.camera_test_mirror = true;
         else if (arg == "--camera-events") o.camera_events = true;
+        else if (arg == "--map-trace" && i + 1 < argc) { // FROM:N
+            char* end = nullptr;
+            o.map_trace_from = std::strtoull(argv[++i], &end, 0);
+            o.map_trace_frames = *end == ':' ? std::strtoull(end + 1, nullptr, 0) : 1;
+        }
         else if ((arg == "--link-record" || arg == "--link-standin" || arg == "--camera-record" || arg == "--camera-test") &&
                  i + 1 < argc) { // B:FILE
             char* end = nullptr;

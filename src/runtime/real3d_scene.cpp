@@ -77,6 +77,7 @@ Real3dScene::BackgroundFog Real3dScene::background_fog() const {
                 (fog.scroll < 0 || viewports[static_cast<size_t>(fog.scroll)].scroll_fog < v.scroll_fog))
                 fog.scroll = static_cast<int>(i);
         }
+    if (!fog_over_nothing && polygons.empty()) fog.scroll = -1; // (no 3D drawn: none; the header)
     if (fog.scroll < 0) return fog;
     const Viewport& scroll = viewports[static_cast<size_t>(fog.scroll)];
     for (size_t i = 0; i < viewports.size(); ++i) {
@@ -135,6 +136,7 @@ void Real3dSceneBuilder::build(const Real3d& mem, Real3dScene& scene) {
     scene.models.clear();
     scene.stats = {};
     scene.block_culled = mem.block_culling();
+    scene.fog_over_nothing = fog_over_nothing_;
     models_.clear();
     viewport_models_.clear();
     visits_ = 0;
@@ -256,6 +258,23 @@ void Real3dSceneBuilder::walk_viewports(uint32_t addr) {
             planes_[5] /= widen;
             vp.x = -e;
             vp.width = total;
+        } else if (extend_ > 0 && vp.y == 0 && vp.height >= 383 && vp.width >= 1 && (vp.x == 0 || vp.x + vp.width >= 495)) {
+            // A viewport the screen's height reaching one side only (the staff
+            // credits' sunset, the left 288 pixels by the names): opened out
+            // past that side alone, at the game's scale, so that the rest of
+            // the screen (the names' black) stays as it was.
+            const float e = static_cast<float>(extend_);
+            const float per = (vp.right - vp.left) / vp.width;
+            const float widen = (vp.width + e) / vp.width; // (culling: kept safe, as above)
+            if (vp.x == 0) {
+                vp.left -= per * e;
+                vp.x = -e;
+            } else {
+                vp.right += per * e;
+            }
+            vp.width += e;
+            planes_[1] /= widen;
+            planes_[5] /= widen;
         }
         const size_t first_model = models_.size();
         attribs_ = {};

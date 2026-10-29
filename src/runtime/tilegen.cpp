@@ -59,6 +59,10 @@ void TilegenRenderer::draw_line(std::span<const uint8_t> ram, const std::array<u
     const uint32_t control = regs[0x20 / 4];
     const uint32_t y = static_cast<uint32_t>(line);
     const std::size_t row = std::size_t{y} * kWidth;
+    if (extend_ > 0 && sides && sides->black()) { // the staff credits (m3::TileSides::black): WideLayer's own sides
+        bottom_real_[y] |= 0x20;
+        top_real_[y] |= 0x20;
+    }
 
     // Layers 2/3 first, then 0/1 over them; in each pair the line mask picks
     // the primary (even) or alternate (odd) layer per 32 pixels.
@@ -93,10 +97,11 @@ void TilegenRenderer::draw_line(std::span<const uint8_t> ram, const std::array<u
                 }
             }
             if ((sx & 511) >= 8 && (sx & 511) <= 504) loops = true; // a picture panning across its name table
-            if (extend_ > 0 && y == 0) { // the frames since the scroll (x and y) changed
-                const uint32_t xy = scroll & 0x01FF03FFu;
-                scroll_still_[n] = xy == scroll_seen_[n] ? std::min(scroll_still_[n] + 1, 1000u) : 0;
-                scroll_seen_[n] = xy;
+            if (extend_ > 0 && y == 0) { // the frames since the x scroll changed (a layer scrolled up or down
+                                         // only doesn't wrap at the sides: the staff credits' names)
+                const uint32_t xs = scroll & 0x3FFu;
+                scroll_still_[n] = xs == scroll_seen_[n] ? std::min(scroll_still_[n] + 1, 1000u) : 0;
+                scroll_seen_[n] = xs;
             }
             if (!(scroll & 0x8000) && scroll_still_[n] < 120) loops = true;
             // A panorama one screen wide (the stages' skies): its map rows are
@@ -145,6 +150,11 @@ void TilegenRenderer::draw_line(std::span<const uint8_t> ram, const std::array<u
                 own[0] = sides->any(static_cast<int>(n), map_row, false);
                 own[1] = sides->any(static_cast<int>(n), map_row, true);
             }
+            // A still full-screen picture (m3::TileSides::picture; not scrolled: then none of its rows
+            // is a panorama, though some rows of a card look like one): WideLayer makes its sides from it, blurred.
+            if (extend_ > 0 && sides && (scroll & 0x80000000u) && (sx & 511) == 0 && !(scroll & 0x8000) &&
+                sides->picture(static_cast<int>(n)))
+                (((control >> (8 + n)) & 1) ? top_real_ : bottom_real_)[y] |= 0x10;
             layers[k] = {(scroll & 0x80000000u) != 0, ((control >> (8 + n)) & 1) != 0, ((control >> (12 + n)) & 1) != 0,
                          sx, (scroll >> 16) & 0x1FF, names, loops, period, {edge[0], edge[1]}, static_cast<int>(n),
                          {own[0], own[1]}};

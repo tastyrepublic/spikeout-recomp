@@ -19,8 +19,23 @@ bool valid(int layer, int row) { return layer >= 0 && layer < TileSides::kLayers
 
 } // namespace
 
+// The full-screen pictures whose sides are blurred: the stages' "NEXT STAGE
+// COMING UP!!" cards, a run of maps (0x80 Diesel Town's, 0x7F the Ship
+// Yard's, 0x7D and 0x7E the later stages': every card of the bot's whole
+// game), and stage 1's closing story (0x82, Mikhail's eyes; its captions are
+// maps of their own on layer 0). Found with gamerun --map-trace over the
+// bot's run. Not the ranking (0x81: its fade) nor the heroes' faces (0x96:
+// that picture scrolls, its sides are its own).
+bool TileSides::blurred(uint16_t map) { return (map >= 0x7D && map <= 0x80) || map == 0x82; }
+
 void TileSides::begin_map(int layer, uint16_t map, int first_row, int end_row) {
+    if (on_map) on_map(layer, map, first_row, end_row);
     if (layer < 0 || layer >= kLayers) return;
+    if (first_row <= 0 && end_row >= kScreenRows) { // (a map over the whole screen)
+        picture_[layer] = blurred(map) ? map : 0;
+        black_ = false;
+    }
+    if (credits(map)) black_ = true;
     for (int row = std::max(first_row, 0); row < std::min(end_row, kRows); ++row)
         for (int side = 0; side < 2; ++side)
             for (int i = 0; i < kSide; ++i) {
@@ -55,6 +70,7 @@ void TileSides::fill_edge(int layer, int row, bool right) {
 
 void TileSides::clear_layer(int layer) {
     if (layer < 0 || layer >= kLayers) return;
+    picture_[layer] = 0;
     for (int row = 0; row < kRows; ++row)
         for (int side = 0; side < 2; ++side)
             for (int i = 0; i < kSide; ++i) pending_[static_cast<std::size_t>(index(layer, row, side != 0, i))] = Cell{};
@@ -91,6 +107,7 @@ void TileSides::state(State& s) {
     s.tag("tile sides");
     s.io(pending_);
     s.io(shown_);
+    if (s.loading()) picture_ = {}, black_ = false;
 }
 
 } // namespace m3

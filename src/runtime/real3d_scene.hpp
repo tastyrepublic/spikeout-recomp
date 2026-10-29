@@ -119,6 +119,7 @@ struct Real3dScene {
     };
     std::vector<Model> models;
     bool block_culled = false; // the Real3D's block culling was on: white, no scene
+    bool fog_over_nothing = false; // scroll fog with no polygons too (Supermodel's; background_fog)
 
     struct Stats {
         uint32_t viewports = 0, nodes = 0, models = 0, polygons = 0;
@@ -136,7 +137,13 @@ struct Real3dScene {
     //  - scroll fog: the highest scroll fog value of the lowest priority that
     //    has one fills its viewport with its fog colour (times the fog
     //    ambient, plus the spotlight on fog) at that alpha, if some viewport
-    //    with the same fog colour has fog or a spotlight on fog.
+    //    with the same fog colour has fog or a spotlight on fog, and (unless
+    //    fog_over_nothing) the frame has polygons to draw. After the staff
+    //    credits the game leaves their viewports' scroll fog (orange, 0.65)
+    //    set through the ranking, which has no 3D: Supermodel's rule covers
+    //    the ranking with it, a real cabinet doesn't (the owner, 2026-10-29).
+    //    The only frames in the game the rule changes (one player's run to
+    //    the end, attract mode; docs/fidelity.md).
     struct BackgroundFog {
         int ambient = -1; // viewport darkened (-1: none), and by how much
         float ambient_alpha = 0;
@@ -176,6 +183,9 @@ public:
     // -extend. 0: the arcade's screen.
     void set_extend(int pixels) { extend_ = pixels; }
     int extend() const { return extend_; }
+    // Scroll fog drawn when the frame has no polygons too, as Supermodel
+    // (Real3dScene::background_fog; --fog-over-nothing).
+    void set_fog_over_nothing(bool on) { fog_over_nothing_ = on; }
 
 private:
     struct ModelRef {
@@ -217,6 +227,7 @@ private:
     uint32_t path_ = 0; // the culling nodes walked down through, hashed (FNV-1a of their addresses)
     std::vector<uint32_t> ancestors_; // path_ at each of them, the viewport's first
     int extend_ = 0; // set_extend
+    bool fog_over_nothing_ = false; // set_fog_over_nothing
     // The viewport's frustum planes (words 0x0C-0x13): left u, v; top u, w;
     // right u, v; bottom u, w.
     std::array<float, 8> planes_{};

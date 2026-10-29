@@ -48,6 +48,10 @@ namespace {
 constexpr uint32_t kDrawHook = 0x9628, kFillHook = 0x7E34, kCopyHook = 0x8230, kClearHook = 0x795C;
 constexpr uint32_t kNameTables = 0xF10F8000, kNameTableSize = 0x2000;
 constexpr uint16_t kBlank = 0x20; // the tile the clear flag fills with
+// The staff credits' set-up fills their names' column (layer 0, 28 x 64
+// from column 36) from 0xa164, before the sunset fades in, some 160 frames
+// before their first map (the heading, 0xea).
+constexpr uint32_t kCreditsSetUp = 0xA168;
 // The title (map 0x53) and its wall's repeat past the map's edge: the
 // rivets are about 50 pixels apart, and 31 columns on (a door's width, half
 // the title) keeps that spacing across the join (49 and 48 pixels) and
@@ -173,6 +177,7 @@ void fill(recomp::Context& c) {
     const int32_t y = offset >= 0 ? offset / row_bytes : -((-offset + row_bytes - 1) / row_bytes);
     const int32_t x = (offset - y * row_bytes) / 2;
     const bool left = x == 0, right = x + w >= TileSides::kScreen;
+    if (c.cpu.lr == kCreditsSetUp) c.bus.tile_sides().begin_credits();
     if (!left && !right) return;
     for (int32_t row = y; row < y + h && row < rows; ++row) {
         if (left) c.bus.tile_sides().fill_edge(layer, row, false);

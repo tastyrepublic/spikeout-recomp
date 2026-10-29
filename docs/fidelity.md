@@ -160,6 +160,16 @@ empty NVRAM, so the demo runs the same):
   alone, too). Scroll fog and ambient fog are drawn over the 2D layers
   before the scene (Supermodel's guess at the hardware's rule for which
   viewport supplies them); Spikeout uses scroll fog in most frames.
+- Scroll fog with nothing to draw (2026-10-29, the owner: a real cabinet's
+  ranking after the staff credits has no orange over it): the credits'
+  viewports keep their scroll fog (0.651, orange 255/110/0) through the
+  ranking, whose frames have viewports but no models or polygons, and
+  Supermodel's rule covers the ranking with it (65%). Now no scroll fog in
+  a frame with no polygons; `--fog-over-nothing` (gamerun and the window)
+  brings Supermodel's back. Over one player's whole game (attract mode
+  from boot, then the bot's run to the end replayed, the software renderer
+  every frame) the ranking after the credits is the only place scroll fog
+  had been drawn with no polygons.
 - Also as Supermodel: normals divided by the node's model scale rather
   than normalized, signed bytes read as (2b + 1) / 255, the translator map
   (colour x 16), inverted textures, microtextures, format 7 without the

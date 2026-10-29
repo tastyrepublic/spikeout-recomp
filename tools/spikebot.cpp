@@ -5,7 +5,7 @@
 //   spikebot <rom_dir> --load-state FILE [--out DIR] [--frames N] [--no-sound]
 //            [--play] [--workers N] [--inspect EVERY] [--dump LO-HI]
 //            [--route D:N,...] [--explore-test] [--moves-test] [--floor-map] [--weak-enemies]
-//            [--bench] [--selftest]
+//            [--bench] [--selftest] [--record-inputs FILE]
 //
 // The game runs on its own thread and stops at the end of every frame for
 // the bot's next command (Emulator below): run some frames with some inputs
@@ -24,6 +24,7 @@
 // runs the search for a way to the enemies once and walks it; --selftest
 // checks that a save state run on twice (here and on a worker) ends the same.
 #include "game_setup.hpp"
+#include "input_log.hpp"
 #include "png_write.hpp"
 
 #include "games/games.hpp"
@@ -110,6 +111,7 @@ public:
     struct Snapshot {
         std::vector<uint8_t> data;
         uint64_t frame = 0;
+        std::size_t writes = 0; // (--record-inputs: the writes recorded after its frame by then)
     };
 
     Emulator(const m3::RomSet& roms, std::span<const recomp::FunctionEntry> functions,
@@ -182,6 +184,7 @@ public:
                 snap->data = std::move(s.data());
                 e.state_size_ = snap->data.size();
                 snap->frame = e.timing_.frames();
+                if (e.log_) snap->writes = e.log_->frames[snap->frame].writes.size();
                 e.serve(); // (paused here until the next step)
             });
             e.go_ = true;
@@ -209,7 +212,10 @@ public:
     void write16(uint32_t addr, uint16_t v) {
         bus_.ram()[addr] = static_cast<uint8_t>(v >> 8);
         bus_.ram()[addr + 1] = static_cast<uint8_t>(v);
+        if (log_) log_->frames[timing_.frames()].writes.emplace_back(addr, v);
     }
+    // --record-inputs: what this board runs with, frame by frame (tools::InputLog).
+    void record_into(tools::InputLog* log) { log_ = log; }
     uint32_t r13() const { return c_.cpu.gpr[13]; } // (the game's small-data base: its globals are off it)
     uint64_t frame() const { return timing_.frames(); }
     const std::string& stopped() const { return stopped_; }
@@ -241,6 +247,7 @@ private:
             } catch (const Rewind& r) {
                 m3::State s(std::span<const uint8_t>(r.snap->data)); // (not copied)
                 tools::board_state(s, c_, timing_, sound_fn());
+                if (log_) log_->forget_after(timing_.frames(), r.snap->writes);
                 resume = true;
             } catch (const Quit&) {
                 break;
@@ -258,6 +265,11 @@ private:
     void frame_end() {
         if (with_sound_) sound_.frame(bus_.midi_out(), timing_.frame_start(timing_.frames() - 1), timing_.frame_cycles());
         else bus_.midi_out().clear();
+        if (log_) { // (the inputs this frame ran with; main RAM's hash at its end now and then)
+            tools::InputLog::Frame& f = log_->frames[timing_.frames()];
+            f.bank0 = bus_.inputs.bank0, f.controls = bus_.inputs.controls, f.writes.clear();
+            f.hash = timing_.frames() % tools::InputLog::kHashEvery == 0 ? tools::Recording::ram_hash(bus_.ram()) : 0;
+        }
         if (!shot_.empty()) {
             real3d_.render(bus_.real3d());
             tilegen_.composite(screen_, real3d_.image());
@@ -315,6 +327,7 @@ private:
     int frames_left_ = 0; // (of the step being run)
     std::size_t state_size_ = 0; // (the last one's: room made for the next)
     std::string shot_, stopped_;
+    tools::InputLog* log_ = nullptr; // --record-inputs
 
     std::thread thread_;
     std::mutex mutex_;
@@ -960,6 +973,9 @@ std::optional<std::pair<float, float>> g_goal; // (SPIKEBOT_GOAL=x,z: --explore-
 // (the game's own knock-out still runs: its counts and time bonuses) - for getting through the
 // stages, not for playing them.
 bool g_weak_enemies = false;
+// --record-inputs FILE: the main board's run, saved with each checkpoint state and at the end.
+tools::InputLog* g_input_log = nullptr;
+std::string g_input_log_path;
 
 float apart(const Emulator& e) {
     const Character p = character(e, ram::kPlayer);
@@ -1113,6 +1129,7 @@ void play(Emulator& e, Workers& w, int frames, const std::string& out) {
     auto checkpoint = [&](const std::shared_ptr<Emulator::Snapshot>& snap) { // one the window can load
         if (out.empty() || snap->frame < next_state) return;
         e.write_state(*snap, out + "/bot-" + std::to_string(snap->frame) + ".state");
+        if (g_input_log) g_input_log->save(g_input_log_path);
         next_state += kStateEvery;
     };
     int down_for = 0; // frames with no health (a knock-out shows "K.O." first)
@@ -1385,6 +1402,7 @@ int main(int argc, char** argv) {
         else if (arg == "--bench") bench = true;
         else if (arg == "--floor-map") floor_map = true;
         else if (arg == "--weak-enemies") g_weak_enemies = true;
+        else if (arg == "--record-inputs" && i + 1 < argc) g_input_log_path = argv[++i];
         else if (arg == "--route" && i + 1 < argc) route_spec = argv[++i];
         else if (arg == "--workers" && i + 1 < argc) workers = std::atoi(argv[++i]);
         else if (arg == "--dump" && i + 1 < argc) std::sscanf(argv[++i], "%x-%x", &dump_lo, &dump_hi);
@@ -1406,6 +1424,8 @@ int main(int argc, char** argv) {
     const std::vector<recomp::FunctionEntry> functions = tools::game_functions();
     const std::vector<recomp::FunctionEntry> blocks = tools::game_blocks();
     Emulator e(roms, functions, blocks, with_sound);
+    tools::InputLog input_log;
+    if (!g_input_log_path.empty()) e.record_into(g_input_log = &input_log);
     if (!e.start(load)) return 1;
     std::printf("Loaded %s at frame %llu\n", load.c_str(), static_cast<unsigned long long>(e.frame()));
 
@@ -1671,5 +1691,12 @@ int main(int argc, char** argv) {
                                                                                                            : "DIFFERENT");
     }
     if (!e.stopped().empty()) std::printf("Stopped: %s\n", e.stopped().c_str());
+    if (g_input_log) {
+        if (input_log.save(g_input_log_path))
+            std::printf("Recorded %zu frames' inputs in %s (gamerun --load-state %s --inputs %s plays them again)\n",
+                        input_log.frames.size(), g_input_log_path.c_str(), load.c_str(), g_input_log_path.c_str());
+        else
+            std::fprintf(stderr, "spikebot: cannot write %s\n", g_input_log_path.c_str());
+    }
     return 0;
 }

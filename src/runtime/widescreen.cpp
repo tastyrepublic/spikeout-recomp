@@ -54,6 +54,26 @@ void WideLayer::build(std::span<const uint32_t> layer, std::span<const uint32_t>
     for (int y = 0; y < kHeight; ++y)
         std::copy_n(layer.begin() + y * kWidth, kWidth, out.begin() + static_cast<std::ptrdiff_t>(y) * wide + e);
     if (e == 0) return;
+    // The staff credits (the tile generator's bit 5 on every line): the left
+    // side the picture mirrored at its edge (the sunset's sky; the 3D's
+    // ground opened out in front of it), past the right the row's edge pixel
+    // carried on (the names' black: mirrored, they'd read backwards; left
+    // empty, the 3D's background showed there). The owner's choice of three
+    // previews (mirrored, blurred, black). Wider than 16:9, black past 16:9's
+    // sides (kCreditsSide: over the 3D too, from the layers above it).
+    if (real.size() == static_cast<std::size_t>(kHeight) &&
+        std::all_of(real.begin(), real.end(), [](uint8_t m) { return (m & 0x20) != 0; })) {
+        const int black = above ? std::max(e - kCreditsSide, 0) : 0;
+        for (int y = 0; y < kHeight; ++y) {
+            const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(wide);
+            for (int x = 0; x < e; ++x)
+                out[row + static_cast<std::size_t>(x)] =
+                    x < black ? 0xFF000000u : layer[static_cast<std::size_t>(y * kWidth + std::min(e - 1 - x, kWidth - 1))];
+            std::fill_n(out.begin() + static_cast<std::ptrdiff_t>(row + static_cast<std::size_t>(e + kWidth)), e,
+                        layer[static_cast<std::size_t>(y * kWidth + kWidth - 1)]);
+        }
+        return;
+    }
     const bool has_side = side.size() == static_cast<std::size_t>(2 * e) * kHeight;
 
     for (int s = 0; s < 2; ++s) {
@@ -207,6 +227,12 @@ void WideLayer::build(std::span<const uint32_t> layer, std::span<const uint32_t>
         }
     }
 
+    // A still full-screen picture's lines (the tile generator's bit 4: a
+    // stage's card, a story's picture), both sides from the picture itself.
+    if (real.size() == static_cast<std::size_t>(kHeight) &&
+        std::any_of(real.begin(), real.end(), [](uint8_t m) { return (m & 0x10) != 0; }))
+        blurred_sides(layer, real, e, out);
+
     // The sides the tile generator drew from the game's own columns past the
     // screen (the title's doors), over whatever was made for them above: the
     // rest is made as it always was, these rows not looked at.
@@ -225,7 +251,7 @@ void WideLayer::build(std::span<const uint32_t> layer, std::span<const uint32_t>
     for (int y = 0; y < kHeight; ++y)
         for (int s = 0; s < 2; ++s) {
             const uint8_t mark = real[static_cast<std::size_t>(y)];
-            if (!(mark & (1u << s))) continue;
+            if (!(mark & (1u << s)) || (mark & 0x10)) continue; // (a blurred picture's line: the blur, not its edge tiles carried on)
             const uint32_t* from = own.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(2 * e) +
                                    static_cast<std::size_t>(s ? e : 0);
             uint32_t* to = out.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(wide) +
@@ -238,6 +264,65 @@ void WideLayer::build(std::span<const uint32_t> layer, std::span<const uint32_t>
             for (int i = 0; i < e; ++i) // what the tile generator drew in front of it
                 if (from[i] >> 24) to[i] = from[i];
         }
+}
+
+// The picture enlarged to cover the wide frame (its middle rows kept),
+// blurred (kBlurPasses box blurs each way, radius kBlurRadius: close to a
+// Gaussian), darkened to kBlurDark, as both sides of the lines marked (bit
+// 4); kept while the picture stays the same (a card is shown for seconds).
+void WideLayer::blurred_sides(std::span<const uint32_t> layer, std::span<const uint8_t> real, int e, std::vector<uint32_t>& out) {
+    const int wide = kWidth + 2 * e;
+    uint64_t hash = 1469598103934665603ull ^ static_cast<uint64_t>(e);
+    for (std::size_t i = 0; i < static_cast<std::size_t>(kWidth) * kHeight; ++i) hash = (hash ^ layer[i]) * 1099511628211ull;
+    if (hash != blur_hash_ || blur_.size() != static_cast<std::size_t>(wide) * kHeight) {
+        blur_hash_ = hash;
+        const double scale = static_cast<double>(wide) / kWidth;
+        std::array<std::vector<float>, 3> c;
+        for (auto& ch : c) ch.assign(static_cast<std::size_t>(wide) * kHeight, 0.0f);
+        for (int y = 0; y < kHeight; ++y) {
+            const int sy = std::clamp(static_cast<int>((y - kHeight / 2) / scale + kHeight / 2.0), 0, kHeight - 1);
+            for (int x = 0; x < wide; ++x) {
+                const int sx = std::clamp(static_cast<int>(x / scale), 0, kWidth - 1);
+                const uint32_t p = layer[static_cast<std::size_t>(sy * kWidth + sx)];
+                const std::size_t at = static_cast<std::size_t>(y) * static_cast<std::size_t>(wide) + static_cast<std::size_t>(x);
+                for (int k = 0; k < 3; ++k) c[static_cast<std::size_t>(k)][at] = static_cast<float>((p >> (8 * k)) & 255);
+            }
+        }
+        // Box blurs by running sums, along rows then columns, the edges held.
+        std::vector<float> line(static_cast<std::size_t>(std::max(wide, kHeight)));
+        auto blur = [&](std::vector<float>& ch, int n, int count, std::size_t step, std::size_t stride) {
+            for (int j = 0; j < count; ++j) {
+                float* p = ch.data() + static_cast<std::size_t>(j) * stride;
+                auto get = [&](int i) { return p[static_cast<std::size_t>(std::clamp(i, 0, n - 1)) * step]; };
+                float sum = 0;
+                for (int i = -kBlurRadius; i <= kBlurRadius; ++i) sum += get(i);
+                for (int i = 0; i < n; ++i) {
+                    line[static_cast<std::size_t>(i)] = sum / static_cast<float>(2 * kBlurRadius + 1);
+                    sum += get(i + kBlurRadius + 1) - get(i - kBlurRadius);
+                }
+                for (int i = 0; i < n; ++i) p[static_cast<std::size_t>(i) * step] = line[static_cast<std::size_t>(i)];
+            }
+        };
+        for (auto& ch : c)
+            for (int pass = 0; pass < kBlurPasses; ++pass) {
+                blur(ch, wide, kHeight, 1, static_cast<std::size_t>(wide));
+                blur(ch, kHeight, wide, static_cast<std::size_t>(wide), 1);
+            }
+        blur_.resize(static_cast<std::size_t>(wide) * kHeight);
+        for (std::size_t i = 0; i < blur_.size(); ++i) {
+            uint32_t p = 0xFF000000u;
+            for (int k = 0; k < 3; ++k)
+                p |= static_cast<uint32_t>(std::clamp(c[static_cast<std::size_t>(k)][i] * kBlurDark, 0.0f, 255.0f)) << (8 * k);
+            blur_[i] = p;
+        }
+    }
+    for (int y = 0; y < kHeight; ++y) {
+        if (!(real[static_cast<std::size_t>(y)] & 0x10)) continue;
+        const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(wide);
+        std::copy_n(blur_.begin() + static_cast<std::ptrdiff_t>(row), e, out.begin() + static_cast<std::ptrdiff_t>(row));
+        std::copy_n(blur_.begin() + static_cast<std::ptrdiff_t>(row + static_cast<std::size_t>(e + kWidth)), e,
+                    out.begin() + static_cast<std::ptrdiff_t>(row + static_cast<std::size_t>(e + kWidth)));
+    }
 }
 
 // A picture fading out at its edge (the linking screen's spotlight, the

@@ -94,6 +94,7 @@ public:
     // quad rendering"), or as two triangles (default: the same picture for
     // flat, linearly mapped quads, and cheaper).
     void set_quads(bool on) { quads_on_ = on; }
+    void set_fog_over_nothing(bool on) { builder_.set_fog_over_nothing(on); } // (Real3dSceneBuilder's)
 
 private:
     using Viewport = Real3dScene::Viewport;
