@@ -385,6 +385,12 @@ public:
             anchored_ = false;
         }
     }
+    // What the music board plays (SPIKEOUT_NET_DEBUG's reports).
+    std::optional<m3::Dsb2::NowPlaying> music_now() {
+        std::lock_guard<std::mutex> guard(lock_);
+        if (const m3::Dsb2* dsb = board_.music()) return dsb->now_playing();
+        return std::nullopt;
+    }
     // Silent and still while the game is paused (the menu).
     void pause(bool on) {
         paused_ = on;
@@ -694,6 +700,11 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
                             index, static_cast<unsigned long long>(timing.frames()), frame_ms / 300, run_ms / 300, end_ms / 300,
                             input_ms / 300, logic - logic_before);
                 logic_before = logic;
+                if (shared.sound)
+                    if (const auto m = shared.sound->music_now())
+                        std::printf("spikeout: board %zu at %llu: music %s %06x-%06x at %06x, volume %02x %02x\n", index,
+                                    static_cast<unsigned long long>(timing.frames()), m->playing ? "playing" : "stopped", m->start,
+                                    m->end, m->pos, m->volume_left, m->volume_right);
                 std::fflush(stdout);
                 run_ms = input_ms = frame_ms = end_ms = 0;
             }
@@ -770,7 +781,21 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             if (shared.linked.capture_frame != 0 && frame == shared.linked.capture_frame)
                 c.request_snapshot([&](uint32_t) {
                     m3::State s;
-                    tools::board_state(s, c, timing, sound_state);
+                    // A cabinet whose sound this machine doesn't run carries this machine's own
+                    // sound board: whoever takes that cabinet (a player joining, or put back in
+                    // step) then has music (the owner's choice, 2026-10-30). In the game every
+                    // cabinet's music board plays the same track, at most two MPEG frames apart
+                    // (gamerun --music-hash), so a cabinet in the game is in step at once; one
+                    // still waiting (attract, select) plays this machine's track until its own
+                    // game sends its tune (coin, the select, entering the game: it answers them,
+                    // where a sound board that never ran didn't, the start-up exchange made only
+                    // at power-on missing: no music until a reload). A moment of this machine's
+                    // own sound effects may come with it.
+                    const bool carry = !sound_state && shared.sound;
+                    const std::function<void(m3::State&)> carried =
+                        carry ? std::function<void(m3::State&)>([&](m3::State& st) { shared.sound->state(st, c.cycles()); })
+                              : sound_state;
+                    tools::board_state(s, c, timing, carried);
                     std::lock_guard guard(shared.linked.lock);
                     shared.linked.boards[index] = std::move(s.data());
                     ++shared.linked.saved;

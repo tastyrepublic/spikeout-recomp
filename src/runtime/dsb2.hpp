@@ -53,6 +53,14 @@ public:
     // ---- Inspection ----
     uint32_t pc() const;
     bool playing() const { return playing_; }
+    // What is heard: the stream playing (its start and end in the MPEG data), how far it is,
+    // and the volume (for comparing two boards' music).
+    struct NowPlaying {
+        bool playing;
+        uint32_t start, end, pos;
+        uint8_t volume_left, volume_right;
+    };
+    NowPlaying now_playing() const { return {playing_, play_start_, play_end_, pos_, volume_[0], volume_[1]}; }
     uint64_t tracks_started = 0, commands = 0;
     int music_peak = 0; // levels of the music, for reports
     double music_energy = 0;

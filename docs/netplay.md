@@ -164,8 +164,9 @@ library (`src/net/`, `tools/netplay.hpp`).
   caught up, then the authority hands the cabinet over from a frame a
   little ahead (8 frames). The cabinet is played as it was set up (not
   from the joiner's own, which isn't kept afterwards either). Sound: the
-  joiner's own board starts with its sound board fresh (the host's state
-  carries only the host's), so the music comes back with the next tune.
+  joiner's cabinet comes with the host's own sound board (since
+  2026-10-30, below: "Decided and done"), its music the host's track; it
+  had come with one that never ran, silent until a reload.
 - **Finding games, on this network:** a host broadcasts on every network
   this machine is on (port 47326, once a second); "Join a game nearby"
   lists them. No internet needed (a LAN, one device's hotspot).
@@ -421,6 +422,60 @@ it, so the state it sends is exact (only the host pays, roughly a quarter
 of a cabinet's run time each; option 1 if the host has left); (3) every PC
 runs every cabinet's sound (exact always; every player pays). Suggested:
 2, measured on 4 cabinets first.
+
+**Decided and done (2026-10-30): (4) the host's own sound board, carried.**
+With one board a PC in view, (2) can't work (the host won't run the
+joiner's cabinet), so a fourth option was put and taken: when the window
+captures every cabinet's state for another machine (a join, or a machine
+put back in step), each cabinet whose sound it doesn't run carries its
+own sound board (the window's capture, tools/spikeout.cpp). Why it's
+right:
+- In the game, every cabinet's music board plays the same track: `gamerun
+  --music-hash N` (each board's music board, every N frames: a hash of its
+  state, and what it plays: the stream's start and end, how far, the
+  volume; `m3::Dsb2::now_playing`). Two cabinets both in the game
+  (two-start.state with the both-players recording, frames 5100-7800): the
+  same track and volume, the place the same or one MPEG frame apart
+  (0x240 bytes, ~36 ms). The whole-state hashes differ (counters of each
+  board's own history), so what plays is what's compared.
+- A cabinet still waiting plays its own: from power-on (the linking
+  repro), board 1 in attract and the select played its own tunes (stopped,
+  the attract's, the select's a8135e) while board 0 played the stage's;
+  as its player came in (~4400, 0x110000 set) its music board took the
+  stage's track, at once and in step. So the game itself starts the shared
+  track on a cabinet entering the game.
+- Why a joiner had none: its cabinet in the host's state had no sound part,
+  so it ran a sound board that had never run, and that board answered
+  nothing (no select tune, no stage tune on entering, as two windows
+  showed: stopped from the join at 4500 to 7800), the start-up exchange
+  the main board makes only at power-on missing. Only a reload from the
+  host gave it music.
+- With the host's sound board carried (two windows on this PC,
+  SPIKEOUT_NET_DEBUG=1, which now prints the shown cabinet's music every
+  300 frames; J joins at 4500, coin and start, then put out of step at
+  7080 by SPIKEOUT_TEST_POKE): J plays H's track from the join on, and on
+  through its reload (7082) to the end. In the window each machine's music
+  runs on its own audio device's clock, and the joiner's board ran
+  unpaced while catching up, so J's place trailed H's by about a third of
+  a second: the same track, about the same place.
+- A cabinet still waiting when taken plays the host's track until its own
+  game sends its tune (coin, the select, entering): it answers them now.
+  A moment of the host's own sound effects may come along. The states sent
+  grow by a sound board a cabinet (about 1.1 MB before packing; 11,990 KB
+  packed for two cabinets against 11,943 before).
+
+**Smaller states (2026-10-30).** Every cabinet's 8 MB of main RAM is mostly
+the shared world, the same as the others', but 8 MB and more apart in the
+state, beyond zstd's plain window (2 MB at level 3). `net::compress` now
+packs with long-distance matching over a 2^27 window (128 MB, what a
+reader takes by default: `ZSTD_decompress` unpacks it unchanged).
+Measured on linked save states (a scratch tool): two cabinets 10,686 KB
+packed plain, 5,803 KB long, packed as fast (151 ms, 152), unpacked
+faster (31 ms, 19); four cabinets (`build/linkstudy/four2/four-8000.state`,
+113,756 KB raw) 22,463 KB plain, 6,671 KB long (357 ms, 223 to pack).
+Level 6 would save another 5% for half again the time; left at 3. In the
+two-window test the state a joiner gets went from 11,990 KB to 5,981 KB,
+the join, the music and a resync as before.
 
 Seen in the same test (two windows on one PC, both with the ring model): joined
 at frame 1991, seat taken at 2105, no hash check differed; 50-60 frames a

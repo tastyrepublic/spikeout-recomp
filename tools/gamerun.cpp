@@ -291,6 +291,7 @@ struct Options {
     bool show_text = false, real_netboard = true, force_master = false, quads = false, midi_burst = false,
          dma_instant = false, fog_over_nothing = false;
     std::size_t net_trace = 0;
+    uint64_t music_hash = 0; // --music-hash N: each board's music board state hashed every N frames
     int64_t blocks = 200'000'000;
     std::size_t boards = 1;
     uint32_t slice = 8;
@@ -1382,6 +1383,13 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             put(frame + o.input_delay, source);
         }
         if (o.netplay && frame % 120 == 0) o.netplay->hash(frame, m.index, tools::Recording::ram_hash(m.bus.ram()));
+        if (o.music_hash && frame % o.music_hash == 0 && m.sound.board.music()) { // --music-hash: the music board's state, and what it plays
+            const m3::Dsb2::NowPlaying p = m.sound.board.music()->now_playing();
+            std::printf("board %zu frame %llu: music %016llx, %s %06x-%06x at %06x, volume %02x %02x\n", m.index,
+                        static_cast<unsigned long long>(frame),
+                        static_cast<unsigned long long>(state_hash([&m](m3::State& s) { m.sound.board.music()->state(s); })),
+                        p.playing ? "playing" : "stopped", p.start, p.end, p.pos, p.volume_left, p.volume_right);
+        }
         if (o.link_record || o.link_standin || o.camera_test) { // (each frame's main RAM, and every 100th the whole board's, to compare the two runs)
             std::printf("board %zu frame %llu: RAM %016llx\n", m.index, static_cast<unsigned long long>(frame),
                         static_cast<unsigned long long>(tools::Recording::ram_hash(m.bus.ram())));
@@ -2211,6 +2219,7 @@ int main(int argc, char** argv) {
         else if (arg == "--text") o.show_text = true;
         else if (arg == "--netboard" && i + 1 < argc) o.real_netboard = std::string(argv[++i]) == "real";
         else if (arg == "--net-trace" && i + 1 < argc) o.net_trace = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--music-hash" && i + 1 < argc) o.music_hash = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--net-disasm" && i + 1 < argc) o.net_disasm = argv[++i];
         else if (arg == "--net-force-master") o.force_master = true;
         else if (arg == "--net-send-waits" && i + 1 < argc) o.send_waits_for_receive = std::string(argv[++i]) != "off";
