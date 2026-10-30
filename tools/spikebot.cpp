@@ -33,6 +33,7 @@
 #include "runtime/tilegen.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -111,6 +112,7 @@ struct Snapshot {
     std::vector<uint8_t> data;
     uint64_t frame = 0;
     std::size_t writes = 0; // (--record-inputs: the writes recorded after its frame by then)
+    std::size_t changes = 0; // (--record-inputs, linked boards: the changes recorded by then)
 };
 
 // The game as the bot drives it: one board (Emulator), or linked boards (Rig,
@@ -470,16 +472,17 @@ public:
         return static_cast<uint16_t>(ram[addr] << 8 | ram[addr + 1]);
     }
     void write16(uint32_t addr, uint16_t v) override {
-        for (auto& b : boards_) {
-            b->bus.ram()[addr] = static_cast<uint8_t>(v >> 8);
-            b->bus.ram()[addr + 1] = static_cast<uint8_t>(v);
-        }
+        for (std::size_t i = 0; i < boards_.size(); ++i) write16_on(i, addr, v);
     }
     void write16_on(std::size_t board, uint32_t addr, uint16_t v) override {
-        auto ram = boards_[std::min(board, boards_.size() - 1)]->bus.ram();
+        board = std::min(board, boards_.size() - 1);
+        auto ram = boards_[board]->bus.ram();
         ram[addr] = static_cast<uint8_t>(v >> 8);
         ram[addr + 1] = static_cast<uint8_t>(v);
+        record_write(board, addr, v);
     }
+    // --record-inputs: what the boards run with and where (tools::LinkedInputLog).
+    void record_into(tools::LinkedInputLog* log) { log_ = log; }
     uint32_t r13() const override { return boards_[me_]->c.cpu.gpr[13]; }
     uint64_t frame() const override { return frame_; }
     const std::string& stopped() const override { return stopped_; }
@@ -504,6 +507,7 @@ private:
         std::vector<uint32_t> screen;
         std::thread thread;
         std::vector<uint8_t> saved; // (its state at its own point, while a save is under way)
+        uint32_t line = 0;          // (at the last meeting)
         bool has_saved = false, rewind = false, draw_2d = false;
         std::string shot;
     };
@@ -530,7 +534,26 @@ private:
             const Inputs in = held_[i] ? held_[i](frame) : Inputs{};
             boards_[i]->bus.inputs.bank0 = in.bank0;
             boards_[i]->bus.inputs.controls = in.controls;
+            if (log_) {
+                tools::LinkedInputLog::Change c;
+                c.inputs = true, c.bank0 = in.bank0, c.controls = in.controls;
+                record(i, std::move(c));
+            }
         }
+    }
+
+    // --record-inputs: a change made where the boards stand for the bot (here_).
+    void record(std::size_t board, tools::LinkedInputLog::Change c) {
+        tools::LinkedInputLog::Where where = here_;
+        where.board = static_cast<uint8_t>(board);
+        std::lock_guard lock(log_mutex_);
+        log_->changes.emplace_back(where, std::move(c));
+    }
+    void record_write(std::size_t board, uint32_t addr, uint16_t v) {
+        if (!log_) return;
+        tools::LinkedInputLog::Change c;
+        c.writes.emplace_back(addr, v);
+        record(board, std::move(c));
     }
 
     // Every board and the ring put back as `snap` has them (the boards stopped: not yet
@@ -548,6 +571,11 @@ private:
             b->has_saved = false;
         }
         s.tag("end");
+        here_ = {tools::LinkedInputLog::At::Resumed, 0, boards_[0]->timing.frames(), 0};
+        if (log_) {
+            std::lock_guard lock(log_mutex_);
+            if (log_->changes.size() > snap.changes) log_->changes.resize(snap.changes);
+        }
     }
 
     void run(std::size_t i) {
@@ -586,6 +614,7 @@ private:
         }
         if (line % kSlice == kSlice - 1) {
             b.bus.netboard().sync(b.c.cycles());
+            b.line = line;
             turns_.pass(i);
             if (quit_) throw Quit{};
             if (b.rewind) {
@@ -612,11 +641,20 @@ private:
                 b.saved = std::move(s.data());
                 b.has_saved = true;
             });
-        if (frame >= to_) return;
-        const Held& held = held_[i]; // (the next frame's inputs)
-        const Inputs in = held ? held(frame + 1) : Inputs{};
-        b.bus.inputs.bank0 = in.bank0;
-        b.bus.inputs.controls = in.controls;
+        tools::LinkedInputLog::Change c; // (--record-inputs: main RAM's hash now and then, the inputs set)
+        if (log_ && frame % tools::LinkedInputLog::kHashEvery == 0) c.hash = tools::Recording::ram_hash(b.bus.ram());
+        if (frame < to_) {
+            const Held& held = held_[i]; // (the next frame's inputs)
+            const Inputs in = held ? held(frame + 1) : Inputs{};
+            b.bus.inputs.bank0 = in.bank0;
+            b.bus.inputs.controls = in.controls;
+            c.inputs = true, c.bank0 = in.bank0, c.controls = in.controls;
+        }
+        if (log_ && (c.inputs || c.hash)) {
+            std::lock_guard lock(log_mutex_);
+            log_->changes.emplace_back(tools::LinkedInputLog::Where{tools::LinkedInputLog::At::FrameEnd, static_cast<uint8_t>(i), frame, 0},
+                                       std::move(c));
+        }
     }
 
     // At a meeting, every board stopped (the last to come runs this): the link's packets on;
@@ -640,8 +678,13 @@ private:
             s.tag("end");
             snap->data = std::move(s.data());
             snap->frame = to_;
+            if (log_) {
+                std::lock_guard lock(log_mutex_);
+                snap->changes = log_->changes.size();
+            }
             saved_ = snap;
         }
+        here_ = {tools::LinkedInputLog::At::Meeting, 0, boards_[0]->timing.frames(), boards_[0]->line};
         std::unique_lock lock(mutex_);
         go_ = false, paused_ = true;
         changed_.notify_all();
@@ -659,6 +702,9 @@ private:
     uint64_t frame_ = 0, to_ = 0;
     bool want_snap_ = false;
     std::string stopped_;
+    tools::LinkedInputLog* log_ = nullptr; // --record-inputs
+    tools::LinkedInputLog::Where here_;    // (where the boards stand for the bot)
+    std::mutex log_mutex_;
 
     std::mutex mutex_;
     std::condition_variable changed_;
@@ -743,11 +789,32 @@ std::vector<Character> enemies(const Game& e) {
     return out;
 }
 
-// Where the red arrow points, while the game asks for the gate to be broken.
+// --unmarked-gate: at a gate with another beside the arrow's, that one is broken instead (Victor's
+// in stage 2: the sewers). Set by the play loop when the gate is called (gate_objects), read by
+// the tries: x, y (the arrow's height), z.
+bool g_unmarked_gate = false;
+std::optional<std::array<float, 3>> g_gate_point;
+// --gate-object N: object N (a gate, gate_objects) broken whenever it can be, the fight or not:
+// stage 2's basketball court (area 15) has its gates live during the last boss, no gate called;
+// 0x01 (beside the court) leads to the mall, 0x0B/0x0C (Victor's from the far side) to stage
+// change 57 and area 24. While it stands, it is the target (g_gate_point).
+int g_gate_object = -1;
+bool gate_object_standing(const Game& e) {
+    if (g_gate_object < 0) return false;
+    const uint32_t objects = e.read32(e.r13() - 16100);
+    if (objects >= 0x800000) return false;
+    const uint32_t flags = e.read32(objects + 2028 + static_cast<uint32_t>(g_gate_object) * 24);
+    return (flags & 0x01000000u) && !(flags & 0x04000000u);
+}
+
+// Where the red arrow points, while the game asks for the gate to be broken (or the gate chosen).
 std::optional<std::pair<float, float>> arrow_target(const Game& e) {
+    if (g_gate_object >= 0 && g_gate_point && gate_object_standing(e)) return std::make_pair((*g_gate_point)[0], (*g_gate_point)[2]);
     if (!(area_phase(e) & ram::kPhaseGate)) return std::nullopt;
+    if (g_gate_point) return std::make_pair((*g_gate_point)[0], (*g_gate_point)[2]);
     return std::make_pair(e.readf_on(0, ram::kArrowTarget), e.readf_on(0, ram::kArrowTarget + 8));
 }
+float gate_height(const Game& e) { return g_gate_point ? (*g_gate_point)[1] : e.readf_on(0, ram::kArrowTarget + 4); }
 
 void print_state(const Game& e) {
     const Character p = character(e, me(e));
@@ -799,6 +866,8 @@ struct Floor {
     // coming from the side v > d, pushing it out to v = d + its radius.
     struct Wall {
         float c, s, u0, u1, d, y0, y1, h0, h1;
+        uint32_t flags = 0;          // (the record's first word: byte 1 an object's index, a gate's)
+        float x0 = 0, z0 = 0, x1 = 0, z1 = 0; // (its ends in the world)
     };
     float x0 = 0, z0 = 0, x1 = 0, z1 = 0, scale = 1;
     int columns = 0, rows = 0;
@@ -887,6 +956,7 @@ constexpr float kJumpUp = 2.4f, kDropDown = 4.0f;
 // 0.85, was; the opera house's walls by its stairs, planned with 2.4, weren't: the bot shuttled
 // at them instead of going round by the outdoor area).
 constexpr float kWallJump = 1.0f;
+constexpr float kTargetOverFloor = 2.0f; // (a target this far from its cell's nearest floor stands on it)
 struct Waypoint {
     float x, y, z;
     bool jump;
@@ -926,7 +996,14 @@ std::vector<Waypoint> plan_way(const Floor& f, float x, float y, float z, float 
     const int64_t goal = id(c1, l1);
     float gx, gz;
     middle(c1, gx, gz);
-    const float th = floors(c1)[static_cast<std::size_t>(l1)]; // (the target's floor)
+    // (the target's floor; or its own height when the cell lists none near it: on stage 2's
+    // walkways two enemies paced a ledge whose floor the grid has in some cells and not others,
+    // and where it hadn't, the ground 5.3 below was taken for theirs, the way out of reach ending
+    // on a walkway near the ground instead of on the ledge; the way flipped between the two every
+    // turn and the bot shuttled until the time ran out. A gate's arrow, 1.5 over its floor,
+    // keeps the floor.)
+    const float listed = floors(c1)[static_cast<std::size_t>(l1)];
+    const float th = std::fabs(listed - ty) <= kTargetOverFloor ? listed : ty;
     std::map<int64_t, float> cost;
     std::map<int64_t, int64_t> came;
     using Item = std::pair<float, int64_t>;
@@ -1074,13 +1151,49 @@ Floor read_floor(const Game& e) {
                 auto at = [&](uint32_t off) { return as_float(e.read32(r + off)); };
                 // (the ends in the world: x y z at +12 +16 +20 and +24 +28 +32; into the wall's frame)
                 const float c = at(4), s = at(8), x0 = at(12), z0 = at(20), x1 = at(24), z1 = at(32);
-                w = {c, s, x0 * s - z0 * c, x1 * s - z1 * c, z0 * s + x0 * c, at(16), at(28), at(36), at(40)};
+                w = {c, s, x0 * s - z0 * c, x1 * s - z1 * c, z0 * s + x0 * c, at(16), at(28), at(36), at(40), e.read32(r), x0, z0, x1, z1};
             } else {
                 w.d = 1e9f; // (skipped: never crossed)
             }
             f.walls.push_back(w);
         }
     return f;
+}
+
+// The area's objects that walls belong to (gates: hit, a wall's byte 1 picks an entry of the
+// byte table at the object table + 24320, the object's number; 0x5103C sets that object's
+// 0x08000000, and broken it has 0x04000000, which the area's script tests, condition 0x0C). The
+// objects: 24 bytes each at *(r13 - 16100) + 2028, the first word their flags. A gate the script
+// can tell broken has 0x01000000 (Victor's two in stage 2: 0x0B/0x0C, the arrow's, and 0x05/0x06,
+// unmarked; each sends the script its own way).
+struct GateObject {
+    int number = 0;
+    uint32_t flags = 0;
+    float x = 0, y = 0, z = 0; // (the middle of its walls)
+    int walls = 0;
+};
+std::vector<GateObject> gate_objects(const Game& e, const Floor& f) {
+    std::vector<GateObject> out;
+    const uint32_t objects = e.read32(e.r13() - 16100);
+    if (objects >= 0x800000) return out;
+    std::map<int, GateObject> by;
+    for (const Floor::Wall& w : f.walls) {
+        if (w.d > 1e8f) continue; // (skipped)
+        const int index = static_cast<int>(w.flags >> 8 & 0xFF);
+        if (!index) continue;
+        const int n = e.read16(objects + 24320 + static_cast<uint32_t>(index & ~1)) >> (index & 1 ? 0 : 8) & 0xFF;
+        if (!n) continue;
+        GateObject& g = by[n];
+        g.number = n;
+        g.x += (w.x0 + w.x1) / 2, g.y += w.y0, g.z += (w.z0 + w.z1) / 2;
+        ++g.walls;
+    }
+    for (auto& [n, g] : by) {
+        g.flags = e.read32(objects + 2028 + static_cast<uint32_t>(n) * 24);
+        g.x /= static_cast<float>(g.walls), g.y /= static_cast<float>(g.walls), g.z /= static_cast<float>(g.walls);
+        out.push_back(g);
+    }
+    return out;
 }
 
 // ---- Playing ----
@@ -1159,7 +1272,7 @@ Score score(const Game& e) {
     s.arrow = t.has_value();
     if (t) { // the fight is over: where the arrow points (those left are bystanders); with its
              // height (the opera house's gate is on a balcony above the doors below it)
-        const float up = e.readf_on(0, ram::kArrowTarget + 4) - kArrowAbove - p.y;
+        const float up = gate_height(e) - kArrowAbove - p.y;
         s.nearest = std::hypot(std::hypot(t->first - p.x, t->second - p.z), std::max(0.0f, std::fabs(up) - 1.0f));
         return s;
     }
@@ -1196,14 +1309,19 @@ const Character* boss_of(const Game& e, const std::vector<Character>& foes) {
 // arrow points while the game asks for the gate.
 std::optional<Character> target(const Game& e) {
     const Character p = character(e, me(e));
+    if (g_gate_object >= 0 && g_gate_point && gate_object_standing(e)) { // (--gate-object: it first)
+        Character gate;
+        gate.x = (*g_gate_point)[0], gate.y = (*g_gate_point)[1], gate.z = (*g_gate_point)[2];
+        return gate;
+    }
     const std::vector<Character> foes = enemies(e);
     if (const Character* boss = boss_of(e, foes)) return *boss;
     std::optional<Character> best;
     for (const Character& en : foes)
         if (!best || std::hypot(en.x - p.x, en.z - p.z) < std::hypot(best->x - p.x, best->z - p.z)) best = en;
-    if (!best && arrow_target(e)) {
+    if (const auto t = arrow_target(e); !best && t) {
         Character gate;
-        gate.x = e.readf_on(0, ram::kArrowTarget), gate.y = e.readf_on(0, ram::kArrowTarget + 4), gate.z = e.readf_on(0, ram::kArrowTarget + 8);
+        gate.x = t->first, gate.y = gate_height(e), gate.z = t->second;
         best = gate;
     }
     return best;
@@ -1235,6 +1353,15 @@ constexpr int kLeg = 30;
 // (following a way: a jump's leg lasts until it lands: held, it crouches ~16 frames, takes off,
 // and comes down ~80 frames after the press, the theatre's stage wall crossed)
 constexpr int kWayLeg = 12, kWayJumpLeg = 80;
+// Along a way, the lever with shift held (strafing: the guide's lock-on): 0.093 a frame at once and
+// straight on, where a walk starts slowly, wanders and settles at 0.074 (from fullrec's 10704, 60
+// frames: 5.39 against 3.64). The guide's run (the lever tapped twice, then held) never started,
+// with taps and gaps of 1-12 and 1-16 frames. SPIKEBOT_WALK=1: walked, as before.
+// Only while the target is further than kStrafeFrom: strafing keeps the way the player faced, and
+// at stage 1's gate (fullrec4's 81415) he came up to it facing away, no try broke it, and he
+// waited; the last of the way walked turns him to face it.
+const bool g_strafe = std::getenv("SPIKEBOT_WALK") == nullptr;
+constexpr float kStrafeFrom = 5.0f;
 constexpr int kRunUp = 20; // (a jump's run-up: back this long, then toward the step)
 constexpr float kReach = 4.0f, kGateReach = 2.5f; // (a gate's distance has its height in it: score())
 const Button kWalk[8][2] = {{Up, Up}, {Up, Right}, {Right, Right}, {Down, Right},
@@ -1316,8 +1443,10 @@ bool g_weak_enemies = false;
 // input, and are continued when knocked out (their cabinets stay in the shared game). The owner:
 // player 1 alone clears a stage, the others need only be there.
 bool g_idle_others = false;
-// --record-inputs FILE: the main board's run, saved with each checkpoint state and at the end.
+// --record-inputs FILE: the main board's run (linked boards: every board's, tools::LinkedInputLog),
+// saved with each checkpoint state and at the end.
 tools::InputLog* g_input_log = nullptr;
+tools::LinkedInputLog* g_linked_log = nullptr; // (linked boards)
 std::string g_input_log_path;
 
 float apart(const Game& e) {
@@ -1473,6 +1602,7 @@ void play(Game& e, Workers& w, int frames, const std::string& out) {
         if (out.empty() || snap->frame < next_state) return;
         e.write_state(*snap, out + "/bot-" + std::to_string(snap->frame) + ".state");
         if (g_input_log) g_input_log->save(g_input_log_path);
+        if (g_linked_log) g_linked_log->save(g_input_log_path);
         next_state += kStateEvery;
     };
     // What the bot keeps about each player it plays (linked boards: one each; their turns
@@ -1537,7 +1667,32 @@ void play(Game& e, Workers& w, int frames, const std::string& out) {
                         static_cast<double>(p.x), static_cast<double>(p.y), static_cast<double>(p.z));
             last_phase = phase;
             g_barred.clear(); // (a new area, or the same one changed: try everywhere again)
+            // --unmarked-gate: with the gate called, a gate other than the arrow's (its walls'
+            // middle; the arrow's height), the nearest if more
+            g_gate_point.reset();
+            if (g_unmarked_gate && (phase & ram::kPhaseGate)) {
+                const float ax = e.readf_on(0, ram::kArrowTarget), ay = e.readf_on(0, ram::kArrowTarget + 4),
+                            az = e.readf_on(0, ram::kArrowTarget + 8);
+                float best = 1e9f;
+                for (const GateObject& g : gate_objects(e, read_floor(e))) {
+                    if (!(g.flags & 0x01000000u) || (g.flags & 0x04000000u) || std::hypot(g.x - ax, g.z - az) < 5.0f) continue;
+                    if (const float d = std::hypot(g.x - p.x, g.z - p.z); d < best) best = d, g_gate_point = std::array<float, 3>{g.x, ay, g.z};
+                }
+                if (g_gate_point)
+                    std::printf("frame %llu: the unmarked gate at %.1f %.1f (the arrow's at %.1f %.1f)\n",
+                                static_cast<unsigned long long>(e.frame()), static_cast<double>((*g_gate_point)[0]),
+                                static_cast<double>((*g_gate_point)[2]), static_cast<double>(ax), static_cast<double>(az));
+            }
         }
+        // --gate-object N: its place once it stands (the script registers it), at about the
+        // arrow's height over its walls (2.5)
+        if (g_gate_object >= 0 && !g_gate_point && gate_object_standing(e))
+            for (const GateObject& g : gate_objects(e, read_floor(e)))
+                if (g.number == g_gate_object) {
+                    g_gate_point = std::array<float, 3>{g.x, g.y + 2.5f, g.z};
+                    std::printf("frame %llu: gate object %02x at %.1f %.1f\n", static_cast<unsigned long long>(e.frame()), g.number,
+                                static_cast<double>(g.x), static_cast<double>(g.z));
+                }
         const Score now = score(e);
         const int turn = static_cast<int>(e.frame() - turn_start);
         turn_start = e.frame();
@@ -1657,7 +1812,7 @@ void play(Game& e, Workers& w, int frames, const std::string& out) {
                     // for kRunUp frames, then toward it for 2, 4, ... 24 and jump: it must leave
                     // the ground moving, just short of the step's edge.
                     const std::size_t tries = aim->jump ? 16 + 8 * 12 : 16;
-                    auto leg = [](Game& b, std::size_t k, const std::string& shot) {
+                    auto leg = [strafe = g_strafe && now.nearest > kStrafeFrom](Game& b, std::size_t k, const std::string& shot) {
                         if (k >= 16) {
                             const std::size_t to = (k - 16) % 8, away = (to + 4) % 8;
                             const int run_in = 2 * static_cast<int>(1 + (k - 16) / 8);
@@ -1666,9 +1821,9 @@ void play(Game& e, Workers& w, int frames, const std::string& out) {
                             k = to + 8;
                         }
                         const Button a = kWalk[k & 7][0], c = kWalk[k & 7][1];
-                        if (k < 8) return b.step(press({a, c}), kWayLeg, shot);
+                        if (k < 8) return b.step(strafe ? press({a, c, Shift}) : press({a, c}), kWayLeg, shot);
                         b.step(press({a, c, Jump}), kJumpHold);
-                        b.step(press({a, c}), kWayJumpLeg - kJumpHold, shot);
+                        b.step(strafe ? press({a, c, Shift}) : press({a, c}), kWayJumpLeg - kJumpHold, shot);
                     };
                     auto off = [&aim](const Game& b) {
                         const Character q = character(b, me(b));
@@ -1777,7 +1932,7 @@ int main(int argc, char** argv) {
     const char* dir = nullptr;
     std::string load, out, route_spec;
     int frames = 3000, inspect = 0;
-    bool with_sound = true, play_mode = false, selftest = false, explore_test = false, moves_test = false, bench = false, floor_map = false;
+    bool with_sound = true, play_mode = false, selftest = false, explore_test = false, moves_test = false, bench = false, floor_map = false, gates_list = false;
     unsigned dump_lo = 0, dump_hi = 0;
     std::size_t boards = 1, player_arg = 0;
     int workers = static_cast<int>(std::max(1u, std::thread::hardware_concurrency() - 1));
@@ -1794,6 +1949,9 @@ int main(int argc, char** argv) {
         else if (arg == "--moves-test") moves_test = true;
         else if (arg == "--bench") bench = true;
         else if (arg == "--floor-map") floor_map = true;
+        else if (arg == "--gates") gates_list = true;
+        else if (arg == "--unmarked-gate") g_unmarked_gate = true;
+        else if (arg == "--gate-object" && i + 1 < argc) g_gate_object = static_cast<int>(std::strtol(argv[++i], nullptr, 16));
         else if (arg == "--weak-enemies") g_weak_enemies = true;
         else if (arg == "--idle-others") g_idle_others = true;
         else if (arg == "--record-inputs" && i + 1 < argc) g_input_log_path = argv[++i];
@@ -1827,12 +1985,10 @@ int main(int argc, char** argv) {
     const std::unique_ptr<Game> main_game = make();
     Game& e = *main_game;
     tools::InputLog input_log;
+    tools::LinkedInputLog linked_log;
     if (!g_input_log_path.empty()) {
-        if (boards > 1) {
-            std::fprintf(stderr, "spikebot: --record-inputs is for one board\n");
-            return 2;
-        }
-        static_cast<Emulator&>(e).record_into(g_input_log = &input_log);
+        if (boards > 1) static_cast<Rig&>(e).record_into(g_linked_log = &linked_log);
+        else static_cast<Emulator&>(e).record_into(g_input_log = &input_log);
     }
     if (!e.start(load)) return 1;
     std::printf("Loaded %s at frame %llu\n", load.c_str(), static_cast<unsigned long long>(e.frame()));
@@ -1895,6 +2051,15 @@ int main(int argc, char** argv) {
             ++leg;
         }
         print_state(e);
+    }
+    if (gates_list) { // --gates: the area's objects with walls (gate_objects), where they are
+        const Character p = character(e, me(e));
+        std::printf("player at %.2f %.2f %.2f\n", static_cast<double>(p.x), static_cast<double>(p.y), static_cast<double>(p.z));
+        for (const GateObject& g : gate_objects(e, read_floor(e)))
+            std::printf("object %02x: flags %08x%s, %d walls round %.2f %.2f %.2f (%.1f away)\n", g.number, g.flags,
+                        g.flags & 0x04000000u ? " (broken)" : g.flags & 0x01000000u ? " (a gate)" : "", g.walls, static_cast<double>(g.x),
+                        static_cast<double>(g.y), static_cast<double>(g.z), static_cast<double>(std::hypot(g.x - p.x, g.z - p.z)));
+        if (const auto t = arrow_target(e)) std::printf("arrow to %.2f %.2f\n", static_cast<double>(t->first), static_cast<double>(t->second));
     }
     if (floor_map) { // the area's floor grid (docs/bot.md): its header, and a map round the player
         const Floor f = read_floor(e);
@@ -2119,6 +2284,14 @@ int main(int argc, char** argv) {
         if (input_log.save(g_input_log_path))
             std::printf("Recorded %zu frames' inputs in %s (gamerun --load-state %s --inputs %s plays them again)\n",
                         input_log.frames.size(), g_input_log_path.c_str(), load.c_str(), g_input_log_path.c_str());
+        else
+            std::fprintf(stderr, "spikebot: cannot write %s\n", g_input_log_path.c_str());
+    }
+    if (g_linked_log) {
+        if (linked_log.save(g_input_log_path))
+            std::printf("Recorded %zu changes to %zu boards in %s (gamerun --boards %zu --parallel --load-state %s --inputs %s plays them "
+                        "again)\n",
+                        linked_log.changes.size(), e.boards(), g_input_log_path.c_str(), e.boards(), load.c_str(), g_input_log_path.c_str());
         else
             std::fprintf(stderr, "spikebot: cannot write %s\n", g_input_log_path.c_str());
     }

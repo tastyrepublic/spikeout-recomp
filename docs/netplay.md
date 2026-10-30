@@ -1066,6 +1066,48 @@ Three kinds of camera event, for one board per PC:
   this run's areas never were). So 0x18's other three and 0x3F are on the
   route not taken (the gates' other branches): runs through those would
   see them.
+  **The sewer route (2026-10-30):** the bot broke the unmarked gate after
+  Victor (spikebot `--unmarked-gate`, docs/bot.md "Gates, and the unmarked
+  ones"; from `build/bot/fullrec/bot-31704.state`, recorded in
+  `build/bot/sewer2`): Clint's concrete channels, three bosses at once
+  (48504; Huey, Dewey and Louie by the guides), the two-arrow area
+  (0xAB820 ran), back on the arrow route's walkways and the area at 120 45,
+  then the story scene to a new stage at frame 59006 (the guides: stage 4,
+  stage 3 skipped). Replayed with `--script-actions` (490 of 490 hashes):
+  **0x18 at 0xD3660** ran (frame 59006, the stage change's script 0xD3640;
+  the arrow route's change to stage 3 runs 0xD31C4).
+  **The two-arrow area's other gate** (0xAB844's 0x07/0x08, where the
+  sewer route broke 0x2B; `build/bot/branch-ab` from sewer2's 50916): two
+  stage 2 areas the arrow route never has (0xAC45C, 0xACE9C), the
+  basketball court (stage 2's last boss there; 0xAD030 ran: 0xAD054's
+  area), the bonus round, then the mall stage (the guides' Astro Mall;
+  Rikiya). Replayed to frame 87222 with `--script-actions` (605 of 605
+  hashes): **0x3F at 0xB2A64** ran (frame 66459, the change to the mall:
+  the set-up script 0xB2A3C), 0x18 at 0xBFC70 (seen before).
+  **Route bit 0x0400** (found by reading the scripts, docs/bot.md "The
+  route, read from the scripts": area 15's unmarked gate 0x0B/0x0C, broken
+  from branch-ab's 61116; `build/bot/route57`, then `route57b` from 63520):
+  stage change 57 then "Stage 3D, Astro Mall" (the branch's was 3C).
+  Replayed (110 of 110 hashes): **0x18 at 0xC00FC** (frame 66011, the
+  change's script 0xC00DC) and **0x3F at 0xB4EA0** (66462, area 24's set-up
+  0xB4E78). Both 0x3F records now seen, and three of 0x18's four unseen;
+  left: 0x18 at 0xAEA84 (area 22's script, which no go-to-area record
+  names) and 0x09 (in no script).
+  **Neither can run, by the code (2026-10-30).** An area starts from the
+  byte -16365(r13); every store to it, and to the bytes feeding it
+  (-7558, -16265), in the recompiled code: actions 0x00, 0x35/0x36 and
+  0x01 (constants in the scripts: none is 22), the game flow 0x4BB74
+  (starts what action 0x01 set), the area task's save and restore
+  (0x72860 / 0x5A388: the area it was in, for a cabinet joining), a
+  joining cabinet's copy from another (0x7327C, 0x60B04) and the stage
+  ends' table (0x60A40: areas 83, 84, 85, 88 to their next stages). The
+  area table lookup (0x5A94C) has those two callers only, and nothing
+  points into area 22's scripts but the table itself. So area 22
+  (0xAE9EC/0xAEA58) is never started: left-over content. Action 0x09
+  (0x5D20C: the camera's +0x840 = 0) is called by nothing but the action
+  table, and no record in the program image uses it (the one 0x0209
+  pattern in all of RAM, at 0x4E6814, is in 3D data, not a script). Every
+  camera action that can run has been seen.
 - **B. The camera's own code** (run for the remote player: proven exact,
   `--camera-test`). 0xBE14 (+0x4A8-0x4BF, every frame) is each board's own.
 - **C. Other code**, to sort as shared or that player's own: 0x32A80
@@ -1153,8 +1195,22 @@ up its attract mode (0x4A1B0 from 0x496A0, +0xB00). The rest, from ~31700,
 is both cabinets in attract mode running the same demo (0x69E30, 0x6AD9C,
 0x2C480, the +0xB20-0xB30 writers, even 0x345EC from 0x260D0, the demo's
 player being the same on both): the same on both boards. No script action
-ran in that time. Not yet seen on two boards: the per-player shakes while
-both players play.
+ran in that time.
+
+Both players fighting (2026-10-30): spikebot --boards 2 from
+build/bot/two-start.state without --idle-others (the bot playing both, in
+turn), 3,000 frames of stage 1, recorded (--record-inputs: linked boards'
+now, docs/bot.md) and replayed with gamerun --boards 2 --parallel
+--load-state build/bot/two-start.state --inputs build/bot/bothfight/
+inputs.bin --camera-events (every hash on both boards matched, 50 and 50).
+0x345EC from 0x260D0 shook board 1 alone at frame 6657 (player 2's charge
+attack) and board 0 alone at 7414 (player 1's sweep): "each board's own
+(none the same)". A player's shake runs on that player's cabinet only, as
+the code says (the local player test), so for one board a PC the remote
+player's camera needs its own. The rest was as before: the script's
+actions (0x5D21C, 0x5E048, 0x5E550, 0x345EC from 0x5CA8C) and the
+area-start sequence shared, 0x33490 each camera's own easing. 0x21CD4 and
+0x22770 didn't come up in these 3,000 frames.
 
 With both dispatches hooked, stage 1's replay (every hash matched, so the
 new hook changes nothing) runs 51 action kinds, 394 records (from 49, 290):
@@ -1163,6 +1219,34 @@ the area scripts' (0xAE5F8, 0xD47C4, ...); two kinds only there, 0x29 and
 0x31; of the camera actions 0x05 (0xA84A8) and 0x0A (0xA84E0) more often.
 Still no 0x3F, and 0x18 no more than before (lists in
 build/linkstudy/actions: stage1.txt before, stage1-both.txt after).
+
+Four boards (2026-10-30): gamerun --boards 4 --parallel from power-on (the
+link setting 1 on board 0, 2 on the other three: 3 and 4 are not slaves,
+those boards stop at "TWO PROCESSORS DETECTED"), the players joining one
+by one (presses as the two-board command's, boards 2 and 3 at 4200-5250
+and 5800-6850), all four in one game by frame ~8000 (THE NEW TEAM, then
+Spike, White, Linda, Tenshin together), then nobody pressing until every
+game ended and the cabinets were back in attract mode (state:
+build/linkstudy/four2/four-8000.state). With --camera-events:
+- the area-start sequence (0x1D894, from 0x1D8CC) runs on every cabinet in
+  the game each time a player comes in (board 0 at 2948, 4573, 6182, 7792;
+  board 3 only at 7792, its entry): shared, as sorted above;
+- its end, 0x1DB94 (from 0x1DC04), also comes at each cabinet's own game
+  over (11910, 12717, 13443, 14163): one of its two callers is the
+  cabinet's own flow;
+- the continue screen (0x7682C) at each cabinet's own player's end
+  (12101-14355); the rest new here (0x4B428 from 0x4B410, 0x5197C from
+  0x4A30C, 0x51FE8 from 0x4B378, "0x372D4" from 0x4A4E0) is in the game
+  flow's code (0x49384-0x4C020), each cabinet's continue and game over;
+- after ~15000, attract mode on all four (the shakes from 0x21CDC and
+  0x260D0, 0x69E30, the +0xB20 writers). These read "none the same" though
+  they come at the same moments (the boards' frames one apart):
+  --camera-events matches writes by the game's logic counter (0x1000A8),
+  and with every game over each cabinet's counter goes its own way (not
+  checked further); in the two-board check, the same demo writes matched.
+Nothing camera-related that depends on there being more than two players
+turned up; the players' own shakes while several play are still to see
+(the bot's two-player run).
 
 ## Plan
 

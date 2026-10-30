@@ -22,7 +22,10 @@
 // where), to its end unless --blocks says otherwise. --inputs FILE plays a
 // run spikebot recorded (--record-inputs; tools::InputLog) from the state it
 // began from (--load-state): board 0's inputs each frame, the bot's RAM
-// writes, main RAM checked against its hashes, to its end.
+// writes, main RAM checked against its hashes, to its end. Linked boards'
+// (spikebot --boards N; tools::LinkedInputLog) need --boards N --parallel:
+// every board's inputs and writes where the bot made them (frame ends, the
+// slices' meetings, points after a frame's end), each board's RAM checked.
 // --save-state FILE@FRAME saves the whole board at the end of FRAME (in the
 // first block after it outside an exception; tools::board_state), and
 // --load-state FILE runs on from such a state (or the window's, F9) instead
@@ -240,6 +243,8 @@ struct Options {
     const char* dump_backup = nullptr;
     const tools::Recording* replay = nullptr; // --replay FILE
     const tools::InputLog* input_log = nullptr; // --inputs FILE (spikebot --record-inputs)
+    const std::map<tools::LinkedInputLog::Where, tools::LinkedInputLog::Change>* linked_inputs = nullptr; // (linked boards')
+    uint64_t linked_inputs_end = 0;           // (the last frame there)
     std::string save_state;                   // --save-state FILE@FRAME
     uint64_t save_frame = 0;
     const char* load_state = nullptr;         // --load-state FILE
@@ -488,6 +493,8 @@ struct Machine {
     // --replay: the next recorded inputs and hash, hashes matched, the first frame not
     size_t replay_input = 0, replay_hash = 0;
     uint64_t replay_matched = 0, replay_parted = 0;
+    uint32_t line = 0; // (linked boards: at the last meeting)
+    uint8_t linked_bank0 = 0xFF, linked_controls = 0xFF; // (--inputs, linked boards: as last set)
     recomp::Context c;
     recomp::FrameTiming timing;
     m3::TilegenRenderer tilegen;
@@ -598,6 +605,25 @@ void replay_frame(Machine& m, const tools::Recording& rec, uint64_t frame) {
 std::function<void(m3::State&)> sound_state(Machine& m, const Options& o) {
     if (o.no_sound) return {};
     return [&m](m3::State& s) { m.sound.state(s); };
+}
+
+// --inputs, linked boards: what the bot changed on board m where it stood (a
+// frame end, a meeting, a point after a frame's end), as it did. Returns the
+// change found there (or null).
+const tools::LinkedInputLog::Change* linked_change(Machine& m, const Options& o, tools::LinkedInputLog::At at, uint64_t frame,
+                                                   uint32_t line = 0) {
+    const auto it = o.linked_inputs->find({at, static_cast<uint8_t>(m.index), frame, line});
+    if (it == o.linked_inputs->end()) return nullptr;
+    const tools::LinkedInputLog::Change& c = it->second;
+    if (c.inputs) {
+        m.linked_bank0 = m.bus.inputs.bank0 = c.bank0;
+        m.linked_controls = m.bus.inputs.controls = c.controls;
+    }
+    for (const auto& [addr, value] : c.writes) {
+        m.bus.ram()[addr] = static_cast<uint8_t>(value >> 8);
+        m.bus.ram()[addr + 1] = static_cast<uint8_t>(value);
+    }
+    return &c;
 }
 
 // --rollback-test: thrown from a snapshot point once the board is back at an
@@ -1003,6 +1029,7 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
                 m.bus.inputs.controls = it->second.controls;
             }
         }
+        if (o.linked_inputs) linked_change(m, o, tools::LinkedInputLog::At::Resumed, m.timing.frames());
     }
     m.c.limit_blocks(static_cast<uint64_t>(o.blocks));
     if (o.map_trace_frames) // --map-trace FROM:N: each tile map the game draws, its layer and rows
@@ -1052,6 +1079,7 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         if (turns.boards() > 1 && line % slice == slice - 1) {
             m.bus.netboard().sync(m.c.cycles());
             if (m.recording_host) m.host_log.push_back({HostCall::Pass, 0, 0, 0, m.c.cycles()});
+            m.line = line;
             turns.pass(m.index);
             if (m.rb.rewind) { // (--rollback-test: put back at the meeting, with the others)
                 m.rb.rewind = false;
@@ -1321,6 +1349,22 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             } else if (!frames.empty() && frame >= frames.rbegin()->first) {
                 m.c.limit_blocks(0); // (the recorded run's end)
             }
+        }
+        if (o.linked_inputs) { // --inputs, linked boards: main RAM checked, the inputs as the bot left them, its changes
+            m.bus.inputs.bank0 = m.linked_bank0;
+            m.bus.inputs.controls = m.linked_controls;
+            if (const auto* c = linked_change(m, o, tools::LinkedInputLog::At::FrameEnd, frame); c && c->hash) {
+                if (tools::Recording::ram_hash(m.bus.ram()) == c->hash) {
+                    ++m.replay_matched;
+                } else if (!m.replay_parted) {
+                    m.replay_parted = frame;
+                    std::printf("inputs: board %zu's main RAM differs from the recorded run's at frame %llu\n", m.index,
+                                static_cast<unsigned long long>(frame));
+                }
+            }
+            if (o.linked_inputs->count({tools::LinkedInputLog::At::Resumed, static_cast<uint8_t>(m.index), frame, 0}))
+                m.c.request_snapshot([&m, &o, frame](uint32_t) { linked_change(m, o, tools::LinkedInputLog::At::Resumed, frame); });
+            if (frame >= o.linked_inputs_end) m.c.limit_blocks(0); // (the recorded run's end)
         }
         // Into the board's input table (--input-delay frames on), and the
         // next frame's out of it.
@@ -1793,6 +1837,10 @@ void report(Machine& m, const Options& o) {
         std::printf("Replay: %llu of %zu hashes matched the recording's%s\n", static_cast<unsigned long long>(m.replay_matched),
                     o.replay->hashes.size(),
                     m.replay_parted ? (", parted at frame " + std::to_string(m.replay_parted)).c_str() : " (the same run)");
+    if (o.linked_inputs)
+        std::printf("Inputs: board %zu: %llu of the recorded run's hashes matched%s\n", m.index,
+                    static_cast<unsigned long long>(m.replay_matched),
+                    m.replay_parted ? (", parted at frame " + std::to_string(m.replay_parted)).c_str() : " (the same run)");
     if (o.input_log && m.index == 0)
         std::printf("Inputs: %llu of the recorded run's hashes matched%s\n", static_cast<unsigned long long>(m.replay_matched),
                     m.replay_parted ? (", parted at frame " + std::to_string(m.replay_parted)).c_str() : " (the same run)");
@@ -2061,16 +2109,22 @@ int main(int argc, char** argv) {
     Options o;
     tools::Recording recording;
     tools::InputLog input_log; // (--inputs)
+    std::map<tools::LinkedInputLog::Where, tools::LinkedInputLog::Change> linked_inputs; // (--inputs, linked boards')
     bool blocks_given = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--blocks" && i + 1 < argc) o.blocks = std::strtoll(argv[++i], nullptr, 0), blocks_given = true;
         else if (arg == "--inputs" && i + 1 < argc) { // FILE (spikebot --record-inputs; with --load-state, the state it began from)
-            if (!input_log.load(argv[++i])) {
+            if (input_log.load(argv[++i])) {
+                o.input_log = &input_log;
+            } else if (tools::LinkedInputLog log; log.load(argv[i])) { // (linked boards')
+                linked_inputs = log.by_where();
+                for (const auto& [where, c] : linked_inputs) o.linked_inputs_end = std::max(o.linked_inputs_end, where.frame);
+                o.linked_inputs = &linked_inputs;
+            } else {
                 std::fprintf(stderr, "gamerun: %s: not a recorded run (spikebot --record-inputs)\n", argv[i]);
                 return 1;
             }
-            o.input_log = &input_log;
         }
         else if (arg == "--replay" && i + 1 < argc) {
             std::string error;
@@ -2356,6 +2410,11 @@ int main(int argc, char** argv) {
                              "not with network play or save states\n");
         return 2;
     }
+    if (o.linked_inputs && (o.boards < 2 || !o.parallel || o.slice != 8 || !o.load_state)) {
+        std::fprintf(stderr, "gamerun: these inputs are linked boards' (spikebot --boards N): with --boards N --parallel "
+                             "--load-state FILE, the default slice\n");
+        return 2;
+    }
     tools::InputTable inputs(networked ? net::kMaxSeats : o.boards);
     std::unique_ptr<tools::NetPlay> netplay;
     std::vector<uint8_t> join_state; // (a game joined in progress: every board's state, unpacked)
@@ -2584,9 +2643,13 @@ int main(int argc, char** argv) {
     }
     LinkedRollback rollback; // (--rollback-test, linked boards)
     if (ring && o.rb_frames) rollback.ring = ring.get();
+    std::vector<std::unique_ptr<Machine>> machines;
     auto make_turns = [&] {
-        return std::make_unique<tools::Turns>(o.boards, parallel, parallel ? std::function<void()>([&ring, &linked, &rollback, &o] {
+        return std::make_unique<tools::Turns>(o.boards, parallel, parallel ? std::function<void()>([&ring, &linked, &rollback, &o, &machines] {
             ring->exchange();
+            if (o.linked_inputs) // (--inputs: what the bot changed where it stopped the boards, at a meeting)
+                for (auto& m : machines)
+                    linked_change(*m, o, tools::LinkedInputLog::At::Meeting, machines[0]->timing.frames(), machines[0]->line);
             if (linked.ring && (!linked.path.empty() || linked.sink)) linked.finish();
             if (rollback.ring) rollback.between(o);
         }) : std::function<void()>());
@@ -2610,7 +2673,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 #endif
-    std::vector<std::unique_ptr<Machine>> machines;
   for (;;) { // (network play: again from the host's state, a machine out of step)
     tools::Turns& turns = *turns_ptr;
     machines.clear();

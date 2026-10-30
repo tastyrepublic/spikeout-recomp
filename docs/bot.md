@@ -59,7 +59,8 @@ From `build/bot/bot-3500.state` (stage 1's gym), unhelped:
   no nearer the point aimed at bars it at once. With these the opera gate
   was broken alone (frame 123023).
 - Running (the lever tapped twice, then held, per the guide) didn't start a
-  run with taps of 2-8 frames (`--route 30-37`, `SPIKEBOT_RUNTAP`); left out.
+  run with taps of 2-8 frames (`--route 30-37`, `SPIKEBOT_RUNTAP`); left out
+  (and later strafed instead: "Strafing along a way").
 - The run was stopped in the Reception Hall (frame ~128,400) at the owner's
   word: good enough for the next work, the stages and scene changes.
 
@@ -104,6 +105,118 @@ state run twice gives every board's RAM the same.
   build\bot\two-start.state@5000 --blocks 4000000000`. Run: `spikebot
   --boards 2 --load-state build\bot\two-start.state --play --weak-enemies
   --idle-others --workers 5 --out DIR`.
+- Recorded (2026-10-30): `--record-inputs FILE` works on linked boards too
+  (tools::LinkedInputLog). The boards stop for the bot at a meeting of
+  their slices, or where a state put them back (each board just after a
+  frame's end), not at a frame's end, so every change is kept with where it
+  took effect: a board's frame end (the inputs held), a meeting (board 0's
+  frame and line there) or the point a state resumed at (the bot's inputs
+  and RAM writes), with each board's RAM hash every 60 frames; a step that
+  goes back to a save forgets what came after it. `gamerun --boards N
+  --parallel --load-state START --inputs FILE` plays it again at those
+  points. Checked: 1,500 frames from two-start.state, the bot playing
+  player 1 (25 of 25 hashes on each board), and 3,000 with both players
+  fighting (build/bot/bothfight: 50 of 50 on each).
+- two8's game over (frame 69468, stage 2's walkways): two enemies paced a
+  ledge a floor up (height 5.15) whose floor the grid lists in some cells
+  and not others. Over a cell without it, the way's target floor was taken
+  as the ground 5.3 below, and the way, out of reach, ended on another
+  walkway; it flipped between the two every turn (27 and 41 points) and the
+  bot shuttled along the walkway below for 6,000 frames until the time ran
+  out. Now a target further than 2.0 from the floor listed nearest it is
+  aimed at at its own height (a gate's arrow, 1.5 over its floor, keeps the
+  floor). From two8's 61843: both down by 62386, the next area at 63980.
+
+## Strafing along a way (2026-10-30)
+
+The guide's run (the lever tapped twice, then held) still never started:
+from fullrec's 10704 (nobody about), 60 frames down, taps of 1-12 frames
+and gaps of 1-16 all went less far than holding the lever (at best 3.24
+against 3.64). Shift held with the lever (the guide's lock-on, a strafe)
+went 5.39: 0.093 a frame from the first frame and straight on, where a walk
+starts slowly, wanders and settles at 0.074; shift alone doesn't move. So
+the way's legs now hold shift (`SPIKEBOT_WALK=1`: walked, as before), while
+the target is further than 5.0: a strafe keeps the way the player faced,
+and at stage 1's gate (fullrec4's 81415) he came up to it facing away, no
+try broke it and he waited until the 600 frames were over; the last of the
+way walked turns him. From fullrec4's 81415 (a 22-unit walk on the flat to
+the gate): the gate broken at 81827, walked 81941 (114 frames sooner of
+396). On two8's walkways (60328), where every leg chosen is a jump, both
+came to the enemies at the same frame: the bot keeps its 12-frame walking
+legs and its 4-cell lookahead (longer, 30-40 frames and 8-16 cells, changed
+nothing there: the jumps still won).
+
+## Gates, and the unmarked ones (2026-10-30)
+
+The owner's guide (players online): after Victor in stage 2, an unmarked
+gate on the far side leads to the sewers (Huey, Dewey and Louie). How the
+game has it (Victor's area, `fullrec/bot-31704.state`, the gate called):
+- The red arrow is a script action, 0x2D (`022d08MM PPPPPPPP`): P points at
+  an x y z in a table of the stage's arrow places (stage 2's at 0xAFFA8);
+  M 0 one arrow, 2 two (the next place too), else none.
+- The script then registers the gates as objects (action 0x03, sub-byte
+  0x0A, an object's number each): Victor's 0x0B and 0x0C (the arrow's) and
+  0x05 and 0x06 (no arrow). Condition 0x0C (`010c08NN 04000000`) is object
+  NN broken; 0x0B or 0x0C sets the flags word 0x0284's bit 0x10, 0x05 or
+  0x06 its 0x20, either ends the gate (0x80, the phase to 8), and 0x90 goes
+  on to script 0xAAAF0 then 0xA66F0, 0xA0 to 0xAABB0 then 0xA7CE8.
+- The objects: 24 bytes each at *(r13 - 16100) + 2028, the first word
+  their flags (a gate 0x01501000; 0x08000000 hit, 0x04000000 broken). A
+  gate is walls of the area's collision: an attack hitting a wall takes its
+  first word's byte 1 through the byte table at the objects + 24320 to the
+  object's number (0x5103C), so each gate's place is its walls'.
+- `--gates` lists the area's objects with walls, their flags and where they
+  are. Victor's: 0x0B/0x0C at 9.0 22.3 and 9.0 25.3 (the arrow at 7.7
+  23.8), 0x05/0x06 at 44.3 36.5 and 42.8 36.5.
+- `--unmarked-gate`: when the gate is called, a gate other than the arrow's
+  (unbroken, 0x01000000, 5 or more from the arrow; the nearest) is the one
+  walked to and broken. From 31704: found at once, broken at 32524 (the
+  arrow's took 31874), the next area at 43.9 37.2 (the boss Clint, in
+  concrete channels), where the arrow's led to 2.1 23.3.
+- Every gate in the scripts (a scan of the program image for action 0x03
+  sub-byte 0x0A runs, grouped by the bit each object's break sets): one
+  gate with one arrow in all but these: Victor's (0xA9F2C, above); stage 2's
+  0xAD054 (and 0xAD910 the same): 0x01 against 0x0B/0x0C, the arrow at
+  -7.2 -3.4, an area the bot never reached (on a branch); the opera house
+  (0xC4B8C): 0x29/0x2A on the balcony over the doors, the arrow's (15.7
+  0.0), against 0x01/0x02 on the ground at 19.8 -25.0. 0xAB844 and
+  0xBF1F0 have two gates and two arrows (mode 2): both marked.
+- The opera house's (fullrec4's 175591, `--unmarked-gate`): broken at
+  176425, then a street by a stone wall (10.5 -27.0, boxers), where the
+  arrow's led into the story scene and the reception hall. No 0x3F or 0x18
+  in its first 1,800 frames (`build/bot/opera-hidden`, replayed: 30 of 30
+  hashes).
+
+## The route, read from the scripts (2026-10-30)
+
+Where each gate leads, from the program image (no play needed):
+- Areas: the table at 0xA1D24, 8 bytes an area number (its set-up script,
+  its script; 0x5A94C). The area task (0x11BA80) keeps the running script
+  at +16 (0x11BA90); the byte at -16365(r13) (0x104013), when set, starts
+  that area (0x59C7C) and is cleared.
+- Action 0x35 (`023504NN`): go to area NN, through area 36 (0xAF288, the
+  between-areas script, whose action 0x36 starts it); action 0x00
+  (`020004NN`): area NN at once. Every such record, with the area whose
+  script holds it, gives the game's area graph (stage 2's: 6 (Victor) to 1
+  or 3, 12 (the two-arrow area) to 9 or 14, 14 to 15, ...; stage starts:
+  55 (0xBFC50) to 17 the mall, 57 (0xC00DC) to 24, 59 (0xCC06C) to 29).
+- A stage's end: action 0x01 (`020108AA BB`) puts stage-change area BB in
+  -16265(r13), which the game flow starts (0x4BB74). Area 84 (0xAF85C,
+  after stage 2's last boss) picks by the route bits, the area task's
+  +0x288 (0x11BD08): 0x0100 area 93, 0x0200 55 (the mall), 0x0400 57, 0x0001
+  91, else 74; area 85 (0xD3DF4): 0x0800 55, 0x1000 57, else 59. Gates set
+  those bits as they break (action 0x16 on `02880000`); +0x284 (0x11BD04)
+  holds each gate's own bits (condition 0x0E, both words).
+- So for the stage starting at area 24 (its set-up 0xB4E78 holds 0x3F's
+  0xB4EA0; its change, area 57's 0xC00DC, 0x18's 0xC00FC; it leads on to
+  24, 34, 35, 25, 26 and the two-arrow area 44): bit 0x0400, set in area 15
+  (0xAD054, after 0xACE9C's gate) by its unmarked gate 0x0B/0x0C (Victor's,
+  from the far side, at 9 22.3), where the arrow points at 0x01 (-6.4 -3.4:
+  bit 0x0200, the mall). From branch-ab's 61116 with `--unmarked-gate`
+  (`build/bot/route57`): broken at 61596, +0x288 0x402.
+- `--gate-object N` (hex) goes for gate object N while it stands, a fight
+  or not (tried at the basketball court, area 15's last boss: its gates
+  were already closed by then; the choice is at the gate before).
 
 ## Fighting faster (2026-10-29)
 
