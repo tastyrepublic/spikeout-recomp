@@ -1054,6 +1054,18 @@ Three kinds of camera event, for one board per PC:
   every action run, the definitive "seen"; the conditions (type 1 records)
   before an action say what makes it run; what writes the task's +16 from
   the table says which gate leads to which area.
+  **Done (2026-10-30): `gamerun --script-actions`** (an observer hook at
+  the dispatch's block, 0x5AB18; every record run, by its address, with its
+  action, runs and first frame). Over the bot's recorded run (the four
+  segments' `--inputs` replays, every RAM hash matched with the hook in;
+  stage 1's inputs end at frame 23006, not 50904; seg2 logged none) the
+  camera actions run: 0x05, 0x0A, 0x2D in every stage; 0x18 at 4 of its 7
+  records (0xAEE54, 0xD31C4, 0xBFC70, 0xCC08C); 0x24, 0x2B, 0x39, 0x4A;
+  0x40 only at the final boss (0xC92A0, 0xC94B8, 0xC9F7C, 0xCA204,
+  0xCAB5C). Never: 0x09 (in no script) and 0x3F (both records in scripts
+  this run's areas never were). So 0x18's other three and 0x3F are on the
+  route not taken (the gates' other branches): runs through those would
+  see them.
 - **B. The camera's own code** (run for the remote player: proven exact,
   `--camera-test`). 0xBE14 (+0x4A8-0x4BF, every frame) is each board's own.
 - **C. Other code**, to sort as shared or that player's own: 0x32A80
@@ -1067,6 +1079,90 @@ Three kinds of camera event, for one board per PC:
   two-player runs over the whole game (`--camera-events` with two boards
   compares each writer's writes by frame, offset and value): the bot
   driving two boards.
+
+**Kind C sorted by reading the code (2026-10-30).** `--camera-events` now
+gives each writing block's caller (LR: `00033490 (from 00033228)`), and the
+writing block is often not the writer: the report names the last block run,
+so a store made just after a call returns is put on the callee. 0x37258 and
+0x372D4 are the game's register save and restore helpers (they write only
+the stack); the LR names the code that really wrote. Every writer seen over
+the bot's game, with its caller, read in the recompiled code:
+- **The camera's own code** (r12 the camera; called from the function at
+  0x32990 after the part that `--camera-test` times as the update, so
+  outside its window and counted here; to be run for the remote player
+  with the rest, not copied; not yet checked that `--camera-test` does):
+  0xBE14 and 0x4584 from 0x32514/0x32540 (0x324C4: the camera's points
+  relative to 0x1A0000, turned by its heading, +0x4A8-0x4BC); 0x32A80
+  (0x32A44, called from the update at 0x32A1C: counts +0xAC6 down while
+  the flags word's 0x02000000 is set); 0x33490 from 0x33228 (0x33164,
+  called at 0x329F8: +0xAC8-0xAD0 eased toward the local player,
+  -16348(r13)); 0x33078 (0x32E78, called at 0x32A10: a counter at +0xB72, the final boss);
+  0x2C480 from 0x324DC (one of the camera's mode handlers, through the
+  table at 0x91B04, chosen at 0x324C4; the ending's mode: +0x4B,
+  +0xD1-0xD4, +0x113-0x128, +0x400).
+- **Shared** (the same on every cabinet; to copy): every script action,
+  through either interpreter (0x5AB18's dispatch, or 0x5A824's at 0x5A874,
+  which runs a script through within a frame: the "set-up" scripts the
+  area task never showed may be these; `--script-actions` now hooks both);
+  0x345EC called from 0x5CA84 (inside action 0x05's handler, 0x5C73C, every
+  time it runs); "0x372D4" from 0x1D8CC and 0x1DC04, really 0x1D894 (in
+  0x1D734: a sequence run off the area object's counter, 0x10C13C +674,
+  with sounds and a 2D message; at count 13 it sets the flags word's
+  0x02000000 and +0xAC6 = 240) and 0x1DB94 (its end: both cleared); the gate
+  run found these the same on both boards. "0x37258" from 0x5D824 (action
+  0x18).
+- **The player's own** (to make for the remote player): 0x345EC called from
+  0x260CC (a character's routine, only when the character is the local
+  player, -16348(r13), and its +0x1E68 byte is set: a shake, +0xD2-0xD4,
+  from the table at 0x90114); the gate run had it 18 times on board 0 and 3
+  on board 1. Also 0x345EC from 0x21CD4 (when the character, or the one at
+  its +272, is the local player) and from 0x22770 (shake 7, when the
+  character's +114 is the player the camera follows, the camera's +0x4A).
+  And the cabinet's own game flow (the state machine at 0x49384, its mode
+  byte -16374(r13)): the ending, 0x4BE54 (the camera's mode +0x48 = 10,
+  +0x4A = 0, +0x400 = 2: "0x372D4" from 0x4BEB0) then 0x4BEE4 each frame
+  running a cut scene's timeline, 0x69D84 (0x69E30 from 0x4BF88: a frame
+  counter against a table setting +0x48 and +0xC8), skipped by the
+  cabinet's own button held 40 frames (-32512(r13)), so each cabinet's
+  though the cabinets reach it together; and the game over: the continue
+  screen and then the ranking's name entry keep their working values in
+  the camera's +0xB04-0xB1E (0x7682C from 0x4B68C, where the continue
+  countdown, -7523(r13), reaches 639, and from 0x4BDD4 after the ending:
+  the local player's score, +16136, and character; 0x76F78, 0x76868 and
+  0x76944 from 0x4BFCC/0x4BFD0; it reads the cabinet's own buttons,
+  -32508(r13), and the backup RAM's ranking), then the cabinet's reset
+  (0x4942C: +0x840 = 0, called at 0x494CC after 0x51FAC; 0x6C01C from
+  0x6BB28, 0x6BAA0 setting the effects up again: +0xB80 and flags). These
+  last are the remote cabinet's flow, not its player's view in play: for
+  one board a PC, the remote camera is needed while its player plays, and
+  what the remote cabinet shows after its game over is its own business.
+
+The local player's pointer, -16348(r13) (0x104024), is 0x1A0000 on board 0
+and 0x1A4000 on board 1 (checked in a two-player state): code that tests
+it, or reads the local player through it, is each cabinet's own.
+
+Checked on two boards (2026-10-30): the bot's two-player run
+(build/bot/two6, docs/bot.md) to stage 2's fence gate, then from its state
+at frame 27865 nobody pressing (gamerun --boards 2 --parallel
+--camera-events --script-actions, 13,450 frames): player 2's game ended
+first (board 1 back in attract mode by 30000), then player 1's (the
+continue countdown at 30000). 0x7682C wrote on board 0 only (frame 29961,
+its continue screen), 0x33490 too (board 0's camera easing toward its
+player, until 29761), "0x372D4" from 0x1DC04 too (29770); board 1 alone set
+up its attract mode (0x4A1B0 from 0x496A0, +0xB00). The rest, from ~31700,
+is both cabinets in attract mode running the same demo (0x69E30, 0x6AD9C,
+0x2C480, the +0xB20-0xB30 writers, even 0x345EC from 0x260D0, the demo's
+player being the same on both): the same on both boards. No script action
+ran in that time. Not yet seen on two boards: the per-player shakes while
+both players play.
+
+With both dispatches hooked, stage 1's replay (every hash matched, so the
+new hook changes nothing) runs 51 action kinds, 394 records (from 49, 290):
+the second interpreter runs records at 0xA82DC-0xA88F4 and others among
+the area scripts' (0xAE5F8, 0xD47C4, ...); two kinds only there, 0x29 and
+0x31; of the camera actions 0x05 (0xA84A8) and 0x0A (0xA84E0) more often.
+Still no 0x3F, and 0x18 no more than before (lists in
+build/linkstudy/actions: stage1.txt before, stage1-both.txt after).
 
 ## Plan
 

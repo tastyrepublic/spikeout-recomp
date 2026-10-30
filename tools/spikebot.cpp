@@ -105,15 +105,67 @@ Inputs press(std::initializer_list<Button> buttons) {
     return in;
 }
 
-// One board, run on its own thread one frame at a time for the bot.
-class Emulator {
-public:
-    struct Snapshot {
-        std::vector<uint8_t> data;
-        uint64_t frame = 0;
-        std::size_t writes = 0; // (--record-inputs: the writes recorded after its frame by then)
-    };
+// A state kept in memory (a board's save state, or linked boards': the file
+// gamerun --boards N --load-state takes).
+struct Snapshot {
+    std::vector<uint8_t> data;
+    uint64_t frame = 0;
+    std::size_t writes = 0; // (--record-inputs: the writes recorded after its frame by then)
+};
 
+// The game as the bot drives it: one board (Emulator), or linked boards (Rig,
+// --boards N: each player's own board, the one controlled set by control()).
+// Reading and stepping are the controlled player's board; writes go to every
+// board (the game's state is each cabinet's, kept the same).
+class Game {
+public:
+    virtual ~Game() = default;
+    virtual bool start_from(std::vector<uint8_t> data, const std::string& name = "a save state") = 0;
+    bool start(const std::string& path) { return start_from(tools::read_file(path), path); }
+    // Runs `frames` frames with `in` held by the controlled player; screenshot: the last one's picture.
+    virtual void step(Inputs in, int frames = 1, const std::string& screenshot = {}) = 0;
+    virtual std::shared_ptr<Snapshot> save() = 0;
+    virtual void load(const std::shared_ptr<Snapshot>& snap) = 0;
+    bool write_state(const Snapshot& snap, const std::string& path) { return tools::write_file(path, snap.data); }
+    virtual uint16_t read16(uint32_t addr) const = 0;
+    // Board `board`'s RAM, whichever player is controlled (linked: the red arrow is kept by
+    // board 0, the master, alone: board 1's was all zero at stage 1's gate).
+    virtual uint16_t read16_on(std::size_t /*board*/, uint32_t addr) const { return read16(addr); }
+    float readf_on(std::size_t board, uint32_t addr) const {
+        const uint32_t v = static_cast<uint32_t>(read16_on(board, addr)) << 16 | read16_on(board, addr + 2);
+        float f;
+        std::memcpy(&f, &v, 4);
+        return f;
+    }
+    float readf(uint32_t addr) const {
+        const uint32_t v = read32(addr);
+        float f;
+        std::memcpy(&f, &v, 4);
+        return f;
+    }
+    uint32_t read32(uint32_t addr) const { return static_cast<uint32_t>(read16(addr)) << 16 | read16(addr + 2); }
+    virtual void write16(uint32_t addr, uint16_t v) = 0;
+    // One board's RAM only (linked boards each keep their own copy of an enemy).
+    virtual void write16_on(std::size_t board, uint32_t addr, uint16_t v) {
+        (void)board;
+        write16(addr, v);
+    }
+    virtual uint32_t r13() const = 0; // (the game's small-data base: its globals are off it)
+    virtual uint64_t frame() const = 0;
+    virtual const std::string& stopped() const = 0;
+    // Linked boards: how many, the player controlled (its board's inputs and RAM), and what the
+    // others hold meanwhile, frame by frame (by the frame's number: tries do the same).
+    virtual std::size_t boards() const { return 1; }
+    virtual void control(std::size_t /*player*/) {}
+    virtual std::size_t player() const { return 0; }
+    using Held = std::function<Inputs(uint64_t frame)>;
+    virtual void hold(std::size_t /*board*/, Held /*inputs*/) {}
+    virtual Held held(std::size_t /*board*/) const { return {}; }
+};
+
+// One board, run on its own thread one frame at a time for the bot.
+class Emulator : public Game {
+public:
     Emulator(const m3::RomSet& roms, std::span<const recomp::FunctionEntry> functions,
              std::span<const recomp::FunctionEntry> blocks, bool with_sound)
         : bus_(roms), c_(bus_, functions), sound_(roms), with_sound_(with_sound),
@@ -138,8 +190,7 @@ public:
     }
 
     // Starts from a save state (the window's F9 or gamerun --save-state).
-    bool start(const std::string& path) { return start_from(tools::read_file(path), path); }
-    bool start_from(std::vector<uint8_t> data, const std::string& name = "a save state") {
+    bool start_from(std::vector<uint8_t> data, const std::string& name = "a save state") override {
         try {
             m3::State s(std::move(data));
             tools::board_state(s, c_, timing_, sound_fn());
@@ -156,7 +207,7 @@ public:
     // Runs `frames` frames with `in` held; screenshot: the last one's picture.
     // The frames go in one command (the game's thread stops only after the
     // last), but the one with a picture, which draws the 2D as it goes.
-    void step(Inputs in, int frames = 1, const std::string& screenshot = {}) {
+    void step(Inputs in, int frames = 1, const std::string& screenshot = {}) override {
         const int plain = screenshot.empty() ? frames : frames - 1;
         auto run = [this, in](int n, const std::string& shot) {
             command([in, n, shot](Emulator& e) {
@@ -175,7 +226,7 @@ public:
     // can resume at (outside any exception: Context::request_snapshot), takes
     // it there and waits; the next step's inputs are set there, as they are
     // when the state is loaded again, so both go on the same way.
-    std::shared_ptr<Snapshot> save() {
+    std::shared_ptr<Snapshot> save() override {
         auto snap = std::make_shared<Snapshot>();
         command([snap](Emulator& e) {
             e.c_.request_snapshot([&e, snap](uint32_t) {
@@ -192,33 +243,24 @@ public:
         return snap;
     }
     // Goes back to `snap`; the next step's inputs replace the ones it held.
-    void load(const std::shared_ptr<Snapshot>& snap) {
+    void load(const std::shared_ptr<Snapshot>& snap) override {
         if (!snap || snap->data.empty()) return;
         command([snap](Emulator&) { throw Rewind{snap}; });
     }
-    bool write_state(const Snapshot& snap, const std::string& path) { return tools::write_file(path, snap.data); }
 
     // Reading the game's RAM between frames (big-endian, as the CPU sees it).
-    uint16_t read16(uint32_t addr) const { return static_cast<uint16_t>(bus_.ram()[addr] << 8 | bus_.ram()[addr + 1]); }
-    float readf(uint32_t addr) const {
-        const uint32_t v = static_cast<uint32_t>(bus_.ram()[addr]) << 24 | static_cast<uint32_t>(bus_.ram()[addr + 1]) << 16 |
-                           static_cast<uint32_t>(bus_.ram()[addr + 2]) << 8 | bus_.ram()[addr + 3];
-        float f;
-        std::memcpy(&f, &v, 4);
-        return f;
-    }
-    uint32_t read32(uint32_t addr) const { return static_cast<uint32_t>(read16(addr)) << 16 | read16(addr + 2); }
+    uint16_t read16(uint32_t addr) const override { return static_cast<uint16_t>(bus_.ram()[addr] << 8 | bus_.ram()[addr + 1]); }
     // Writing it (between frames, the game's thread waiting: as reading).
-    void write16(uint32_t addr, uint16_t v) {
+    void write16(uint32_t addr, uint16_t v) override {
         bus_.ram()[addr] = static_cast<uint8_t>(v >> 8);
         bus_.ram()[addr + 1] = static_cast<uint8_t>(v);
         if (log_) log_->frames[timing_.frames()].writes.emplace_back(addr, v);
     }
     // --record-inputs: what this board runs with, frame by frame (tools::InputLog).
     void record_into(tools::InputLog* log) { log_ = log; }
-    uint32_t r13() const { return c_.cpu.gpr[13]; } // (the game's small-data base: its globals are off it)
-    uint64_t frame() const { return timing_.frames(); }
-    const std::string& stopped() const { return stopped_; }
+    uint32_t r13() const override { return c_.cpu.gpr[13]; }
+    uint64_t frame() const override { return timing_.frames(); }
+    const std::string& stopped() const override { return stopped_; }
 
 private:
     struct Quit {};
@@ -336,27 +378,314 @@ private:
     bool idle_ = false, done_ = false;
 };
 
+// Linked boards (--boards N, a player on each), as gamerun --boards N
+// --parallel runs them: each on its own thread, all at once, meeting every
+// kSlice lines (tools::Turns), the link's packets moved on at the meeting
+// (m3::LinkRing, deferred, its latency a slice): the same every run. The bot
+// stops them at a meeting: a step's frames run, the first meeting after the
+// last one ends. A save runs one frame more and keeps every board's state at
+// its own point after that frame's end (the first block it can resume at)
+// with the ring's part, the packets on their way between those points: a
+// linked save state, gamerun's format (gamerun --boards N --load-state runs
+// on from it). As gamerun --rollback-test goes back, loading puts every board
+// back there with the others stopped at the meeting; each goes on from its
+// own point as it leaves. A step after a save loads it first, as each try from
+// it does, so the run and its tries go on alike.
+class Rig : public Game {
+public:
+    static constexpr uint32_t kSlice = 8; // (lines between meetings: gamerun's default)
+
+    Rig(std::size_t n, const m3::RomSet& roms, std::span<const recomp::FunctionEntry> functions,
+        std::span<const recomp::FunctionEntry> blocks)
+        : ring_(n), turns_(n, true, [this] { between(); }), held_(n) {
+        const uint64_t slice_cycles =
+            (recomp::FrameTiming().frame_cycles() * kSlice + recomp::FrameTiming::kLines - 1) / recomp::FrameTiming::kLines;
+        ring_.set_deferred(true);
+        ring_.set_latency(slice_cycles);
+        for (std::size_t i = 0; i < n; ++i) {
+            boards_.push_back(std::make_unique<Board>(roms, functions));
+            Board& b = *boards_.back();
+            b.bus.set_security_key(m3::games::kSpikeoutFinalEdition.security_key);
+            b.bus.use_netboard(std::make_unique<m3::CommBoard>(ring_.port(i), m3::CommBoardOptions{}));
+            b.c.set_scheduler(&b.timing);
+            b.c.set_blocks(blocks);
+            m3::games::install_spikeout_hooks(b.c);
+            b.timing.on_display_line = [this, i](uint32_t line) { display_line(i, line); };
+            b.timing.on_frame_end = [this, i] { frame_end(i); };
+        }
+    }
+    ~Rig() override {
+        {
+            std::lock_guard lock(mutex_);
+            quit_ = true, go_ = true;
+        }
+        changed_.notify_all();
+        for (auto& b : boards_)
+            if (b->thread.joinable()) b->thread.join();
+    }
+
+    // From linked boards' state (gamerun --boards N --save-state, the window's F9 in network play).
+    bool start_from(std::vector<uint8_t> data, const std::string& name = "a save state") override {
+        auto snap = std::make_shared<Snapshot>();
+        snap->data = std::move(data);
+        try {
+            put_back(*snap);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "spikebot: %s: %s (a state of %zu linked boards?)\n", name.c_str(), e.what(), boards_.size());
+            return false;
+        }
+        snap->frame = frame_ = boards_[0]->timing.frames();
+        saved_ = snap;
+        for (std::size_t i = 0; i < boards_.size(); ++i) boards_[i]->thread = std::thread([this, i] { run(i); });
+        return true;
+    }
+
+    void step(Inputs in, int frames = 1, const std::string& screenshot = {}) override {
+        if (!stopped_.empty()) return;
+        if (behind_saved_) put_back(*saved_); // (as a try from the save: from every board's point)
+        behind_saved_ = false;
+        held_[me_] = [in](uint64_t) { return in; };
+        set_inputs(frame_ + 1);
+        run_to(frame_ + static_cast<uint64_t>(std::max(frames, 1)), false, screenshot);
+    }
+    std::shared_ptr<Snapshot> save() override {
+        if (!stopped_.empty()) return saved_;
+        if (behind_saved_) put_back(*saved_);
+        set_inputs(frame_ + 1);
+        run_to(frame_ + 1, true, {});
+        behind_saved_ = true; // (the boards ran on to the meeting after it)
+        return saved_;
+    }
+    void load(const std::shared_ptr<Snapshot>& snap) override {
+        if (!snap || snap->data.empty() || !stopped_.empty()) return;
+        put_back(*snap);
+        saved_ = snap;
+        frame_ = snap->frame;
+        behind_saved_ = false;
+    }
+
+    uint16_t read16(uint32_t addr) const override { return read16_on(me_, addr); }
+    uint16_t read16_on(std::size_t board, uint32_t addr) const override {
+        const auto ram = boards_[std::min(board, boards_.size() - 1)]->bus.ram();
+        return static_cast<uint16_t>(ram[addr] << 8 | ram[addr + 1]);
+    }
+    void write16(uint32_t addr, uint16_t v) override {
+        for (auto& b : boards_) {
+            b->bus.ram()[addr] = static_cast<uint8_t>(v >> 8);
+            b->bus.ram()[addr + 1] = static_cast<uint8_t>(v);
+        }
+    }
+    void write16_on(std::size_t board, uint32_t addr, uint16_t v) override {
+        auto ram = boards_[std::min(board, boards_.size() - 1)]->bus.ram();
+        ram[addr] = static_cast<uint8_t>(v >> 8);
+        ram[addr + 1] = static_cast<uint8_t>(v);
+    }
+    uint32_t r13() const override { return boards_[me_]->c.cpu.gpr[13]; }
+    uint64_t frame() const override { return frame_; }
+    const std::string& stopped() const override { return stopped_; }
+    std::size_t boards() const override { return boards_.size(); }
+    void control(std::size_t player) override { me_ = std::min(player, boards_.size() - 1); }
+    std::size_t player() const override { return me_; }
+    void hold(std::size_t board, Held inputs) override {
+        if (board < held_.size()) held_[board] = std::move(inputs);
+    }
+    Held held(std::size_t board) const override { return board < held_.size() ? held_[board] : Held{}; }
+
+private:
+    struct Rewound {};
+    struct Board {
+        Board(const m3::RomSet& roms, std::span<const recomp::FunctionEntry> functions)
+            : bus(roms), c(bus, functions), screen(m3::TilegenRenderer::kWidth * m3::TilegenRenderer::kHeight) {}
+        m3::Bus bus;
+        recomp::Context c;
+        recomp::FrameTiming timing;
+        m3::TilegenRenderer tilegen;
+        m3::Real3dRenderer real3d;
+        std::vector<uint32_t> screen;
+        std::thread thread;
+        std::vector<uint8_t> saved; // (its state at its own point, while a save is under way)
+        bool has_saved = false, rewind = false, draw_2d = false;
+        std::string shot;
+    };
+
+    // The boards run on to the first meeting after frame `to` ends (and, `snap`, keep their
+    // states after its end); the bot's thread waits for it.
+    void run_to(uint64_t to, bool snap, const std::string& shot) {
+        {
+            std::unique_lock lock(mutex_);
+            to_ = to, want_snap_ = snap;
+            Board& b = *boards_[me_];
+            b.shot = shot, b.draw_2d = !shot.empty();
+            paused_ = false, go_ = true;
+        }
+        changed_.notify_all();
+        std::unique_lock lock(mutex_);
+        changed_.wait(lock, [this] { return paused_ || !stopped_.empty(); });
+        frame_ = to;
+    }
+
+    // Each board's inputs for the frame `frame` (the controlled player's, the others' held).
+    void set_inputs(uint64_t frame) {
+        for (std::size_t i = 0; i < boards_.size(); ++i) {
+            const Inputs in = held_[i] ? held_[i](frame) : Inputs{};
+            boards_[i]->bus.inputs.bank0 = in.bank0;
+            boards_[i]->bus.inputs.controls = in.controls;
+        }
+    }
+
+    // Every board and the ring put back as `snap` has them (the boards stopped: not yet
+    // started, or at a meeting, going on from their own points as they leave it).
+    void put_back(const Snapshot& snap) {
+        m3::State s(std::span<const uint8_t>(snap.data));
+        s.tag("spikeout linked save state 1");
+        ring_.cut_state(s);
+        for (auto& b : boards_) {
+            std::vector<uint8_t> bytes;
+            s.io(bytes);
+            m3::State bs(std::move(bytes));
+            tools::board_state(bs, b->c, b->timing, {});
+            b->rewind = started_;
+            b->has_saved = false;
+        }
+        s.tag("end");
+    }
+
+    void run(std::size_t i) {
+        Board& b = *boards_[i];
+        {
+            std::unique_lock lock(mutex_);
+            changed_.wait(lock, [this] { return go_; });
+            started_ = true;
+        }
+        for (;;) {
+            if (quit_) break;
+            try {
+                b.c.resume_block(b.c.cpu.pc);
+            } catch (const Rewound&) {
+                continue;
+            } catch (const Quit&) {
+                break;
+            } catch (const std::exception& e) {
+                std::lock_guard lock(mutex_);
+                if (stopped_.empty()) stopped_ = "board " + std::to_string(i) + ": " + e.what();
+                break;
+            }
+            std::lock_guard lock(mutex_);
+            if (stopped_.empty()) stopped_ = "board " + std::to_string(i) + ": the reset code returned";
+            break;
+        }
+        turns_.finish(i);
+        changed_.notify_all();
+    }
+
+    void display_line(std::size_t i, uint32_t line) {
+        Board& b = *boards_[i];
+        if (b.draw_2d) {
+            if (line == 0) b.tilegen.begin_frame();
+            b.tilegen.draw_line(b.bus, static_cast<int>(line));
+        }
+        if (line % kSlice == kSlice - 1) {
+            b.bus.netboard().sync(b.c.cycles());
+            turns_.pass(i);
+            if (quit_) throw Quit{};
+            if (b.rewind) {
+                b.rewind = false;
+                throw Rewound{};
+            }
+        }
+    }
+
+    void frame_end(std::size_t i) {
+        Board& b = *boards_[i];
+        b.bus.midi_out().clear();
+        const uint64_t frame = b.timing.frames();
+        if (frame == to_ && !b.shot.empty()) {
+            b.real3d.render(b.bus.real3d());
+            b.tilegen.composite(b.screen, b.real3d.image());
+            tools::write_png(b.shot, b.screen, m3::TilegenRenderer::kWidth, m3::TilegenRenderer::kHeight);
+            b.shot.clear(), b.draw_2d = false;
+        }
+        if (frame == to_ && want_snap_)
+            b.c.request_snapshot([this, &b](uint32_t) {
+                m3::State s;
+                tools::board_state(s, b.c, b.timing, {});
+                b.saved = std::move(s.data());
+                b.has_saved = true;
+            });
+        if (frame >= to_) return;
+        const Held& held = held_[i]; // (the next frame's inputs)
+        const Inputs in = held ? held(frame + 1) : Inputs{};
+        b.bus.inputs.bank0 = in.bank0;
+        b.bus.inputs.controls = in.controls;
+    }
+
+    // At a meeting, every board stopped (the last to come runs this): the link's packets on;
+    // the boards stopped for the bot once all have ended frame to_ (and saved, if asked).
+    void between() {
+        ring_.exchange();
+        if (!go_) return;
+        for (auto& b : boards_)
+            if (b->timing.frames() < to_ || (want_snap_ && !b->has_saved)) return;
+        if (want_snap_) {
+            if (!ring_.cut_complete()) return;
+            auto snap = std::make_shared<Snapshot>();
+            m3::State s;
+            s.tag("spikeout linked save state 1");
+            ring_.cut_state(s);
+            for (auto& b : boards_) {
+                s.io(b->saved);
+                b->has_saved = false;
+                std::vector<uint8_t>().swap(b->saved);
+            }
+            s.tag("end");
+            snap->data = std::move(s.data());
+            snap->frame = to_;
+            saved_ = snap;
+        }
+        std::unique_lock lock(mutex_);
+        go_ = false, paused_ = true;
+        changed_.notify_all();
+        changed_.wait(lock, [this] { return go_; }); // (the bot's turn: reading, writing, loading)
+    }
+
+    struct Quit {};
+    m3::LinkRing ring_;
+    tools::Turns turns_;
+    std::vector<std::unique_ptr<Board>> boards_;
+    std::vector<Held> held_;
+    std::size_t me_ = 0;
+    std::shared_ptr<Snapshot> saved_; // (the last save, or the state loaded)
+    bool behind_saved_ = false;       // (the boards ran on past it to a meeting)
+    uint64_t frame_ = 0, to_ = 0;
+    bool want_snap_ = false;
+    std::string stopped_;
+
+    std::mutex mutex_;
+    std::condition_variable changed_;
+    bool go_ = false, paused_ = false, quit_ = false, started_ = false;
+};
+
 // Boards that try things from a save state in parallel (one thread each):
 // try_all runs fn(worker, k) for k in [0, n) from `snap`, every worker taking
 // the next k, and returns each one's result.
 class Workers {
 public:
-    Workers(int n, const m3::RomSet& roms, std::span<const recomp::FunctionEntry> functions,
-            std::span<const recomp::FunctionEntry> blocks, bool with_sound)
-        : roms_(roms), functions_(functions), blocks_(blocks), with_sound_(with_sound), count_(std::max(n, 1)) {}
+    // make: a game like the bot's (one board, or linked boards); `main`: the bot's, whose
+    // controlled player and other players' inputs every try takes.
+    Workers(int n, std::function<std::unique_ptr<Game>()> make, const Game& main)
+        : make_(std::move(make)), main_(main), count_(std::max(n, 1)) {}
 
     template <class T>
-    std::vector<T> try_all(const std::shared_ptr<Emulator::Snapshot>& snap, std::size_t n,
-                           const std::function<T(Emulator&, std::size_t)>& fn) {
+    std::vector<T> try_all(const std::shared_ptr<Snapshot>& snap, std::size_t n, const std::function<T(Game&, std::size_t)>& fn) {
         return try_from<T>([&snap](std::size_t) { return snap; }, n, fn);
     }
     // The same, try k starting from from(k).
     template <class T>
-    std::vector<T> try_from(const std::function<std::shared_ptr<Emulator::Snapshot>(std::size_t)>& from, std::size_t n,
-                            const std::function<T(Emulator&, std::size_t)>& fn) {
+    std::vector<T> try_from(const std::function<std::shared_ptr<Snapshot>(std::size_t)>& from, std::size_t n,
+                            const std::function<T(Game&, std::size_t)>& fn) {
         if (boards_.empty()) // (made from the first snapshot)
             for (int i = 0; i < count_; ++i) {
-                boards_.push_back(std::make_unique<Emulator>(roms_, functions_, blocks_, with_sound_));
+                boards_.push_back(make_());
                 boards_.back()->start_from(from(0)->data);
             }
         std::vector<T> out(n);
@@ -366,6 +695,8 @@ public:
             threads.emplace_back([&, board = b.get()] {
                 for (std::size_t k; (k = next++) < n;) {
                     board->load(from(k));
+                    board->control(main_.player());
+                    for (std::size_t i = 0; i < main_.boards(); ++i) board->hold(i, main_.held(i));
                     out[k] = fn(*board, k);
                 }
             });
@@ -374,11 +705,10 @@ public:
     }
 
 private:
-    const m3::RomSet& roms_;
-    std::span<const recomp::FunctionEntry> functions_, blocks_;
-    bool with_sound_;
+    std::function<std::unique_ptr<Game>()> make_;
+    const Game& main_;
     int count_;
-    std::vector<std::unique_ptr<Emulator>> boards_;
+    std::vector<std::unique_ptr<Game>> boards_;
 };
 
 // ---- The game as the bot sees it ----
@@ -388,16 +718,22 @@ struct Character {
     float x = 0, y = 0, z = 0;
 };
 
-Character character(const Emulator& e, uint32_t base) {
+// The controlled player's character (player 1's on one board; linked, the one
+// whose board the bot is controlling: player 2's object on board 1).
+uint32_t me(const Game& e) { return ram::kPlayer + static_cast<uint32_t>(e.player()) * ram::kSlot; }
+// For the log: "P2 " when linked boards are played, else nothing.
+std::string who(const Game& e) { return e.boards() > 1 ? "P" + std::to_string(e.player() + 1) + " " : std::string(); }
+
+Character character(const Game& e, uint32_t base) {
     return {base, e.read16(base + ram::kHealth), e.read16(base + ram::kMaxHealth), e.readf(base + ram::kX),
             e.readf(base + ram::kY), e.readf(base + ram::kZ)};
 }
 
-uint16_t area_phase(const Emulator& e) { return e.read16(ram::kAreaPhase + 2); }
+uint16_t area_phase(const Game& e) { return e.read16(ram::kAreaPhase + 2); }
 
 // The enemies to fight: those with health while the area's fight is on (after
 // a boss those left run off, and between stages the slots keep the last ones).
-std::vector<Character> enemies(const Emulator& e) {
+std::vector<Character> enemies(const Game& e) {
     std::vector<Character> out;
     if (area_phase(e) & ram::kPhaseOver) return out;
     for (int i = 0; i < ram::kEnemySlots; ++i) {
@@ -408,13 +744,13 @@ std::vector<Character> enemies(const Emulator& e) {
 }
 
 // Where the red arrow points, while the game asks for the gate to be broken.
-std::optional<std::pair<float, float>> arrow_target(const Emulator& e) {
+std::optional<std::pair<float, float>> arrow_target(const Game& e) {
     if (!(area_phase(e) & ram::kPhaseGate)) return std::nullopt;
-    return std::make_pair(e.readf(ram::kArrowTarget), e.readf(ram::kArrowTarget + 8));
+    return std::make_pair(e.readf_on(0, ram::kArrowTarget), e.readf_on(0, ram::kArrowTarget + 8));
 }
 
-void print_state(const Emulator& e) {
-    const Character p = character(e, ram::kPlayer);
+void print_state(const Game& e) {
+    const Character p = character(e, me(e));
     std::printf("frame %llu: area phase %u, frames %u; player hp %d/%d at %.2f %.2f %.2f\n", static_cast<unsigned long long>(e.frame()),
                 area_phase(e), e.read16(ram::kAreaFrames), p.health, p.max_health, p.x, p.y, p.z);
     for (int i = 0; i < ram::kEnemySlots; ++i) {
@@ -423,8 +759,8 @@ void print_state(const Emulator& e) {
         std::printf("  slot %06x: kind %04x hp %d/%d at %.2f %.2f %.2f\n", ch.base, e.read16(ch.base + ram::kKind), ch.health,
                     ch.max_health, ch.x, ch.y, ch.z);
     }
-    std::printf("  arrow to %.2f %.2f %.2f%s\n", static_cast<double>(e.readf(ram::kArrowTarget)),
-                static_cast<double>(e.readf(ram::kArrowTarget + 4)), static_cast<double>(e.readf(ram::kArrowTarget + 8)),
+    std::printf("  arrow to %.2f %.2f %.2f%s\n", static_cast<double>(e.readf_on(0, ram::kArrowTarget)),
+                static_cast<double>(e.readf_on(0, ram::kArrowTarget + 4)), static_cast<double>(e.readf_on(0, ram::kArrowTarget + 8)),
                 arrow_target(e) ? " (break the gate)" : "");
 }
 
@@ -694,7 +1030,7 @@ float as_float(uint32_t v) {
     return f;
 }
 
-Floor read_floor(const Emulator& e) {
+Floor read_floor(const Game& e) {
     Floor f;
     const uint32_t grid = e.read32(e.r13() - 7832);
     if (grid == 0xFFFFFFFFu || grid >= 0x800000) return f;
@@ -799,7 +1135,7 @@ std::vector<Move> moves() {
     return m;
 }
 
-const Character* boss_of(const Emulator& e, const std::vector<Character>& foes);
+const Character* boss_of(const Game& e, const std::vector<Character>& foes);
 
 // How things stand, for comparing tries.
 struct Score {
@@ -814,16 +1150,16 @@ struct Score {
 // the opera house's, 2 at the car park's).
 constexpr float kArrowAbove = 1.3f;
 
-Score score(const Emulator& e) {
+Score score(const Game& e) {
     Score s;
-    const Character p = character(e, ram::kPlayer);
+    const Character p = character(e, me(e));
     s.player_health = p.health;
     s.player_y = p.y;
     const auto t = arrow_target(e);
     s.arrow = t.has_value();
     if (t) { // the fight is over: where the arrow points (those left are bystanders); with its
              // height (the opera house's gate is on a balcony above the doors below it)
-        const float up = e.readf(ram::kArrowTarget + 4) - kArrowAbove - p.y;
+        const float up = e.readf_on(0, ram::kArrowTarget + 4) - kArrowAbove - p.y;
         s.nearest = std::hypot(std::hypot(t->first - p.x, t->second - p.z), std::max(0.0f, std::fabs(up) - 1.0f));
         return s;
     }
@@ -848,7 +1184,7 @@ Score score(const Emulator& e) {
 // In a boss fight (the phase's boss bit), the boss: the enemy with the most health at full, by
 // far (Mikhail 1500, his guards 200); only he needs to go down (the owner: "every stage the goal
 // is to kill the boss"; guards keep coming). Else none.
-const Character* boss_of(const Emulator& e, const std::vector<Character>& foes) {
+const Character* boss_of(const Game& e, const std::vector<Character>& foes) {
     if (!(area_phase(e) & ram::kPhaseBoss)) return nullptr;
     const Character* boss = nullptr;
     for (const Character& en : foes)
@@ -858,8 +1194,8 @@ const Character* boss_of(const Emulator& e, const std::vector<Character>& foes) 
 
 // Where the bot is headed: the boss in a boss fight, else the nearest enemy, else where the
 // arrow points while the game asks for the gate.
-std::optional<Character> target(const Emulator& e) {
-    const Character p = character(e, ram::kPlayer);
+std::optional<Character> target(const Game& e) {
+    const Character p = character(e, me(e));
     const std::vector<Character> foes = enemies(e);
     if (const Character* boss = boss_of(e, foes)) return *boss;
     std::optional<Character> best;
@@ -867,7 +1203,7 @@ std::optional<Character> target(const Emulator& e) {
         if (!best || std::hypot(en.x - p.x, en.z - p.z) < std::hypot(best->x - p.x, best->z - p.z)) best = en;
     if (!best && arrow_target(e)) {
         Character gate;
-        gate.x = e.readf(ram::kArrowTarget), gate.y = e.readf(ram::kArrowTarget + 4), gate.z = e.readf(ram::kArrowTarget + 8);
+        gate.x = e.readf_on(0, ram::kArrowTarget), gate.y = e.readf_on(0, ram::kArrowTarget + 4), gate.z = e.readf_on(0, ram::kArrowTarget + 8);
         best = gate;
     }
     return best;
@@ -907,28 +1243,31 @@ const Button kWalk[8][2] = {{Up, Up}, {Up, Right}, {Right, Right}, {Down, Right}
 // The player held where he stands (a scene: stage 2's stairs show the floor
 // above for 500 frames, then the player is put there): 20 frames' walking in
 // each of the 4 straight ways moves him nowhere. Nothing to search then.
-bool frozen(Workers& w, const std::shared_ptr<Emulator::Snapshot>& snap) {
-    const auto moved = w.try_all<float>(snap, 4, [](Emulator& b, std::size_t k) {
-        const Character p0 = character(b, ram::kPlayer);
+bool frozen(Workers& w, const std::shared_ptr<Snapshot>& snap) {
+    const auto moved = w.try_all<float>(snap, 4, [](Game& b, std::size_t k) {
+        const Character p0 = character(b, me(b));
         b.step(press({kWalk[k * 2][0], kWalk[k * 2][1]}), 20); // (20: in a corner he turns before he moves)
-        const Character p = character(b, ram::kPlayer);
+        const Character p = character(b, me(b));
         return std::hypot(p.x - p0.x, p.z - p0.z) + std::fabs(p.y - p0.y);
     });
+    if (std::getenv("SPIKEBOT_VERBOSE"))
+        std::printf("    held? moved %.3f %.3f %.3f %.3f\n", static_cast<double>(moved[0]), static_cast<double>(moved[1]),
+                    static_cast<double>(moved[2]), static_cast<double>(moved[3]));
     return std::all_of(moved.begin(), moved.end(), [](float m) { return m < 0.01f; });
 }
 
-int navigate(Workers& w, const std::shared_ptr<Emulator::Snapshot>& snap, float from, bool verbose) {
+int navigate(Workers& w, const std::shared_ptr<Snapshot>& snap, float from, bool verbose) {
     // One leg each way first (an eighth of the cost): when the best gets well
     // closer, nothing is in the way; the two-leg routes only when it doesn't.
     constexpr float kClear = 1.5f; // (a leg walked in the open covers about 2.5)
-    const std::vector<float> legs = w.try_all<float>(snap, 8, [](Emulator& b, std::size_t k) {
+    const std::vector<float> legs = w.try_all<float>(snap, 8, [](Game& b, std::size_t k) {
         b.step(press({kWalk[k][0], kWalk[k][1]}), kLeg);
         return score(b).nearest;
     });
     const std::size_t leg = static_cast<std::size_t>(std::min_element(legs.begin(), legs.end()) - legs.begin());
     if (verbose) std::printf("    one leg: best %zu, %.2f -> %.2f\n", leg, static_cast<double>(from), static_cast<double>(legs[leg]));
     if (from - legs[leg] >= kClear) return static_cast<int>(leg);
-    const std::vector<float> ends = w.try_all<float>(snap, 64, [](Emulator& b, std::size_t k) {
+    const std::vector<float> ends = w.try_all<float>(snap, 64, [](Game& b, std::size_t k) {
         const std::size_t a = k / 8, c = k % 8;
         b.step(press({kWalk[a][0], kWalk[a][1]}), kLeg);
         b.step(press({kWalk[c][0], kWalk[c][1]}), kLeg);
@@ -962,7 +1301,7 @@ constexpr int kExploreStale = 10;    // rounds with nowhere nearer: then the fur
 // A leg of a route: direction d & 7 for kExploreLeg frames, with a jump at
 // its start when d >= 8 (onto crates and ledges a walk can't get up).
 constexpr int kExploreWays = 16;
-void explore_leg(Emulator& b, uint8_t d) {
+void explore_leg(Game& b, uint8_t d) {
     const Button a = kWalk[d & 7][0], c = kWalk[d & 7][1];
     if (d < 8) return b.step(press({a, c}), kExploreLeg);
     b.step(press({a, c, Jump}), kExploreLeg); // (held: higher; kJumpHold)
@@ -973,19 +1312,23 @@ std::optional<std::pair<float, float>> g_goal; // (SPIKEBOT_GOAL=x,z: --explore-
 // (the game's own knock-out still runs: its counts and time bonuses) - for getting through the
 // stages, not for playing them.
 bool g_weak_enemies = false;
+// --idle-others (linked boards): only player 1 is played; the others stand where they are, no
+// input, and are continued when knocked out (their cabinets stay in the shared game). The owner:
+// player 1 alone clears a stage, the others need only be there.
+bool g_idle_others = false;
 // --record-inputs FILE: the main board's run, saved with each checkpoint state and at the end.
 tools::InputLog* g_input_log = nullptr;
 std::string g_input_log_path;
 
-float apart(const Emulator& e) {
-    const Character p = character(e, ram::kPlayer);
+float apart(const Game& e) {
+    const Character p = character(e, me(e));
     if (g_goal) return std::hypot(g_goal->first - p.x, g_goal->second - p.z);
     float best = 1e9f;
     for (const Character& en : enemies(e)) best = std::min(best, std::hypot(en.x - p.x, en.z - p.z));
     return best;
 }
 
-std::vector<uint8_t> explore(Workers& w, const std::shared_ptr<Emulator::Snapshot>& snap, float start, bool verbose) {
+std::vector<uint8_t> explore(Workers& w, const std::shared_ptr<Snapshot>& snap, float start, bool verbose) {
     struct Place {
         std::vector<uint8_t> route;
         float apart = 0;
@@ -994,7 +1337,7 @@ std::vector<uint8_t> explore(Workers& w, const std::shared_ptr<Emulator::Snapsho
         float away = 0;  // (from the start, on the ground)
     };
     std::map<std::tuple<int, int, int>, Place> archive;
-    const Character p0 = w.try_all<Character>(snap, 1, [](Emulator& b, std::size_t) { return character(b, ram::kPlayer); })[0];
+    const Character p0 = w.try_all<Character>(snap, 1, [](Game& b, std::size_t) { return character(b, me(b)); })[0];
     const float y0 = p0.y;
     archive[{static_cast<int>(std::floor(p0.x / kCell)), static_cast<int>(std::floor(p0.z / kCell)),
              static_cast<int>(std::floor(p0.y / kCellHeight))}] = {{}, start, 0}; // (where it stands)
@@ -1023,16 +1366,16 @@ std::vector<uint8_t> explore(Workers& w, const std::shared_ptr<Emulator::Snapsho
         for (Place* p : picks) ++p->tried;
         // Each place picked is walked to once and saved there; the 8 ways are
         // tried from that (a route walked again for each would cost 8 times).
-        using Snap = std::shared_ptr<Emulator::Snapshot>;
-        const std::vector<Snap> at = w.try_all<Snap>(snap, picks.size(), [&](Emulator& b, std::size_t k) {
+        using Snap = std::shared_ptr<Snapshot>;
+        const std::vector<Snap> at = w.try_all<Snap>(snap, picks.size(), [&](Game& b, std::size_t k) {
             for (uint8_t d : picks[k]->route) explore_leg(b, d);
             return b.save();
         });
         const std::vector<Reached> reached = w.try_from<Reached>([&](std::size_t k) { return at[k / kExploreWays]; },
-                                                                 picks.size() * kExploreWays, [&](Emulator& b, std::size_t k) {
+                                                                 picks.size() * kExploreWays, [&](Game& b, std::size_t k) {
             const uint8_t d = static_cast<uint8_t>(k % kExploreWays);
             explore_leg(b, d);
-            const Character p = character(b, ram::kPlayer);
+            const Character p = character(b, me(b));
             std::vector<uint8_t> route = picks[k / kExploreWays]->route;
             route.push_back(d);
             return Reached{std::move(route), p.x, p.y, p.z, apart(b)};
@@ -1067,8 +1410,8 @@ std::vector<uint8_t> explore(Workers& w, const std::shared_ptr<Emulator::Snapsho
         // A plan of the cells reached (z down the page, x across): # reached, E an enemy, @ the start.
         using Cell = std::pair<int, int>;
         auto cell = [](const Character& ch) { return Cell{static_cast<int>(std::floor(ch.x / kCell)), static_cast<int>(std::floor(ch.z / kCell))}; };
-        const auto seen = w.try_all<std::vector<Cell>>(snap, 1, [&](Emulator& b, std::size_t) {
-            std::vector<Cell> v{cell(character(b, ram::kPlayer))}; // (the start first)
+        const auto seen = w.try_all<std::vector<Cell>>(snap, 1, [&](Game& b, std::size_t) {
+            std::vector<Cell> v{cell(character(b, me(b)))}; // (the start first)
             for (const Character& en : enemies(b)) v.push_back(cell(en));
             return v;
         })[0];
@@ -1098,7 +1441,7 @@ std::vector<uint8_t> explore(Workers& w, const std::shared_ptr<Emulator::Snapsho
 // (start continues, beat picks the fighter shown on "SELECT A FIGHTER", the
 // same one) until the player is back with health (or the time is up).
 // Returns whether it was.
-bool continue_game(Emulator& e, const std::string& out) {
+bool continue_game(Game& e, const std::string& out) {
     Inputs coin, start;
     coin.bank0 = static_cast<uint8_t>(0xFF & ~kCoin);
     start.bank0 = static_cast<uint8_t>(0xFF & ~kStart);
@@ -1109,14 +1452,14 @@ bool continue_game(Emulator& e, const std::string& out) {
         e.step(tries % 2 ? press({Beat}) : start, 4);
         const bool shot = !out.empty() && tries % 3 == 0;
         e.step({}, 16, shot ? out + "/c-" + std::to_string(e.frame() + 16) + ".png" : std::string());
-        if (character(e, ram::kPlayer).health > 0) return true;
+        if (character(e, me(e)).health > 0) return true;
     }
     return false;
 }
 
 // Fights: every `decide` frames, tries each move for `horizon` frames from a
 // save state (on the workers) and plays the best for `decide` frames.
-void play(Emulator& e, Workers& w, int frames, const std::string& out) {
+void play(Game& e, Workers& w, int frames, const std::string& out) {
     constexpr int kDecide = 10, kHorizon = 20, kFightHorizon = 55, kGateHorizon = 120;
     constexpr uint64_t kStateEvery = 300;
     constexpr int kKnockedOut = 120; // (until "CONTINUE?" shows)
@@ -1126,38 +1469,70 @@ void play(Emulator& e, Workers& w, int frames, const std::string& out) {
     const uint64_t end = e.frame() + static_cast<uint64_t>(frames);
     uint64_t next_shot = e.frame(), next_state = e.frame();
     const bool verbose = std::getenv("SPIKEBOT_VERBOSE") != nullptr;
-    auto checkpoint = [&](const std::shared_ptr<Emulator::Snapshot>& snap) { // one the window can load
+    auto checkpoint = [&](const std::shared_ptr<Snapshot>& snap) { // one the window can load
         if (out.empty() || snap->frame < next_state) return;
         e.write_state(*snap, out + "/bot-" + std::to_string(snap->frame) + ".state");
         if (g_input_log) g_input_log->save(g_input_log_path);
         next_state += kStateEvery;
     };
-    int down_for = 0; // frames with no health (a knock-out shows "K.O." first)
-    int still_for = 0, last_enemy_health = -1, last_player_health = -1; // (nothing hit either way)
-    float closest = 1e9f; // (while still: the nearest they have been; getting closer is not stuck)
-    uint64_t turn_start = e.frame(); // (the frames since the last turn: walking takes longer than fighting)
+    // What the bot keeps about each player it plays (linked boards: one each; their turns
+    // alternate, each player's inputs held meanwhile as its last turn left them).
+    struct Mind {
+        int down_for = 0; // frames with no health (a knock-out shows "K.O." first)
+        int still_for = 0, last_enemy_health = -1, last_player_health = -1; // (nothing hit either way)
+        float closest = 1e9f;   // (while still: the nearest they have been; getting closer is not stuck)
+        uint64_t turn_start = 0; // (the frames since the last turn: walking takes longer than fighting)
+        int no_hits = 0;  // (fight turns in a row where no try hurt anyone)
+        int walk_for = 0; // (turns left walking the way though within reach)
+        int way_stalled = 0; // (turns following a way no nearer the point headed for)
+        Waypoint way_aim{0, 0, 0, false};
+        float way_best = 1e9f;
+    };
+    std::vector<Mind> minds(e.boards());
+    for (Mind& m : minds) m.turn_start = e.frame();
+    uint64_t turns = 0;
     int last_phase = -1; // (each change logged: where the stages and areas begin)
-    int no_hits = 0; // (fight turns in a row where no try hurt anyone)
     constexpr int kNoHits = 6, kWalkFor = 10;
-    int walk_for = 0; // (turns left walking the way though within reach)
-    int way_stalled = 0; // (turns following a way no nearer the point headed for)
-    Waypoint way_aim{0, 0, 0, false};
-    float way_best = 1e9f;
     constexpr int kWayStalled = 6;
     uint64_t playing_at = e.frame(); // (the last frame a game was being played)
     while (e.frame() < end && e.stopped().empty()) {
-        if (g_weak_enemies) // (--weak-enemies: each turn, every enemy in play down to 1 health)
-            for (int i = 0; i < ram::kEnemySlots; ++i) {
-                const uint32_t base = ram::kEnemies + static_cast<uint32_t>(i) * ram::kSlot;
-                if (e.read16(base + ram::kLive) >> 8 != 0 && e.read16(base + ram::kHealth) > 1) e.write16(base + ram::kHealth, 1);
+        if (g_idle_others) // (the others: continued when knocked out, otherwise left alone)
+            for (std::size_t q = 1; q < e.boards(); ++q) {
+                e.control(q);
+                if (character(e, me(e)).health == 0 && (minds[q].down_for += kDecide) >= kKnockedOut) {
+                    const bool back = continue_game(e, {});
+                    std::printf("frame %llu: %sknocked out; %s\n", static_cast<unsigned long long>(e.frame()), who(e).c_str(),
+                                back ? "continued" : "no continue");
+                    minds[q].down_for = 0;
+                }
+                e.hold(q, {});
             }
+        const std::size_t player = g_idle_others ? 0 : turns++ % e.boards();
+        e.control(player);
+        Mind& mind = minds[player];
+        int& down_for = mind.down_for;
+        int &still_for = mind.still_for, &last_enemy_health = mind.last_enemy_health, &last_player_health = mind.last_player_health;
+        float& closest = mind.closest;
+        uint64_t& turn_start = mind.turn_start;
+        int &no_hits = mind.no_hits, &walk_for = mind.walk_for, &way_stalled = mind.way_stalled;
+        Waypoint& way_aim = mind.way_aim;
+        float& way_best = mind.way_best;
+        if (g_weak_enemies) // (--weak-enemies: each turn, every enemy in play down to 1 health, on
+                            // every board: their copies differ, and cabinets that disagree about a
+                            // kill stop with a communication error)
+            for (std::size_t board = 0; board < e.boards(); ++board)
+                for (int i = 0; i < ram::kEnemySlots; ++i) {
+                    const uint32_t base = ram::kEnemies + static_cast<uint32_t>(i) * ram::kSlot;
+                    if (e.read16_on(board, base + ram::kLive) >> 8 != 0 && e.read16_on(board, base + ram::kHealth) > 1)
+                        e.write16_on(board, base + ram::kHealth, 1);
+                }
         if (e.read32(ram::kPlaying) != 0) playing_at = e.frame();
         else if (e.frame() - playing_at > 600) {
             std::printf("frame %llu: game over (the attract mode)\n", static_cast<unsigned long long>(e.frame()));
             break;
         }
         if (const int phase = area_phase(e); phase != last_phase) {
-            const Character p = character(e, ram::kPlayer);
+            const Character p = character(e, me(e));
             std::printf("frame %llu: area phase %d, player at %.1f %.1f %.1f\n", static_cast<unsigned long long>(e.frame()), phase,
                         static_cast<double>(p.x), static_cast<double>(p.y), static_cast<double>(p.z));
             last_phase = phase;
@@ -1191,7 +1566,7 @@ void play(Emulator& e, Workers& w, int frames, const std::string& out) {
                 // out while a search took the player 42 legs away from two enemies 1.6 off), nor
                 // when the floor grid has a way there (following it, steps that fail are barred and
                 // planned round).
-                const Character pl = character(e, ram::kPlayer);
+                const Character pl = character(e, me(e));
                 const std::optional<Character> t = target(e);
                 const bool no_search = now.nearest <= (to_gate ? kGateReach : kReach) ||
                                        (t && plan_way(read_floor(e), pl.x, pl.y, pl.z, t->x, t->y, t->z).size() > 1) ||
@@ -1238,7 +1613,7 @@ void play(Emulator& e, Workers& w, int frames, const std::string& out) {
         // front, the arrow 7 behind it): there, hit it.
         bool gate_reached = false;
         if (to_gate && now.nearest > kGateReach) {
-            const Character p = character(e, ram::kPlayer);
+            const Character p = character(e, me(e));
             if (const std::optional<Character> t = target(e))
                 gate_reached = plan_way(read_floor(e), p.x, p.y, p.z, t->x, t->y, t->z).size() <= 2;
         }
@@ -1247,20 +1622,32 @@ void play(Emulator& e, Workers& w, int frames, const std::string& out) {
             if (frozen(w, snap)) {
                 // With enemies within reach it's a hold, not a scene: struggle (beat taps free the
                 // player; waiting, stage 1's boss held him until the time ran out).
-                if (now.enemies > 0 && now.nearest <= kReach) {
+                // (any enemy's distance: in a boss fight `nearest` is the boss's, and one of the others
+                // held the player while the bot waited for a scene to end; read now, and not apart(),
+                // which gives the gate's distance on the way to one: stage 2's fence gate, a grabber
+                // came after the area's last enemy and held the player until the time ran out; nor
+                // enemies(), empty once the area's phase says it's over, as it did then)
+                const Character p = character(e, me(e));
+                float held_by = 1e9f;
+                for (int i = 0; i < ram::kEnemySlots; ++i) {
+                    const Character en = character(e, ram::kEnemies + static_cast<uint32_t>(i) * ram::kSlot);
+                    if (en.max_health > 0 && en.health > 0 && e.read16(en.base + ram::kLive) >> 8 != 0)
+                        held_by = std::min(held_by, std::hypot(en.x - p.x, en.z - p.z));
+                }
+                if (held_by <= kReach) {
                     walk_for = 0;
                     for (int i = 0; i < kDecide; ++i) e.step(i % 6 < 2 ? press({Beat}) : press({i % 4 < 2 ? Left : Right}));
-                    std::printf("frame %llu: struggle (held)\n", static_cast<unsigned long long>(e.frame()));
+                    std::printf("frame %llu: %sstruggle (held)\n", static_cast<unsigned long long>(e.frame()), who(e).c_str());
                     continue;
                 }
                 e.step({}, kLeg); // (a scene: no search)
-                std::printf("frame %llu: wait (held)\n", static_cast<unsigned long long>(e.frame()));
+                std::printf("frame %llu: %swait (held)\n", static_cast<unsigned long long>(e.frame()), who(e).c_str());
                 continue;
             }
             // A way over the area's floor (the game's own grid), when there is one: each turn
             // the 8 directions walked and jumped are tried, and the one ending nearest the next
             // point on the way is played.
-            const Character p = character(e, ram::kPlayer);
+            const Character p = character(e, me(e));
             if (const std::optional<Character> t = target(e)) {
                 const std::vector<Waypoint> way = plan_way(read_floor(e), p.x, p.y, p.z, t->x, t->y, t->z);
                 if (const std::optional<Waypoint> aim = next_on_way(way, p.x, p.y, p.z)) {
@@ -1270,7 +1657,7 @@ void play(Emulator& e, Workers& w, int frames, const std::string& out) {
                     // for kRunUp frames, then toward it for 2, 4, ... 24 and jump: it must leave
                     // the ground moving, just short of the step's edge.
                     const std::size_t tries = aim->jump ? 16 + 8 * 12 : 16;
-                    auto leg = [](Emulator& b, std::size_t k, const std::string& shot) {
+                    auto leg = [](Game& b, std::size_t k, const std::string& shot) {
                         if (k >= 16) {
                             const std::size_t to = (k - 16) % 8, away = (to + 4) % 8;
                             const int run_in = 2 * static_cast<int>(1 + (k - 16) / 8);
@@ -1283,12 +1670,12 @@ void play(Emulator& e, Workers& w, int frames, const std::string& out) {
                         b.step(press({a, c, Jump}), kJumpHold);
                         b.step(press({a, c}), kWayJumpLeg - kJumpHold, shot);
                     };
-                    auto off = [&aim](const Emulator& b) {
-                        const Character q = character(b, ram::kPlayer);
+                    auto off = [&aim](const Game& b) {
+                        const Character q = character(b, me(b));
                         return std::hypot(aim->x - q.x, aim->z - q.z) + 2 * std::fabs(aim->y - q.y);
                     };
                     const float before = off(e);
-                    const std::vector<float> ends = w.try_all<float>(snap, tries, [&](Emulator& b, std::size_t k) {
+                    const std::vector<float> ends = w.try_all<float>(snap, tries, [&](Game& b, std::size_t k) {
                         leg(b, k, {});
                         return off(b);
                     });
@@ -1317,9 +1704,9 @@ void play(Emulator& e, Workers& w, int frames, const std::string& out) {
                                     static_cast<double>(aim->x), static_cast<double>(aim->y), static_cast<double>(aim->z));
                         way_stalled = 0;
                     }
-                    const Character q = character(e, ram::kPlayer);
-                    std::printf("frame %llu: way %zu%s (%zu points, %.1f to the next) nearest %.1f\n",
-                                static_cast<unsigned long long>(e.frame()), k < 16 ? k & 7 : (k - 16) % 8,
+                    const Character q = character(e, me(e));
+                    std::printf("frame %llu: %sway %zu%s (%zu points, %.1f to the next) nearest %.1f\n",
+                                static_cast<unsigned long long>(e.frame()), who(e).c_str(), k < 16 ? k & 7 : (k - 16) % 8,
                                 k < 8 ? "" : k < 16 ? " jumping" : (" jumping after a run-up of " + std::to_string(2 * (1 + (k - 16) / 8))).c_str(),
                                 way.size(), static_cast<double>(off(e)), static_cast<double>(score(e).nearest));
                     if (verbose)
@@ -1333,8 +1720,8 @@ void play(Emulator& e, Workers& w, int frames, const std::string& out) {
             e.step(press({kWalk[dir][0], kWalk[dir][1]}), kLeg,
                    out.empty() ? std::string() : out + "/p-" + std::to_string(e.frame() + kLeg) + ".png");
             const Score after = score(e);
-            std::printf("frame %llu: walk %d       hp %d, enemies %d (hp %d), nearest %.1f\n",
-                        static_cast<unsigned long long>(e.frame()), dir, after.player_health, after.enemies,
+            std::printf("frame %llu: %swalk %d       hp %d, enemies %d (hp %d), nearest %.1f\n",
+                        static_cast<unsigned long long>(e.frame()), who(e).c_str(), dir, after.player_health, after.enemies,
                         after.enemy_health, static_cast<double>(after.nearest));
             if (verbose) print_state(e);
             continue;
@@ -1348,7 +1735,7 @@ void play(Emulator& e, Workers& w, int frames, const std::string& out) {
         const int horizon = gate ? kGateHorizon : old_fight ? kHorizon : kFightHorizon; // (the gate takes longer to show)
         auto tap = [](int i) { return i % 6 < 2 ? press({Beat}) : Inputs{}; };
         auto skipped = [&](std::size_t k) { return old_fight && all[k].length > kHorizon; };
-        const std::vector<Score> tried = w.try_all<Score>(snap, all.size(), [&](Emulator& b, std::size_t k) {
+        const std::vector<Score> tried = w.try_all<Score>(snap, all.size(), [&](Game& b, std::size_t k) {
             if (skipped(k)) return score(b);
             for (int i = 0; i < horizon; ++i) b.step(gate || old_fight || i < all[k].length ? all[k].inputs(i) : tap(i));
             return score(b);
@@ -1371,9 +1758,14 @@ void play(Emulator& e, Workers& w, int frames, const std::string& out) {
             e.step(all[pick].inputs(i), 1,
                    shot && i == played - 1 ? out + "/p-" + std::to_string(e.frame() + 1) + ".png" : std::string());
         if (shot) next_shot += 60;
+        if (e.boards() > 1) // (while the others take their turns, this player keeps at the move, frame by frame)
+            e.hold(player, [move = all[pick], start = e.frame() - static_cast<uint64_t>(played)](uint64_t f) {
+                return move.inputs(static_cast<int>(f - start));
+            });
         const Score after = score(e);
-        std::printf("frame %llu: %-12s hp %d, enemies %d (hp %d), nearest %.1f\n", static_cast<unsigned long long>(e.frame()),
-                    all[pick].name, after.player_health, after.enemies, after.enemy_health, static_cast<double>(after.nearest));
+        std::printf("frame %llu: %s%-12s hp %d, enemies %d (hp %d), nearest %.1f\n", static_cast<unsigned long long>(e.frame()),
+                    e.boards() > 1 ? ("P" + std::to_string(player + 1) + " ").c_str() : "", all[pick].name, after.player_health,
+                    after.enemies, after.enemy_health, static_cast<double>(after.nearest));
         if (verbose && after.enemies > 0 && after.nearest < 0.05f) print_state(e);
     }
 }
@@ -1387,6 +1779,7 @@ int main(int argc, char** argv) {
     int frames = 3000, inspect = 0;
     bool with_sound = true, play_mode = false, selftest = false, explore_test = false, moves_test = false, bench = false, floor_map = false;
     unsigned dump_lo = 0, dump_hi = 0;
+    std::size_t boards = 1, player_arg = 0;
     int workers = static_cast<int>(std::max(1u, std::thread::hardware_concurrency() - 1));
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -1402,9 +1795,12 @@ int main(int argc, char** argv) {
         else if (arg == "--bench") bench = true;
         else if (arg == "--floor-map") floor_map = true;
         else if (arg == "--weak-enemies") g_weak_enemies = true;
+        else if (arg == "--idle-others") g_idle_others = true;
         else if (arg == "--record-inputs" && i + 1 < argc) g_input_log_path = argv[++i];
         else if (arg == "--route" && i + 1 < argc) route_spec = argv[++i];
         else if (arg == "--workers" && i + 1 < argc) workers = std::atoi(argv[++i]);
+        else if (arg == "--boards" && i + 1 < argc) boards = std::max<std::size_t>(1, std::strtoull(argv[++i], nullptr, 0));
+        else if (arg == "--player" && i + 1 < argc) player_arg = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--dump" && i + 1 < argc) std::sscanf(argv[++i], "%x-%x", &dump_lo, &dump_hi);
         else if (!dir) dir = argv[i];
     }
@@ -1423,11 +1819,24 @@ int main(int argc, char** argv) {
     }
     const std::vector<recomp::FunctionEntry> functions = tools::game_functions();
     const std::vector<recomp::FunctionEntry> blocks = tools::game_blocks();
-    Emulator e(roms, functions, blocks, with_sound);
+    // One board, or linked boards (--boards N: a linked save state, gamerun --boards N's).
+    auto make = [&]() -> std::unique_ptr<Game> {
+        if (boards > 1) return std::make_unique<Rig>(boards, roms, functions, blocks);
+        return std::make_unique<Emulator>(roms, functions, blocks, with_sound);
+    };
+    const std::unique_ptr<Game> main_game = make();
+    Game& e = *main_game;
     tools::InputLog input_log;
-    if (!g_input_log_path.empty()) e.record_into(g_input_log = &input_log);
+    if (!g_input_log_path.empty()) {
+        if (boards > 1) {
+            std::fprintf(stderr, "spikebot: --record-inputs is for one board\n");
+            return 2;
+        }
+        static_cast<Emulator&>(e).record_into(g_input_log = &input_log);
+    }
     if (!e.start(load)) return 1;
     std::printf("Loaded %s at frame %llu\n", load.c_str(), static_cast<unsigned long long>(e.frame()));
+    e.control(player_arg); // (--player N: linked boards, the board read and driven by the tools below)
 
     if (inspect > 0) {
         for (int done = 0; done < frames && e.stopped().empty(); done += inspect) {
@@ -1470,7 +1879,7 @@ int main(int argc, char** argv) {
                 } else if (d == 9)
                     for (int k = 0; k < std::min(20, n - i); ++k) e.step(k % 6 < 2 ? press({Beat}) : Inputs{});
                 else e.step(d >= 8 ? Inputs{} : press({kWalk[d & 7][0], kWalk[d & 7][1]}), std::min(20, n - i));
-                const Character p = character(e, ram::kPlayer);
+                const Character p = character(e, me(e));
                 float near = 1e9f;
                 for (const Character& en : enemies(e)) near = std::min(near, std::hypot(en.x - p.x, en.z - p.z));
                 std::printf("leg %d dir %d: (%.1f %.2f %.1f) nearest %.2f\n", leg, d, static_cast<double>(p.x),
@@ -1489,7 +1898,7 @@ int main(int argc, char** argv) {
     }
     if (floor_map) { // the area's floor grid (docs/bot.md): its header, and a map round the player
         const Floor f = read_floor(e);
-        const Character p = character(e, ram::kPlayer);
+        const Character p = character(e, me(e));
         std::printf("floor: x %.2f..%.2f z %.2f..%.2f, %d x %d cells of %.3f\n", static_cast<double>(f.x0), static_cast<double>(f.x1),
                     static_cast<double>(f.z0), static_cast<double>(f.z1), f.columns, f.rows, static_cast<double>(1 / f.scale));
         if (f.valid()) {
@@ -1533,7 +1942,7 @@ int main(int argc, char** argv) {
                 for (const Character& en : foes)
                     if (const float d = std::hypot(en.x - p.x, en.z - p.z); d < best) best = d, tx = en.x, ty = en.y, tz = en.z;
                 if (best > 1e8f) {
-                    tx = e.readf(ram::kArrowTarget), ty = e.readf(ram::kArrowTarget + 4), tz = e.readf(ram::kArrowTarget + 8);
+                    tx = e.readf_on(0, ram::kArrowTarget), ty = e.readf_on(0, ram::kArrowTarget + 4), tz = e.readf_on(0, ram::kArrowTarget + 8);
                 }
                 way = plan_way(f, p.x, p.y, p.z, tx, ty, tz);
                 std::printf("way to %.2f %.2f %.2f: %zu points", static_cast<double>(tx), static_cast<double>(ty), static_cast<double>(tz),
@@ -1581,18 +1990,18 @@ int main(int argc, char** argv) {
         e.step({}, 120);
         std::printf("bench: 120 frames on the board: %.1f frames/s\n", 120 / secs(t));
         t = clock::now();
-        std::shared_ptr<Emulator::Snapshot> snap;
+        std::shared_ptr<Snapshot> snap;
         for (int i = 0; i < 20; ++i) snap = e.save(), e.step({});
         std::printf("bench: a save (and a frame): %.2f ms, %zu bytes\n", secs(t) * 1000 / 20, snap->data.size());
         t = clock::now();
         for (int i = 0; i < 20; ++i) e.load(snap), e.step({});
         std::printf("bench: a load (and a frame): %.2f ms\n", secs(t) * 1000 / 20);
-        Workers w(workers, roms, functions, blocks, with_sound);
-        w.try_all<int>(snap, 1, [](Emulator& b, std::size_t) { return static_cast<int>(b.frame()); }); // (made)
+        Workers w(workers, make, e);
+        w.try_all<int>(snap, 1, [](Game& b, std::size_t) { return static_cast<int>(b.frame()); }); // (made)
         for (const int len : {1, 20, 60}) {
             t = clock::now();
             const std::size_t n = 128;
-            w.try_all<int>(snap, n, [len](Emulator& b, std::size_t) {
+            w.try_all<int>(snap, n, [len](Game& b, std::size_t) {
                 b.step({}, len);
                 return 0;
             });
@@ -1604,15 +2013,15 @@ int main(int argc, char** argv) {
     if (moves_test) { // each move for 40 frames from here: how high the player goes, where it ends
         const std::vector<Move> all = moves();
         auto snap = e.save();
-        const Character p0 = character(e, ram::kPlayer);
+        const Character p0 = character(e, me(e));
         for (const Move& m : all) {
             e.load(snap);
             float top = p0.y;
             for (int i = 0; i < 40; ++i) {
                 e.step(m.inputs(i), 1, !out.empty() && i == 12 ? out + "/move-" + m.name + ".png" : std::string());
-                top = std::max(top, character(e, ram::kPlayer).y);
+                top = std::max(top, character(e, me(e)).y);
             }
-            const Character p = character(e, ram::kPlayer);
+            const Character p = character(e, me(e));
             const Score s = score(e);
             std::printf("%-16s up %.2f, moved %.2f %.2f %.2f, hp %d, enemy hp %d\n", m.name, static_cast<double>(top - p0.y),
                         static_cast<double>(p.x - p0.x), static_cast<double>(p.y - p0.y), static_cast<double>(p.z - p0.z),
@@ -1634,14 +2043,14 @@ int main(int argc, char** argv) {
                 e.load(snap);
                 for (int i = 0; i < 60; ++i)
                     e.step(jump && i < 2 ? press({kWalk[d][0], kWalk[d][1], Jump}) : press({kWalk[d][0], kWalk[d][1]}));
-                const Character p = character(e, ram::kPlayer);
+                const Character p = character(e, me(e));
                 std::printf("walk %d%s: at %.2f %.2f %.2f, nearest %.2f\n", d, jump ? " jumping" : "        ",
                             static_cast<double>(p.x), static_cast<double>(p.y), static_cast<double>(p.z), static_cast<double>(apart(e)));
             }
         e.load(snap);
     }
     if (explore_test) { // the exploration alone, from here: the route found, walked, and where it ends
-        Workers w(workers, roms, functions, blocks, with_sound);
+        Workers w(workers, make, e);
         auto snap = e.save();
         if (const char* goal = std::getenv("SPIKEBOT_GOAL")) {
             float gx = 0, gz = 0;
@@ -1659,31 +2068,46 @@ int main(int argc, char** argv) {
             }
     }
     if (play_mode) {
-        Workers w(workers, roms, functions, blocks, with_sound);
+        Workers w(workers, make, e);
         play(e, w, frames, out);
     }
     if (selftest) { // a save state run on twice with the same inputs: the same state
+        auto ram_hashes = [&e] { // (each board's main RAM, hashed)
+            std::vector<uint64_t> h;
+            const std::size_t was = e.player();
+            for (std::size_t p = 0; p < e.boards(); ++p) {
+                e.control(p);
+                uint64_t x = 0xCBF29CE484222325ull;
+                for (uint32_t a = 0; a < 0x800000; a += 4) x = (x ^ e.read32(a)) * 0x100000001B3ull;
+                h.push_back(x);
+            }
+            e.control(was);
+            return h;
+        };
         auto snap = e.save();
         e.step(press({Beat, Up}), 120);
         const Score a = score(e);
-        const float ax = character(e, ram::kPlayer).x;
+        const float ax = character(e, me(e)).x;
+        const auto ah = ram_hashes();
         e.load(snap);
         e.step(press({Beat, Up}), 120);
         const Score b = score(e);
-        const float bx = character(e, ram::kPlayer).x;
-        std::printf("selftest: player hp %d / %d, enemy hp %d / %d, x %.4f / %.4f: %s\n", a.player_health, b.player_health,
-                    a.enemy_health, b.enemy_health, static_cast<double>(ax), static_cast<double>(bx),
-                    a.player_health == b.player_health && a.enemy_health == b.enemy_health && ax == bx ? "same" : "DIFFERENT");
+        const float bx = character(e, me(e)).x;
+        const auto bh = ram_hashes();
+        std::printf("selftest: player hp %d / %d, enemy hp %d / %d, x %.4f / %.4f: %s; every board's RAM: %s\n", a.player_health,
+                    b.player_health, a.enemy_health, b.enemy_health, static_cast<double>(ax), static_cast<double>(bx),
+                    a.player_health == b.player_health && a.enemy_health == b.enemy_health && ax == bx ? "same" : "DIFFERENT",
+                    ah == bh ? "the same" : "DIFFERENT");
         // And on a worker, from a fresh save: the same as the board itself.
-        Workers w(2, roms, functions, blocks, with_sound);
+        Workers w(2, make, e);
         auto snap2 = e.save();
-        const auto on_worker = w.try_all<std::pair<Score, float>>(snap2, 2, [](Emulator& board, std::size_t) {
+        const auto on_worker = w.try_all<std::pair<Score, float>>(snap2, 2, [](Game& board, std::size_t) {
             board.step(press({Beat, Up}), 120);
-            return std::make_pair(score(board), character(board, ram::kPlayer).x);
+            return std::make_pair(score(board), character(board, me(board)).x);
         });
         e.step(press({Beat, Up}), 120);
         const Score c = score(e);
-        const float cx = character(e, ram::kPlayer).x;
+        const float cx = character(e, me(e)).x;
         for (const auto& [sc, x] : on_worker)
             std::printf("selftest worker: player hp %d / %d, enemy hp %d / %d, x %.4f / %.4f: %s\n", sc.player_health,
                         c.player_health, sc.enemy_health, c.enemy_health, static_cast<double>(x), static_cast<double>(cx),

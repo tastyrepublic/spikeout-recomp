@@ -63,6 +63,48 @@ From `build/bot/bot-3500.state` (stage 1's gym), unhelped:
 - The run was stopped in the Reception Hall (frame ~128,400) at the owner's
   word: good enough for the next work, the stages and scene changes.
 
+## Two linked boards (2026-10-30)
+
+For the camera events of a two-player game (docs/netplay.md), the bot
+drives linked boards: `--boards N` with a linked state (gamerun --boards N
+--parallel --save-state, or the window's F9 in network play), `--player N`
+the board it plays (default 0). The boards run in one process as gamerun
+--parallel does (a `m3::LinkRing`, a meeting every 8 lines; the class
+`Rig`), the bot stopping them at the meeting after each frame; a save is
+the ring's cut and every board's state, gamerun's format, so the states it
+writes load in gamerun. Workers are rigs too. `--selftest` checks that a
+state run twice gives every board's RAM the same.
+
+- `--idle-others`: only the bot's player plays; the others stand (continued
+  when knocked out). The owner: one player beating the boss and breaking
+  the gate is enough to go on, and so it is (player 2 stays behind, and
+  appears with the team in the next area).
+- The red arrow (0x11DF54) is kept by board 0 only, so the target is read
+  there. A fight move's inputs are held on through the boards' frames.
+- In a boss fight the hold check counts the nearest enemy's own distance,
+  not the boss's (which is all `nearest` gives there).
+- `--weak-enemies` writes each board's own copy: the copies of an enemy
+  differ between cabinets (at frame 8371 one enemy had 1 health on board 0,
+  60 on board 1, the check made on board 0 only), and when player 1 knocked
+  it out the cabinets disagreed: "Communication error. Please call service
+  staff" on both from frame ~8556, the run waiting for ever (two5). With
+  each board checked and written, the same run (two6, from 8047) went on.
+- The hold check reads the enemy slots itself: at stage 2's fence gate
+  (two7, frame ~38990) a grabber came after the area's last enemy, while
+  `enemies()` was empty (the area's phase over) and `apart()` gave the
+  gate's distance, so the bot waited as if for a scene until the time ran
+  out (game over at ~41700). With the slots read it struggles free, and
+  the gate was broken (two8, from 38712: next area at 39601).
+- `--record-inputs` is refused with more than one board.
+- Start: build/bot/two-start.state, both players joined, frame 5000, made
+  from power-on with `gamerun --boards 2 --parallel --poke
+  0:10019E=1@0:5000 --poke 1:10019E=2@0:5000 --press 0:coin@1200 --press
+  0:start@1300 --press 0:beat@1700 --press 1:coin@2600 --press
+  1:start@2700 --press 1:beat@3300 --press 1:beat@3650 --save-state
+  build\bot\two-start.state@5000 --blocks 4000000000`. Run: `spikebot
+  --boards 2 --load-state build\bot\two-start.state --play --weak-enemies
+  --idle-others --workers 5 --out DIR`.
+
 ## Fighting faster (2026-10-29)
 
 The opera house's hall timed out twice with the old fighting. Now each move

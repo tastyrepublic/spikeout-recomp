@@ -125,7 +125,13 @@ constexpr std::array kCodeEntries = {
 // character (0x33A6C), what makes its view after the update (0x32578) and
 // 0xC670 (first called after the update, from 0x32514), for gamerun
 // --camera-test (network play: a remote player's camera run here?).
-constexpr std::array kHooks = {0x00009628u, 0x00007E34u, 0x00008230u, 0x0000795Cu, 0x0002C4DCu, 0x00033A6Cu, 0x00032578u, 0x0000C670u};
+// And the stage script's action dispatch (0x5AB18: r31 the record, byte 1 the
+// action, called through the table at 0x8BAB8), for gamerun --script-actions:
+// every action a script runs (docs/netplay.md, the camera events); and the
+// other interpreter's (0x5A824, a script run through within a frame: 0x5A874,
+// the same table, r31 the record).
+constexpr std::array kHooks = {0x00009628u, 0x00007E34u, 0x00008230u, 0x0000795Cu, 0x0002C4DCu,
+                               0x00033A6Cu, 0x00032578u, 0x0000C670u, 0x0005AB18u, 0x0005A874u};
 
 } // namespace
 

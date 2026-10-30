@@ -310,6 +310,7 @@ struct Options {
     bool camera_test_flags = false; // --camera-test-flags
     bool camera_test_mirror = false; // --camera-test-mirror
     bool camera_events = false; // --camera-events: board 0's camera written by other code, counted
+    bool script_actions = false; // --script-actions: every stage script action run, by its record
     bool net_watch = false;
     // --renderer: the 3D in software, on the GPU, or both, compared.
     enum class Renderer { Software, Gpu, Compare } renderer = Renderer::Software;
@@ -463,7 +464,13 @@ struct Machine {
             std::set<uint32_t> offsets;
             std::vector<std::array<uint32_t, 3>> seen; // (logic counter, offset, value)
         };
-        std::map<uint32_t, Writer> event_writers; // by the writing block
+        std::map<uint64_t, Writer> event_writers; // by the writing block (high half) and its caller (LR, low)
+        bool actions = false; // --script-actions: every stage script action run (the dispatch's hook)
+        struct ActionRun {
+            uint8_t action = 0;
+            uint64_t runs = 0, first = 0, last = 0;
+        };
+        std::map<uint32_t, ActionRun> actions_run; // by the action's record
 
         uint64_t mirrored = 0;
         uint64_t calls = 0, runs = 0, compared = 0, heading_free = 0, object_free = 0, heading_step = 0, object_step = 0;
@@ -640,12 +647,16 @@ constexpr uint32_t kLogicCounter = 0x1000A8;
 // the first view test), the flags and counter at +0x00-0x07 (each
 // cabinet's), 0x32470's positions from player 1 (+0x4A8-0x4BF).
 constexpr uint32_t kAfterUpdate = 0xC670, kAfterUpdateReturn = 0x32514;
+constexpr uint32_t kActionDispatch = 0x5AB18; // a stage script's action about to run (r31 its record, byte 1 the action)
+constexpr uint32_t kActionDispatchAtOnce = 0x5A874; // the same, from the interpreter that runs a script through (0x5A824)
 void camera_written(void* user, uint32_t addr, uint32_t value, uint32_t size) {
     Machine& m = *static_cast<Machine*>(user);
     Machine::CameraTest& t = m.camera;
     const uint32_t pc = m.c.cpu.pc;
     if (t.events && !t.inside && !t.in_view && !t.in_update && addr - kCamera >= 8) { // --camera-events: who, how often
-        auto& e = t.event_writers[pc];
+        // (by the writing block and its caller, LR: 0x37258 and 0x372D4 are called by a script's
+        // action and by other code, so the block alone doesn't say whose the write is)
+        auto& e = t.event_writers[static_cast<uint64_t>(pc) << 32 | m.c.cpu.lr];
         if (e.writes++ == 0) e.first = m.timing.frames();
         e.last = m.timing.frames();
         e.offsets.insert(addr - kCamera);
@@ -707,6 +718,14 @@ void camera_hook(recomp::Context& c, uint32_t pc, void* user) {
         }
     }
     if (t.inside) return; // (the side run: no other hooks either)
+    if (pc == kActionDispatch || pc == kActionDispatchAtOnce) { // --script-actions: the record (r31) about to run, its action (byte 1)
+        if (!t.actions) return;
+        const uint32_t record = c.cpu.gpr[31];
+        Machine::CameraTest::ActionRun& a = t.actions_run[record];
+        if (a.runs++ == 0) a.action = m.bus.read8(record + 1), a.first = m.timing.frames();
+        a.last = m.timing.frames();
+        return;
+    }
     if (pc == kCameraView) { // (--camera-test-mirror: its writes are the camera's own, until the next view test)
         t.in_view = true;
         return;
@@ -2205,6 +2224,7 @@ int main(int argc, char** argv) {
         else if (arg == "--camera-test-flags") o.camera_test_flags = true;
         else if (arg == "--camera-test-mirror") o.camera_test_mirror = true;
         else if (arg == "--camera-events") o.camera_events = true;
+        else if (arg == "--script-actions") o.script_actions = true;
         else if (arg == "--map-trace" && i + 1 < argc) { // FROM:N
             char* end = nullptr;
             o.map_trace_from = std::strtoull(argv[++i], &end, 0);
@@ -2598,9 +2618,10 @@ int main(int argc, char** argv) {
         machines.push_back(std::make_unique<Machine>(i, roms, functions));
         machines.back()->c.set_blocks(blocks);
         m3::games::install_spikeout_hooks(machines.back()->c);
-        if ((o.camera_trace && i == 0) || o.camera_events) { // (--camera-events: every board)
+        if ((o.camera_trace && i == 0) || o.camera_events || o.script_actions) { // (--camera-events, --script-actions: every board)
             Machine& m = *machines.back();
             m.camera.trace_left = i == 0 ? o.camera_trace : 0;
+            m.camera.actions = o.script_actions;
             m.c.set_hook(camera_hook, &m);
             if (o.camera_events) {
                 m.camera.events = true;
@@ -2736,19 +2757,19 @@ int main(int argc, char** argv) {
     if (o.camera_events && machines.size() > 1) { // each event writer: the same writes at the same game frames on boards 0 and 1?
         const auto& a = machines[0]->camera.event_writers;
         const auto& b = machines[1]->camera.event_writers;
-        std::set<uint32_t> writers;
+        std::set<uint64_t> writers;
         for (const auto& [pc, w] : a) writers.insert(pc);
         for (const auto& [pc, w] : b) writers.insert(pc);
         std::printf("Camera events, board 0 against board 1 (each write by game frame, offset and value):\n");
-        for (uint32_t pc : writers) {
+        for (uint64_t pc : writers) {
             std::multiset<std::array<uint32_t, 3>> sa, sb;
             if (auto it = a.find(pc); it != a.end()) sa.insert(it->second.seen.begin(), it->second.seen.end());
             if (auto it = b.find(pc); it != b.end()) sb.insert(it->second.seen.begin(), it->second.seen.end());
             std::size_t both = 0;
             for (const auto& w : sa) both += sb.count(w) != 0;
             const char* kind = sa == sb ? "shared (the same on both)" : both == 0 ? "each board's own (none the same)" : "partly the same";
-            std::printf("  %08x: board 0 %zu writes, board 1 %zu, %zu of board 0's on board 1 too: %s\n", pc, sa.size(), sb.size(), both,
-                        kind);
+            std::printf("  %08x (from %08x): board 0 %zu writes, board 1 %zu, %zu of board 0's on board 1 too: %s\n",
+                        static_cast<uint32_t>(pc >> 32), static_cast<uint32_t>(pc), sa.size(), sb.size(), both, kind);
         }
     }
     for (auto& mp : machines) {
@@ -2762,12 +2783,28 @@ int main(int argc, char** argv) {
             std::printf("Camera events, board %zu: %zu blocks wrote into the camera besides its own code\n", mp->index,
                         t.event_writers.size());
             for (const auto& [pc, w] : t.event_writers) {
-                std::printf("  %08x: %llu writes, frames %llu-%llu, at", pc, static_cast<unsigned long long>(w.writes),
+                std::printf("  %08x (from %08x): %llu writes, frames %llu-%llu, at", static_cast<uint32_t>(pc >> 32),
+                            static_cast<uint32_t>(pc), static_cast<unsigned long long>(w.writes),
                             static_cast<unsigned long long>(w.first), static_cast<unsigned long long>(w.last));
                 std::size_t shown = 0;
                 for (uint32_t off : w.offsets)
                     if (shown++ < 16) std::printf(" +%03x", off);
                 std::printf("%s\n", w.offsets.size() > 16 ? " ..." : "");
+            }
+        }
+        if (t.actions) { // --script-actions: by action, the records that ran it
+            std::map<uint8_t, std::vector<std::pair<uint32_t, Machine::CameraTest::ActionRun>>> by_action;
+            for (const auto& [record, a] : t.actions_run) by_action[a.action].emplace_back(record, a);
+            std::printf("Script actions, board %zu: %zu kinds, %zu records run\n", mp->index, by_action.size(), t.actions_run.size());
+            for (const auto& [action, records] : by_action) {
+                uint64_t runs = 0, first = ~0ull;
+                for (const auto& [record, a] : records) runs += a.runs, first = std::min(first, a.first);
+                std::printf("  action %02x: %zu records, %llu runs, first at frame %llu:", action, records.size(),
+                            static_cast<unsigned long long>(runs), static_cast<unsigned long long>(first));
+                std::size_t shown = 0;
+                for (const auto& [record, a] : records)
+                    if (shown++ < 12) std::printf(" %06x", record);
+                std::printf("%s\n", records.size() > 12 ? " ..." : "");
             }
         }
         if (!t.testing) continue;
