@@ -46,6 +46,12 @@ public:
     uint64_t frame_start(uint64_t frame) const { return frame * frame_cycles_; } // frame 0 starts at cycle 0
 
     void state(m3::State& s); // save states (runtime/state.hpp)
+    // Test aid (gamerun --wait-seat): `frames` more frames counted as gone by, as if the board
+    // had been stopped that long between two frames.
+    void move_on(uint64_t frames) {
+        frame_start_ += frames * frame_cycles_;
+        frames_ += frames;
+    }
 
     // Called from inside the run (on the thread running the game).
     std::function<void(uint32_t line)> on_display_line; // start of display line 0-383

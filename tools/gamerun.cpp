@@ -315,6 +315,15 @@ struct Options {
     uint64_t map_trace_from = 0, map_trace_frames = 0; // --map-trace FROM:N
     bool camera_test_flags = false; // --camera-test-flags
     bool camera_test_mirror = false; // --camera-test-mirror
+    bool link_standin_no_reads = false; // --link-standin-no-reads
+    bool link_standin_coarse = false;   // --link-standin-coarse
+    bool link_standin_blocks = false;   // --link-standin-blocks
+    int drop_board = -1;                // --drop B@FRAME
+    uint64_t drop_frame = 0;
+    int wait_board = -1;                // --wait-seat B@FROM:UNTIL
+    uint64_t wait_from = 0, wait_until = 0;
+    int clone_board = -1;               // --clone-seat B@FRAME
+    uint64_t clone_frame = 0;
     bool camera_events = false; // --camera-events: board 0's camera written by other code, counted
     bool script_actions = false; // --script-actions: every stage script action run, by its record
     bool net_watch = false;
@@ -630,6 +639,23 @@ const tools::LinkedInputLog::Change* linked_change(Machine& m, const Options& o,
 // --rollback-test: thrown from a snapshot point once the board is back at an
 // earlier frame; run() goes on from there (as a loaded state does).
 struct Rewound {};
+// --drop B@FRAME: thrown at the end of board B's frame FRAME; run() goes on making its blocks.
+struct Dropped {
+    uint64_t write_at;
+    uint32_t slice;
+};
+std::vector<std::unique_ptr<struct Machine>>* g_machines = nullptr; // (--drop: board 0, whose block the made ones start from)
+// --clone-seat B@FRAME: board 0's state at its first block after FRAME's end (no sound), which
+// board B takes at its own, as its own cabinet (thrown after: run() goes on from it).
+std::vector<uint8_t> g_clone_state;
+std::mutex g_clone_lock;
+struct Cloned {};
+// --wait-seat B@FROM:UNTIL: thrown at board B's first block after FROM's end; run() holds its blocks
+// to UNTIL, then brings the board back there.
+struct Frozen {
+    uint64_t until, write_at;
+    uint32_t slice;
+};
 
 // --link-record: a network board that logs its main board's calls.
 class RecordingNetBoard : public m3::NetBoardDevice {
@@ -970,6 +996,12 @@ m3::CommBoardOptions link_options(const Options& o) {
     return options;
 }
 
+// GAMERUN_ONEPC_CHECK: board 0's copy of player 2's first word, by frame, as board 0 wrote its own record's.
+std::map<uint64_t, uint32_t>& onepc_p2_word() {
+    static std::map<uint64_t, uint32_t> seen;
+    return seen;
+}
+
 void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing* ring, tools::Turns& turns) {
     m3::Bus& bus = m.bus;
     bus.midi_burst = o.midi_burst;
@@ -1088,8 +1120,117 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             }
         }
     };
+    // GAMERUN_ONEPC_CHECK: board 0's copy of player 2's first word as board 0 writes its own record's
+    // +0x10 (0x6DA90, the same point of its frame as board 1 writes its)
+    if (std::getenv("GAMERUN_ONEPC_CHECK") && m.index == 0)
+        bus.watch_writes(0x140210, 0x140214, [](void* user, uint32_t addr, uint32_t, uint32_t) {
+            Machine& b = *static_cast<Machine*>(user);
+            if (addr == 0x140210) onepc_p2_word()[b.timing.frames()] = b.bus.read32(0x1A4000);
+        }, &m);
     m.timing.on_frame_end = [&m, &o] {
         const uint64_t frame = m.timing.frames();
+        if (o.drop_frame && static_cast<int>(m.index) == o.drop_board && frame == o.drop_frame) // --drop B@FRAME: its PC gone here
+            throw Dropped{o.link_standin_at ? o.link_standin_at : 2400000, o.slice};
+        if (o.clone_frame && frame + 1 == o.clone_frame && m.index == 0) // --clone-seat: board 0's state, for board B (a frame
+                                                                          // before: a slave's world is the master's a frame back)
+            m.c.request_snapshot([&m](uint32_t) {
+                m3::State s;
+                tools::board_state(s, m.c, m.timing, {});
+                std::lock_guard guard(g_clone_lock);
+                g_clone_state = std::move(s.data());
+            });
+        if (o.clone_frame && frame == o.clone_frame && static_cast<int>(m.index) == o.clone_board)
+            m.c.request_snapshot([&m](uint32_t) {
+                // (this cabinet's own: its network board and EEPROM, its link buffers, its counters)
+                m3::State nb, ee;
+                m.bus.netboard().state(nb);
+                m.bus.eeprom().state(ee);
+                const std::vector<uint8_t> link(m.bus.ram().begin() + 0x140000, m.bus.ram().begin() + 0x143000);
+                const uint32_t counters[3] = {m.bus.read32(0x1000A4), m.bus.read32(0x1000A8), m.bus.read32(0x140048)};
+                std::vector<uint8_t> from;
+                {
+                    std::lock_guard guard(g_clone_lock);
+                    from = g_clone_state;
+                }
+                if (from.empty()) throw std::runtime_error("--clone-seat: no state of board 0's at this frame");
+                const uint64_t frames_here = m.timing.frames();
+                m3::State s(std::move(from));
+                tools::board_state(s, m.c, m.timing, {});
+                if (const uint64_t behind = frames_here - m.timing.frames()) { // (its time, as its network board has it)
+                    const uint64_t shift = behind * m.timing.frame_cycles();
+                    m.timing.move_on(behind);
+                    recomp::Context::Aside a = m.c.set_aside();
+                    a.cycles += shift, a.next_check += shift, a.scheduler_due += shift;
+                    a.tb_offset -= shift * 33 / 332;
+                    m.c.put_back(a);
+                }
+                m3::State nb_in(std::move(nb.data())), ee_in(std::move(ee.data()));
+                m.bus.netboard().state(nb_in);
+                m.bus.eeprom().state(ee_in);
+                std::copy(link.begin(), link.end(), m.bus.ram().begin() + 0x140000);
+                m.bus.write32(0x1000A4, counters[0]), m.bus.write32(0x1000A8, counters[1]), m.bus.write32(0x140048, counters[2]);
+                const uint32_t player = 0x1A0000 + 0x4000 * static_cast<uint32_t>(m.index);
+                m.bus.write32(0x104024, player);                          // the local player's object
+                m.bus.write8(0x10065B, static_cast<uint8_t>(m.index + 1)); // its number
+                m.bus.write32(0x106008, 0x1062AE + 2 * static_cast<uint32_t>(m.index + 1)); // its time's entry (as 0x11C3C sets it)
+                m.bus.write8(0x10019E, 2);                                // the link: a slave
+                m.bus.write8(kCamera + 0x4A, static_cast<uint8_t>(m.index)); // the player its camera follows
+                std::printf("board %zu: board 0's state taken as cabinet %zu at frame %llu\n", m.index, m.index + 1,
+                            static_cast<unsigned long long>(m.timing.frames()));
+                throw Cloned{};
+            });
+        if (o.wait_from && static_cast<int>(m.index) == o.wait_board && frame == o.wait_from) // --wait-seat: stopped at a clean point
+            m.c.request_snapshot([&o](uint32_t) { throw Frozen{o.wait_until, o.link_standin_at ? o.link_standin_at : 2400000, o.slice}; });
+        // GAMERUN_ONEPC_CHECK (two boards): how much of board 1's record (0x140200) board 0 has: its
+        // copy of player 2 (0x1A4000) at the same frame's end and the one before, against the
+        // record's +0x08 (the player's +0x2A), +0x0A (its +0x74 or +0x76) and +0x10 (its first word).
+        static const bool onepc_check = std::getenv("GAMERUN_ONEPC_CHECK") != nullptr;
+        if (onepc_check) {
+            struct Seen { uint32_t word, h2a, h74, h76; };
+            static std::mutex lock;
+            static std::map<uint64_t, Seen> board0;
+            static uint64_t checked = 0, same[6] = {};
+            std::lock_guard guard(lock);
+            if (m.index == 0) {
+                board0[frame] = {m.bus.read32(0x1A4000), m.bus.read16(0x1A402A), m.bus.read16(0x1A4074), m.bus.read16(0x1A4076)};
+            } else if (m.index == 1) {
+                const auto now = board0.find(frame), before = board0.find(frame - 1);
+                if (now != board0.end() && before != board0.end()) {
+                    const uint32_t r10 = m.bus.read32(0x140210);
+                    const uint16_t r08 = m.bus.read16(0x140208), r0a = m.bus.read16(0x14020A);
+                    ++checked;
+                    same[0] += r08 == now->second.h2a, same[1] += r08 == before->second.h2a;
+                    same[2] += r0a == now->second.h74 || r0a == now->second.h76, same[3] += r0a == before->second.h74 || r0a == before->second.h76;
+                    static uint64_t as74 = 0, as76 = 0, both = 0; // (+0x0A: which of the two it is)
+                    as74 += r0a == before->second.h74, as76 += r0a == before->second.h76, both += before->second.h74 == before->second.h76;
+                    if (checked % 3500 == 0)
+                        std::printf("onepc check: +0A as +74 %llu, as +76 %llu, the two the same %llu\n", (unsigned long long)as74,
+                                    (unsigned long long)as76, (unsigned long long)both);
+                    same[4] += r10 == now->second.word, same[5] += r10 == before->second.word;
+                    static std::map<uint32_t, uint64_t> xors; // (+0x10's differences from the copy as board 0 wrote its own)
+                    static uint64_t at_write = 0;
+                    if (auto w = onepc_p2_word().find(frame - 1); w != onepc_p2_word().end()) { // (written during the frame now ended)
+                        at_write += r10 == w->second;
+                        if (r10 != w->second && ++xors[r10 ^ w->second] <= 3)
+                            std::printf("onepc check: frame %llu +10 %08x, board 0's copy %08x\n", (unsigned long long)frame, r10, w->second);
+                    }
+                    static uint64_t earlier[3] = {}; // (board 0's copy 1, 2 and 3 frames before)
+                    for (int k = 0; k < 3; ++k)
+                        if (auto w = onepc_p2_word().find(frame - 2 - k); w != onepc_p2_word().end()) earlier[k] += r10 == w->second;
+                    if (checked % 500 == 0)
+                        std::printf("onepc check: +10 as board 0 wrote its own %llu; a frame before %llu, two %llu, three %llu\n",
+                                    (unsigned long long)at_write, (unsigned long long)earlier[0], (unsigned long long)earlier[1],
+                                    (unsigned long long)earlier[2]);
+                    if (checked % 3500 == 0)
+                        for (const auto& [x, n] : xors) std::printf("onepc check: +10 differs by %08x %llu times\n", x, (unsigned long long)n);
+                    if (checked % 500 == 0)
+                        std::printf("onepc check, %llu frames: +08 %llu/%llu (this frame/the one before), +0A %llu/%llu, +10 %llu/%llu\n",
+                                    (unsigned long long)checked, (unsigned long long)same[0], (unsigned long long)same[1],
+                                    (unsigned long long)same[2], (unsigned long long)same[3], (unsigned long long)same[4],
+                                    (unsigned long long)same[5]);
+                }
+            }
+        }
         // --rollback-test: a frame run again after going back (:quiet: drawn
         // and heard the first time only); the re-runs timed.
         const bool quiet = o.rb_quiet && frame <= m.rb.quiet_through;
@@ -1390,7 +1531,7 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
                         static_cast<unsigned long long>(state_hash([&m](m3::State& s) { m.sound.board.music()->state(s); })),
                         p.playing ? "playing" : "stopped", p.start, p.end, p.pos, p.volume_left, p.volume_right);
         }
-        if (o.link_record || o.link_standin || o.camera_test) { // (each frame's main RAM, and every 100th the whole board's, to compare the two runs)
+        if (o.link_record || o.link_standin || o.camera_test || o.drop_frame || o.clone_frame) { // (each frame's main RAM, and every 100th the whole board's, to compare the two runs)
             std::printf("board %zu frame %llu: RAM %016llx\n", m.index, static_cast<unsigned long long>(frame),
                         static_cast<unsigned long long>(tools::Recording::ram_hash(m.bus.ram())));
             if (frame % 100 == 0)
@@ -1398,6 +1539,12 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
                     std::printf("board %zu frame %llu: whole state %016llx\n", m.index, static_cast<unsigned long long>(frame),
                                 static_cast<unsigned long long>(state_hash(
                                     [&](m3::State& s) { tools::board_state(s, m.c, m.timing, sound_state(m, o)); })));
+                    if (std::getenv("GAMERUN_STATE_PARTS")) // (which part differs: the CPU, the frame timing, the network board)
+                        std::printf("board %zu frame %llu: parts cpu %016llx timing %016llx netboard %016llx\n", m.index,
+                                    static_cast<unsigned long long>(frame),
+                                    static_cast<unsigned long long>(state_hash([&](m3::State& s) { m.c.state(s); })),
+                                    static_cast<unsigned long long>(state_hash([&](m3::State& s) { m.timing.state(s); })),
+                                    static_cast<unsigned long long>(state_hash([&](m3::State& s) { m.bus.netboard().state(s); })));
                 });
         }
         {
@@ -1690,6 +1837,56 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
     };
 }
 
+void made_blocks(Machine& m, tools::Turns& turns, uint64_t write_at, uint32_t slice);
+
+// --wait-seat: a waiting cabinet nobody runs (an empty seat, its board stopped at a clean point):
+// its network board fed its last block held, the header's three counters (+0x00, +0x1C, +0x58)
+// one up a frame, at the stand-in's times, until frame `until` starts; then the board brought to
+// the present: its frame count and clock moved on (the time base held: no time passes for it), and
+// the RAM its counters come from (0x1000A4, 0x1000A8, 0x140048) set to go on from the held
+// blocks' last, each as far from it as the board had them when it stopped. Then it runs on.
+void wait_seat(Machine& m, tools::Turns& turns, const Frozen& z) {
+    m3::NetBoardDevice& nb = m.bus.netboard();
+    std::array<uint32_t, 0x240> block{};
+    for (uint32_t i = 0; i < 0x240; ++i) block[i] = m.bus.read32(0x141000 + 4 * i);
+    const uint32_t sources[3] = {0x1000A4, 0x1000A8, 0x140048}, words[3] = {0x00, 0x1C, 0x58};
+    int64_t ahead[3];
+    for (int k = 0; k < 3; ++k) ahead[k] = int64_t(m.bus.read32(sources[k])) - int64_t(block[words[k] / 4]);
+    const uint64_t frame_cycles = m.timing.frame_cycles(), line_cycles = m.timing.line_cycles();
+    const uint64_t vblank = line_cycles * recomp::FrameTiming::kVBlankLines;
+    const uint64_t first = m.timing.frames();
+    for (uint64_t f = first; f < z.until; ++f) {
+        const uint64_t frame_start = m.timing.frame_start(f), at = frame_start + z.write_at;
+        bool written = false;
+        auto write = [&](uint64_t until) {
+            if (written || at > until) return;
+            nb.sync(at);
+            for (uint32_t w : words) ++block[w / 4];
+            for (uint32_t i = 0; i < 0x240; ++i) nb.write32(0xC0000100 + 4 * i, block[i]);
+            written = true;
+        };
+        for (uint32_t line = z.slice - 1; line < recomp::FrameTiming::kDisplayLines; line += z.slice) {
+            const uint64_t t = frame_start + vblank + line * line_cycles;
+            write(t);
+            nb.sync(t);
+            turns.pass(m.index);
+        }
+        const uint64_t end = frame_start + frame_cycles;
+        write(end);
+        nb.sync(end);
+        nb.end_frame();
+    }
+    const uint64_t frames = z.until - first, shift = frames * frame_cycles;
+    m.timing.move_on(frames);
+    recomp::Context::Aside a = m.c.set_aside();
+    a.cycles += shift, a.next_check += shift, a.scheduler_due += shift;
+    a.tb_offset -= shift * 33 / 332; // (the time base where it was)
+    m.c.put_back(a);
+    for (int k = 0; k < 3; ++k) m.bus.write32(sources[k], static_cast<uint32_t>(int64_t(block[words[k] / 4]) + ahead[k]));
+    std::printf("board %zu: held %llu frames (%llu-%llu), back at frame %llu\n", m.index, (unsigned long long)frames,
+                (unsigned long long)first, (unsigned long long)z.until, (unsigned long long)m.timing.frames());
+}
+
 void run(Machine& m, tools::Turns& turns) {
     turns.wait(m.index);
     const auto start = std::chrono::steady_clock::now();
@@ -1699,6 +1896,17 @@ void run(Machine& m, tools::Turns& turns) {
             m.c.call(m.c.cpu.pc);
             m.why = "the reset code returned";
         } catch (const Rewound&) { // (--rollback-test: back at an earlier frame, on from there)
+            resume = true;
+            continue;
+        } catch (const Dropped& d) { // (--drop: this board's PC gone; its blocks made from board 0 from here on)
+            m.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            made_blocks(m, turns, d.write_at, d.slice);
+            return;
+        } catch (const Cloned&) { // (--clone-seat: on from board 0's state, as this cabinet)
+            resume = true;
+            continue;
+        } catch (const Frozen& z) { // (--wait-seat: held, then brought back to the present)
+            wait_seat(m, turns, z);
             resume = true;
             continue;
         } catch (const recomp::OutOfBudget&) {
@@ -1723,7 +1931,8 @@ void run(Machine& m, tools::Turns& turns) {
 // `write_at` (--link-standin-at CYCLES): each frame's writes held, and
 // made together that many main cycles after the frame's end before
 // (rather than when the main board made them).
-void stand_in(Machine& m, tools::Turns& turns, const std::vector<HostCall>& log, uint64_t write_at, bool patch_enemy_flags) {
+void stand_in(Machine& m, tools::Turns& turns, const std::vector<HostCall>& log, uint64_t write_at, bool patch_enemy_flags,
+              bool no_reads, bool coarse) {
     turns.wait(m.index);
     m3::NetBoardDevice& nb = m.bus.netboard();
     uint64_t reads = 0, differed = 0, first = 0, frame_end = 0;
@@ -1739,6 +1948,16 @@ void stand_in(Machine& m, tools::Turns& turns, const std::vector<HostCall>& log,
         if (write_at && e.op == HostCall::Write32 && frame_end) {
             held.push_back(e);
             continue;
+        }
+        // (--link-standin-no-reads: the main board's reads left out; they change nothing on the
+        // network board, io_read being const: only its writes and the time matter)
+        if (no_reads && e.op >= HostCall::Read8 && e.op <= HostCall::Read32) continue;
+        // (--link-standin-coarse: the main board's own syncs left out too; the network board is
+        // brought to the time only at the slices' meetings and the frames' ends, as a stand-in
+        // run beside another board would be)
+        if (coarse) {
+            if (e.op == HostCall::Sync) continue;
+            if (e.op == HostCall::Pass || e.op == HostCall::EndFrame) nb.sync(e.t);
         }
         uint32_t got = e.value;
         if (patch_enemy_flags && e.op == HostCall::Write32 && e.addr >= 0xC0000200 && e.addr < 0xC0000A00) {
@@ -1770,6 +1989,161 @@ void stand_in(Machine& m, tools::Turns& turns, const std::vector<HostCall>& log,
             std::to_string(differed) + " read differently" +
             (differed ? " (the first at main cycle " + std::to_string(first) + ")" : std::string());
     turns.finish(m.index);
+}
+
+// --link-standin-blocks: board m's network board driven by its main board's blocks alone, as a
+// PC running only its own board would get them from the remote one: from the recorded calls,
+// only each frame's writes are kept (the frames counted by their ends); the time is this side's
+// own, the network board brought to each slice's meeting (the start of display lines 7, 15, ...:
+// the nominal cycle, as recomp::FrameTiming has it) and each frame's end, and the block written
+// `write_at` main cycles after the end of the frame before it.
+void stand_in_blocks(Machine& m, tools::Turns& turns, const std::vector<HostCall>& log, uint64_t write_at, uint32_t slice) {
+    turns.wait(m.index);
+    m3::NetBoardDevice& nb = m.bus.netboard();
+    std::vector<std::vector<HostCall>> blocks(1); // (by frame, from the state's frame)
+    for (const HostCall& e : log) {
+        if (e.op == HostCall::EndFrame) blocks.emplace_back();
+        else if (e.op >= HostCall::Write8 && e.op <= HostCall::Write32) blocks.back().push_back(e);
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const uint64_t frame_cycles = m.timing.frame_cycles(), line_cycles = m.timing.line_cycles();
+    const uint64_t vblank = line_cycles * recomp::FrameTiming::kVBlankLines;
+    uint64_t written = 0;
+    const uint64_t first = m.timing.frames();
+    std::size_t due = 0; // (the next frame's block to write)
+    auto write_block = [&](uint64_t until) { // the blocks due by `until`
+        while (due < blocks.size() && m.timing.frame_start(first + due) + write_at <= until) {
+            nb.sync(m.timing.frame_start(first + due) + write_at);
+            for (const HostCall& w : blocks[due]) {
+                if (w.op == HostCall::Write32) nb.write32(w.addr, w.value);
+                else if (w.op == HostCall::Write16) nb.write16(w.addr, static_cast<uint16_t>(w.value));
+                else nb.write8(w.addr, static_cast<uint8_t>(w.value));
+            }
+            written += blocks[due].size();
+            ++due;
+        }
+    };
+    for (std::size_t k = 0; k + 1 < blocks.size(); ++k) { // (each frame the log has an end of)
+        const uint64_t frame_start = m.timing.frame_start(first + k);
+        for (uint32_t line = slice - 1; line < recomp::FrameTiming::kDisplayLines; line += slice) {
+            const uint64_t t = frame_start + vblank + line * line_cycles;
+            write_block(t);
+            nb.sync(t);
+            turns.pass(m.index);
+        }
+        const uint64_t end = frame_start + frame_cycles;
+        write_block(end);
+        nb.sync(end);
+        nb.end_frame();
+    }
+    // (and the meetings of the frame the log stops in, as many as it has)
+    std::size_t passes_after = 0;
+    for (auto it = log.rbegin(); it != log.rend() && it->op != HostCall::EndFrame; ++it) passes_after += it->op == HostCall::Pass;
+    const uint64_t last_start = m.timing.frame_start(first + blocks.size() - 1);
+    for (std::size_t p = 0; p < passes_after; ++p) {
+        const uint64_t t = last_start + vblank + ((p + 1) * slice - 1) * line_cycles;
+        write_block(t);
+        nb.sync(t);
+        turns.pass(m.index);
+    }
+    m.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    m.why = "stood in from blocks: " + std::to_string(blocks.size() - 1) + " frames, " + std::to_string(written) + " writes";
+    turns.finish(m.index);
+}
+
+// --drop B@FRAME: board B's PC gone at the end of its frame FRAME. Its network board goes on (the
+// stand-in's time: each slice's meeting and frame's end), fed blocks made each frame from board
+// 0's own (the shared bytes) and what every PC can know alike (docs/netplay.md, "a dropped
+// cabinet"): the header's three counters (+0x00, +0x1C, +0x58) one up a frame from its last, its
+// other own bytes as they were; the next record (in its slots' turn) board 0's newest, with its
+// own fields: no buttons (+0x04), the player's facing (+0x08, its +0x2A), +0x0A (its +0x76 when
+// its +0x44's top bit is set, else +0x74) and first word (+0x10) from board 0's copy of that
+// player a frame before, the camera's heading (+0x0C), the empty slots' leftovers (+0x34-0x37,
+// +0x40-0x43) and the on-screen bits held as they were. RAM's order (the block at 0x141000:
+// header 0x100, four records of 0x200; written to the network board at 0xC0000100 on).
+void made_blocks(Machine& m, tools::Turns& turns, uint64_t write_at, uint32_t slice) {
+    Machine& local = *(*g_machines)[0];
+    m3::NetBoardDevice& nb = m.bus.netboard();
+    std::array<uint32_t, 0x240> block{}; // (its last block, as words)
+    for (uint32_t i = 0; i < 0x240; ++i) block[i] = m.bus.read32(0x141000 + 4 * i);
+    auto newest = [](const std::array<uint32_t, 0x240>& b) {
+        int best = 0;
+        for (int s = 1; s < 4; ++s)
+            if (b[(0x100 + s * 0x200 + 0xDC) / 4] > b[(0x100 + best * 0x200 + 0xDC) / 4]) best = s;
+        return best;
+    };
+    const uint32_t player = 0x1A0000 + 0x4000 * static_cast<uint32_t>(m.index); // (its player's object)
+    struct Copy { uint32_t first, flags44; uint16_t facing, h74, h76; } before{};
+    auto copy_now = [&] {
+        return Copy{local.bus.read32(player), local.bus.read32(player + 0x44), local.bus.read16(player + 0x2A),
+                    local.bus.read16(player + 0x74), local.bus.read16(player + 0x76)};
+    };
+    before = copy_now();
+    const uint64_t frame_cycles = m.timing.frame_cycles(), line_cycles = m.timing.line_cycles();
+    const uint64_t vblank = line_cycles * recomp::FrameTiming::kVBlankLines;
+    uint64_t made = 0;
+    auto put8 = [](std::array<uint32_t, 0x240>& b, uint32_t byte, uint8_t v) { // (RAM's byte order: big-endian words)
+        uint32_t& w = b[byte / 4];
+        const uint32_t shift = 8 * (3 - byte % 4);
+        w = (w & ~(0xFFu << shift)) | (uint32_t(v) << shift);
+    };
+    auto get8 = [](const std::array<uint32_t, 0x240>& b, uint32_t byte) { return static_cast<uint8_t>(b[byte / 4] >> (8 * (3 - byte % 4))); };
+    for (uint64_t f = m.timing.frames();; ++f) {
+        const uint64_t frame_start = m.timing.frame_start(f), at = frame_start + write_at;
+        bool written = false;
+        auto write_made = [&](uint64_t until) {
+            if (written || at > until) return;
+            nb.sync(at);
+            std::array<uint32_t, 0x240> mine{};
+            for (uint32_t i = 0; i < 0x240; ++i) mine[i] = local.bus.read32(0x141000 + 4 * i);
+            std::array<uint32_t, 0x240> next = block;
+            for (uint32_t i = 0; i < 0x40; ++i) next[i] = mine[i]; // the header: board 0's, with its own bytes
+            for (uint32_t byte : {0x02u, 0x03u, 0x16u, 0x17u, 0x1Eu, 0x1Fu, 0x23u, 0x25u, 0x26u, 0x41u, 0x44u, 0x45u, 0x46u, 0x47u, 0x4Eu,
+                                  0x4Fu, 0x5Au, 0x5Bu})
+                put8(next, byte, get8(block, byte));
+            for (uint32_t w : {0x00u, 0x1Cu, 0x58u}) next[w / 4] = block[w / 4] + 1; // (the counters)
+            // (the record board 0 wrote for the logic count this one is at: a slave runs a frame
+            // behind the master, so board 0's from the frame before, still in its slots)
+            const int to = (newest(block) + 1) % 4;
+            const uint32_t logic = next[0x1C / 4];
+            int from = -1;
+            for (int s = 0; s < 4; ++s)
+                if (mine[(0x100 + s * 0x200 + 0xDC) / 4] == logic) from = s;
+            if (from < 0) { // (none: board 0's newest, noted)
+                from = newest(mine);
+                if (m.why.empty()) m.why = "no record of board 0's for logic " + std::to_string(logic) + " (frame " + std::to_string(f) + ")";
+            }
+            const uint32_t rec = 0x100 + 0x200 * static_cast<uint32_t>(to), src = 0x100 + 0x200 * static_cast<uint32_t>(from);
+            for (uint32_t i = 0; i < 0x80; ++i) next[rec / 4 + i] = mine[src / 4 + i];
+            const uint32_t old = 0x100 + 0x200 * static_cast<uint32_t>(newest(block));
+            next[(rec + 0x04) / 4] = 0; // no buttons
+            next[(rec + 0x08) / 4] = uint32_t(before.facing) << 16 | ((before.flags44 & 0x80000000u) ? before.h76 : before.h74);
+            next[(rec + 0x0C) / 4] = (block[(old + 0x0C) / 4] & 0xFFFF0000u) | (next[(rec + 0x0C) / 4] & 0xFFFFu); // (the heading held)
+            next[(rec + 0x10) / 4] = before.first;
+            next[(rec + 0x34) / 4] = block[(old + 0x34) / 4], next[(rec + 0x40) / 4] = block[(old + 0x40) / 4];
+            for (uint32_t byte : {0x47u, 0x5Fu, 0x6Bu, 0x77u}) put8(next, rec + byte, get8(block, old + byte)); // (on-screen bits)
+            for (uint32_t i = 0; i < 0x240; ++i) nb.write32(0xC0000100 + 4 * i, next[i]);
+            block = next;
+            before = copy_now();
+            written = true;
+            ++made;
+        };
+        for (uint32_t line = slice - 1; line < recomp::FrameTiming::kDisplayLines; line += slice) {
+            const uint64_t t = frame_start + vblank + line * line_cycles;
+            write_made(t);
+            nb.sync(t);
+            if (turns.alone(m.index)) {
+                m.why = "dropped; " + std::to_string(made) + " blocks made" + (m.why.empty() ? std::string() : "; " + m.why);
+                turns.finish(m.index);
+                return;
+            }
+            turns.pass(m.index);
+        }
+        const uint64_t end = frame_start + frame_cycles;
+        write_made(end);
+        nb.sync(end);
+        nb.end_frame();
+    }
 }
 
 void report(Machine& m, const Options& o) {
@@ -2286,6 +2660,25 @@ int main(int argc, char** argv) {
         else if (arg == "--camera-test-from" && i + 1 < argc) o.camera_test_from = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--camera-test-flags") o.camera_test_flags = true;
         else if (arg == "--camera-test-mirror") o.camera_test_mirror = true;
+        else if (arg == "--link-standin-no-reads") o.link_standin_no_reads = true;
+        else if (arg == "--link-standin-coarse") o.link_standin_coarse = true;
+        else if (arg == "--link-standin-blocks") o.link_standin_blocks = true;
+        else if (arg == "--clone-seat" && i + 1 < argc) { // B@FRAME: board B made from board 0's state at FRAME
+            char* end = nullptr;
+            o.clone_board = static_cast<int>(std::strtol(argv[++i], &end, 0));
+            if (*end == '@') o.clone_frame = std::strtoull(end + 1, &end, 0);
+        }
+        else if (arg == "--wait-seat" && i + 1 < argc) { // B@FROM:UNTIL: board B stopped at FROM, back at UNTIL
+            char* end = nullptr;
+            o.wait_board = static_cast<int>(std::strtol(argv[++i], &end, 0));
+            if (*end == '@') o.wait_from = std::strtoull(end + 1, &end, 0);
+            if (*end == ':') o.wait_until = std::strtoull(end + 1, &end, 0);
+        }
+        else if (arg == "--drop" && i + 1 < argc) { // B@FRAME: board B's PC gone at the end of FRAME
+            char* end = nullptr;
+            o.drop_board = static_cast<int>(std::strtol(argv[++i], &end, 0));
+            if (*end == '@') o.drop_frame = std::strtoull(end + 1, &end, 0);
+        }
         else if (arg == "--camera-events") o.camera_events = true;
         else if (arg == "--script-actions") o.script_actions = true;
         else if (arg == "--map-trace" && i + 1 < argc) { // FROM:N
@@ -2653,6 +3046,7 @@ int main(int argc, char** argv) {
     LinkedRollback rollback; // (--rollback-test, linked boards)
     if (ring && o.rb_frames) rollback.ring = ring.get();
     std::vector<std::unique_ptr<Machine>> machines;
+    g_machines = &machines;
     auto make_turns = [&] {
         return std::make_unique<tools::Turns>(o.boards, parallel, parallel ? std::function<void()>([&ring, &linked, &rollback, &o, &machines] {
             ring->exchange();
@@ -2782,7 +3176,12 @@ int main(int argc, char** argv) {
         std::vector<std::thread> threads;
         for (auto& m : machines) {
             if (static_cast<int>(m->index) == o.link_standin_board)
-                threads.emplace_back([&m, &turns, &standin_log, &o] { stand_in(*m, turns, standin_log, o.link_standin_at, o.link_standin_patch == "enemy-flags"); });
+                threads.emplace_back([&m, &turns, &standin_log, &o] {
+                    if (o.link_standin_blocks) stand_in_blocks(*m, turns, standin_log, o.link_standin_at, o.slice);
+                    else
+                        stand_in(*m, turns, standin_log, o.link_standin_at, o.link_standin_patch == "enemy-flags",
+                                 o.link_standin_no_reads, o.link_standin_coarse);
+                });
             else
                 threads.emplace_back([&m, &turns] { run(*m, turns); });
         }

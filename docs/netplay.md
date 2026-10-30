@@ -1303,6 +1303,210 @@ Nothing camera-related that depends on there being more than two players
 turned up; the players' own shakes while several play are still to see
 (the bot's two-player run).
 
+## One board a PC: the stand-in, step by step (2026-10-30)
+
+**A remote cabinet is its network board and one block a frame.** From a
+linked state at frame 4700 (both players in, `build/onepc/fight-4700.state`)
+to 5800, both pressing, board 1 recorded (`--link-record`) and then stood in
+for (`--link-standin`); board 0's main RAM every frame and whole state every
+100 against the recording run, 3790 lines:
+- the stand-in as before (every call replayed): all the same;
+- `--link-standin-no-reads` (the main board's reads left out: they change
+  nothing on the network board, `CommBoard::io_read` const): all the same;
+- and `--link-standin-coarse` (its own syncs left out too: the network
+  board brought to the time only at the slices' meetings and frames' ends):
+  all the same;
+- and `--link-standin-at 2400000` (the block written in one burst 2.4M
+  cycles after each frame's end): all the same.
+
+From power-on (the linking repro, board 1's calls recorded to frame 5690,
+a scratch tool over them): after start-up (the memory tests and the
+firmware loaded, frames 17-700) the main board writes nothing to its
+network board but the block (576 32-bit writes a frame); a few stretches
+have none (loading: 2300-2399, ~4200).
+
+**Where the block comes from (main RAM; the network board's view of each
+32-bit word byte-swapped against the main board's).** The cabinet's live
+block: a header at 0x140100 (0x100 bytes) and its record at 0x140200
+(0x200). The link code (0x6EE68 / 0x6EEAC, memcpy 0x4E88) copies them into
+its outgoing block at 0x141000 (the header, then four records 0x141100,
+0x141300, 0x141500, 0x141700, one a frame in turn), which goes to the
+network board; what came in is copied from its shared RAM (0xC0000D00 on)
+to 0x142000-0x142FFF (0x6EFA0) and on (0x6F040, 0x6F11C). The bytes that
+differ between two cabinets in the same game (both blocks dumped with
+`--link-dump` over the fight, records paired by their logic counter at
++0xDC, 3671 pairs), in the sent order, and in RAM:
+
+| sent | the record in RAM (0x140200 +) | written by |
+|---|---|---|
+| +0x05 | the word at +0x04 (the buttons) | 0x6DA90 (from 0x6D928) |
+| +0x08-0x0B | the halfwords at +0x08, +0x0A (the camera's heading) | 0x550CC (the player's update, 0x51824) |
+| +0x0E-0x0F | the halfword at +0x0C | 0x550CC |
+| +0x11-0x13 | the word at +0x10 (flags) | 0x6DA90 |
+| +0x34-0x37, +0x40-0x43 | the float of the 12-byte character entries at +0x2C and +0x38 | 0x74808 / 0x74884 (from 0x742CC) |
+| +0x44, +0x5C, +0x68, +0x74 | the flags word's low byte of the entries at +0x44, +0x5C, +0x68, +0x74 (the on-screen bits, 0x08 / 0x10) | 0x74884 |
+
+The character list: 12-byte entries from +0x14 (a flags word, four bytes,
+a float). The header's own bytes (sent +0x000-0x001, +0x014-0x015,
++0x01C-0x01D, +0x020, +0x025-0x026, +0x042-0x047, +0x04C-0x04D,
++0x058-0x059): counters at its +0x00, +0x1C (the logic counter), +0x58
+(written by 0x6D9C4), the rest each cabinet's constants. Next: each
+field's source on the other board (the side camera for the heading and
+the on-screen bits, board 0's copy of the remote player for the rest),
+then gamerun making the remote's block itself, checked against these.
+
+**Better: the remote PC sends its block (2026-10-30).** With one board a
+PC, the remote cabinet's board runs on the remote PC, which has its block
+exactly: no need to make it here. Its per-cabinet bytes are its own
+buttons word (0x100100, 0x6DA90 writes it into +0x04), its player's
+object's first word (0x1A0000 + 0x4000 a player, +0x10), its camera and
+view (the player's update, the character list) and its counters; all of
+it is in the block its main board writes. Each frame's 0x900 bytes XORed
+with the frame before change by 26 bytes on average (both boards over the
+fight; packed alone by zstd, 82 bytes a frame, at most 108: 4.6 KB/s; a
+plain byte-diff would be less). With an input delay (as Mode B has) it
+arrives in time; making it here (the side camera, board 0's copy of the
+remote player) is only for guessing it under rollback, later.
+
+`--link-standin-blocks` proves it: the stand-in takes from the recorded
+calls only each frame's writes (as the remote PC would send them; the
+frames counted by their ends) and keeps its own time: the network board
+brought to each slice's meeting at its nominal cycle (display lines 7,
+15, ... 383: frame start + 40 lines of VBlank + the line's) and to each
+frame's end, the block written 2.4M cycles after the end of the frame
+before it (`--link-standin-at`), frames without one (loading) skipped. All
+board 0's lines the same as the recording run's:
+- the fight (from fight-4700.state, 1100 frames): 3790 of 3790 (once the
+  stand-in also ran the meetings of the frame the log stops in: without,
+  only the last whole-state line differed, packets left on their way);
+- the bot's two-player run (`build/bot/tworec`, its linked inputs, both
+  boards at once): stage 1's last area, its boss, the story scene and the
+  change into stage 2 (from bot-19730.state, 2997 frames, 2868 blocks: 129
+  frames loading with none): 3030 of 3030; a boss, the gate called (29260)
+  and broken (29757) and the next area (from bot-28449.state, 2689
+  frames): 2760 of 2760. (From bot-28449 both runs part from the bot's
+  recording alike at 31020: a replay matter, not the stand-in's.)
+- standing in for the master (board 0; board 1 checked, the fight):
+  3705 of 3705: either cabinet can be the one stood in for;
+- from power-on (the linking repro, `--clock 1800000000`, to frame 4926):
+  5014 of 5014, through the start-up's writes (the memory tests, the
+  network board's firmware, its start: up to ~2,500 writes a frame, all
+  written in the frame's one burst), attract, player 1's start, and player
+  2 joining on the stood-in cabinet (its coin, start and select carried by
+  its writes alone). Without `--clock` the whole-state lines differed
+  every 100 frames while RAM, the CPU, the frame timing and the network
+  board (`GAMERUN_STATE_PARTS=1`) were the same: the real-time clock, set
+  from the PC's time at each run's start.
+
+So a PC can run its own board and stand in for every other with what that
+board's PC sends: each frame, its main board's writes to its network
+board (its block in play; more at start-up).
+
+**A dropped cabinet, its blocks made here (2026-10-30).** The owner wants
+every feature with one board a PC: a player who drops stands idle. With
+no PC running that cabinet, every other PC makes its block from what they
+all have alike. `gamerun --drop B@FRAME`: board B's main board stops at
+the end of FRAME (its PC gone); from there its network board is fed made
+blocks (`made_blocks`), at the stand-in's times:
+- the header: board 0's, with B's own bytes as its last block had them,
+  and its three counters (+0x00, +0x1C the logic count, +0x58) one up a
+  frame;
+- the next record, in its slots' turn: **board 0's record for the logic
+  count B is at.** A slave runs a frame behind the master (board 1's +0x1C
+  one less than board 0's: 0x0DBD against 0x0DBE at the fight's start), so
+  that is board 0's record from the frame before, still in its slots.
+  Taking board 0's newest instead gave "Communication error!! Please call
+  service staff (Sync_sys_broken)" within a frame;
+- in it, B's own fields: no buttons (+0x04); from board 0's copy of B's
+  player a frame before (GAMERUN_ONEPC_CHECK measured it: all 3500 frames
+  of the fight): its facing (+0x08, the player's +0x2A), +0x0A (its +0x76
+  when its +0x44's top bit is set, else +0x74; 0x550CC) and its first word
+  (+0x10; 0x6DA90); held as B's last record had them: the camera's heading
+  (+0x0C), the empty slots' leftovers (+0x34-0x37, +0x40-0x43, constant)
+  and the on-screen bits (+0x47, +0x5F, +0x6B, +0x77).
+
+From the fight state, board 1 dropped at 4800, player 2 idle from then:
+the game goes on (board 0 to frame 8452 as without the drop, no link
+error), player 2 standing and being hit ("HELP!!"). Against the run where
+board 1 ran on idle (both dumped, `--link-dump`, by data frame): the first
+three made blocks differ from the real ones only in the camera's heading
+(record +0x0E); over 400 frames the heading (+0x0E/0x0F), one character's
+on-screen bits (+0x068, 20 frames) and a few flag bits (+0x11-0x13, the
+game parting from the other run once the views differ). Every PC makes
+the same blocks (only the shared game goes into them), so the PCs stay in
+step; to be exactly what an idle cabinet sends, the dropped player's
+camera would run on the side (`--camera-test`'s), from its camera (0xC00
+bytes) as its PC last sent it.
+
+**An empty seat (2026-10-30).** A cabinet nobody has taken waits in
+attract mode. From power-on (`--clock`, the link pokes, board 0's player
+starting at 1200, board 1 left alone; both dumped): over frames 1800-2350
+board 1's newest record never changed; its header changed in its three
+counters (one up a frame) and, a few times, at +0x10 (2), +0x14 (4),
++0x15 (1) and +0x25 (1). So its blocks can be made (held, the counters
+run on). But the waiting cabinet's board follows the others' game: its
+RAM against a run where nobody plays parts at frame 1202, just after board
+0's coin. So a board for a player taking that seat can't be made exactly
+from nothing; to try: a waiting board from the start (after its start-up)
+brought to the present (its counters and time moved on to what its made
+blocks said), then let run, joining as a cabinet does (coin, start).
+
+**Taking an empty seat works (2026-10-30).** `gamerun --wait-seat
+B@FROM:UNTIL`: board B stopped at its first block after FROM's end (a
+clean point); its network board fed its last block held, the header's
+three counters one up a frame, until UNTIL starts; then the board brought
+to the present (`FrameTiming::move_on`, the CPU's cycles moved on with the
+time base held, the RAM its counters come from, 0x1000A4, 0x1000A8 and
+0x140048, set to go on from the held blocks, each as far ahead of them as
+it had been) and run on. From power-on (`--clock`, the link pokes, board
+0's player in at 1200), board 1 stopped at 1100 and back at 3000 (1900
+frames held), its player's coin at 3200, start 3300, select 3900/4250:
+board 0 shows "HERE COMES A NEW PLAYER." (4400) and both players fight
+the boss by 5200, no link error. So an empty seat needs nobody running
+it: its blocks made, and for whoever takes it a waiting board from the
+start (every cabinet boots together; kept by the host) brought to the
+present.
+
+**Taking a seat in the game (a dropped player's), from another board's
+state (2026-10-30).** The two boards' RAM in the same fight differs in
+~575,000 bytes, mostly what each draws (the 3D display lists at
+0x54A000-0x5DB000, the 2D layers, render buffers), remade every frame.
+`gamerun --clone-seat B@FRAME`: board 0's state at its clean point after
+FRAME-1 (a slave's world is the master's a frame back: taking FRAME's gave
+"Communication error!! ... (code: 0x... 1)"), loaded into board B at its
+clean point after FRAME, B keeping its own network board, EEPROM, link
+buffers (0x140000-0x143000) and counters, its time moved on the frame, and
+told which cabinet it is: the local player's object (0x104024), its
+number (0x10065B), the link role (0x10019E = 2, a slave), the player its
+camera follows (camera +0x4A). On a live board 1 mid-fight (cloned at
+4950): both boards on at full speed to 6890, no link error; board 1's
+screen shows White as its own player, Spike as the other, its camera on
+White, the picture at the end almost the same as without the clone (board
+0's lines part from frame 4953: the clone isn't board 1 to the byte).
+The cabinet's own TIME showed board 0's player's at first (64 where board
+1 shows 77): the players' times are a shared table, 1/64ths, a halfword a
+player at -7504(r13) (0x1062B0), and each cabinet shows its own through a
+pointer to its entry, -8184(r13) (0x106008 = 0x1062AE + 2 x its player's
+number), set with the player's object pointer at 0x11C3C. Set too, board
+1 shows 77, its picture at 6000 as without the clone.
+
+Not the same board to the byte (board 1's lines part a frame after the
+clone, at 4951): the board a rejoining player takes has no "real" one to
+match. What must hold is that it agrees with the others on the shared
+game, and it does: its sent records paired with board 0's by logic count
+(2191 pairs, `--link-dump` and the pairing above) differ only at the bytes
+two real cabinets differ at (the buttons, the camera's, the on-screen
+bits, the counters and constants), none other.
+
+**So, with one board a PC, every seat can be had:** a dropped player's
+cabinet made by every PC alike (its character standing idle); an empty
+seat made, and taken with a waiting board from the start brought to the
+present; a seat in the game taken with a playing board's state as that
+cabinet (its own network board, EEPROM, link buffers and counters, and
+which cabinet it is: 0x104024, 0x10065B, 0x106008, 0x10019E, camera
++0x4A), a frame behind the master's. All in gamerun (`--drop`,
+`--wait-seat`, `--clone-seat`); the network session is next.
+
 ## Plan
 
 1. Single board, single player (milestones 1–4).

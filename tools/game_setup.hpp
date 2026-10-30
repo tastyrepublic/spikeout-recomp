@@ -173,6 +173,11 @@ public:
     explicit Turns(std::size_t boards, bool parallel = false, std::function<void()> between = {})
         : done_(boards, false), parallel_(parallel), between_(std::move(between)) {}
     std::size_t boards() const { return done_.size(); }
+    // Whether board i is the only one still running.
+    bool alone(std::size_t i) {
+        std::lock_guard lock(mutex_);
+        return !done_[i] && running() == 1;
+    }
 
     void wait(std::size_t i) {
         if (parallel_) return; // (all start together)
