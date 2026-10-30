@@ -227,9 +227,10 @@ a frame at scale 4), the settings menu and widescreen all work.
   Checked: seg2/seg3 pictures in 4:3 and 16:9 the same as before but the
   card; stage 1 and seg4 not re-compared.
 - Next (a separate session): the camera events still to sort. Kind A's
-  0x3F (0xB4EA0 in area script 0xB4800, behind a condition not met;
-  0xB2A64 in a script never run, perhaps the hidden route) and the area
-  scripts never run (the hidden stages). Kind C as shared or per-player,
+  0x3F (both its records, 0xB2A64 and 0xB4EA0, in scripts the area task
+  never ran; every script listed in the table at 0xA1D2C-0xA2028) and the
+  scripts never run (the hidden stages, or set-ups run some other way): an
+  observer hook at the action dispatch 0x5AB30 would log every action run. Kind C as shared or per-player,
   with each write's caller (LR, which --camera-events doesn't report yet:
   0x37258/0x372D4 are the script's when called from 0x5D81C), needing
   two-player runs over the whole game (the bot driving two boards). Then

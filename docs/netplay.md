@@ -1040,12 +1040,20 @@ Three kinds of camera event, for one board per PC:
   the frame before the scripts holding 0x18 started (0xAEE28: 19608,
   0xD31A4: 66224, 0xBFC50: 102654, 0xCC06C: 151912). 0x37258 and 0x372D4
   are called from other code too: to sort them, the caller (LR) of each
-  write is needed, a script's meaning shared. 0x3F: 0xB4EA0 is in 0xB4800's
-  script, which ran (123472-126096) without it (behind a condition not
-  met); 0xB2A64 is in a script that never ran (between 0xAF85C and
-  0xB2C08: an area the bot never entered, the hidden route perhaps). The
-  areas' scripts never run in this run are the ones to look at for the
-  hidden stages: their starts can be found from what points at them.
+  write is needed, a script's meaning shared. Each record's own script
+  (its chain of records walked from a start in the table below): 0x3F's
+  0xB2A64 in 0xB2A3C's, 0xB4EA0 in 0xB4E78's; 0x18's 0xAEA84 in 0xAEA58's,
+  0xC00FC in 0xC00DC's, 0xD3660 in 0xD3640's: none of them a script the
+  interpreter task above ran. Every script's start is in one table,
+  0xA1D2C-0xA2028 (in twos and more: the area scripts above with the
+  script before each, perhaps its set-up, which the task's +16 never
+  showed; perhaps run by another task, or within a frame). Not yet known:
+  which of the table's scripts are areas the bot never entered (the hidden
+  route) and which are run some other way. Ways on: an observer hook at
+  the action dispatch (0x5AB30: r31 the record, byte 1 the action) logs
+  every action run, the definitive "seen"; the conditions (type 1 records)
+  before an action say what makes it run; what writes the task's +16 from
+  the table says which gate leads to which area.
 - **B. The camera's own code** (run for the remote player: proven exact,
   `--camera-test`). 0xBE14 (+0x4A8-0x4BF, every frame) is each board's own.
 - **C. Other code**, to sort as shared or that player's own: 0x32A80
