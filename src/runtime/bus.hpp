@@ -156,6 +156,11 @@ public:
     // Swap in another network board (a CommBoard runs the real firmware;
     // the default is the SimNetBoard simulation).
     void use_netboard(std::unique_ptr<NetBoardDevice> board) { netboard_ = std::move(board); }
+    // Another board's network board in this one's place for a while (one
+    // board a PC: another cabinet's link code run here as that cabinet), its
+    // reads and writes going there even while device writes are held;
+    // nullptr puts this board's own back.
+    void borrow_netboard(NetBoardDevice* board) { borrowed_ = board; }
 
     // The main CPU's time in cycles, for devices with their own clock to
     // catch up to before an access (set by the runtime).
@@ -254,8 +259,13 @@ public:
     // Side runs (game code run once more for another cabinet, with RAM put
     // back after: tools/remote_cabinet.hpp): writes outside work RAM dropped
     // while set, so the devices (the sound board's MIDI port, the interrupts
-    // it raises...) don't see them.
-    void hold_device_writes(bool hold) { hold_devices_ = hold; }
+    // it raises...) don't see them. But the CROM bank (what the code then
+    // reads from banked ROM): switched as the code asks, put back after.
+    void hold_device_writes(bool hold) {
+        if (hold && !hold_devices_) held_crom_ = {crom_bank_, crom_bank_reg_};
+        if (!hold && hold_devices_) crom_bank_ = held_crom_[0], crom_bank_reg_ = held_crom_[1];
+        hold_devices_ = hold;
+    }
     // And work RAM's writes kept in a journal while it's on (every write the
     // slow way), each byte's value before; undo_journal() puts them back,
     // newest first, and empties it. Cheaper than copying all of RAM when a
@@ -340,6 +350,7 @@ private:
     void (*on_watch_)(void* user, uint32_t addr, uint32_t value, uint32_t size) = nullptr;
     void* on_watch_user_ = nullptr;
     bool hold_devices_ = false; // (hold_device_writes)
+    std::array<uint32_t, 2> held_crom_{}; // (the CROM bank and its register as the hold began)
     bool journaling_ = false;   // (journal)
     std::vector<std::pair<uint32_t, uint8_t>> journal_;
     void update_fast_limit() {
@@ -367,9 +378,11 @@ private:
     Mpc106 pci_;
     Irq irq_;
     std::unique_ptr<NetBoardDevice> netboard_;
+    NetBoardDevice* borrowed_ = nullptr;
     NetBoardDevice* net() const { // the board, caught up to now
-        netboard_->sync(now());
-        return netboard_.get();
+        NetBoardDevice* board = borrowed_ ? borrowed_ : netboard_.get();
+        board->sync(now());
+        return board;
     }
     uint64_t (*clock_fn_)(const void*) = nullptr;
     const void* clock_user_ = nullptr;

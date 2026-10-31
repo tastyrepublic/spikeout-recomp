@@ -134,11 +134,22 @@ constexpr std::array kCodeEntries = {
 // --one-board and --drop's made blocks (one board a PC, docs/netplay.md); and the two places
 // that decide a camera shake (0x345E4) by the cabinet's own player: 0x21C88
 // (a character's animation, the local player's) and 0x22750 (shake 7, the
-// player the camera follows). And the mode dispatcher (0x492AC, once a frame
+// player the camera follows), and a hit's (0x26070, its test before 0x260CC).
+// And the mode dispatcher (0x492AC, once a frame
 // from the main loop): a cabinet's own flow, run on the side for another.
+// And the main loop's step after the link (0x36E94), where a link run on the
+// side ends when it skips the rest of its frame; and the drawing's wait for
+// the vblank (0x36E04), where a frame's tasks run on the side end. And a
+// character's animation step (0x62AF4, r14 the character: its pose into its
+// buffers at 0x210000-0x22FFFF, each cabinet's own), run again as another.
+// And, for the master's run on the side through its drawing (its shadow made
+// from it): the vblank wait's loop (0x36E08), the OS's wait for a transfer
+// (0x4DD8), passed at once there, and the main loop before its idle wait
+// (0x36F24), where that run ends.
 constexpr std::array kHooks = {0x00009628u, 0x00007E34u, 0x00008230u, 0x0000795Cu, 0x0002C4DCu,
                                0x00033A6Cu, 0x00032578u, 0x0000C670u, 0x0005AB18u, 0x0005A874u,
-                               0x0006DA90u, 0x00021C88u, 0x00022750u, 0x000492ACu};
+                               0x0006DA90u, 0x00021C88u, 0x00022750u, 0x00026070u, 0x000492ACu, 0x00036E94u,
+                               0x00036E04u, 0x00062AF4u, 0x00036E08u, 0x00004DD8u, 0x00036F24u};
 
 } // namespace
 

@@ -395,8 +395,13 @@ void Bus::write_slow(uint32_t addr, uint32_t value, uint32_t size) {
             }
         return;
     }
-    if (hold_devices_) return;
     const Region* region = find_region(addr);
+    if (hold_devices_ && region && region->device == Device::System) { // (held: only the CROM bank, put back as the hold ends)
+        for (uint32_t i = 0; i < size; ++i)
+            if (region->offset(addr) + i == kSysCromBank) system_write(kSysCromBank, static_cast<uint8_t>(value >> (8 * (size - 1 - i))));
+        return;
+    }
+    if (hold_devices_ && !(borrowed_ && region && region->device == Device::NetBoard)) return; // (a borrowed network board's are its own)
     if (!region || !emulated(*region, addr) || !(region->access & kWrite)) {
         count(region, addr, true);
         return;

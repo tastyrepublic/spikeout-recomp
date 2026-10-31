@@ -1691,6 +1691,275 @@ timing hooks used to measure the banners were taken out again; the same
 stage times, the unpack costs, RAM dumps by frame) were scratch switches
 and are not in gamerun.
 
+**Past the first missed frames (2026-10-31, uncommitted when written).**
+The same mashing run carried on past frame 10,846 (where the runs above
+stopped) into the banners, both players' continues and board 0's game
+over. What the real blocks showed:
+
+- A board that misses a frame writes no block; its network board sends
+  the other bank again, the block from two frames before (both banks a
+  double buffer). Given which frames the remote cabinet misses
+  (`--one-board-miss FRAME`, for now taken from the real run), skipping its
+  block there is exact.
+- The link (0x6D758) is a protocol of its own, each cabinet deciding from
+  what it received: whether its count goes on (0x6DBE0: the others' counts
+  too old: the master needs the slave's from the frame before no more than
+  two behind its next, a slave the master's from the same frame no more than
+  one; held back, the frame counter and the header's +0x48 go on, the count
+  and the records stay), who is in the game (0x6DCB0 and 0x6EB30: the
+  header's node mask +0x28; board 0 leaving the game at 11,163 set its own
+  to 0, board 1's to 0x40000000), the record's stamps (0x6DA48: +0x04 the
+  buttons, +0x10 the player's first word, +0xD8 the node, +0xD9 the count &
+  3, +0xDA the nodes - 1, +0xDC the count), its frame counter (0x1000A4,
+  bumped at the main loop's top). Rather than copying each rule, the
+  module now runs the remote's link itself ("link run"): its link memory
+  (0x140000-0x14FFFF: control, header, working record, the others'
+  records, its block, what it received) and variables (0x1000A4-0x1000AB,
+  -7544..-7531(r13)) in, its network board lent to the bus for the run
+  (`Bus::borrow_netboard`: the link reads what that board received and
+  writes its block there itself), its next record made from this board's
+  into its working record, its own variables as its last link left them
+  with its flows' changes since applied (a flow runs at this board's time,
+  which for a slave is before its link of that count). A held-back frame
+  ends at the hook on 0x36E94. The record word +0x100 is the cabinet's
+  own flow's (0x4C21C) and link's.
+- The link run writes the block late in the frame (2.8M cycles in), after
+  this board's view tests of the count, which a cabinet a count ahead
+  carries in its newest record; the newest record of a count this board
+  hasn't reached is its working record then. The other cabinet reads a
+  record two counts on, and every block carries the last four again, so
+  each link run first brings its older records' camera fields up to date.
+  A cabinet's view of its own player is run right after its camera's
+  update (this board's own view tests run as late as 100,000 cycles into
+  the next frame in heavy frames, after the block has gone).
+- A third camera shake: a hit (0x26070, before 0x260CC; the kind the
+  hitter's +7784, when the local player hits or is hit, or in mode 3 with
+  a flag unless the one hit is down). Missing it put a new enemy off the
+  master's screen in its record 200 frames later.
+- `--one-board-camera`'s recording is now also a check: the first
+  difference of the side camera from it, as each update starts.
+
+Results, the side link in (board for board against the two-board run):
+board 1 leaving: exact through 11,164 (6,364 frames after the hand-over),
+through both of its given missed frames, board 0's time over, continue
+and leaving the game. Board 0 (the master) leaving: exact through 10,943
+(6,143 frames), every hold-back the same. The runs take 180 s (90 s
+before the link runs: to be made cheaper).
+
+Where it stops, and why:
+
+1. **The cabinets apart.** From 11,163 board 0's player is out (game
+   over) and board 1 plays on alone. Their worlds are no longer the same
+   game, so board 1's records can't come from board 0's world, and board 0
+   does read them: from 34 frames on, its copy of player 2 (0x1A6xxx)
+   follows them, and it spreads into its globals. Board 1's world then has
+   to come from board 1's own game running.
+2. **This board missing a frame while the master is a count ahead.** At
+   10,942 board 1 (here) is still unpacking its TIME OVER while the master
+   links two counts ahead; its newest record needs the master's world step
+   of a count board 1 hasn't run. Running the master's flow and its tasks
+   (0x11DF4 up to its vblank wait, hooked at 0x36E04) on board 1's world
+   is the way, but the tasks there run out of their cycle budget in the
+   banner's unpacking (0x8F98).
+3. Which frames a remote cabinet misses, still given, not predicted.
+
+**A shadow board for those stretches: tried, not exact (2026-10-31).**
+The idea: when side runs can't follow, run a whole board as the other
+cabinet ("shadow"), copied from this board's state where both have
+finished the same count (0x36E94: board 0 finishes count C about a frame
+before board 1 does, both linking at about 1.95M cycles in the same
+frame, board 1 a count behind), with the module's own variables, camera,
+link memory and variables put in (gamerun `--one-board-shadow FRAME`:
+the leaving board waits, taking its turns, then runs as the shadow).
+The two boards' RAM at the same count differs in about 565 KB; most is
+what each draws, but not all. With every byte that differed at the
+hand-over taken from the leaving board (its own, as it was then), 29 KB
+still differ from the real board 1 right after the copy: fields inside
+the characters' and enemies' objects (0x1A0000-0x1C3FFF; player 1's
++0x2249 is 05 on board 1 now, 00 at the hand-over), 0x1F0000-, 0x200000-,
+each cabinet's and changing in play. Side runs never needed them (the
+blocks stayed exact without them), but a whole board's game reads them:
+the shadow's records part from the real board's within three counts
+(its enemies' entries). A board copied in mid-game can't be that
+cabinet unless all of its own state has been kept, which means having
+run its whole game all along.
+
+**Which of those bytes matter: bisected (2026-10-31).** The real board 1's
+RAM saved where it finished count 4818 (its 0x36E94), and the shadow
+started as above with the real bytes put in over chosen ranges, then run
+450 frames on, its blocks and board 0 compared with the two-board run.
+All the real bytes but the live stack (0x73EFA0-0x73FFFF: the copied CPU's
+return addresses): the shadow's blocks and board 0 exact through 6,554,
+the end (the shadow's inputs for the copy's own frame set from its press
+list too: its frame's input read comes before the copy point). None: off
+at 6,003. Halving, a range left out or kept at a time: not needed are the
+link memory, the r13 variables and camera, the 2D layers 0x180000-, the
+objects' other bytes, 0x1D0000-0x20FFFF, 0x230000-0x73EFA0. Needed, and
+enough together:
+
+- two enemy view-area bytes (0x1B74A2-3, 0x1BF4A4: the characters'
+  +0x34A0 area, which the module keeps; its copy there one step out of
+  time at the copy point);
+- about 350 bytes of a table at 0x217E00-0x22A800, entries 0x100 apart,
+  written about 450 times a frame on board 1 by objects' own routines
+  (0x62BA0, 0x63584, 0x639B8, 0x4F180, 0x4F42C, called through pointers).
+  Side runs never run them, so the module doesn't keep it.
+
+So a shadow started mid-game can be exact if the module keeps that table
+for the other cabinet too, which means running those routines as it
+(part of its frame's tasks), at a cost still to be measured.
+
+**Tasks mode, and a shadow that is exact (2026-10-31).** The table is the
+characters' pose buffers: 0x62AF4 steps a character's animation (from the
+ROM's tables at 0xFFB00008) and 0x62BA0 works out its pose, from the
+characters' updates (0x1E3D8, through 0x42240, 0x5154C, 0x51D18; 0x4F180
+from 0x51820 and 0x5222C too); a character a cabinet's camera doesn't see
+isn't posed the same, and enemies' view areas are set when they appear,
+by code side runs never ran. The frame's order (board 0, measured): the
+link about 1.95M cycles in, the dispatcher, the characters' updates and
+animation (2.0-2.2M), the camera's update (2.3M), the drawing's vblank
+wait (2.45M), the view tests in the next frame (about 80,000 cycles in),
+0x36E94 (260,000). The part before the drawing is about 43% of a frame's
+work. Tasks mode (`Cabinets::use_tasks`, gamerun `--one-board-tasks`):
+each other cabinet's flow run with its frame's tasks (0x11DF4) up to the
+drawing's vblank wait (hooked at 0x36E04), as it, its own variables,
+camera and pose buffers (0x210000-0x22FFFF) kept from that; then what
+makes its camera's view (0x32578, the drawing's). That replaces the camera,
+shake, mirror and animation side runs (its own code does all of them); view
+tests and link runs as before. Its blocks exact as before (board 0
+identical over 3,390 frames); its side runs 2.8 ms a frame against 1.3 ms
+(gamerun, this PC). Found on the way: inside a side run gamerun's hook
+skipped the module, so a link run that held its frame back, and a tasks
+run reaching the vblank wait, ran on to their cycle budget unseen (their
+results were right, the time wasted); fixed.
+
+From the module in tasks mode, with nothing of the real board's: a shadow
+started at frame 6,000 gave board 1's blocks exact and board 0 identical
+over the 550 frames tested (four pose bytes off at the copy, none that
+mattered). One more of each cabinet's own: the main loop's count
+(-32764(r13), 0x100004, one up every time round), which a link resync puts
+in the header's +0x20 (after the game over, 12,848); now a link variable,
+one up in each link run. Started at 10,900 (a calm point before the time
+overs) and run on: board 0 identical to the two-board run for 10,664
+frames, 4,700 to 15,364 (the reference's own end, where its other board
+stopped at its block limit): both time overs (the shadow missed its frames
+by itself), both continues, board 0 leaving the game, board 1 on alone,
+both game overs, ranking, attract, the link's resync. A shadow can't
+easily be started in the middle of the trouble: around 11,150 board 0
+misses frames to its own banners, its work for a count ending after its
+next wake-up, and the module's state for the count isn't there at the copy
+point (the shadow waits and asks again each frame, never finding one).
+Started before, it carries through.
+
+Still to do: when to start a shadow and stop it again (the games together
+in plain play: handed back to side runs, as at the first hand-over), the
+master's shadow (a count ahead of this board), tasks mode in banner frames
+(its side runs there ran to their cycle budget in the unpacking, 0x8EE0),
+and what a shadow costs on a tablet.
+
+**Handing back from a shadow: the slave's timing (2026-10-31).** Side runs
+start from the other cabinet's own state after the count before the one
+this board is about to run (its own variables, camera, poses; in tasks
+mode the world they run on is this board's before its tasks of the
+count). The tests above took the camera from a recording of an earlier
+run. Taken instead from the leaving board itself where it finished a count
+(its 0x36E94; gamerun now does that without `--one-board-camera`): a
+master's is there in time (it finishes a count a frame before this board
+starts the next), a slave's never is: when this board's dispatcher of
+count L comes (1.98M cycles into frame F), the slave has finished only
+L-2 (its 0x36E94 for L-1 is 0.25M into frame F+1). So side runs of a
+slave can't be started from its live board at the right count, and a
+shadow of a slave can't be handed back that way. Ways round: this board's
+world kept from the frame before (page-tracked snapshots, as rollback
+keeps), the slave's catch-up count run on that; or a shadow, once started,
+left running. Also seen: tasks mode with the master leaving failed in
+plain play (4,846) on its cycle budget in the tile unpacker (0x8EE8).
+
+**Tasks mode with the master; handing back; the master's shadow (2026-10-31).**
+The master's tasks unpacked from nonsense (0x7FFF tiles from 0x5655EC2C):
+its map load (0x92EC, map 0xBB) reads banked CROM, and the bank switch
+(the system board's CROM bank register) was a held device write, so the
+side run read the wrong bank. The bus now lets the CROM bank through while
+holding device writes and puts it back after (`Bus::hold_device_writes`).
+With that, tasks mode with the master leaving is exact through 10,943
+(where this board misses a frame with the master ahead), as the plain mode.
+The record's player word takes only the view bits (0x08, 0x10) from the side
+view test; its 0x40 is the shared game's (the side test runs before the
+tasks that set it). Kept for each cabinet in tasks mode: its 2D area
+(0x180000-0x19FFFF) besides its poses.
+
+Handing back (module: `ask_hand_back`, `hand_back`; gamerun
+`--one-board-hand-back FRAME`, and `--one-board-auto`'s rules): at this
+board's next dispatcher (count L) the count the shadow stops after is set
+(L-1 for a slave, L+1 for the master) and for a slave this board's world
+kept (8 MB, once); the shadow stops at its 0x36E94 for that count; the
+module takes its own variables, camera, own areas, link memory and
+variables there; its first link run takes its working record as left; a
+slave's next count is run on the kept world, with view tests of the
+characters this board's took. Tried: a shadow of the master from 6,000,
+handed back at 6,303: the hand-back went, but the shadow had parted at
+6,002. A master's shadow can't be made from this board: the master runs a
+count ahead (when this board finishes count C, the master has finished
+C+1), so this board's world is always a count behind what it needs. A
+slave's shadow works (above); the slave's first side runs, without a
+camera recording, need the same catch-up as a hand-back (its state after a
+count comes a frame after this board needs it).
+
+**Every hand-over exact, both ways; the rules (2026-10-31, uncommitted when
+written).** The master's shadow is made from a side run after all: this
+board, at its dispatcher of count L, runs the master's count L as it (flow
+and tasks, its link memory and variables swapped in) and on through its
+drawing to the main loop's 0x36F24, the vblank wait's loop (0x36E08) and
+the OS's transfer wait (0x4DD8) passed at once; that RAM and CPU (its MSR
+as a board's is there) go to the leaving board, which goes on at the idle
+wait 0x36F44 with the flag read as 0 and a decrementer interrupt pending
+(its wake-up had come at its link time). Its players 3/4 objects
+(0x1A8000-0x1AFFFF, which its link's entries read) are its own too. The
+slave's hand-back glitch (four frames, a player's view bits) was the
+catch-up's view tests called from the dispatcher with its registers: the
+view test reads more than the view matrix from its caller's (the draw
+loop's) registers. Each view test's registers are now kept as this board
+calls it, and the catch-up's run with them. And the first link run after
+a hand-back kept the shadow's working record but also skipped putting the
+player's first word (as this board had it at that count) into the
+player's object, so the link stamped this board's current one: now put in
+as in every other link run.
+
+With those, a cabinet's main board itself is handed over the way a shadow
+is (`Cabinets::running`, then `ask_hand_back`): gamerun `--one-board B@F`
+without `--one-board-camera` does that, so no camera recording is needed
+any more, for a slave either (its next count caught up on this board's
+world kept, as after a shadow). That is how network play will start side
+runs: from the leaving PC's own state.
+
+`--one-board-auto`'s rules, fixed: a shadow's state wasn't asked again
+while one was waiting for the leaving board (each frame's ask had replaced
+the one about to be taken, so the shadow started only when the trouble
+ended), and the first link mask seen isn't a change.
+
+The fast test (a script over two saved two-board states of the mashing
+run, `build/onepc/mash-5990.state` and `mash-10890.state`, twelve runs in
+parallel with `--no-2d --no-sound`, about a minute), each compared frame by
+frame with the two-board run's RAM hashes for as long as both boards ran:
+
+| run | from | board that stays | frames, all identical |
+|---|---|---|---|
+| side runs (camera recording) | 6,000 | master | 538 |
+| side runs | 6,000 | slave | 539 |
+| side runs, no recording | 6,000 | master | 538 |
+| shadow from 6,100 | 6,000 | master / slave | 534 / 483 |
+| shadow 6,100, handed back 6,250 | 6,000 | master / slave | 538 / 539 |
+| shadow from 10,910 (time overs) | 10,900 | master | 2,100 |
+| the rules | 6,000 | master / slave | 2,151 / 2,148 |
+| the rules | 10,900 | master / slave | 2,102 / 2,054 |
+
+From 6,000 the rules never wanted a shadow (plain play); from 10,900 one
+starts at once (5 s or less left) and carries through both time overs,
+the continues, game over, the ranking and attract. Not yet tried: the
+rules handing a shadow back in the middle of a game after trouble (the
+hand-back itself is exact, above); banner frames in tasks mode; the
+players 3/4 objects as a cabinet's own only while those seats are empty.
+
 ## Plan
 
 1. Single board, single player (milestones 1–4).
