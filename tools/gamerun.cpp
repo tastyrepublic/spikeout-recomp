@@ -180,6 +180,7 @@
 #include "net/compress.hpp"
 #include "input_log.hpp"
 #include "recording.hpp"
+#include "remote_cabinet.hpp"
 #include "png_write.hpp"
 #include "wav_write.hpp"
 #ifdef SPIKEOUT_GPU
@@ -315,12 +316,17 @@ struct Options {
     uint64_t map_trace_from = 0, map_trace_frames = 0; // --map-trace FROM:N
     bool camera_test_flags = false; // --camera-test-flags
     bool camera_test_mirror = false; // --camera-test-mirror
+    bool camera_test_free = false;   // --camera-test-free
     bool link_standin_no_reads = false; // --link-standin-no-reads
     bool link_standin_coarse = false;   // --link-standin-coarse
     bool link_standin_blocks = false;   // --link-standin-blocks
     int drop_board = -1;                // --drop B@FRAME
     uint64_t drop_frame = 0;
-    int wait_board = -1;                // --wait-seat B@FROM:UNTIL
+    const char* drop_buttons = nullptr; // --drop-buttons DUMP
+    int one_board = -1;                 // --one-board B@FRAME (and --one-board-camera FILE)
+    uint64_t one_board_frame = 0;
+    const char* one_board_camera = nullptr;
+    int wait_board = -1;               // --wait-seat B@FROM:UNTIL
     uint64_t wait_from = 0, wait_until = 0;
     int clone_board = -1;               // --clone-seat B@FRAME
     uint64_t clone_frame = 0;
@@ -471,6 +477,22 @@ struct Machine {
         double side_seconds = 0; // the side runs' game code alone
         uint64_t from = 0; // --camera-test-from FRAME: the second camera started there
         bool copy_flags = false; // --camera-test-flags: its flags word from this board's camera each frame
+        // --camera-test-free: the second camera only run on (from the recorded one at --camera-test-from),
+        // not compared: its heading after each update and its view tests kept, by logic count, for
+        // --drop's made blocks (the other cabinet's camera, run here)
+        bool free = false;
+        std::map<uint32_t, uint16_t> heading_at;                      // (logic: its heading, camera +0x2A)
+        std::map<std::pair<uint32_t, uint32_t>, uint32_t> view_at;    // ((logic, character): its flags word)
+        // (and players 1-4 as this board writes its own record, 0x6DA90, by logic count: each one's
+        // first word, +0x44, +0x2A, +0x74, +0x76, what a made record takes from its player)
+        std::map<uint32_t, std::array<std::array<uint32_t, 5>, 4>> players_at;
+        // (and that cabinet's own flow run on the side, with its own variables, kCabinetOwn: their
+        // values, and its header after its flow, by logic count)
+        std::vector<uint8_t> own;
+        std::map<uint32_t, std::array<uint8_t, 0x100>> header_at;
+        std::map<uint32_t, std::vector<uint8_t>> own_at;   // (after each logic count: checked against that board's own)
+        std::map<uint32_t, std::vector<uint8_t>> own_seed; // (that board's own after each logic count, while it runs)
+        uint64_t toggled_at = 0;                           // (the frame its toggles were last flipped for)
         bool mirror = false; // --camera-test-mirror: other code's changes to this board's camera made to the second too
         bool in_view = false, in_update = false; // (this board's view routine, or its update, running)
         bool events = false; // --camera-events: code other than the camera's own writing into it, counted
@@ -539,6 +561,12 @@ struct Machine {
              frames_block_culled = 0;
     uint64_t micro_tris = 0, translator_tris = 0, inverted_tris = 0;
     uint16_t net_status[2] = {0, 0}; // --net-watch
+    // --one-board: on the board that stays, the other cabinets made by it; on the one that goes, its own
+    // variables as each flow of its starts (by logic count), to start the side flow from; its camera as each
+    // update starts (--one-board-camera, a --camera-record of it).
+    std::unique_ptr<tools::remote::Cabinets> cabinets;
+    std::mutex cabinets_lock;
+    std::map<uint32_t, std::vector<uint8_t>> own_seed, camera_seed;
 
     // --renderer gpu / compare: the GPU's picture, and how it compared with
     // the software renderer's (pixels with a channel more than 2 apart).
@@ -643,12 +671,16 @@ struct Rewound {};
 struct Dropped {
     uint64_t write_at;
     uint32_t slice;
+    bool module = false; // (--one-board: its blocks made by the other board's tools::remote::Cabinets)
 };
 std::vector<std::unique_ptr<struct Machine>>* g_machines = nullptr; // (--drop: board 0, whose block the made ones start from)
 // --clone-seat B@FRAME: board 0's state at its first block after FRAME's end (no sound), which
 // board B takes at its own, as its own cabinet (thrown after: run() goes on from it).
 std::vector<uint8_t> g_clone_state;
 std::mutex g_clone_lock;
+const char* g_drop_buttons = nullptr; // --drop-buttons DUMP (for made_blocks)
+const std::vector<Press>* g_presses = nullptr; // --press (for made_blocks: a dropped seat's own buttons)
+int g_drop_board = -1; // --drop B (the side camera's buttons are that cabinet's)
 struct Cloned {};
 // --wait-seat B@FROM:UNTIL: thrown at board B's first block after FROM's end; run() holds its blocks
 // to UNTIL, then brings the board back there.
@@ -702,6 +734,49 @@ constexpr uint32_t kLogicCounter = 0x1000A8;
 constexpr uint32_t kAfterUpdate = 0xC670, kAfterUpdateReturn = 0x32514;
 constexpr uint32_t kActionDispatch = 0x5AB18; // a stage script's action about to run (r31 its record, byte 1 the action)
 constexpr uint32_t kActionDispatchAtOnce = 0x5A874; // the same, from the interpreter that runs a script through (0x5A824)
+constexpr uint32_t kRecordWrite = 0x6DA90; // this cabinet's record written (+0x04 its buttons, +0x10 its player's first word)
+// A camera shake (0x345E4, r3 the kind: the table at 0x90114, 8 bytes a kind, its byte into the
+// camera's +0xD2 and +0xD3, its float into +0xD4), decided by the cabinet's own player: 0x21C88 (a
+// character's animation command, r14 the character, r28+4 the kind: every cabinet's in mode 3 with
+// a flag, else the local player's, -16348(r13), or one holding it, +0x44 bit 0x1000 and +272) and
+// 0x22750 (kind 7 for the player the camera follows, camera +0x4A, against the character's +114).
+// Board 0's own decisions written into its camera (the block 0x345EC) aren't the other's.
+constexpr uint32_t kShakeByAnimation = 0x21C88, kShakeFollowed = 0x22750, kShakeWrite = 0x345EC;
+// A cabinet's own flow: the mode dispatcher, called once a frame from the main loop (0x11A80, after
+// the link's 0x6D758), its mode -16374(r13) (7 in the game, 15 after a game over), the in-game mode's
+// routine 0x4B460 (the time over, the continue countdown -7523(r13), the flags -8188(r13), the header's
+// status 0x140106). Run on the side for another cabinet with its own variables: the bytes of r13's
+// areas that differ between two linked boards (board 0 at a frame against board 1 the frame after,
+// through a time over, a continue and a game over), less the main loop's timings (-16252..-16242).
+constexpr uint32_t kModeDispatch = 0x492AC;
+constexpr std::pair<uint32_t, uint32_t> kCabinetOwn[] = {
+    {0x104000, 0x104014}, {0x10401A, 0x10401C}, {0x104024, 0x10402C}, {0x104051, 0x104052}, {0x10407B, 0x10407C},
+    {0x104083, 0x104084}, {0x104090, 0x104094}, {0x1040B0, 0x1040BC}, {0x1040C7, 0x1040C8}, {0x1040F0, 0x1040FC},
+    {0x104103, 0x104104}, {0x10065B, 0x10065C}, {0x106004, 0x10600C}, {0x106180, 0x106181}, {0x1061B7, 0x1061BB},
+    {0x1061CD, 0x1061E6}, {0x106242, 0x10624D}, {0x106268, 0x10626C}, {0x106295, 0x1062A4}, {0x1062AD, 0x1062AE},
+    {0x1062C7, 0x1062C8}, {0x1062DC, 0x1062DD}, {0x100100, 0x100120}, // (its buttons' words, 0x5094's, and copies)
+    {0x140104, 0x140108}, // (and its block's header status, +0x04-0x07: its flow ORs bits into +0x06)
+    // (and each character's view of it, +0x34A0-0x34BF: its camera's view tests write them, its camera's update
+    // reads them; players 1-4, then enemies 1-8)
+    {0x1A34A0, 0x1A34C0}, {0x1A74A0, 0x1A74C0}, {0x1AB4A0, 0x1AB4C0}, {0x1AF4A0, 0x1AF4C0}, {0x1B34A0, 0x1B34C0},
+    {0x1B74A0, 0x1B74C0}, {0x1BB4A0, 0x1BB4C0}, {0x1BF4A0, 0x1BF4C0}, {0x1C34A0, 0x1C34C0}, {0x1C74A0, 0x1C74C0},
+    {0x1CB4A0, 0x1CB4C0}, {0x1CF4A0, 0x1CF4C0},
+    // (and their view bits, the first word's low byte)
+    {0x1A0003, 0x1A0004}, {0x1A4003, 0x1A4004}, {0x1A8003, 0x1A8004}, {0x1AC003, 0x1AC004}, {0x1B0003, 0x1B0004},
+    {0x1B4003, 0x1B4004}, {0x1B8003, 0x1B8004}, {0x1BC003, 0x1BC004}, {0x1C0003, 0x1C0004}, {0x1C4003, 0x1C4004},
+    {0x1C8003, 0x1C8004}, {0x1CC003, 0x1CC004}};
+std::size_t cabinet_own_size() {
+    std::size_t n = 0;
+    for (const auto& [lo, hi] : kCabinetOwn) n += hi - lo;
+    return n;
+}
+uint32_t cabinet_own_byte(std::size_t k) { // (the k-th own byte's address)
+    for (const auto& [lo, hi] : kCabinetOwn) {
+        if (k < hi - lo) return lo + static_cast<uint32_t>(k);
+        k -= hi - lo;
+    }
+    return 0;
+}
 void camera_written(void* user, uint32_t addr, uint32_t value, uint32_t size) {
     Machine& m = *static_cast<Machine*>(user);
     Machine::CameraTest& t = m.camera;
@@ -717,6 +792,10 @@ void camera_written(void* user, uint32_t addr, uint32_t value, uint32_t size) {
         return;
     }
     if (t.inside || t.in_view || t.in_update || t.mine.empty()) return;
+    if (t.free && pc == kShakeWrite) return; // (decided again for the other, camera_hook)
+    // (this cabinet's own continue and name entry keep their working values in its camera, +0xB04-0xB1E: its flow's,
+    // run for the other by the side flow)
+    if (t.free && (pc == 0x7682C || pc == 0x76F78 || pc == 0x76868 || pc == 0x76944)) return;
     for (uint32_t k = 0; k < size; ++k) {
         const uint32_t at = addr + k - kCamera;
         if (at < 8 || at >= kCameraBytes || (at >= 0x4A8 && at < 0x4C0)) continue;
@@ -741,6 +820,72 @@ double ops_f(uint64_t bits) { // an FPR's double
 // compared with the other board's camera as its next update starts, both
 // as the second camera runs on by itself (free) and from the recorded one
 // each time (one step).
+uint64_t state_hash(const std::function<void(m3::State&)>& walk);
+
+// --one-board: the staying board's hook (the other cabinets' side runs first; nothing else in a side run),
+// and the leaving board's (its own variables as each flow of its starts, while it still runs).
+void one_board_hook(recomp::Context& c, uint32_t pc, void* user) {
+    Machine& m = *static_cast<Machine*>(user);
+    if (m.cabinets->inside()) return;
+    if (m.cabinets->hook(pc)) return;
+    m3::games::spikeout_hook(c, pc, nullptr);
+}
+// --one-board B@FRAME: board B made by the other (two boards) from the end of FRAME, its side runs started ten
+// frames before (its camera from --one-board-camera, a --camera-record of it, by logic count; its own variables
+// from the leaving board's own as a flow of its started, the flows since run on).
+void one_board_leaving_hook(recomp::Context& c, uint32_t pc, void* user);
+void set_up_one_board(std::vector<std::unique_ptr<Machine>>& machines, const Options& o) {
+    const std::size_t gone = static_cast<std::size_t>(o.one_board), stays = gone == 0 ? 1 : 0;
+    Machine& m = *machines[stays];
+    Machine& leaving = *machines[gone];
+    auto held = [](std::size_t seat, uint64_t frame) {
+        uint8_t in[2] = {0xFF, 0xFF};
+        if (g_presses)
+            for (const Press& p : *g_presses)
+                if (for_board(p.board, seat) && frame >= p.frame && frame < p.frame + p.frames)
+                    in[p.bank] = static_cast<uint8_t>(in[p.bank] & ~(1u << p.bit));
+        return tools::remote::held_word(in[0], in[1]);
+    };
+    m.cabinets = std::make_unique<tools::remote::Cabinets>(m.c, m.bus, m.timing, stays, held);
+    auto cameras = std::make_shared<std::map<uint32_t, std::vector<uint8_t>>>();
+    if (o.one_board_camera) {
+        const std::vector<uint8_t> bytes = tools::read_file(o.one_board_camera);
+        for (std::size_t at = 0; at + 4 + kCameraBytes <= bytes.size(); at += 4 + kCameraBytes) {
+            uint32_t logic = 0;
+            std::memcpy(&logic, bytes.data() + at, 4);
+            (*cameras)[logic].assign(bytes.begin() + static_cast<std::ptrdiff_t>(at + 4), bytes.begin() + static_cast<std::ptrdiff_t>(at + 4 + kCameraBytes));
+        }
+    }
+    const uint64_t from = o.one_board_frame >= 10 ? o.one_board_frame - 10 : 0;
+    Machine* l = &leaving;
+    Machine* s = &m;
+    m.cabinets->add(gone, gone == 0 ? +1 : -1,
+                    [cameras, l, s, from](std::size_t, uint32_t logic, tools::remote::Seed& seed) {
+                        if (s->timing.frames() < from) return false;
+                        const auto camera = cameras->find(logic);
+                        if (camera == cameras->end()) return false;
+                        std::lock_guard guard(l->cabinets_lock);
+                        auto own = l->own_seed.upper_bound(logic);
+                        if (own == l->own_seed.begin()) return false;
+                        --own;
+                        seed.camera = camera->second, seed.own = own->second, seed.own_logic = own->first - 1;
+                        return true;
+                    });
+    m.c.set_hook(one_board_hook, &m);
+    m.bus.watch_writes(kCamera, kCamera + kCameraBytes, &tools::remote::Cabinets::camera_written, m.cabinets.get());
+    leaving.c.set_hook(one_board_leaving_hook, &leaving);
+}
+void one_board_leaving_hook(recomp::Context& c, uint32_t pc, void* user) {
+    Machine& m = *static_cast<Machine*>(user);
+    if (pc == tools::remote::kModeDispatch) {
+        static const std::vector<uint32_t> own = tools::remote::own_addresses();
+        std::vector<uint8_t> bytes(own.size());
+        for (std::size_t k = 0; k < own.size(); ++k) bytes[k] = m.bus.read8(own[k]);
+        std::lock_guard guard(m.cabinets_lock);
+        m.own_seed[m.bus.read32(tools::remote::kLogicCounter)] = std::move(bytes);
+    }
+    m3::games::spikeout_hook(c, pc, nullptr);
+}
 void camera_hook(recomp::Context& c, uint32_t pc, void* user) {
     Machine& m = *static_cast<Machine*>(user);
     Machine::CameraTest& t = m.camera;
@@ -771,6 +916,36 @@ void camera_hook(recomp::Context& c, uint32_t pc, void* user) {
         }
     }
     if (t.inside) return; // (the side run: no other hooks either)
+    if (pc == kRecordWrite) {
+        if (!t.free) return;
+        auto& players = t.players_at[m.bus.read32(kLogicCounter)];
+        for (uint32_t k = 0; k < 4; ++k) {
+            const uint32_t p = 0x1A0000 + 0x4000 * k;
+            players[k] = {m.bus.read32(p), m.bus.read32(p + 0x44), m.bus.read16(p + 0x2A), m.bus.read16(p + 0x74), m.bus.read16(p + 0x76)};
+        }
+        return;
+    }
+    if (pc == kShakeByAnimation || pc == kShakeFollowed) { // (the other cabinet's shake, into its camera run here)
+        if (!t.free || t.mine.empty() || g_drop_board < 0) return;
+        const uint32_t r13 = c.cpu.gpr[13], character = c.cpu.gpr[14];
+        uint32_t kind = 0;
+        if (pc == kShakeFollowed) {
+            if (t.mine[0x4A] == m.bus.read8(character + 114)) kind = 7;
+        } else {
+            const uint32_t local = 0x1A0000 + 0x4000 * static_cast<uint32_t>(g_drop_board);
+            bool shake;
+            if (m.bus.read8(r13 - 16376) == 3) shake = (m.bus.read32(r13 - 16380) & 0x01080000u) != 0;
+            else if (m.bus.read32(character) & 0x04000000u) shake = false;
+            else shake = local == character || ((m.bus.read32(character + 68) & 0x1000u) && m.bus.read32(character + 272) == local);
+            if (shake) kind = m.bus.read8(c.cpu.gpr[28] + 4);
+        }
+        if (kind) {
+            const uint32_t entry = 0x90114 + 8 * (kind - 1);
+            t.mine[0xD2] = t.mine[0xD3] = m.bus.read8(entry);
+            for (uint32_t k = 0; k < 4; ++k) t.mine[0xD4 + k] = m.bus.read8(entry + 4 + k);
+        }
+        return;
+    }
     if (pc == kActionDispatch || pc == kActionDispatchAtOnce) { // --script-actions: the record (r31) about to run, its action (byte 1)
         if (!t.actions) return;
         const uint32_t record = c.cpu.gpr[31];
@@ -789,7 +964,8 @@ void camera_hook(recomp::Context& c, uint32_t pc, void* user) {
     }
     if (pc == kCameraUpdate) t.in_update = true;
     if (pc == kCameraUpdate || pc == kViewTest) t.in_view = false;
-    if (pc != kCameraUpdate && pc != kViewTest) return m3::games::spikeout_hook(c, pc, nullptr);
+    if (pc != kCameraUpdate && pc != kViewTest && pc != kModeDispatch)
+        return m3::games::spikeout_hook(c, pc, nullptr);
     auto ram = m.bus.ram();
     const uint32_t logic = m.bus.read32(kLogicCounter);
     // The function at `pc` run on the side with `camera` in the camera's
@@ -798,9 +974,34 @@ void camera_hook(recomp::Context& c, uint32_t pc, void* user) {
         const recomp::Context::Aside aside = c.set_aside();
         const std::vector<uint8_t> before(ram.begin(), ram.end());
         std::copy(camera.begin(), camera.end(), ram.begin() + kCamera);
+        // (the other cabinet's own variables, its flow's: its camera reads them too, its mode and its time over)
+        for (std::size_t k = 0; k < t.own.size(); ++k) ram[cabinet_own_byte(k)] = t.own[k];
+        if (g_presses && g_drop_board >= 0) { // (the other cabinet's buttons, 0x5094's words: its camera reads them (shift);
+                                              // its frame for this logic count one after this board's, a slave behind)
+            auto held = [&](uint64_t frame) {
+                uint8_t in[2] = {0xFF, 0xFF};
+                for (const Press& p : *g_presses)
+                    if (for_board(p.board, static_cast<std::size_t>(g_drop_board)) && frame >= p.frame && frame < p.frame + p.frames)
+                        in[p.bank] = static_cast<uint8_t>(in[p.bank] & ~(1u << p.bit));
+                return ~(uint32_t(in[0]) | uint32_t(in[1]) << 8 | 0xFFu << 16 | 0xFFu << 24);
+            };
+            // (the slave, board 1 up, a frame behind this one; the master, board 0, a frame ahead)
+            const uint64_t frame = g_drop_board == 0 ? m.timing.frames() - 1 : m.timing.frames() + 1;
+            const uint32_t now = held(frame), was = held(frame - 1);
+            m.bus.write32(0x100100, now), m.bus.write32(0x100104, now & ~was), m.bus.write32(0x100108, was & ~now);
+            if (!t.own.empty() && t.toggled_at != frame) // (its toggles, 0x10010C, the pressed ones flipped once a frame: kept in its own)
+                m.bus.write32(0x10010C, m.bus.read32(0x10010C) ^ (now & ~was)), t.toggled_at = frame;
+            // (and that cabinet's local player, as --clone-seat sets it)
+            const auto b = static_cast<uint32_t>(g_drop_board);
+            m.bus.write32(0x104024, 0x1A0000 + 0x4000 * b);
+            m.bus.write8(0x10065B, static_cast<uint8_t>(b + 1));
+            m.bus.write32(0x106008, 0x1062AE + 2 * (b + 1));
+        }
         c.set_scheduler(nullptr);
         c.cpu.msr &= ~recomp::Context::kMsrEE;
+        c.limit_aside(30'000'000); // (not the board's turn's budget; ten frames at most)
         t.inside = true;
+        m.bus.hold_device_writes(true); // (its sounds, a hit's, not this board's: only RAM is put back after)
         const auto started = std::chrono::steady_clock::now();
         try {
             if (pc == kViewTest) { // with this camera's view matrix, as the game has it in f20-f31 then
@@ -811,6 +1012,8 @@ void camera_hook(recomp::Context& c, uint32_t pc, void* user) {
                     const double d = f;
                     std::memcpy(&c.cpu.fpr[static_cast<std::size_t>(20 + k)], &d, 8);
                 }
+                c.call(pc);
+            } else if (pc == kModeDispatch) { // the cabinet's flow (its mode's routine)
                 c.call(pc);
             } else { // the update, then what makes its view
                 c.call(pc);
@@ -824,8 +1027,13 @@ void camera_hook(recomp::Context& c, uint32_t pc, void* user) {
         }
         t.side_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count(); // (the game code only)
         t.inside = false;
+        m.bus.hold_device_writes(false);
         std::vector<uint8_t> out(ram.begin() + kCamera, ram.begin() + kCamera + kCameraBytes);
         if (flags) *flags = m.bus.read32(aside.cpu.gpr[14]);
+        for (std::size_t k = 0; k < t.own.size(); ++k) t.own[k] = ram[cabinet_own_byte(k)]; // (its own after: its flow's, its camera's)
+        if (pc == kModeDispatch) { // (and its header after its flow, 0x140100: its status at +0x06)
+            std::copy(ram.begin() + 0x140100, ram.begin() + 0x140200, t.header_at[logic].begin());
+        }
         if (pc == kCameraUpdate)
             for (std::size_t i = 0; i < ram.size(); ++i)
                 if (ram[i] != before[i] && (i < kCamera || i >= kCamera + kCameraBytes)) ++t.written[static_cast<uint32_t>(i & ~15u)];
@@ -834,6 +1042,73 @@ void camera_hook(recomp::Context& c, uint32_t pc, void* user) {
         ++t.runs;
         return out;
     };
+    if (pc == kModeDispatch) {
+        if (static_cast<int>(m.index) == g_drop_board) { // (the real cabinet, before its PC goes: its own bytes as its flow of
+                                                         // this logic count starts, kept to start the side flow from, and checked)
+            std::vector<uint8_t> mine(cabinet_own_size());
+            for (std::size_t k = 0; k < mine.size(); ++k) mine[k] = ram[cabinet_own_byte(k)];
+            Machine& b0 = *(*g_machines)[g_drop_board == 0 ? 1 : 0]; // (the board running its side flow)
+            std::lock_guard guard(g_clone_lock);
+            if (const auto side = b0.camera.own_at.find(logic - 1); side != b0.camera.own_at.end() && side->second != mine) {
+                static int shown = 0;
+                if (shown++ < 12) {
+                    std::printf("side flow: after logic %u (frame %llu) differs from board %d's own:", logic - 1,
+                                (unsigned long long)m.timing.frames(), g_drop_board);
+                    for (std::size_t k = 0, n = 0; k < mine.size() && n < 16; ++k)
+                        if (side->second[k] != mine[k]) std::printf(" %06x %02x/%02x", cabinet_own_byte(k), side->second[k], mine[k]), ++n;
+                    std::printf("\n");
+                }
+            }
+            b0.camera.own_seed[logic - 1] = std::move(mine);
+            return;
+        }
+        if (!t.free || t.mine.empty() || g_drop_board < 0) return;
+        uint32_t runs = 1;
+        if (t.own.empty()) { // (started from that cabinet's own bytes after the newest logic count it has run, its flows
+                             // since then run here first, with this board's shared world: approximate)
+            std::lock_guard guard(g_clone_lock);
+            if (t.own_seed.empty() || t.own_seed.rbegin()->first >= logic) return;
+            t.own = t.own_seed.rbegin()->second;
+            runs = logic - t.own_seed.rbegin()->first;
+        }
+        for (uint32_t k = 0; k < runs; ++k) t.mine = side_run(t.mine);
+        std::lock_guard guard(g_clone_lock);
+        t.own_at[logic] = t.own;
+        return;
+    }
+    if (pc == kViewTest && t.free) { // (--camera-test-free: kept for the made blocks)
+        if (t.mine.empty()) return;
+        uint32_t flags = 0;
+        side_run(t.mine, &flags);
+        t.view_at[{logic, c.cpu.gpr[14]}] = flags;
+        return;
+    }
+    if (pc == kCameraUpdate && t.free) {
+        if (t.mine.empty()) { // (started from the other's recorded camera, as its update for this logic count starts)
+            if (m.timing.frames() < t.from) return;
+            const auto in = t.recorded.find(logic);
+            if (in == t.recorded.end()) return;
+            t.mine = in->second, t.first_logic = logic;
+        }
+        t.mine = side_run(t.mine);
+        if (!t.first_free_miss) // (against the other's recorded camera, as its next update starts: the first difference shown)
+            if (const auto next = t.recorded.find(logic + 1); next != t.recorded.end()) {
+                std::string at;
+                for (uint32_t i = 8; i < kCameraBytes; ++i)
+                    if (t.mine[i] != next->second[i] && (i < 0x4A8 || i >= 0x4C0) && at.size() < 600) {
+                        char one[32];
+                        std::snprintf(one, sizeof one, " +%03x %02x/%02x", i, t.mine[i], next->second[i]);
+                        at += one;
+                    }
+                if (!at.empty()) {
+                    t.first_free_miss = logic;
+                    std::printf("side camera first differs after update of logic %u (frame %llu), side/real:%s\n", logic,
+                                (unsigned long long)m.timing.frames(), at.c_str());
+                }
+            }
+        t.heading_at[logic] = static_cast<uint16_t>(t.mine[kCameraHeading] << 8 | t.mine[kCameraHeading + 1]);
+        return;
+    }
     if (pc == kViewTest) { // the other camera's view of this character, written down (logic, character, flags word)
         if (!t.testing || t.mine.empty() || !t.view_out) return;
         uint32_t flags = 0;
@@ -1113,6 +1388,11 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             m.bus.netboard().sync(m.c.cycles());
             if (m.recording_host) m.host_log.push_back({HostCall::Pass, 0, 0, 0, m.c.cycles()});
             m.line = line;
+            if (m.cabinets) { // --one-board: the other cabinets' blocks due, their network boards brought up to the meeting
+                std::lock_guard guard(m.cabinets_lock);
+                const uint64_t f = m.timing.frames();
+                m.cabinets->meet(f, m.timing.frame_start(f) + m.timing.line_cycles() * (recomp::FrameTiming::kVBlankLines + line));
+            }
             turns.pass(m.index);
             if (m.rb.rewind) { // (--rollback-test: put back at the meeting, with the others)
                 m.rb.rewind = false;
@@ -1129,6 +1409,12 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         }, &m);
     m.timing.on_frame_end = [&m, &o] {
         const uint64_t frame = m.timing.frames();
+        if (m.cabinets) { // --one-board: the other cabinets' frames end with this board's (frames() counts those done)
+            std::lock_guard guard(m.cabinets_lock);
+            m.cabinets->end_frame(frame - 1);
+        }
+        if (o.one_board >= 0 && static_cast<int>(m.index) == o.one_board && frame == o.one_board_frame) // --one-board B@FRAME
+            throw Dropped{2400000, o.slice, true};
         if (o.drop_frame && static_cast<int>(m.index) == o.drop_board && frame == o.drop_frame) // --drop B@FRAME: its PC gone here
             throw Dropped{o.link_standin_at ? o.link_standin_at : 2400000, o.slice};
         if (o.clone_frame && frame + 1 == o.clone_frame && m.index == 0) // --clone-seat: board 0's state, for board B (a frame
@@ -1900,6 +2186,18 @@ void run(Machine& m, tools::Turns& turns) {
             continue;
         } catch (const Dropped& d) { // (--drop: this board's PC gone; its blocks made from board 0 from here on)
             m.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            if (d.module) { // (--one-board: made by the other board's cabinets from the next frame's block, at its meetings)
+                Machine& other = *(*g_machines)[m.index == 0 ? 1 : 0];
+                tools::remote::Block last{};
+                for (uint32_t i = 0; i < tools::remote::kBlockWords; ++i) last[i] = m.bus.read32(tools::remote::kBlock + 4 * i);
+                {
+                    std::lock_guard guard(other.cabinets_lock);
+                    other.cabinets->start_making(m.index, m.bus.netboard(), last);
+                }
+                m.why = "one board: its blocks made by board " + std::to_string(other.index) + " from frame " + std::to_string(m.timing.frames());
+                turns.finish(m.index);
+                return;
+            }
             made_blocks(m, turns, d.write_at, d.slice);
             return;
         } catch (const Cloned&) { // (--clone-seat: on from board 0's state, as this cabinet)
@@ -2062,7 +2360,7 @@ void stand_in_blocks(Machine& m, tools::Turns& turns, const std::vector<HostCall
 // +0x40-0x43) and the on-screen bits held as they were. RAM's order (the block at 0x141000:
 // header 0x100, four records of 0x200; written to the network board at 0xC0000100 on).
 void made_blocks(Machine& m, tools::Turns& turns, uint64_t write_at, uint32_t slice) {
-    Machine& local = *(*g_machines)[0];
+    Machine& local = *(*g_machines)[m.index == 0 ? 1 : 0]; // (the board whose block it starts from: the other)
     m3::NetBoardDevice& nb = m.bus.netboard();
     std::array<uint32_t, 0x240> block{}; // (its last block, as words)
     for (uint32_t i = 0; i < 0x240; ++i) block[i] = m.bus.read32(0x141000 + 4 * i);
@@ -2079,6 +2377,24 @@ void made_blocks(Machine& m, tools::Turns& turns, uint64_t write_at, uint32_t sl
                     local.bus.read16(player + 0x74), local.bus.read16(player + 0x76)};
     };
     before = copy_now();
+    // --drop-buttons DUMP: this seat's buttons word (record +0x04) for each logic count, as a real run of
+    // it sent them (a --link-dump: the network board's byte order, each word swapped)
+    std::map<uint32_t, uint32_t> buttons;
+    if (g_drop_buttons) {
+        const std::vector<uint8_t> bytes = tools::read_file(g_drop_buttons);
+        auto word = [&](std::size_t at) {
+            uint32_t v;
+            std::memcpy(&v, bytes.data() + at, 4);
+            return v; // (the dump's words as the host reads them: little-endian, so RAM's order)
+        };
+        for (std::size_t at = 0; at + 8 + 0x900 <= bytes.size(); at += 8 + 0x900) {
+            if (word(at) != m.index) continue;
+            for (uint32_t s = 0; s < 4; ++s) {
+                const std::size_t rec = at + 8 + 0x100 + 0x200 * s;
+                if (const uint32_t logic = word(rec + 0xDC)) buttons[logic] = word(rec + 0x04);
+            }
+        }
+    }
     const uint64_t frame_cycles = m.timing.frame_cycles(), line_cycles = m.timing.line_cycles();
     const uint64_t vblank = line_cycles * recomp::FrameTiming::kVBlankLines;
     uint64_t made = 0;
@@ -2102,29 +2418,79 @@ void made_blocks(Machine& m, tools::Turns& turns, uint64_t write_at, uint32_t sl
                                   0x4Fu, 0x5Au, 0x5Bu})
                 put8(next, byte, get8(block, byte));
             for (uint32_t w : {0x00u, 0x1Cu, 0x58u}) next[w / 4] = block[w / 4] + 1; // (the counters)
+            // (its status, +0x06: from its own flow run on the side, after the logic count before)
+            if (const auto h = local.camera.header_at.find(next[0x1C / 4] - 1); h != local.camera.header_at.end())
+                put8(next, 0x06, h->second[6]), put8(next, 0x07, h->second[7]);
             // (the record board 0 wrote for the logic count this one is at: a slave runs a frame
             // behind the master, so board 0's from the frame before, still in its slots)
-            const int to = (newest(block) + 1) % 4;
-            const uint32_t logic = next[0x1C / 4];
+            // (a record of its, logic count `logic`, into slot `to`, its buttons those of its frame `bf`; `old` the slot
+            // of the block before whose leftovers it keeps)
+            auto make_record = [&](int to, uint32_t logic, uint64_t bf, uint32_t old, bool quiet) {
             int from = -1;
             for (int s = 0; s < 4; ++s)
                 if (mine[(0x100 + s * 0x200 + 0xDC) / 4] == logic) from = s;
-            if (from < 0) { // (none: board 0's newest, noted)
+            const bool placeholder = from < 0;
+            if (placeholder) { // (none: the other board's newest, noted)
                 from = newest(mine);
-                if (m.why.empty()) m.why = "no record of board 0's for logic " + std::to_string(logic) + " (frame " + std::to_string(f) + ")";
+                if (m.why.empty() && !quiet)
+                    m.why = "no record of board " + std::to_string(local.index) + "'s for logic " + std::to_string(logic) + " (frame " + std::to_string(f) + ")";
             }
             const uint32_t rec = 0x100 + 0x200 * static_cast<uint32_t>(to), src = 0x100 + 0x200 * static_cast<uint32_t>(from);
             for (uint32_t i = 0; i < 0x80; ++i) next[rec / 4 + i] = mine[src / 4 + i];
-            const uint32_t old = 0x100 + 0x200 * static_cast<uint32_t>(newest(block));
-            next[(rec + 0x04) / 4] = 0; // no buttons
+            if (placeholder) next[(rec + 0xDC) / 4] = logic, put8(next, rec + 0xD9, static_cast<uint8_t>(logic)); // (its count's)
+            // (its buttons word: what 0x5094 makes of its inputs each frame, held ones set, the system
+            // board's 0x04 under select 0 in bits 0-7, 0x08 in 8-15, 0x0C in 16-23, 0x04 under select 1
+            // in 24-31, its EEPROM's data line idle (high); from its --press list for this frame)
+            uint8_t in[2] = {0xFF, 0xFF};
+            if (g_presses)
+                for (const Press& p : *g_presses)
+                    if (for_board(p.board, m.index) && bf >= p.frame && bf < p.frame + p.frames)
+                        in[p.bank] = static_cast<uint8_t>(in[p.bank] & ~(1u << p.bit));
+            next[(rec + 0x04) / 4] = ~(uint32_t(in[0]) | uint32_t(in[1]) << 8 | 0xFFu << 16 | 0xFFu << 24);
+            if (const auto b = buttons.find(logic); b != buttons.end()) next[(rec + 0x04) / 4] = b->second;
+            // (its player's fields as board 0 had them as it wrote its own record of this logic count, the
+            // same point of the frame's code: --camera-test-free's hook; else as board 0 has them now)
+            if (const auto p = local.camera.players_at.find(logic); p != local.camera.players_at.end()) {
+                const auto& v = p->second[m.index];
+                before = Copy{v[0], v[1], uint16_t(v[2]), uint16_t(v[3]), uint16_t(v[4])};
+            }
             next[(rec + 0x08) / 4] = uint32_t(before.facing) << 16 | ((before.flags44 & 0x80000000u) ? before.h76 : before.h74);
-            next[(rec + 0x0C) / 4] = (block[(old + 0x0C) / 4] & 0xFFFF0000u) | (next[(rec + 0x0C) / 4] & 0xFFFFu); // (the heading held)
+            // (its camera's heading: run here on the side for its logic count, --camera-test-free; else held)
+            const auto heading = local.camera.heading_at.find(logic - 1); // (the record of logic L carries the camera after update L-1)
+            const uint32_t held = block[(old + 0x0C) / 4] & 0xFFFF0000u;
+            next[(rec + 0x0C) / 4] = (heading != local.camera.heading_at.end() ? uint32_t(heading->second) << 16 : held) |
+                                     (next[(rec + 0x0C) / 4] & 0xFFFFu);
             next[(rec + 0x10) / 4] = before.first;
+            if (!local.camera.view_at.empty()) // (its low byte its view bits: its own camera's test of it, run here, the logic count before)
+                if (const auto v = local.camera.view_at.find({logic - 1, player}); v != local.camera.view_at.end())
+                    next[(rec + 0x10) / 4] = (before.first & ~0xFFu) | (v->second & 0xFFu);
             next[(rec + 0x34) / 4] = block[(old + 0x34) / 4], next[(rec + 0x40) / 4] = block[(old + 0x40) / 4];
             for (uint32_t byte : {0x47u, 0x5Fu, 0x6Bu, 0x77u}) put8(next, rec + byte, get8(block, old + byte)); // (on-screen bits)
+            // (with its camera run here: every character's flags low byte, its on-screen bits, from that
+            // camera's view test of it two logic counts before (the entry is the character as it was at the
+            // record of the count before, its test earlier in that frame), but none for one gone since (its
+            // word cleared after the test: board 0's entry all zero); the list: players 1-4, then enemies 1-8)
+            if (!local.camera.view_at.empty())
+                for (uint32_t k = 0; k < 12; ++k) {
+                    const uint32_t character = k < 4 ? 0x1A0000 + 0x4000 * k : 0x1B0000 + 0x4000 * (k - 4);
+                    const uint32_t entry = rec + 0x14 + 12 * k;
+                    const auto v = local.camera.view_at.find({logic - 2, character});
+                    if (v != local.camera.view_at.end() && next[entry / 4] != 0) put8(next, entry + 3, static_cast<uint8_t>(v->second));
+                }
+            };
+            const uint32_t logic = next[0x1C / 4];
+            if (m.index == 0) { // (the master, made by a slave a frame behind it: every record again from the slave's own of
+                // the same logic count, in slot logic & 3 as 0x6EE78 puts them; the newest, its next count's, the slave
+                // hasn't yet: its newest's for now; the slave's game reads the one two back)
+                for (uint32_t back = 4; back-- > 0;) {
+                    const uint32_t x = logic - back;
+                    make_record(static_cast<int>(x & 3), x, f - back, 0x100 + 0x200 * (x & 3), back == 0);
+                }
+            } else {
+                make_record((newest(block) + 1) % 4, logic, f, 0x100 + 0x200 * static_cast<uint32_t>(newest(block)), false);
+            }
             for (uint32_t i = 0; i < 0x240; ++i) nb.write32(0xC0000100 + 4 * i, next[i]);
             block = next;
-            before = copy_now();
             written = true;
             ++made;
         };
@@ -2660,6 +3026,7 @@ int main(int argc, char** argv) {
         else if (arg == "--camera-test-from" && i + 1 < argc) o.camera_test_from = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--camera-test-flags") o.camera_test_flags = true;
         else if (arg == "--camera-test-mirror") o.camera_test_mirror = true;
+        else if (arg == "--camera-test-free") o.camera_test_free = true;
         else if (arg == "--link-standin-no-reads") o.link_standin_no_reads = true;
         else if (arg == "--link-standin-coarse") o.link_standin_coarse = true;
         else if (arg == "--link-standin-blocks") o.link_standin_blocks = true;
@@ -2677,8 +3044,16 @@ int main(int argc, char** argv) {
         else if (arg == "--drop" && i + 1 < argc) { // B@FRAME: board B's PC gone at the end of FRAME
             char* end = nullptr;
             o.drop_board = static_cast<int>(std::strtol(argv[++i], &end, 0));
+            g_drop_board = o.drop_board;
             if (*end == '@') o.drop_frame = std::strtoull(end + 1, &end, 0);
         }
+        else if (arg == "--drop-buttons" && i + 1 < argc) o.drop_buttons = g_drop_buttons = argv[++i]; // DUMP (a --link-dump)
+        else if (arg == "--one-board" && i + 1 < argc) { // B@FRAME: board B made by the other from the end of FRAME
+            char* end = nullptr;
+            o.one_board = static_cast<int>(std::strtol(argv[++i], &end, 0));
+            if (*end == '@') o.one_board_frame = std::strtoull(end + 1, &end, 0);
+        }
+        else if (arg == "--one-board-camera" && i + 1 < argc) o.one_board_camera = argv[++i]; // FILE (a --camera-record of B)
         else if (arg == "--camera-events") o.camera_events = true;
         else if (arg == "--script-actions") o.script_actions = true;
         else if (arg == "--map-trace" && i + 1 < argc) { // FROM:N
@@ -2757,6 +3132,7 @@ int main(int argc, char** argv) {
                 return 2;
             }
             o.presses.push_back(p);
+            g_presses = &o.presses;
         }
         else if (!o.dir) o.dir = argv[i];
         else o.dir = nullptr, i = argc;
@@ -3093,6 +3469,9 @@ int main(int argc, char** argv) {
                 m.bus.watch_writes(kCamera, kCamera + kCameraBytes, camera_written, &m);
             }
         }
+        if (o.one_board >= 0 && i + 1 == o.boards) set_up_one_board(machines, o);
+        if (o.drop_frame && static_cast<int>(i) == o.drop_board && o.camera_test_free) // (its own flow's bytes, for the side flow)
+            machines.back()->c.set_hook(camera_hook, machines.back().get());
         if ((o.camera_record && static_cast<int>(i) == o.camera_record_board) ||
             (o.camera_test && static_cast<int>(i) == o.camera_test_board)) {
             Machine& m = *machines.back();
@@ -3110,6 +3489,7 @@ int main(int argc, char** argv) {
                 m.camera.from = o.camera_test_from;
                 m.camera.copy_flags = o.camera_test_flags;
                 m.camera.mirror = o.camera_test_mirror;
+                m.camera.free = o.camera_test_free;
                 if (o.camera_test_mirror) m.bus.watch_writes(kCamera, kCamera + kCameraBytes, camera_written, &m);
                 m.camera.view_out = std::fopen((std::string(o.camera_test) + ".view").c_str(), "wb");
                 m.camera.mine_out = std::fopen((std::string(o.camera_test) + ".mine").c_str(), "wb");

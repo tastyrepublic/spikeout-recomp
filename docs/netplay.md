@@ -1505,7 +1505,191 @@ present; a seat in the game taken with a playing board's state as that
 cabinet (its own network board, EEPROM, link buffers and counters, and
 which cabinet it is: 0x104024, 0x10065B, 0x106008, 0x10019E, camera
 +0x4A), a frame behind the master's. All in gamerun (`--drop`,
-`--wait-seat`, `--clone-seat`); the network session is next.
+`--wait-seat`, `--clone-seat`).
+
+**But a sent block comes too late over the internet (2026-10-30).** The
+link wants each cabinet's data from exactly one frame before ("Sync_sys_
+broken" otherwise): a cabinet's block, written about 0.68 of a frame in,
+goes out early in the next frame (it may be written as late as 0.97 of
+the frame, measured 2026-10-28), so a PC needs every other cabinet's block
+within about a frame (17.4 ms) of its PC making it. The stand-in proofs
+ran every board in one process, where it always was. Over the internet
+(round trips of 30-100 ms) it can't be, and an input delay doesn't help:
+it delays buttons, not the link, which is the emulated hardware's own
+timing. So with one board a PC each PC **makes** every other cabinet's
+block, as it makes a dropped player's, and only the buttons go between
+them (as Mode B now, the same input delay). In play everything in it is
+known here: the buttons (sent ahead, the input delay), the player's
+fields (board 0's copy of that player a frame back: all 3500 frames), the
+counters, the leftovers, and the camera's heading and on-screen bits from
+that player's camera run on the side (`--camera-test`'s; 2026-10-28 made a
+remote's block that way byte for byte over 5000 frames). The blocks the
+PCs send then only check the made ones (and put them right when they
+weren't). Open: a cabinet outside the shared game (its attract, its
+select, its continue) runs its own code, not made from the shared game;
+whether a block sent late will do there (the others may need only its
+counters) is to try.
+
+**Made blocks exact in play (2026-10-30, gamerun `--drop B@F
+--camera-test 0:CAM --camera-test-free`).** Board 0 hash for hash the
+same as the two-board run, with board 1's PC gone and its blocks made from
+its buttons alone: an idle player (1,272 frames), a moving one (1,272),
+and both players mashing every button in a fight for 5,327 frames (364
+presses), every made block byte for byte the real one's. What it took:
+- Its buttons word (+0x04) is what 0x5094 makes of the I/O board each
+  frame (held: `~(port 0x04 select 0 | 0x08 << 8 | 0x0C << 16 | 0x04
+  select 1 << 24)`, the EEPROM's line idle; 0x100104 pressed, 0x100108
+  released): from its raw inputs, which the PCs send ahead (the input
+  delay), so every PC makes the same word for the same logic count.
+- Its player's fields as board 0 has them when board 0 writes its own
+  record of that logic count, at the same point of the code (a hook at
+  0x6DA90, where a record is written); copied at a time instead, a flag
+  set and cleared within a frame (0x81100000 at 0x20AC8) came out wrong.
+- Its player's view bits (+0x10's low byte) from its side camera's test
+  of the logic count before; the list's from two before, except a
+  character gone since (board 0's entry all zero: 0 there, as the real).
+- Its side camera run with its buttons (the camera reads them: shift), the
+  slave's frame for a logic count being the master's + 1; and with
+  device writes held during a side run (`Bus::hold_device_writes`): the
+  camera's update can send a sound command, and the MIDI byte and its
+  interrupt on board 0 parted the boards by a few cycles.
+- The camera shakes decided by a cabinet's own player (0x345E4, from
+  0x21C88: a character's animation command when the character is the
+  local player or holds it, or in mode 3 for all; from 0x22750: kind 7
+  for the player the camera follows) decided again for it (hooks at both)
+  and board 0's own (written at 0x345EC) not copied into its camera.
+Where it stops: board 0's TIME ran out at 10,124 (each cabinet has its
+own), and the header's +0x06 (each cabinet's status: bit 2 its time over,
+0x4B588, then its continue countdown -7523(r13), -8188(r13)'s flags) is
+board 0's, copied. A cabinet's own flow (time over, continue, game over,
+joining) is the next part: its own variables, run on the side as its
+camera is, or that board run without pictures or sound while it's outside
+the shared game.
+
+**A cabinet's own flow run on the side (2026-10-31; the owner chose this
+over running that board).** Its flow is the mode dispatcher 0x492AC,
+called once a frame from the main loop (0x11A80; the in-game mode's
+routine 0x4B460: time over, the continue countdown -7523(r13), the flags
+-8188(r13), its header status 0x140106). Run on the side at board 0's call
+(a hook), with that cabinet's own variables swapped in and kept after
+(`kCabinetOwn`: the bytes of r13's areas 0x104000- and 0x106000- that
+differ between two linked boards through a time over, a continue and a
+game over, less the main loop's timings; its buttons' words 0x100100-
+0x10011F, its toggles flipped once a frame; its header status
+0x140104-0x140107, as its flow ORs bits into +0x06; and each character's
+view of it, +0x34A0-0x34BF and the first word's low byte, which its view
+tests write and its camera's update reads: found by bisecting the real
+board's RAM into a side run). Its camera's update and view tests run with
+the same own variables; board 0's own continue and name entry (0x7682C,
+0x76F78, 0x76868, 0x76944, into its camera's +0xB04-) aren't copied into
+it. Seeded from that board's own while it still runs (its flows since run
+forward). Result (the mashing run from 10,100, board 1's PC gone at
+10,110): board 0 the same as the two-board run, frame for frame, through
+board 0's time over, its continue and its game over, 833 frames, every
+made block exact, the side flow's own bytes the real ones'.
+
+Where it stops, and why it can't be run on the side: **a cabinet misses
+frames by its own drawing load.** In the shared game neither board missed
+a frame (4,700-10,900); on a continue screen and after a game over they
+do, by their own pictures: board 1 at 10,943, in its continue countdown
+while board 0 still played (held at 99 seconds), its drawing phase
+0x11DF4 (the game times it, -16244(r13)) taking 3.4 times its usual as
+its picture changed to the continue view; the master then waits a frame
+(board 0's logic count held at 10,944), so the shared game sees it. The
+side flow itself costs 100-300 cycles; what overruns is that cabinet's own
+drawing, most of a board's frame, known only by running it. After a game
+over it doesn't matter (that board no longer takes part; every PC makes
+the same held block for it, and it comes back by a join, `--clone-seat`);
+during a continue countdown (about 11 seconds) it does.
+
+**Which frames a cabinet misses, the rule (2026-10-31).** Not its picture
+switching, as first thought: its banners. A banner (TIME OVER, the
+continue's, ...) unpacks its tile graphics straight into tile RAM in one
+go (0x8E2C, called from 0x8AE0: chunks of up to 128 tiles, 64 bytes each,
+about 400,000 cycles a chunk; TIME OVER is 8 chunks, 3.03 million
+cycles, more than a frame of 2,885,744). The game's frame starts when its
+main loop wakes (about cycle 1.95 million of the emulated frame, when the
+link's data comes: loop top 0x118AC, the link 0x6D758 writing its record
+and copying its block to the network board, 0x6EE78, then 0x11DF4, 0xCB84,
+0x36E94, then the wait 0x36F44); a normal frame's work ends about cycle
+250,000 of the next (about 1.2 million cycles). A frame is lost when that
+work runs past the next wake-up: TIME OVER's frame woke at 10,941
+(1.96M), reached its wait at 10,943 (79k); 10,942 had no frame, no block.
+The same in the emulated cycles on every device (a slower one takes
+longer, never differently). A banner's unpacking is fixed by its data, but
+the rest of 0x11DF4 is the cabinet's own drawing: board 0's and board 1's
+differ 2-5% a frame (the game's own timer of it, -16244(r13)), and the
+second banner's frame ended about 2% of a frame before its wake-up, so
+it can't be worked out exactly here without that board's drawing code.
+Not a fault of ours: our clock leaves out cache misses and the bus, so a
+real board is slower and loses these frames at least as surely.
+
+**How close it comes (measured 2026-10-31, board 1 over 1,860 frames:
+the fight, its time over, continue, game over, ranking and attract, 14
+frames with banners).** The drawing phase waits for the vblank (f_36E04:
+the vblank counter -32712(r13), then the tile generator's buffers flipped,
+0xF118000C), so a frame whose work before the vblank fits always ends
+about 0.3 million cycles after it (58% of a frame before the next
+wake-up); only a frame whose work runs past the vblank (a banner's
+unpacking: up to 24 unpacks, 7.7 million cycles) ends anywhere. Every
+frame's end was at least 28% of a frame (800,000 cycles) from a wake-up,
+before or after: the 14 banner frames 28-34%, everything else 41% or
+more. The earlier "2%" was a misreading (the unpacking's end, not the
+frame's). Board 0's drawing as a stand-in for the remote's is 2-5% of
+that phase off (25,000-55,000 cycles), so with the banners' unpacking
+costs (fixed by their data) every lost frame here is predicted right with
+room to spare; only a frame ending within a few percent of a wake-up
+would need the remote's drawing timed exactly (a side run of 0x11DF4
+needs the vblank wait inside it handled: not working yet) or a rollback.
+
+**A slave makes the master's blocks too (2026-10-31).** The worry: the
+master runs a frame ahead, so its newest record (logic L+1, the slave at L)
+holds what a slave hasn't computed. Changing one field at a time in the
+master's real blocks (with gamerun switches since removed, the link
+buffers 0x140000-0x14FFFF left out of the hash): the
+slave's game reads the master's record from two counts back (L-1), which
+it has made itself by then; the newer ones only once, briefly (player 1's
++0x3330 for a frame). So a slave makes the master's block by rebuilding
+its four records (slot L & 3, as 0x6EE78 puts them) from its own records
+of the same counts, the newest a placeholder from its own newest: board
+1's game identical to the two-board run with the master's PC gone, idle
+(1,277 frames) and in the mashing fight (4,904), its link buffers only
+differing. The buttons for the side runs are the remote's frame for the
+same count: the local frame + 1 for a slave, - 1 for the master.
+
+**The module (2026-10-31): `tools/remote_cabinet.hpp`,
+`tools::remote::Cabinets`.** The experiments' pieces in one place, for
+gamerun and the window: per other cabinet its side camera (update, view
+tests, shakes decided for it, the game's other camera writes mirrored),
+its side flow (the dispatcher with its own variables), and its blocks
+(every record by logic count from this board's own, its own fields
+added; the counters from this board's logic count and the cabinet's
+offset), written into its network board at this board's meetings. A
+side run now undoes RAM by the bus's journal (`Bus::journal`,
+`undo_journal`: every work RAM write the slow way, the bytes before kept)
+instead of copying 8 MB twice, and has its own cycle budget
+(`Context::limit_aside`). Each character's first-word low byte is only
+partly a cabinet's own: the view bits 0x08 and 0x10 (0x40 and the low
+three bits are the shared game's). gamerun `--one-board B@FRAME
+--one-board-camera FILE` (board B's main board gone from FRAME; its side
+runs started ten frames before, its camera from a `--camera-record` of
+it, its own variables from its own as its flows started): every test
+exact, board for board against the two-board run:
+
+| run | board leaving | frames | result |
+|---|---|---|---|
+| idle | 1 (slave) | 1,277 | board 0 identical, blocks identical |
+| moving player | 1 | 1,273 | the same |
+| mashing fight, a time over, continue, game over | 1 | 6,146 | the same |
+| idle | 0 (master) | 1,377 | board 1's game identical |
+| mashing fight | 0 | 6,130 | the same |
+
+The mashing runs took 101-118 s for about 6,100 frames, one board and
+the side runs (gamerun, software 2D): about real time (90 s once the
+timing hooks used to measure the banners were taken out again; the same
+6,146 hashes). The measuring tools of the sections above (the main loop's
+stage times, the unpack costs, RAM dumps by frame) were scratch switches
+and are not in gamerun.
 
 ## Plan
 

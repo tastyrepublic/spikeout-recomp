@@ -195,15 +195,23 @@ public:
         bool dec_pending;
         size_t return_depth;
         Scheduler* scheduler;
+        uint64_t block_limit, cycle_limit;
     };
     Aside set_aside() const {
         return {cpu, blocks, cycles_, next_check_, scheduler_due_, tb_offset_, dec_tb_, dec_due_tb_, dec_, returned_to,
-                resume_at, dec_pending_, return_depth_, scheduler_};
+                resume_at, dec_pending_, return_depth_, scheduler_, block_limit_, cycle_limit_};
     }
     void put_back(const Aside& a) {
         cpu = a.cpu, blocks = a.blocks, cycles_ = a.cycles, next_check_ = a.next_check, scheduler_due_ = a.scheduler_due;
         tb_offset_ = a.tb_offset, dec_tb_ = a.dec_tb, dec_due_tb_ = a.dec_due_tb, dec_ = a.dec, returned_to = a.returned_to;
         resume_at = a.resume_at, dec_pending_ = a.dec_pending, return_depth_ = a.return_depth, scheduler_ = a.scheduler;
+        block_limit_ = a.block_limit, cycle_limit_ = a.cycle_limit;
+        recheck();
+    }
+    // For code run aside (between set_aside and put_back): the run's own limits instead of its caller's.
+    void limit_aside(uint64_t cycles) {
+        block_limit_ = UINT64_MAX - 1;
+        limit_cycles(cycles);
     }
 
     // Calls `fn` at the start of the next block run outside any exception

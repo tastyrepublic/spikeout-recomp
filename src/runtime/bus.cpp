@@ -387,11 +387,15 @@ uint32_t Bus::read_slow32(uint32_t addr) {
 
 void Bus::write_slow(uint32_t addr, uint32_t value, uint32_t size) {
     if (on_watch_ && addr >= watch_lo_ && addr < watch_hi_) on_watch_(on_watch_user_, addr, value, size);
-    if (addr < kWorkRamSize) { // straddles the end of RAM, or watched
+    if (addr < kWorkRamSize) { // straddles the end of RAM, or watched, or journaled
         for (uint32_t i = 0; i < size; ++i)
-            if (addr + i < kWorkRamSize) ram_[addr + i] = static_cast<uint8_t>(value >> (8 * (size - 1 - i)));
+            if (addr + i < kWorkRamSize) {
+                if (journaling_) journal_.emplace_back(addr + i, ram_[addr + i]);
+                ram_[addr + i] = static_cast<uint8_t>(value >> (8 * (size - 1 - i)));
+            }
         return;
     }
+    if (hold_devices_) return;
     const Region* region = find_region(addr);
     if (!region || !emulated(*region, addr) || !(region->access & kWrite)) {
         count(region, addr, true);

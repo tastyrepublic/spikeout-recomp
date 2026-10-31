@@ -248,9 +248,27 @@ public:
         watch_hi_ = hi;
         on_watch_ = fn;
         on_watch_user_ = user;
-        const bool ram = fn && lo < kWorkRamSize;
-        fast_limit_ = ram ? std::array<uint32_t, 3>{} : std::array<uint32_t, 3>{kWorkRamSize, kWorkRamSize - 1, kWorkRamSize - 3};
+        update_fast_limit();
     }
+
+    // Side runs (game code run once more for another cabinet, with RAM put
+    // back after: tools/remote_cabinet.hpp): writes outside work RAM dropped
+    // while set, so the devices (the sound board's MIDI port, the interrupts
+    // it raises...) don't see them.
+    void hold_device_writes(bool hold) { hold_devices_ = hold; }
+    // And work RAM's writes kept in a journal while it's on (every write the
+    // slow way), each byte's value before; undo_journal() puts them back,
+    // newest first, and empties it. Cheaper than copying all of RAM when a
+    // side run writes a few KB.
+    void journal(bool on) {
+        journaling_ = on;
+        update_fast_limit();
+    }
+    void undo_journal() {
+        for (auto it = journal_.rbegin(); it != journal_.rend(); ++it) ram_[it->first] = it->second;
+        journal_.clear();
+    }
+    std::size_t journal_size() const { return journal_.size(); }
 
     // Real-time clock (0xF0140000), on the emulated time. It starts at
     // 1970-01-01 00:00; a frontend sets it (rtc().set_time) from the host's
@@ -321,6 +339,13 @@ private:
     uint32_t watch_lo_ = 0, watch_hi_ = 0;
     void (*on_watch_)(void* user, uint32_t addr, uint32_t value, uint32_t size) = nullptr;
     void* on_watch_user_ = nullptr;
+    bool hold_devices_ = false; // (hold_device_writes)
+    bool journaling_ = false;   // (journal)
+    std::vector<std::pair<uint32_t, uint8_t>> journal_;
+    void update_fast_limit() {
+        const bool slow = journaling_ || (on_watch_ && watch_lo_ < kWorkRamSize);
+        fast_limit_ = slow ? std::array<uint32_t, 3>{} : std::array<uint32_t, 3>{kWorkRamSize, kWorkRamSize - 1, kWorkRamSize - 3};
+    }
     uint8_t system_read(uint32_t reg) const;
     void system_write(uint32_t reg, uint8_t value);
 

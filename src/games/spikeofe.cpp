@@ -129,9 +129,16 @@ constexpr std::array kCodeEntries = {
 // action, called through the table at 0x8BAB8), for gamerun --script-actions:
 // every action a script runs (docs/netplay.md, the camera events); and the
 // other interpreter's (0x5A824, a script run through within a frame: 0x5A874,
-// the same table, r31 the record).
+// the same table, r31 the record). And where a cabinet writes its own record
+// for the link (0x6DA90: its buttons, its player's first word), for gamerun
+// --one-board and --drop's made blocks (one board a PC, docs/netplay.md); and the two places
+// that decide a camera shake (0x345E4) by the cabinet's own player: 0x21C88
+// (a character's animation, the local player's) and 0x22750 (shake 7, the
+// player the camera follows). And the mode dispatcher (0x492AC, once a frame
+// from the main loop): a cabinet's own flow, run on the side for another.
 constexpr std::array kHooks = {0x00009628u, 0x00007E34u, 0x00008230u, 0x0000795Cu, 0x0002C4DCu,
-                               0x00033A6Cu, 0x00032578u, 0x0000C670u, 0x0005AB18u, 0x0005A874u};
+                               0x00033A6Cu, 0x00032578u, 0x0000C670u, 0x0005AB18u, 0x0005A874u,
+                               0x0006DA90u, 0x00021C88u, 0x00022750u, 0x000492ACu};
 
 } // namespace
 
