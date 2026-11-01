@@ -2173,10 +2173,49 @@ does before its drawing. The bigger part of a frame here is the board's own
 (about 9.5 ms, mostly its idle loop spinning until the next frame), which an
 idle-wait skip would cut for Mode B and one board alike.
 
-Still to do: the module cheaper; a
-seat taken in a one-board game (the state for it sent); the rules over the
-network (their 60 frames of the other cabinet's buttons ahead aren't known
-there, only the input delay's); rollback (step 2).
+**Without shadows it doesn't last a game.** From mash-10890.state, board 1
+handed over at 10,900, side runs only: board 0 the same for 53 frames, then
+apart at 10,944, the TIME OVER (the side run out of budget in the banner's
+unpacking, 0x8704). So network play needs the shadows and the rules too.
+
+**Shadows and the rules over the network (2026-11-01, uncommitted when
+written).** A shadow needs nothing from the network: each machine runs the
+other cabinet's board again itself, from its own board's state and its
+module's own data, as in one process; its inputs come from the input table
+(the first frame's too). Only the rules' look ahead changed: they started a
+shadow when the other cabinet's coin or start came within 60 frames (from
+the `--press` list), and over the network only the input delay's frames are
+known. `--one-board-lookahead N` limits it in one process: with 2, the
+mid-fight coins (`slave-midgame`, `master-midgame` above) still exact, 1,075
+and 1,074 frames, the shadows started at 6,099-6,100 for the coin at 6,100
+and handed back at 6,406. So the 60 frames were never needed. Over the
+network the rules read the other seat's inputs from the table, as far as
+they are in (`--one-board-auto` with `--net-one-board`, two seats). A shadow
+no longer reports its hash to the session (it is exact in what it sends,
+not in all of its RAM: those checks differed every time).
+
+Proved, two processes over localhost, input delay 2, each machine's own
+board against `--boards 2 --parallel --input-delay 2` (`tools/onepc-net-tests.ps1`
+runs them all):
+
+| run | from | what happens | board 0 / board 1, frames identical |
+|---|---|---|---|
+| apart | mash-10890, handed over 10,900 | shadows at once (5 s or less left), both time overs, continues, board 0's game over, the ranking | 2,067 / 2,057 |
+| coin1 | mash-5990, 6,000 | the slave's coin at 6,100: a shadow from 6,098, back at 6,407 | 1,075 / 1,074 |
+| coin0 | mash-5990, 6,000 | the master's coin at 6,100: its shadow from 6,101, back at 6,404 | 1,075 / 1,074 |
+
+(In apart the joiner's shadow of the master stopped at its own block limit at
+12,946, its board on alone from there: compared to 12,944, as
+`tools/onepc-tests.ps1` does.) No network hash check differed. The script's
+run (two, four, apart, coin1, coin0) gave the same, apart 2,083 / 2,054 frames
+and the coins 1,074 / 1,074, after one fix: a machine's own board stopping
+now stops its shadows too (it closes its input table). The host's own board
+had stopped at its block limit while its shadow of the joiner's board waited
+for inputs the joiner, gone already, would never send: the process hung.
+
+Still to do: shadows with more than two seats (the rules follow one other
+cabinet); the window; a seat taken in a one-board game (the state for it
+sent); the module cheaper; rollback (step 2).
 
 ## Plan
 

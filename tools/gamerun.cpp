@@ -77,7 +77,11 @@
 // here up to the end of FRAME (Mode B), then only this machine's: the
 // others are handed over to its tools::remote::Cabinets (tasks mode), made
 // from their players' inputs as the input delay brings them (--one-board
-// repeated, in one process, hands several boards over the same way).
+// repeated, in one process, hands several boards over the same way). With
+// --one-board-auto (two seats) the rules run the other board whole here as
+// a shadow where side runs can't follow it, seeing its coin and start only
+// as far ahead as the input delay (--one-board-lookahead N limits it in one
+// process too; 60 by default).
 // --no-frame-hashes leaves out the comparisons' RAM hash of every frame.
 // --no-2d and --no-sound leave out the tile generator's drawing and the
 // sound and music boards: the game runs the same without them (nothing
@@ -344,6 +348,7 @@ struct Options {
     uint64_t one_board_shadow = 0;          // --one-board-shadow FRAME (its shadow from there)
     bool one_board_tasks = false;           // --one-board-tasks (tools::remote::Cabinets::use_tasks)
     bool one_board_auto = false;            // --one-board-auto (a shadow started and stopped by the rules)
+    uint64_t one_board_lookahead = 60;      // --one-board-lookahead N (the rules' look at the other cabinet's coin and start)
     uint64_t one_board_hand_back = 0;       // --one-board-hand-back FRAME (its shadow back to side runs, asked then)
     int wait_board = -1;               // --wait-seat B@FROM:UNTIL
     uint64_t wait_from = 0, wait_until = 0;
@@ -592,7 +597,9 @@ struct Machine {
     std::size_t peer = 0;                              // (--one-board: the other of the two, the staying board or the one that goes)
     uint64_t last_link_frame = 0;                      // (on the one that goes: the frame of its last link)
     bool one_board_auto = false;
-    uint64_t hand_back_at = 0;                         // (--one-board-hand-back FRAME)
+    uint64_t lookahead = 60; // (--one-board-lookahead: how far the rules look at the other cabinet's coin and start)
+    bool net_inputs = false; // (network play: those from the input table)
+    uint64_t hand_back_at = 0;                        // (--one-board-hand-back FRAME)
     uint32_t slice = 8;                                // (--slice, for a shadow's wait)
     // --one-board-auto, on the one that stays: frames calm in a row while a shadow runs; the mask last seen and
     // since when
@@ -901,10 +908,16 @@ void one_board_rules(Machine& m) {
     uint32_t least = 0xFFFF; // (the least time of the players in the game)
     for (uint32_t node = 0; node < 4; ++node)
         if (mask & (0x80000000u >> node)) least = std::min<uint32_t>(least, m.bus.read16(0x1062B0 + 2 * node));
-    bool joining = false; // (its coin or start buttons, bank 0, in the next 60 frames)
-    if (g_presses)
+    // (its coin or start buttons, bank 0, in the next --one-board-lookahead frames (60): from its --press list; over the
+    // network, as far as its inputs are in the table, the input delay's frames ahead)
+    bool joining = false;
+    if (m.net_inputs) {
+        for (uint64_t f = frame; f < frame + m.lookahead; ++f)
+            if (const auto in = m.inputs->get(gone, f); in && in->bank0 != 0xFF) joining = true;
+    } else if (g_presses) {
         for (const Press& p : *g_presses)
-            if (for_board(p.board, gone) && p.bank == 0 && p.frame + p.frames > frame && p.frame < frame + 60) joining = true;
+            if (for_board(p.board, gone) && p.bank == 0 && p.frame + p.frames > frame && p.frame < frame + m.lookahead) joining = true;
+    }
     const bool in_game = m.bus.read8(0x10400A) == 7;
     if (!cab.shadowed(gone)) {
         const bool trouble = least <= 5 * 64 || !in_game || frame < m.mask_since + 60 || joining;
@@ -991,6 +1004,25 @@ void shadow_own_bytes(Machine& m, Machine& other) {
     m.ram_at.clear(), other.ram_at.clear();
 }
 
+// A shadow's inputs for the frame it starts in, as its frame's end before would have set them: over the network
+// from the input table, else from its --press list.
+void shadow_inputs(Machine& m) {
+    if (m.net_inputs) {
+        if (const auto in = m.inputs->wait(m.index, m.timing.frames())) {
+            m.bus.inputs.bank0 = in->bank0, m.bus.inputs.bank1 = in->bank1;
+            m.bus.inputs.controls = in->controls, m.bus.inputs.controls2 = in->controls2;
+        }
+        return;
+    }
+    if (!g_presses) return;
+    uint8_t in[2] = {0xFF, 0xFF};
+    for (const Press& p : *g_presses)
+        if (for_board(p.board, m.index) && m.timing.frames() >= p.frame && m.timing.frames() < p.frame + p.frames)
+            in[p.bank] = static_cast<uint8_t>(in[p.bank] & ~(1u << p.bit));
+    m.bus.inputs.bank0 = in[0];
+    m.bus.inputs.controls = in[1];
+}
+
 // The master's shadow: once the staying board has its state (at its dispatcher's entry) and the master's RAM
 // (Cabinets::shadow_master), this board goes on from them, as the master, at that time: its own network board,
 // EEPROM and inputs kept, its role.
@@ -1014,14 +1046,7 @@ bool load_master_shadow(Machine& m) {
     m.bus.netboard().state(nb_in);
     m.bus.eeprom().state(ee_in);
     m.bus.inputs = inputs;
-    if (g_presses) {
-        uint8_t in[2] = {0xFF, 0xFF};
-        for (const Press& p : *g_presses)
-            if (for_board(p.board, m.index) && m.timing.frames() >= p.frame && m.timing.frames() < p.frame + p.frames)
-                in[p.bank] = static_cast<uint8_t>(in[p.bank] & ~(1u << p.bit));
-        m.bus.inputs.bank0 = in[0];
-        m.bus.inputs.controls = in[1];
-    }
+    shadow_inputs(m);
     // (the master's RAM whole, as its run through its drawing left it, there in 0x36E94: its OS's work too (inside
     // its calls there; its transfers' flags cleared where they were waited for))
     std::copy(ram.begin(), ram.end(), m.bus.ram().begin());
@@ -1097,14 +1122,7 @@ bool shadow_wait(Machine& m, tools::Turns& turns, uint32_t slice) {
     m.bus.inputs = inputs;
     const uint64_t shift = m.timing.frame_cycles(); // (its time: the staying board's, a frame on)
     m.timing.move_on(1);
-    if (g_presses) { // (its inputs for this frame, as its frame's end before would have set them)
-        uint8_t in[2] = {0xFF, 0xFF};
-        for (const Press& p : *g_presses)
-            if (for_board(p.board, m.index) && m.timing.frames() >= p.frame && m.timing.frames() < p.frame + p.frames)
-                in[p.bank] = static_cast<uint8_t>(in[p.bank] & ~(1u << p.bit));
-        m.bus.inputs.bank0 = in[0];
-        m.bus.inputs.controls = in[1];
-    }
+    shadow_inputs(m); // (its inputs for this frame, as its frame's end before would have set them)
     recomp::Context::Aside a = m.c.set_aside();
     a.cycles += shift, a.next_check += shift, a.scheduler_due += shift;
     a.tb_offset -= shift * 33 / 332;
@@ -1181,6 +1199,7 @@ void set_up_one_board(std::vector<std::unique_ptr<Machine>>& machines, const Opt
     m.shadow_from = o.one_board_shadow;
     m.keep_ram = o.one_board_shadow != 0 || o.one_board_auto || !o.one_board_camera;
     m.one_board_auto = o.one_board_auto;
+    m.lookahead = o.one_board_lookahead, m.net_inputs = o.netplay != nullptr;
     m.hand_back_at = o.one_board_hand_back;
     m.slice = o.slice;
     auto cameras = std::make_shared<std::map<uint32_t, std::vector<uint8_t>>>();
@@ -1197,7 +1216,7 @@ void set_up_one_board(std::vector<std::unique_ptr<Machine>>& machines, const Opt
     for (std::size_t b = 0; b < machines.size(); ++b) {
         if (!one_board_goes(o, b)) continue;
         Machine* l = machines[b].get();
-        l->peer = stays, l->keep_ram = m.keep_ram, l->slice = o.slice;
+        l->peer = stays, l->keep_ram = m.keep_ram, l->slice = o.slice, l->net_inputs = m.net_inputs;
         // (its logic count less this board's: the master runs a count ahead of the slaves)
         const int ahead = (b == 0 ? 1 : 0) - (stays == 0 ? 1 : 0);
         m.cabinets->add(b, ahead,
@@ -2208,7 +2227,10 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             m.inputs_started = true;
             put(frame + o.input_delay, source);
         }
-        if (o.netplay && frame % 120 == 0) o.netplay->hash(frame, m.index, tools::Recording::ram_hash(m.bus.ram()));
+        // (--net-one-board: from the hand-over, only this machine's own board: a shadow of another is exact in what it
+        // sends, not in all of its RAM)
+        if (o.netplay && frame % 120 == 0 && !(one_board_goes(o, m.index) && frame > o.one_board_frame))
+            o.netplay->hash(frame, m.index, tools::Recording::ram_hash(m.bus.ram()));
         if (o.music_hash && frame % o.music_hash == 0 && m.sound.board.music()) { // --music-hash: the music board's state, and what it plays
             const m3::Dsb2::NowPlaying p = m.sound.board.music()->now_playing();
             std::printf("board %zu frame %llu: music %016llx, %s %06x-%06x at %06x, volume %02x %02x\n", m.index,
@@ -2649,6 +2671,9 @@ void run(Machine& m, tools::Turns& turns) {
         }
         break;
     }
+    // (--net-one-board: this machine's own board stopped, its shadows of the others with it: their players may
+    // have gone already, nothing more of theirs to wait for)
+    if (m.net_inputs && m.cabinets) m.inputs->close();
     m.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     turns.finish(m.index);
 }
@@ -3503,6 +3528,7 @@ int main(int argc, char** argv) {
         else if (arg == "--one-board-shadow" && i + 1 < argc) o.one_board_shadow = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--one-board-tasks") o.one_board_tasks = true;
         else if (arg == "--one-board-auto") o.one_board_auto = o.one_board_tasks = true;
+        else if (arg == "--one-board-lookahead" && i + 1 < argc) o.one_board_lookahead = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--one-board-hand-back" && i + 1 < argc) o.one_board_hand_back = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--camera-events") o.camera_events = true;
         else if (arg == "--script-actions") o.script_actions = true;
@@ -3659,8 +3685,9 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "gamerun: network play starts from power-on or a linked state (no --replay or --save-state)\n");
             return 2;
         }
-        if (o.net_one_board && (o.one_board >= 0 || o.one_board_auto || o.one_board_shadow || o.one_board_camera)) {
-            std::fprintf(stderr, "gamerun: --net-one-board hands every other board over itself (no --one-board options with it)\n");
+        if (o.net_one_board && (o.one_board >= 0 || o.one_board_shadow || o.one_board_camera)) {
+            std::fprintf(stderr, "gamerun: --net-one-board hands every other board over itself (of the --one-board options, --one-board-auto "
+                                 "only)\n");
             return 2;
         }
         // (--load-state: every machine starts from the same linked state, its own copy; the state is part of the
@@ -3787,6 +3814,10 @@ int main(int argc, char** argv) {
         }
         o.eeprom_bytes.clear(); // (not this process's own: every board as every machine has it)
         o.netplay = netplay.get();
+        if (o.net_one_board && o.one_board_auto && start->seats != 2) {
+            std::fprintf(stderr, "gamerun: --one-board-auto (shadows) is for two seats so far\n");
+            return 2;
+        }
         if (o.net_one_board) { // (this machine's board stays; the others are handed over to its module, tasks mode)
             for (std::size_t b = 0; b < start->seats; ++b) {
                 if (b == start->my_seat) continue;
