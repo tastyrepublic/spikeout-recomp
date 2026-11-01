@@ -16,6 +16,9 @@ struct Asset {
 namespace assets {
 extern const Asset menu_rml, menu_rcss;
 extern const Asset font_medium, font_semibold, font_bold_italic; // Barlow Condensed (SIL OFL)
+// Every country's flag (the network seat list) and its RmlUi sprite sheet ("flag-au" and so on), as vf3-recomp has
+// them (its tools/flags/make_flags.py: flag-icons by Panayiotis Lipiridis, MIT, assets/ui/flags-LICENSE.txt)
+extern const Asset flags_png, flags_rcss;
 } // namespace assets
 
 } // namespace ui

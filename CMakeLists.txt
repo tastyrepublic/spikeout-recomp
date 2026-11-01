@@ -361,7 +361,8 @@ if(SPIKEOUT_GPU)
     file(MAKE_DIRECTORY ${ui_out})
     set(ui_sources)
     foreach(entry menu_rml:ui/menu.rml menu_rcss:ui/menu.rcss font_medium:fonts/BarlowCondensed-Medium.ttf
-                  font_semibold:fonts/BarlowCondensed-SemiBold.ttf font_bold_italic:fonts/BarlowCondensed-BoldItalic.ttf)
+                  font_semibold:fonts/BarlowCondensed-SemiBold.ttf font_bold_italic:fonts/BarlowCondensed-BoldItalic.ttf
+                  flags_png:ui/flags.png flags_rcss:ui/flags.rcss)
         string(REPLACE ":" ";" parts ${entry})
         list(GET parts 0 name)
         list(GET parts 1 file)

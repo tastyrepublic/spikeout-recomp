@@ -12,7 +12,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <set>
 
 namespace ui {
 
@@ -36,6 +39,56 @@ int first_selectable(const MenuPage& p) {
 }
 
 Rml::Span<const Rml::byte> bytes(const Asset& a) { return {a.data, a.size}; }
+
+// RmlUi's files: the flags' picture (flags.rcss's "src: flags.png") from the program itself, anything else
+// from the disk as RmlUi's own would.
+struct AssetFiles : Rml::FileInterface {
+    struct Open {
+        const Asset* asset = nullptr;
+        std::FILE* file = nullptr;
+        std::size_t at = 0;
+    };
+    Rml::FileHandle Open(const Rml::String& path) override {
+        auto* f = new struct Open;
+        if (path.size() >= 9 && path.compare(path.size() - 9, 9, "flags.png") == 0) f->asset = &assets::flags_png;
+        else if (!(f->file = std::fopen(path.c_str(), "rb"))) return delete f, 0;
+        return reinterpret_cast<Rml::FileHandle>(f);
+    }
+    void Close(Rml::FileHandle h) override {
+        auto* f = reinterpret_cast<struct Open*>(h);
+        if (f->file) std::fclose(f->file);
+        delete f;
+    }
+    size_t Read(void* buffer, size_t size, Rml::FileHandle h) override {
+        auto* f = reinterpret_cast<struct Open*>(h);
+        if (f->file) return std::fread(buffer, 1, size, f->file);
+        const std::size_t n = std::min(size, f->asset->size - std::min(f->at, f->asset->size));
+        std::memcpy(buffer, f->asset->data + f->at, n);
+        f->at += n;
+        return n;
+    }
+    bool Seek(Rml::FileHandle h, long offset, int origin) override {
+        auto* f = reinterpret_cast<struct Open*>(h);
+        if (f->file) return std::fseek(f->file, offset, origin) == 0;
+        const long base = origin == SEEK_SET ? 0 : origin == SEEK_CUR ? static_cast<long>(f->at) : static_cast<long>(f->asset->size);
+        if (base + offset < 0) return false;
+        f->at = static_cast<std::size_t>(base + offset);
+        return true;
+    }
+    size_t Tell(Rml::FileHandle h) override {
+        auto* f = reinterpret_cast<struct Open*>(h);
+        return f->file ? static_cast<size_t>(std::ftell(f->file)) : f->at;
+    }
+};
+
+// The two-letter codes flags.rcss has a flag for ("flag-au: ...").
+std::set<std::string> flag_codes() {
+    std::set<std::string> out;
+    const std::string_view s = assets::flags_rcss.text();
+    for (std::size_t at = s.find("flag-"); at != std::string_view::npos; at = s.find("flag-", at + 1))
+        if (at + 7 < s.size() && s[at + 7] == ':') out.emplace(s.substr(at + 5, 2));
+    return out;
+}
 
 } // namespace
 
@@ -76,6 +129,8 @@ struct Menu::Impl {
     Rml::ElementDocument* doc = nullptr;
     Rml::ElementDocument* fps = nullptr; // the frame rate (Menu::set_fps)
     MenuListener listener;
+    AssetFiles files;
+    std::set<std::string> flags = flag_codes();
 };
 
 Menu::Menu() : impl_(std::make_unique<Impl>()) {}
@@ -101,6 +156,7 @@ bool Menu::init(SDL_GPUDevice* device, SDL_Window* window) {
     impl_->window = window;
     impl_->gfx = std::make_unique<RenderInterface_SDL_GPU>(device, window);
     Rml::SetRenderInterface(impl_->gfx.get());
+    Rml::SetFileInterface(&impl_->files);
     if (!Rml::Initialise()) {
         error_ = "RmlUi didn't start";
         return false;
@@ -124,7 +180,8 @@ bool Menu::init(SDL_GPUDevice* device, SDL_Window* window) {
     // The page with its style sheet inside (both embedded).
     std::string page(assets::menu_rml.text());
     const size_t head = page.find("</head>");
-    if (head != std::string::npos) page.insert(head, "<style>" + std::string(assets::menu_rcss.text()) + "</style>");
+    if (head != std::string::npos)
+        page.insert(head, "<style>" + std::string(assets::menu_rcss.text()) + std::string(assets::flags_rcss.text()) + "</style>");
     impl_->doc = impl_->ctx->LoadDocumentFromMemory(page);
     if (!impl_->doc) {
         error_ = "the menu's page didn't load";
@@ -134,9 +191,11 @@ bool Menu::init(SDL_GPUDevice* device, SDL_Window* window) {
     impl_->doc->AddEventListener(Rml::EventId::Mouseover, &impl_->listener);
     impl_->doc->AddEventListener(Rml::EventId::Click, &impl_->listener);
     // The frame rate, top right, over the game (and the menu), and a network
-    // game's seats under it in the same style.
+    // game's seats under it in the same style (each player's flag from
+    // flags.rcss's sprite sheet).
     impl_->fps = impl_->ctx->LoadDocumentFromMemory(
-        "<rml><head><style>body { width: 100%; height: 100%; font-family: \"Barlow Condensed\"; font-weight: 600; } "
+        "<rml><head><style>" + std::string(assets::flags_rcss.text()) +
+        "body { width: 100%; height: 100%; font-family: \"Barlow Condensed\"; font-weight: 600; } "
         "#corner { position: absolute; right: 16dp; top: 10dp; } "
         "#fps { display: block; text-align: right; font-size: 26dp; color: #ffd34a; font-effect: outline(2dp #000000); } "
         "#net { display: block; margin-top: 4dp; } "
@@ -150,7 +209,13 @@ bool Menu::init(SDL_GPUDevice* device, SDL_Window* window) {
         ".bars { display: flex; align-items: flex-end; height: 16dp; margin-bottom: 3dp; margin-left: 5dp; } "
         ".bar { width: 3dp; margin-left: 1dp; background-color: #4a4a4a; border: 1dp #000000; } "
         ".g .on { background-color: #5fd35f; } .y .on { background-color: #ffd34a; } .r .on { background-color: #e05555; } "
-        ".ms { text-align: right; white-space: nowrap; }"
+        ".ms { text-align: right; white-space: nowrap; } "
+        ".flag { width: 19dp; height: 14dp; margin: 0 6dp 4dp 0; border: 1dp #000000; } " // (as tall as the 20dp text's capitals)
+        ".noflag { width: 21dp; height: 14dp; margin: 0 6dp 4dp 0; } "
+        ".pills { display: flex; justify-content: flex-end; height: 22dp; margin: 2dp 0 4dp 0; } "
+        ".pill { font-size: 15dp; line-height: 18dp; height: 18dp; padding: 0 8dp; margin-left: 5dp; border-radius: 9dp; "
+        "border: 1dp #000000; } "
+        ".pill.delay { background-color: #3a3f4a; color: #ffffff; } .pill.rb { background-color: #ffd34a; color: #2a2000; }"
         "</style></head><body><div id=\"corner\"><div id=\"fps\"></div><div id=\"net\"></div></div></body></rml>");
     return true;
 }
@@ -161,13 +226,24 @@ void Menu::show_corner() {
     else impl_->fps->Hide();
 }
 
-void Menu::set_net(const std::vector<NetRow>& rows, const std::string& header) {
+void Menu::set_net(const std::vector<NetRow>& rows, const std::string& header, const NetPills& pills) {
     if (!impl_->fps) return;
     std::string rml = header.empty() ? std::string() : "<div class=\"head\">" + escape(header) + "</div>";
+    if (pills.delay >= 0 || pills.rollbacks >= 0) {
+        rml += "<div class=\"pills\">";
+        if (pills.delay >= 0) rml += "<span class=\"pill delay\">DELAY " + std::to_string(pills.delay) + "F</span>";
+        if (pills.rollbacks >= 0) rml += "<span class=\"pill rb\">ROLLBACK " + std::to_string(pills.rollbacks) + "</span>";
+        rml += "</div>";
+    }
+    // (a flag between the seat and the name; when any seat has one, the others keep its room, so the names line up)
+    auto has_flag = [&](const NetRow& r) { return impl_->flags.count(r.country) != 0; };
+    const bool flags = std::any_of(rows.begin(), rows.end(), has_flag);
     for (const NetRow& r : rows) {
         static const char* const kLooks[] = {"you", "player", "fresh", "dim"};
-        rml += "<div class=\"seat " + std::string(kLooks[static_cast<int>(r.look)]) + "\"><span class=\"p\">" + escape(r.seat) +
-               "</span><span class=\"name\">" + escape(r.name) + "</span>";
+        rml += "<div class=\"seat " + std::string(kLooks[static_cast<int>(r.look)]) + "\"><span class=\"p\">" + escape(r.seat) + "</span>";
+        if (has_flag(r)) rml += "<img class=\"flag\" sprite=\"flag-" + r.country + "\"/>";
+        else if (flags) rml += "<span class=\"noflag\"></span>";
+        rml += "<span class=\"name\">" + escape(r.name) + "</span>";
         if (!r.status.empty() || r.bars < 0) {
             rml += "<span class=\"st\">" + escape(r.status) + "</span>";
         } else {
@@ -259,7 +335,16 @@ void Menu::build() {
     for (size_t i = 0; i < p.items.size(); i++) {
         const MenuItem& it = p.items[i];
         rml += "<div class=\"row" + std::string(it.info ? " info" : "") + (static_cast<int>(i) == selected_ ? " selected" : "") +
-               "\" id=\"r" + std::to_string(i) + "\"><span class=\"label\">" + escape(it.label) + "</span>";
+               "\" id=\"r" + std::to_string(i) + "\"><span class=\"label\">" +
+               (impl_->flags.count(it.country) ? "<img class=\"flag\" sprite=\"flag-" + it.country + "\"/>" : std::string()) +
+               escape(it.label) + "</span>";
+        if (it.estimate_ms >= 0) { // (the same bars as the seat list's, by the same bands)
+            const int ms = it.estimate_ms, bars = ms < 40 ? 4 : ms < 80 ? 3 : ms < 140 ? 2 : 1;
+            rml += "<span class=\"speed\"><span class=\"bars " + std::string(bars >= 3 ? "g" : bars == 2 ? "y" : "r") + "\">";
+            for (int b = 0; b < 4; ++b)
+                rml += "<span class=\"bar" + std::string(b < bars ? " on" : "") + "\" style=\"height: " + std::to_string(4 + 4 * b) + "dp;\"></span>";
+            rml += "</span><span>~" + std::to_string(ms) + " ms</span></span>"; // (its own span: loose text in a flex box isn't drawn)
+        }
         if (it.value) {
             rml += "<span class=\"value\">";
             if (it.change) rml += "<span class=\"arrow back\">&lt;&nbsp;&nbsp;</span>";

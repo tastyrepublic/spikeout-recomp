@@ -34,17 +34,26 @@ struct MenuItem {
     std::function<void()> activate;     // Enter / A / a click (buttons)
     bool info = false;                  // a line of text: not selectable
     std::function<void()> clear;        // Delete / Y: back to none (a key binding)
+    std::string country;                // a flag before the label (two letters; "" none): a listed game's host
+    int estimate_ms = -1;               // signal bars and "~N ms" on the right: a listed game's estimated speed (-1 none)
 };
 
 // A seat of a network game, in the list under the frame rate.
 struct NetRow {
     enum class Look : uint8_t { you, player, fresh, dim }; // yellow, white, green (just joined), grey
     std::string seat;   // "2P"
+    std::string country; // two letters: its flag between the seat and the name ("" or none for it: no flag)
     std::string name;
     std::string status; // in place of the bars and round trip (JOINED, LEFT, IDLE, ...); empty: them
     int bars = -1;      // 0-4 (-1: none)
     int ms = -1;        // the round trip (-1: none)
     Look look = Look::player;
+};
+
+// The pills above the seats: the input delay (frames) and the rollbacks so far (-1: that pill not shown).
+struct NetPills {
+    int delay = -1;
+    int rollbacks = -1;
 };
 
 // A page for typing a short code (a game's): a box of its letters and an
@@ -85,8 +94,9 @@ public:
     // too (empty: none).
     void set_fps(const std::string& text);
     // A network game's seats, under the frame rate (empty: none), a line above
-    // them (`header`: a room waiting to start; empty: none).
-    void set_net(const std::vector<NetRow>& rows, const std::string& header = {});
+    // them (`header`: the game's name and room, or a room waiting to start;
+    // empty: none), and pills under that (the input delay, the rollbacks).
+    void set_net(const std::vector<NetRow>& rows, const std::string& header = {}, const NetPills& pills = {});
 
     bool is_open() const { return open_; }
     void open(MenuPage root);

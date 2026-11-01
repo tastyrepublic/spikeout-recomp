@@ -277,6 +277,40 @@ player who went quiet is dropped, WAITING for a free seat while hosting
 joiner was stopped, a game joined by code. Not yet seen: JOINED and LEFT
 on screen (they last 4 seconds).
 
+Flags, the game's name, the delay, a speed in the lobby's list (2026-11-01,
+the owner's design from mock-ups; uncommitted when written):
+- Each seat's flag between the seat and the name ("2P [flag] ALEX"), as
+  tall as the text's capitals; a seat without one keeps its room, so the
+  names line up. The flags are vf3-recomp's (`assets/ui/flags.png` and
+  `flags.rcss`, 48x36 sprites of flag-icons by Panayiotis Lipiridis, MIT:
+  `assets/ui/flags-LICENSE.txt`; made by vf3-recomp's
+  `tools/flags/make_flags.py`), embedded, and served to RmlUi by a file
+  interface (`ui/menu.cpp`); the renderer reads PNG as well as BMP (SDL
+  3.4's `SDL_LoadPNG_IO`).
+- A player's country is only ever the lobby's (Cloudflare's, as VF3 does:
+  never what a game says of itself). The lobby's welcome gives each player
+  its own, `joiner` gives the host each joiner's (`Session::expect` with
+  the country, matched by the addresses the lobby gave), and the host's
+  roster passes every seat's on (a joiner keeps its own from its welcome).
+  A game joined on a LAN has no lobby: its joiners have no flag.
+- Above the seats in a game: its name and room ("ALEX · ROOM J7YKXP"; the
+  name alone on a LAN) and a "DELAY nF" pill. A "ROLLBACK n" pill is drawn
+  by `ui::NetPills` but not shown: network play has no rollback yet.
+- The join list: each internet game's host flag, then on the right the
+  same signal bars and "~N ms", an estimate the lobby makes from how far
+  apart Cloudflare puts the two players (light in fibre over a route half
+  as long again, plus 5 ms: Bangkok-Tokyo ~74, London-New York ~89;
+  `estimate` in `lobby/src/index.js`), with no traffic to the host; the
+  help line says it's an estimate and the real one shows in the game. The
+  list is nearest first among waiting games, then among those in progress.
+  Measuring it for real before joining was turned down: it would give
+  every listed host's address to anyone browsing.
+- Seen in the window against a local lobby (`wrangler dev`, which says
+  every player is in GB at one place): the join list's flag, bars and
+  "~5 ms"; in the game both seats' flags (the host's through the roster),
+  the name and room line and the delay pill; on a LAN the host's flag and
+  none for the joiner. The lobby with these changes isn't deployed.
+
 The host leaving (2026-10-27, the owner's choices):
 - Before the game starts, the room goes with the host: its goodbye (or
   silence for kDropAfter) closes it for the others (Session::room_closed),

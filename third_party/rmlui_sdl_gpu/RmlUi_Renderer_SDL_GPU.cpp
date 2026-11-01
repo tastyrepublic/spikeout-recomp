@@ -4,6 +4,7 @@
 #include <RmlUi/Core/FileInterface.h>
 #include <RmlUi/Core/Log.h>
 #include <RmlUi/Core/Types.h>
+#include <cstring>
 
 
 using namespace Rml;
@@ -421,8 +422,14 @@ TextureHandle RenderInterface_SDL_GPU::LoadTexture(Vector2i& texture_dimensions,
 	file_interface->Read(buffer.get(), buffer_size, file_handle);
 	file_interface->Close(file_handle);
 
-	// (spikeout-recomp: BMP through SDL itself, instead of any format through SDL_image)
-	SDL_Surface* surface = SDL_LoadBMP_IO(SDL_IOFromMem(buffer.get(), buffer_size), true);
+	// (spikeout-recomp: BMP, and PNG from SDL 3.4, through SDL itself, instead of any format through SDL_image)
+	SDL_Surface* surface = nullptr;
+#if SDL_VERSION_ATLEAST(3, 4, 0)
+	if (buffer_size >= 8 && std::memcmp(buffer.get(), "\x89PNG", 4) == 0)
+		surface = SDL_LoadPNG_IO(SDL_IOFromMem(buffer.get(), buffer_size), true);
+	else
+#endif
+		surface = SDL_LoadBMP_IO(SDL_IOFromMem(buffer.get(), buffer_size), true);
 	if (!surface)
 	{
 		return 0;

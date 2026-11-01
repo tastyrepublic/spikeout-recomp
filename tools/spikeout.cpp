@@ -1445,6 +1445,7 @@ int main(int argc, char** argv) {
         g->worker = std::thread([g, name, seats = net_seats, listed = net_listed, build] {
             const auto welcome = tools::lobby_hello(g->lobby, build, name, net::kLobbyUrl);
             if (!welcome) return g->fail("No lobby: " + g->lobby.error());
+            g->session().set_country((*welcome)["country"].as_string()); // (each player's flag in the seat list)
             if (!g->session().host(name, static_cast<uint8_t>(seats))) return g->fail("Can't offer a game: " + g->session().error());
             g->set_status("Finding our address on the internet...");
             tools::find_addresses(g->lobby, g->session(), (*welcome)["turn"].as_bool(), {});
@@ -1473,6 +1474,7 @@ int main(int argc, char** argv) {
         g->worker = std::thread([g, code, name = player_name(settings), build] {
             const auto welcome = tools::lobby_hello(g->lobby, build, name, net::kLobbyUrl);
             if (!welcome) return g->fail("No lobby: " + g->lobby.error());
+            g->session().set_country((*welcome)["country"].as_string());
             if (!g->session().listen()) return g->fail(g->session().error());
             g->set_status("Finding our address on the internet...");
             tools::find_addresses(g->lobby, g->session(), (*welcome)["turn"].as_bool(), {});
@@ -2033,13 +2035,19 @@ int main(int argc, char** argv) {
                     continue; // (shown nearby)
                 const std::string code = g["code"].as_string();
                 const bool playing = g["started"].as_bool();
-                const std::string country = g["country"].as_string(); // (the host's, as Cloudflare sees it)
-                p.items.push_back({label(name, static_cast<int>(g["taken"].as_number()), static_cast<int>(g["seats"].as_number()),
-                                         country.empty() ? std::string("internet") : "internet, " + country, playing),
-                                   playing ? kInProgress : "Join this game (through the internet).", {}, {}, [&, code] {
-                                       net_join_code(code);
-                                       to_room();
-                                   }});
+                std::string country = g["country"].as_string(); // (the host's, as Cloudflare sees it: its flag)
+                for (char& c : country) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                ui::MenuItem it{label(name, static_cast<int>(g["taken"].as_number()), static_cast<int>(g["seats"].as_number()), "internet",
+                                      playing),
+                                std::string(playing ? kInProgress : "Join this game (through the internet).") +
+                                    " The speed (~) is an estimate, from how far away its host is; the real one shows in the game.",
+                                {}, {}, [&, code] {
+                                    net_join_code(code);
+                                    to_room();
+                                }};
+                it.country = country;
+                it.estimate_ms = static_cast<int>(g["ms"].as_number(-1)); // (-1: the lobby doesn't know where one of you is)
+                p.items.push_back(std::move(it));
             }
         }
         if (p.items.empty()) p.items.push_back({"No games found yet", "", {}, {}, {}, true});
@@ -2435,6 +2443,7 @@ int main(int argc, char** argv) {
             net_status_at = now;
             std::vector<ui::NetRow> net_rows;
             std::string net_header = !netgame && now < net_notice_until ? net_notice : std::string();
+            ui::NetPills net_pills; // (no rollback in network play yet: its pill not shown)
             using State = net::Session::SeatView::State;
             if (netgame) {
                 const auto seats = netgame->session().seats();
@@ -2447,6 +2456,14 @@ int main(int argc, char** argv) {
                     const bool in = std::any_of(seats.begin(), seats.end(), [&](const auto& v) { return v.state == State::me; });
                     net_header = "ROOM " + (code.empty() ? std::string() : code + "  ") +
                                  (netgame->host ? "(HOSTING)" : in ? "(JOINED)" : "(JOINING...)");
+                } else if (settings.show_net) { // (playing: the game's name and its room, the input delay)
+                    std::string code;
+                    {
+                        std::lock_guard guard(netgame->lock);
+                        code = netgame->code;
+                    }
+                    net_header = tools::clean_name(netgame->session().game_name()) + (code.empty() ? std::string() : " \xC2\xB7 ROOM " + code);
+                    net_pills.delay = static_cast<int>(shared.input_delay);
                 }
                 const bool hosting = netgame->session().hosting();
                 for (std::size_t s = 0; s < seats.size(); ++s) {
@@ -2461,6 +2478,7 @@ int main(int argc, char** argv) {
                     ui::NetRow r;
                     r.seat = std::to_string(s + 1) + "P";
                     r.name = tools::clean_name(v.name); // (as ours: what the menu's font has)
+                    r.country = v.country;
                     switch (v.state) {
                     case State::me: r.name = "YOU", r.look = ui::NetRow::Look::you; break;
                     case State::open: r.status = hosting ? "WAITING" : "OPEN", r.look = ui::NetRow::Look::dim; break;
@@ -2488,7 +2506,8 @@ int main(int argc, char** argv) {
                 seat_news.fill({});
             }
             // (Network status off: the seats left out, the room's line still shown)
-            menu.set_net(settings.show_net ? net_rows : std::vector<ui::NetRow>(), net_header);
+            menu.set_net(settings.show_net ? net_rows : std::vector<ui::NetRow>(), net_header,
+                         settings.show_net ? net_pills : ui::NetPills{});
         }
         if (menu_open && now - net_refreshed > std::chrono::milliseconds(250)) {
             net_refreshed = now;

@@ -91,6 +91,17 @@ div { display: block; }
 
 .row.selected .value { color: #1a0705; }
 
+/* A listed network game: its host's flag before the name, its estimated speed on the right (bars, "~N ms"). */
+/* (the flag and the bars as tall as the text's capitals: 0.7 of its 23dp) */
+.row .flag { width: 21dp; height: 16dp; margin: 0 10dp 0 0; border: 1dp #000000; vertical-align: baseline; }
+.row .speed { flex: 0 0 auto; display: flex; align-items: center; color: #e6d3cc; }
+.row.selected .speed { color: #1a0705; }
+.row .bars { display: flex; align-items: flex-end; height: 16dp; margin: 4dp 8dp 0 0; } /* (down onto the text's baseline) */
+.row .bar { width: 4dp; margin-left: 2dp; background-color: #4a4a4a; border: 1dp #000000; }
+.row .bars.g .on { background-color: #5fd35f; }
+.row .bars.y .on { background-color: #ffd34a; }
+.row .bars.r .on { background-color: #e05555; }
+
 .row .arrow { color: #c99a8a; }
 .row.selected .arrow { color: #1a0705; }
 

@@ -62,7 +62,9 @@ async function player() {
 test("a public game listed (in progress too, while a cabinet is empty), joined by its code; a private one only by its code", async () => {
 	const host = await player();
 	host.send({ t: "hello", build: "b1", name: "Ann" });
-	assert.equal((await host.next("welcome")).turn, false);
+	const welcome = await host.next("welcome");
+	assert.equal(welcome.turn, false);
+	assert.equal(typeof welcome.country, "string"); // (Cloudflare's; "" here, run locally)
 	host.send({ t: "host", name: "Ann's game", seats: 2, public: true, session: "abcdef", port: 47000, candidates: ["192.168.1.5:47000", "bad"] });
 	const { code } = await host.next("hosted");
 	assert.match(code, /^[A-HJ-NP-Z2-9]{6}$/);
@@ -79,7 +81,10 @@ test("a public game listed (in progress too, while a cabinet is empty), joined b
 	guest.send({ t: "list" });
 	const { games, total } = await guest.next("games");
 	assert.equal(total, 1);
-	for (const g of games) { assert.equal(typeof g.country, "string"); delete g.country; } // (Cloudflare's; whatever wrangler dev says)
+	for (const g of games) { // (Cloudflare's country and the estimate from where it puts them; whatever wrangler dev says)
+		assert.equal(typeof g.country, "string"), delete g.country;
+		assert.ok(Number.isInteger(g.ms) && g.ms >= -1), delete g.ms;
+	}
 	assert.deepEqual(games, [{ code, name: "Ann's game", seats: 2, taken: 1, started: false, session: "abcdef" }]); // (the session: a game found nearby too shown once)
 
 	guest.send({ t: "join", code: code.toLowerCase(), port: 47100, candidates: ["10.0.0.7:47100"] });
@@ -87,9 +92,11 @@ test("a public game listed (in progress too, while a cabinet is empty), joined b
 	assert.equal(joining.session, "abcdef");
 	assert.ok(joining.candidates.includes("192.168.1.5:47000"));
 	assert.ok(!joining.candidates.includes("bad"));
+	assert.equal(typeof joining.country, "string"); // (the host's, as the lobby has it)
 	const joiner = await host.next("joiner");
 	assert.equal(joiner.name, "Bo");
 	assert.ok(joiner.candidates.includes("10.0.0.7:47100"));
+	assert.equal(typeof joiner.country, "string"); // (the joiner's)
 
 	guest.send({ t: "join", code: secretCode, port: 47100, candidates: [] }); // (by its code: yes)
 	assert.equal((await guest.next("joining")).seats, 3);
@@ -105,7 +112,7 @@ test("a public game listed (in progress too, while a cabinet is empty), joined b
 	host.send({ t: "update", taken: 1, started: true }); // in progress, a cabinet empty: still listed, joinable
 	guest.send({ t: "list" });
 	assert.deepEqual(
-		(await guest.next("games")).games.map(({ country, ...g }) => g),
+		(await guest.next("games")).games.map(({ country, ms, ...g }) => g),
 		[{ code, name: "Ann's game", seats: 2, taken: 1, started: true, session: "abcdef" }],
 	);
 	guest.send({ t: "join", code, port: 1, candidates: [] });

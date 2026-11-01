@@ -1,6 +1,7 @@
 #include "net/session.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -160,6 +161,14 @@ struct Stream {
     uint64_t next() const { return known ? first + frames.size() : 0; }
 };
 
+// A country as the lobby says it (Cloudflare's two letters), lower case; anything else none.
+std::string two_letters(const std::string& country) {
+    if (country.size() != 2 || !std::isalpha(static_cast<unsigned char>(country[0])) || !std::isalpha(static_cast<unsigned char>(country[1])))
+        return {};
+    return {static_cast<char>(std::tolower(static_cast<unsigned char>(country[0]))),
+            static_cast<char>(std::tolower(static_cast<unsigned char>(country[1])))};
+}
+
 } // namespace
 
 struct Session::Impl {
@@ -180,6 +189,7 @@ struct Session::Impl {
     bool room_closed = false; // (a joiner: the host left before the game started)
     uint64_t session = 0;
     std::string game_name, my_name;
+    std::string my_country; // (the lobby's two letters for this player, Session::set_country; "" none)
     std::vector<uint8_t> my_eeprom, my_backup; // this player's cabinet (Session::set_cabinet)
     uint8_t seats = 0, my_seat = kNoSeat;
     bool started = false, leaving = false, joining = false;
@@ -196,6 +206,13 @@ struct Session::Impl {
         Clock::time_point until;
     };
     std::vector<Punch> punches;
+    // (the host: a joiner's country as the lobby said it, by the addresses it said the joiner is at)
+    struct CountrySaid {
+        std::vector<Address> at;
+        std::string country;
+        Clock::time_point until;
+    };
+    std::vector<CountrySaid> countries_said;
     Clock::time_point last_punch{};
     Clock::time_point last_join{}, last_beacon{};
     std::vector<Address> beacon_targets; // (the host: every network's broadcast address)
@@ -206,7 +223,7 @@ struct Session::Impl {
         bool connected = false; // heard from, not dropped
         bool dropped = false;
         Address address;
-        std::string name;
+        std::string name, country;
         uint64_t player = 0;
         bool cabinet = false; // (the host: its cabinet in, as it was)
         std::vector<uint8_t> eeprom, backup;
@@ -261,8 +278,8 @@ struct Session::Impl {
         bool announced = false;
     };
     std::array<Drop, kMaxSeats> drops;
-    // A seat whose player went (Session::seats): their name, and whether they said goodbye.
-    std::array<std::string, kMaxSeats> gone_name;
+    // A seat whose player went (Session::seats): their name and country, and whether they said goodbye.
+    std::array<std::string, kMaxSeats> gone_name, gone_country;
     std::array<bool, kMaxSeats> said_bye{};
     std::map<uint64_t, uint64_t> my_hashes;
     std::map<std::pair<uint64_t, uint8_t>, uint64_t> their_hashes;
@@ -392,6 +409,7 @@ struct Session::Impl {
             const bool present = s == my_seat || peers[s].present;
             w.u8(present ? 1 : 0);
             w.str(s == my_seat ? my_name : peers[s].name);
+            w.str(s == my_seat ? my_country : peers[s].country);
             std::vector<Address> where;
             if (s != my_seat && present) {
                 where.push_back(Address{peers[s].address.ip, peers[s].address.port}); // (as we see it)
@@ -465,17 +483,23 @@ struct Session::Impl {
     }
 
     void on_join(const Address& from, Reader& r) {
-        const uint64_t their_build = r.u64(), player = r.u64();
-        const std::string name = r.str();
-        std::vector<Address> where = get_addresses(r);
-        if (!r.ok()) return;
-        for (uint8_t s = 0; s < seats; ++s)
-            if (s != my_seat && peers[s].present && peers[s].player == player) return; // (already in: our welcome is on its way)
         auto refuse = [&](const std::string& why) {
             Writer w = header(kRefuse, session, my_seat);
             w.str(why);
             send(from, w);
         };
+        const uint64_t their_build = r.u64(), player = r.u64();
+        const std::string name = r.str();
+        std::vector<Address> where = get_addresses(r);
+        if (!r.ok()) return;
+        // (its country: as the lobby said, by where it is (from here, or an address it gives); none on a LAN)
+        std::string country;
+        for (const CountrySaid& c : countries_said)
+            for (const Address& a : c.at)
+                if (a.same_place(from) || std::any_of(where.begin(), where.end(), [&](const Address& b) { return a.same_place(b); }))
+                    country = c.country;
+        for (uint8_t s = 0; s < seats; ++s)
+            if (s != my_seat && peers[s].present && peers[s].player == player) return; // (already in: our welcome is on its way)
         if (their_build != build) return refuse("a different game or build");
         uint8_t seat = kNoSeat; // (a game in progress: a cabinet no player has)
         for (uint8_t s = 0; s < seats && seat == kNoSeat; ++s) // (the old host's too, once the room has moved on)
@@ -485,7 +509,7 @@ struct Session::Impl {
         p = Peer{};
         said_bye[seat] = false, gone_name[seat].clear();
         p.present = p.connected = true;
-        p.address = from, p.name = name, p.player = player, p.heard = Clock::now();
+        p.address = from, p.name = name, p.country = country, p.player = player, p.heard = Clock::now();
         p.reached = true, p.direct_heard = from.relayed ? Clock::time_point{} : p.heard;
         p.candidates = std::move(where);
         permit(from);
@@ -598,17 +622,17 @@ struct Session::Impl {
                 const uint8_t n = r.u8();
                 for (uint8_t s = 0; s < n && s < kMaxSeats && r.ok(); ++s) {
                     const bool present = r.u8() != 0;
-                    const std::string name = r.str();
+                    const std::string name = r.str(), country = r.str();
                     std::vector<Address> where = get_addresses(r);
                     if (s == my_seat || s == host_seat) {
-                        if (s == host_seat) peers[host_seat].name = name;
+                        if (s == host_seat) peers[host_seat].name = name, peers[host_seat].country = country;
                         continue;
                     }
                     Peer& p = peers[s];
                     if (p.dropped && !(present && cabinets[s].open)) continue;
                     if (p.dropped) p = Peer{}; // (a new player in a cabinet whose player dropped)
                     const bool was = p.present;
-                    p.present = present && !where.empty(), p.name = name;
+                    p.present = present && !where.empty(), p.name = name, p.country = country;
                     if (p.present && !p.reached) p.address = where.front();
                     if (started && p.present && !was) p.connected = true, p.heard = Clock::now(); // (joined in progress)
                     if (p.present && !was) said_bye[s] = false, gone_name[s].clear();
@@ -796,7 +820,7 @@ struct Session::Impl {
         if (cb.idle) cb.idle(s, frame);
         // The seat free again (a new player may join it): this player is gone.
         Peer& p = peers[s];
-        gone_name[s] = p.name;
+        gone_name[s] = p.name, gone_country[s] = p.country;
         p = Peer{};
         p.dropped = true; // (its datagrams, if any still come, ignored; a new player resets it)
         drops[s] = Drop{};
@@ -1159,6 +1183,16 @@ void Session::set_cabinet(std::vector<uint8_t> eeprom, std::vector<uint8_t> back
     impl_->my_backup = std::move(backup);
 }
 
+void Session::set_country(const std::string& country) {
+    std::lock_guard guard(impl_->lock);
+    impl_->my_country = two_letters(country);
+}
+
+std::string Session::game_name() const {
+    std::lock_guard guard(impl_->lock);
+    return impl_->game_name;
+}
+
 void Session::start(StartInfo info) {
     Impl& m = *impl_;
     std::lock_guard guard(m.lock);
@@ -1330,6 +1364,14 @@ void Session::expect(const std::vector<Address>& addresses) {
     m.last_punch = Clock::time_point{};
 }
 
+void Session::expect(const std::vector<Address>& addresses, const std::string& country) {
+    expect(addresses);
+    Impl& m = *impl_;
+    std::lock_guard guard(m.lock);
+    std::erase_if(m.countries_said, [](const Impl::CountrySaid& c) { return c.until < Clock::now(); });
+    m.countries_said.push_back({addresses, two_letters(country), Clock::now() + std::chrono::seconds(60)});
+}
+
 std::array<bool, kMaxSeats> Session::relayed() const {
     const Impl& m = *impl_;
     std::lock_guard guard(m.lock);
@@ -1359,12 +1401,12 @@ std::array<Session::SeatView, kMaxSeats> Session::seats() const {
         const auto& p = m.peers[s];
         const auto& cab = m.cabinets[s];
         if (s == m.my_seat) {
-            v.state = State::me, v.name = m.my_name;
+            v.state = State::me, v.name = m.my_name, v.country = m.my_country;
         } else if (p.present && !p.dropped) {
-            v.name = p.name, v.round_trip = p.rtt;
+            v.name = p.name, v.country = p.country, v.round_trip = p.rtt;
             v.state = cab.open && !cab.until ? State::joining : State::playing;
         } else if (!m.gone_name[s].empty() || m.said_bye[s]) {
-            v.state = State::gone, v.name = m.gone_name[s], v.left = m.said_bye[s];
+            v.state = State::gone, v.name = m.gone_name[s], v.country = m.gone_country[s], v.left = m.said_bye[s];
         } else {
             v.state = State::open;
             if (s < m.start_info.names.size() && !cab.open) v.name = m.start_info.names[s]; // (before the drop is known)

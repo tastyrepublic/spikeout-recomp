@@ -144,6 +144,11 @@ public:
     // This player's cabinet (its settings EEPROM and backup RAM), before
     // hosting or joining: every machine starts this player's board from it.
     void set_cabinet(std::vector<uint8_t> eeprom, std::vector<uint8_t> backup);
+    // This player's country (the lobby's welcome: Cloudflare's two letters; none on a LAN): its own seat's, and a
+    // host's in the roster it sends (SeatView::country; a joiner's comes from the lobby through the host, expect).
+    void set_country(const std::string& country);
+    // The game's name (the host's: its player's name, or as the lobby listed it).
+    std::string game_name() const;
 
     // The host: the players so far (seat, name), and starting the boards.
     std::vector<std::string> players() const;
@@ -196,6 +201,7 @@ public:
         };
         State state = State::none;
         std::string name; // the player's (gone: the one who was)
+        std::string country; // theirs, two lower-case letters ("" unknown)
         bool left = false; // gone after saying goodbye
         int round_trip = -1; // ms (-1: not measured yet)
     };
@@ -222,6 +228,9 @@ public:
     // The host: a player joining from these addresses (the lobby says):
     // datagrams to them now open our router to theirs.
     void expect(const std::vector<Address>& addresses);
+    // And its country as the lobby has it (Cloudflare's; never what a game says of itself): the player's who
+    // joins from one of those addresses, which the roster passes on to every machine.
+    void expect(const std::vector<Address>& addresses, const std::string& country);
     // Seats reached only through a relay (ours or theirs), for an overlay.
     std::array<bool, kMaxSeats> relayed() const;
 

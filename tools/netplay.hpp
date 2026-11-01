@@ -258,10 +258,10 @@ inline std::optional<std::string> lobby_offer(net::LobbyClient& lobby, net::Sess
     return (*hosted)["code"].as_string();
 }
 
-// The host's part while players join: each joiner's addresses opened to.
+// The host's part while players join: each joiner's addresses opened to, its country (the lobby's) kept.
 inline void lobby_pump(net::LobbyClient& lobby, net::Session& session) {
     while (auto m = lobby.next())
-        if ((*m)["t"].as_string() == "joiner") session.expect(parse_addresses((*m)["candidates"]));
+        if ((*m)["t"].as_string() == "joiner") session.expect(parse_addresses((*m)["candidates"]), (*m)["country"].as_string());
 }
 
 // Joins the game with this code (the session listening, its addresses found).

@@ -3618,7 +3618,9 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "gamerun: no lobby at %s: %s\n", o.lobby_url.c_str(), lobby.error().c_str());
                 return 1;
             }
-            std::printf("net: the lobby says hello (a relay: %s)\n", (*welcome)["turn"].as_bool() ? "yes" : "no");
+            std::printf("net: the lobby says hello (a relay: %s, country \"%s\")\n", (*welcome)["turn"].as_bool() ? "yes" : "no",
+                        (*welcome)["country"].as_string().c_str());
+            session.set_country((*welcome)["country"].as_string());
         }
         if (!o.net_host.empty()) {
             if (!session.host(o.net_host, o.net_seats)) {

@@ -5,15 +5,17 @@
 //
 // One WebSocket a player, JSON text messages, {"t": type, ...}:
 //
-//   hello  {build, name}                 -> welcome {address, turn}
-//   list   {from}                        -> games {games: [{code, name, seats, taken, started, session, country}],
+//   hello  {build, name}                 -> welcome {address, country, turn} (country: Cloudflare's two letters for the
+//                                           player, "" if none: a host shows its own with its seat)
+//   list   {from}                        -> games {games: [{code, name, seats, taken, started, session, country, ms}],
 //                                                  from, total} (LIST_PAGE from `from`; waiting first, newest first)
 //   host   {name, seats, public, session, port, candidates[, takeover: code]}
 //                                        -> hosted {code}
 //   update {taken, started}              (the host's game)
 //   unhost {}
-//   join   {code, port, candidates}      -> joining {code, name, seats, session, candidates}
-//                                           and the host gets joiner {name, candidates}
+//   join   {code, port, candidates}      -> joining {code, name, seats, session, candidates, country}
+//                                           and the host gets joiner {name, candidates, country} (each the
+//                                           other's country, as the lobby has it: never what a game says)
 //   turn   {}                            -> turn {iceServers} (short-lived TURN credentials)
 //   "ping"                               -> "pong" (answered without waking the object)
 //
@@ -49,6 +51,18 @@ function text(v, max) {
 	return typeof v === "string" ? v.slice(0, max) : "";
 }
 
+// A listed game's speed for the player asking, estimated (no traffic to the host): the round trip, ms, from
+// how far apart Cloudflare puts them, light in fibre (200 km a ms) over a route half as long again, and 5 ms
+// for the routers at each end. -1 when either place is unknown. (The real one shows once in the game.)
+function estimate(a, b) {
+	if (![a.lat, a.lon, b.lat, b.lon].every(Number.isFinite)) return -1;
+	const rad = Math.PI / 180;
+	const h = Math.sin(((b.lat - a.lat) * rad) / 2) ** 2 +
+		Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(((b.lon - a.lon) * rad) / 2) ** 2;
+	const km = 2 * 6371 * Math.asin(Math.min(1, Math.sqrt(h)));
+	return Math.round(5 + (2 * km * 1.5) / 200);
+}
+
 function candidates(list, seen) {
 	const out = [];
 	if (Array.isArray(list))
@@ -70,6 +84,8 @@ export class Lobby extends DurableObject {
 		server.serializeAttachment({
 			ip: request.headers.get("CF-Connecting-IP") || "",
 			country: (request.cf && request.cf.country) || "", // (Cloudflare's: two letters, shown with a listed game)
+			lat: request.cf ? parseFloat(request.cf.latitude) : NaN, // (roughly where: a listed game's estimated speed)
+			lon: request.cf ? parseFloat(request.cf.longitude) : NaN,
 			name: "",
 			build: "",
 			game: null, // the game this player offers
@@ -111,17 +127,18 @@ export class Lobby extends DurableObject {
 				a.build = text(m.build, 32);
 				a.name = text(m.name, 32);
 				ws.serializeAttachment(a);
-				return send({ t: "welcome", address: a.ip, turn: Boolean(this.env.TURN_KEY_ID && this.env.TURN_KEY_API_TOKEN) });
+				return send({ t: "welcome", address: a.ip, country: a.country, turn: Boolean(this.env.TURN_KEY_ID && this.env.TURN_KEY_API_TOKEN) });
 
 			case "list": {
 				// Those waiting for players first, then those in progress with an
-				// empty cabinet; the newest first in each. A page of LIST_PAGE from
+				// empty cabinet; the nearest (estimate) first in each, then the newest. A page of LIST_PAGE from
 				// `from`, and how many there are (the game asks for the next page).
 				const open = [];
 				for (const p of this.players())
 					if (p.a.game && p.a.game.public && p.a.game.taken < p.a.game.seats && p.a.build === a.build) // (in progress too: an empty cabinet)
 						open.push(p.a);
-				open.sort((x, y) => Number(x.game.started) - Number(y.game.started) || (y.game.created || 0) - (x.game.created || 0));
+				const near = (h) => { const e = estimate(a, h); return e < 0 ? 1e9 : e; }; // (nearest first; unknown last)
+				open.sort((x, y) => Number(x.game.started) - Number(y.game.started) || near(x) - near(y) || (y.game.created || 0) - (x.game.created || 0));
 				const from = Math.max(0, Number(m.from) | 0);
 				const games = open.slice(from, from + LIST_PAGE).map((h) => ({
 					code: h.game.code,
@@ -131,6 +148,7 @@ export class Lobby extends DurableObject {
 					started: h.game.started,
 					session: h.game.session,
 					country: h.country || "",
+					ms: estimate(a, h),
 				}));
 				return send({ t: "games", games, from, total: open.length });
 			}
@@ -187,8 +205,8 @@ export class Lobby extends DurableObject {
 				if (g.taken >= g.seats) return send({ t: "error", why: "that game is full" });
 				const port = Number(m.port) | 0;
 				const mine = candidates(m.candidates, seen && port ? `${seen}:${port}` : "");
-				host.ws.send(JSON.stringify({ t: "joiner", name: a.name, candidates: mine }));
-				return send({ t: "joining", code, name: g.name, seats: g.seats, session: g.session, candidates: g.candidates });
+				host.ws.send(JSON.stringify({ t: "joiner", name: a.name, candidates: mine, country: a.country }));
+				return send({ t: "joining", code, name: g.name, seats: g.seats, session: g.session, candidates: g.candidates, country: host.a.country });
 			}
 
 			case "turn": {
