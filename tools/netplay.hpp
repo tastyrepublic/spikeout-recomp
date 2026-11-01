@@ -73,13 +73,27 @@ inline std::vector<uint8_t> eeprom_bytes(const std::array<uint16_t, 64>& w) {
 // player's own cabinet's, with the host's country (linked cabinets must
 // share one, or the slaves show COUNTRY SETTING DIFFERENT; difficulty
 // follows the master, coins and free play stay each cabinet's own:
-// docs/fidelity.md). A new cabinet (none yet) starts as the host's.
+// docs/fidelity.md). A new cabinet (none yet) starts as the host's. A host
+// with none (gamerun's, a blank chip) doesn't set the country; its own
+// cabinet then starts as the first other player's: a blank chip on the
+// master with a slave's set up never linked (the network check cancelled;
+// docs/netplay.md, "gamerun and the window in one game"). Every cabinet blank:
+// as they are.
 inline std::vector<uint8_t> seat_eeprom(const net::StartInfo& start, std::size_t seat) {
+    auto valid = [](const std::vector<uint8_t>& bytes) {
+        auto w = eeprom_words(bytes);
+        return bytes.size() == 128 && ArcadeSettings{w}.valid();
+    };
     const std::vector<uint8_t>& host = start.eeprom.empty() ? std::vector<uint8_t>() : start.eeprom[0];
     std::vector<uint8_t> mine = seat < start.eeprom.size() ? start.eeprom[seat] : std::vector<uint8_t>();
     auto host_words = eeprom_words(host);
     const ArcadeSettings host_settings{host_words};
-    if (host.size() != 128 || !host_settings.valid()) return mine;
+    if (!valid(host)) {
+        if (valid(mine)) return mine;
+        for (const std::vector<uint8_t>& other : start.eeprom)
+            if (valid(other)) return other;
+        return mine;
+    }
     auto words = eeprom_words(mine);
     ArcadeSettings settings{words};
     if (mine.size() != 128 || !settings.valid()) return host;

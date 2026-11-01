@@ -2213,9 +2213,84 @@ now stops its shadows too (it closes its input table). The host's own board
 had stopped at its block limit while its shadow of the joiner's board waited
 for inputs the joiner, gone already, would never send: the process hung.
 
+**One board a PC in the window (2026-11-01, uncommitted when written).**
+The hand-over, the shadows and the rules moved out of gamerun into
+`tools/one_board.hpp` (`tools::one_board::Game`, a `Board` for each board:
+its context, bus and frame timing, which the program keeps running), used by
+gamerun and the window alike. gamerun gives the same as before: the 18
+`tools/onepc-tests.ps1` runs and the network runs, frame for frame.
+
+The window can't start from a state in the middle of a fight: a network game
+starts at power-on. So the window hands the other cabinet over 10 frames in
+but holds it whole (`hand_over(..., held)`, gamerun's `--one-board-held`):
+a shadow from the start, until the rules find the game calm (both players in
+it, more than 15 s each, 300 frames), and from then on side runs, a shadow
+again where trouble comes. Proved first in gamerun over localhost
+(`tools/onepc-net-tests.ps1`'s poweron: player 1 in a game alone at 1,300,
+player 2 joining it at 2,700, handed back at ~4,620): 7,374 of 7,374 frames
+the same on both machines. It found one fault: the module's "stop after" of
+0 (none asked yet) matched the logic count, still 0 through the boot, and
+handed the board back at once; 0 is now never a stop.
+
+`spikeout --net-one-board` (two players; off by default, the command line
+only while it's tested, as `--smooth`): each board registers its part as it
+starts, the last sets them up; the other board's thread waits as a shadow
+would. Nothing sent differs, so the others needn't do the same. From the
+hand-over a state asked for (a player joining in progress, a machine out of
+step) is refused, and F9 saves nothing: the other board doesn't run whole
+here. The other cabinet's RAM hash isn't reported. Tests:
+`SPIKEOUT_TEST_PRESS=NAME@FRAME[:N],...` holds this player's buttons as
+gamerun's `--press`; `tools/onepc-window-test.ps1 [-OneBoard joiner|host]`
+runs two windows on this machine, one hosting, one joining, through their
+menus, one of them on one board, and the session's hash checks (every 120
+frames) compare the one-board window's own board with the other window's
+copy of it:
+
+| one board | handed back to side runs | hash checks differing, to frame 7,000 |
+|---|---|---|
+| the joiner | 4,624 | none |
+| the host | 4,621 | none |
+
+(Both players in the game at frame 7,000, by the windows' screenshots.)
+
+Its speed (SPIKEOUT_NET_DEBUG=1, the test's two windows on the i7-8700K):
+two plain windows held 17.4 ms a frame to the end (17.4-18.2); with the
+joiner on one board, the same to ~5,700, then 20.6-21.0 ms in both windows
+(~48 fps) to the end. The board that stays runs its own frame and the other
+cabinet's side runs one after the other on its thread (~18.5 ms there in
+the fight's heavier scenes, against 17.4), where every board runs on a core
+of its own; the other window waits for its inputs. So on a PC with cores to
+spare one board is slower than every board, for all it costs less in all
+(13.0 ms against 21.6 ms a frame, above): it is for a machine that can't run
+every board at full speed. (Each player's TIME is their own: the two
+windows show different ones.)
+
+**gamerun and the window in one game (2026-11-01).** A gamerun host with a
+window joining differed on the host's board by frame 120, every board run
+in both. gamerun sends no settings EEPROM (unless `--eeprom`); for a seat
+with none the window wrote zeros, gamerun kept the chip blank (all ones, as
+a fresh board has it, and as the window's own first run has it). The window
+now keeps it blank too (two windows always send theirs: unchanged). Then
+the two agreed, but the cabinets didn't link: both network boards held in
+reset, the game's network check cancelled on both machines alike. Not the
+settings' values (the window's were the game's defaults: export, a coin a
+credit, Normal): in gamerun alone, two linked boards from power-on, a blank
+chip on the master with the slave's set up never linked; both blank, both
+set up, or a blank slave did (7,356-7,370 packets each way by frame
+~4,000). Why the slave's check gives up then isn't known (the blank master
+writing its defaults first, at a guess). A window never sends a blank chip
+(its game writes its defaults as it first starts), so only a gamerun host
+meets it. `tools::seat_eeprom`: a host with none doesn't set the country,
+and its own cabinet starts as the first other player's (every cabinet
+blank, or every one set up: as before; each player's coins, free play and
+difficulty still their own, the country the host's). Then a gamerun host
+with a window joining linked (master and slave, 13,778 packets each way)
+and no hash check differed to frame 7,000.
+
 Still to do: shadows with more than two seats (the rules follow one other
-cabinet); the window; a seat taken in a one-board game (the state for it
-sent); the module cheaper; rollback (step 2).
+cabinet); a seat taken in a one-board game (the state for it sent); the
+menu setting and an automatic choice (one board when this PC can't keep
+up); the module cheaper; rollback (step 2).
 
 ## Plan
 

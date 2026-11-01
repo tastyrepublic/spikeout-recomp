@@ -81,7 +81,9 @@
 // --one-board-auto (two seats) the rules run the other board whole here as
 // a shadow where side runs can't follow it, seeing its coin and start only
 // as far ahead as the input delay (--one-board-lookahead N limits it in one
-// process too; 60 by default).
+// process too; 60 by default). --one-board-held (with the rules): at the
+// hand-over each other board runs on whole, as its shadow, until the rules
+// find the game calm (the window's way: from power-on, through attract).
 // --no-frame-hashes leaves out the comparisons' RAM hash of every frame.
 // --no-2d and --no-sound leave out the tile generator's drawing and the
 // sound and music boards: the game runs the same without them (nothing
@@ -193,6 +195,7 @@
 #include "net/compress.hpp"
 #include "input_log.hpp"
 #include "recording.hpp"
+#include "one_board.hpp"
 #include "remote_cabinet.hpp"
 #include "png_write.hpp"
 #include "wav_write.hpp"
@@ -350,6 +353,7 @@ struct Options {
     bool one_board_auto = false;            // --one-board-auto (a shadow started and stopped by the rules)
     uint64_t one_board_lookahead = 60;      // --one-board-lookahead N (the rules' look at the other cabinet's coin and start)
     uint64_t one_board_hand_back = 0;       // --one-board-hand-back FRAME (its shadow back to side runs, asked then)
+    bool one_board_held = false;            // --one-board-held (at the hand-over its board runs on whole, until the rules hand it back)
     int wait_board = -1;               // --wait-seat B@FROM:UNTIL
     uint64_t wait_from = 0, wait_until = 0;
     int clone_board = -1;               // --clone-seat B@FRAME
@@ -553,6 +557,7 @@ struct Machine {
     uint8_t linked_bank0 = 0xFF, linked_controls = 0xFF; // (--inputs, linked boards: as last set)
     recomp::Context c;
     recomp::FrameTiming timing;
+    tools::one_board::Board ob{c, bus, timing, index}; // --one-board (tools/one_board.hpp)
     m3::TilegenRenderer tilegen;
     m3::Real3dRenderer real3d;
     tools::FrameSound sound;
@@ -586,37 +591,6 @@ struct Machine {
              frames_block_culled = 0;
     uint64_t micro_tris = 0, translator_tris = 0, inverted_tris = 0;
     uint16_t net_status[2] = {0, 0}; // --net-watch
-    // --one-board: on the board that stays, the other cabinets made by it; on the one that goes, its own
-    // variables as each flow of its starts (by logic count), to start the side flow from; its camera as each
-    // update starts (--one-board-camera, a --camera-record of it).
-    std::unique_ptr<tools::remote::Cabinets> cabinets;
-    std::mutex cabinets_lock;
-    std::map<uint32_t, std::vector<uint8_t>> own_seed, camera_seed;
-    std::map<uint32_t, tools::remote::Seed> done_seed; // (on the one that goes: by the count it finished, at 0x36E94)
-    bool shadowing = false;                            // (on the one that goes: running as the other's shadow)
-    std::size_t peer = 0;                              // (--one-board: the other of the two, the staying board or the one that goes)
-    uint64_t last_link_frame = 0;                      // (on the one that goes: the frame of its last link)
-    bool one_board_auto = false;
-    uint64_t lookahead = 60; // (--one-board-lookahead: how far the rules look at the other cabinet's coin and start)
-    bool net_inputs = false; // (network play: those from the input table)
-    uint64_t hand_back_at = 0;                        // (--one-board-hand-back FRAME)
-    uint32_t slice = 8;                                // (--slice, for a shadow's wait)
-    // --one-board-auto, on the one that stays: frames calm in a row while a shadow runs; the mask last seen and
-    // since when
-    uint64_t calm_frames = 0, mask_since = 0;
-    uint32_t last_mask = 0;
-    // --one-board-shadow FRAME: on the board that stays, from when its state is taken for the other's shadow
-    // (at its first 0x36E94 from FRAME on), and whether it has been.
-    uint64_t shadow_from = 0;
-    bool shadow_taken = false;
-    // (both boards, until the hand-over: their RAM where each finished a count (0x36E94), by count; on the
-    // leaving board then: its RAM at its last, and the bytes that differed from the staying board's at the
-    // same count, its own for a shadow (the module's own variables, camera and link memory aside))
-    std::map<uint32_t, std::vector<uint8_t>> ram_at;
-    bool keep_ram = false;
-    std::vector<uint8_t> shadow_base;
-    std::vector<uint32_t> shadow_own;
-
     // --renderer gpu / compare: the GPU's picture, and how it compared with
     // the software renderer's (pixels with a channel more than 2 apart).
 #ifdef SPIKEOUT_GPU
@@ -728,19 +702,10 @@ std::vector<std::unique_ptr<struct Machine>>* g_machines = nullptr; // (--drop: 
 // board B takes at its own, as its own cabinet (thrown after: run() goes on from it).
 std::vector<uint8_t> g_clone_state;
 std::mutex g_clone_lock;
-// --one-board-shadow: the staying board's state (in g_clone_state) taken where it finished count
-// g_shadow_count, in its frame g_shadow_frame (~0: not yet).
-uint32_t g_shadow_count = 0;
-uint64_t g_shadow_frame = ~0ull;
-// (the master's shadow: the staying board's state at its dispatcher's entry in g_clone_state, the master's RAM)
-std::vector<uint8_t> g_master_ram;
-ppc::CpuState g_master_cpu{};
-bool g_master_ready = false;
 const char* g_drop_buttons = nullptr; // --drop-buttons DUMP (for made_blocks)
 const std::vector<Press>* g_presses = nullptr; // --press (for made_blocks: a dropped seat's own buttons)
 int g_drop_board = -1; // --drop B (the side camera's buttons are that cabinet's)
 struct Cloned {};
-struct HandedBack { uint32_t count; }; // (--one-board: a shadow stopped where it finished `count`, back to side runs)
 // --wait-seat B@FROM:UNTIL: thrown at board B's first block after FROM's end; run() holds its blocks
 // to UNTIL, then brings the board back there.
 struct Frozen {
@@ -881,370 +846,57 @@ double ops_f(uint64_t bits) { // an FPR's double
 // each time (one step).
 uint64_t state_hash(const std::function<void(m3::State&)>& walk);
 
-// --one-board: the staying board's hook (the other cabinets' side runs first; nothing else in a side run),
-// and the leaving board's (its own variables as each flow of its starts, while it still runs).
-void keep_ram(Machine& m) { // (at 0x36E94, while wanted: this board's RAM after the count it finished)
-    if (!m.keep_ram) return;
-    std::lock_guard guard(m.cabinets_lock);
-    auto ram = m.bus.ram();
-    m.ram_at[m.bus.read32(tools::remote::kLogicCounter)].assign(ram.begin(), ram.end());
-    while (m.ram_at.size() > 3) m.ram_at.erase(m.ram_at.begin());
-}
-// --one-board-auto: once a frame on the board that stays, where it finished a count (0x36E94). A shadow of the
-// other cabinet started when trouble may come, that side runs can't follow (the other then missing frames to its
-// banners, or the games apart): a player in the game with 5 s or less (the time table at 0x1062B0, a halfword a
-// player, 1/64 s), this board out of the game's mode (-16374(r13), 7), the link's players changed (the header's
-// mask, +0x28) in the last 60 frames, or the other cabinet's coin or start buttons pressed in the next 60 frames.
-// Handed back to side runs after 300 frames in a row of the opposite with room to spare: every player in the game
-// with more than 15 s, both cabinets in the game's mode with the same players, no coin or start coming.
-void one_board_rules(Machine& m) {
-    const std::size_t gone = m.peer;
-    Machine& other = *(*g_machines)[gone];
-    tools::remote::Cabinets& cab = *m.cabinets;
-    if (!cab.making(gone) && !cab.shadowed(gone)) return; // (its main board still there)
-    const uint64_t frame = m.timing.frames();
-    const uint32_t mask = m.bus.read32(0x140128);
-    if (mask != m.last_mask) m.mask_since = m.last_mask ? frame : 0, m.last_mask = mask; // (the first seen: no change)
-    uint32_t least = 0xFFFF; // (the least time of the players in the game)
-    for (uint32_t node = 0; node < 4; ++node)
-        if (mask & (0x80000000u >> node)) least = std::min<uint32_t>(least, m.bus.read16(0x1062B0 + 2 * node));
-    // (its coin or start buttons, bank 0, in the next --one-board-lookahead frames (60): from its --press list; over the
-    // network, as far as its inputs are in the table, the input delay's frames ahead)
-    bool joining = false;
-    if (m.net_inputs) {
-        for (uint64_t f = frame; f < frame + m.lookahead; ++f)
-            if (const auto in = m.inputs->get(gone, f); in && in->bank0 != 0xFF) joining = true;
-    } else if (g_presses) {
-        for (const Press& p : *g_presses)
-            if (for_board(p.board, gone) && p.bank == 0 && p.frame + p.frames > frame && p.frame < frame + m.lookahead) joining = true;
-    }
-    const bool in_game = m.bus.read8(0x10400A) == 7;
-    if (!cab.shadowed(gone)) {
-        const bool trouble = least <= 5 * 64 || !in_game || frame < m.mask_since + 60 || joining;
-        bool waiting; // (a state taken, not yet used or refused by the leaving board: not asked again over it)
-        {
-            std::lock_guard guard(g_clone_lock);
-            waiting = g_shadow_frame != ~0ull || g_master_ready;
-        }
-        if (trouble && m.shadow_taken && !waiting) {
-            m.shadow_from = frame, m.shadow_taken = false;
-            std::printf("board %zu: a shadow of board %zu wanted at frame %llu (least time %u/64 s, mode %u, mask %08x%s)\n", m.index, gone,
-                        (unsigned long long)frame, least, m.bus.read8(0x10400A), mask, joining ? ", its buttons" : "");
-        }
-        if (trouble && !m.shadow_from) m.shadow_from = frame;
-        return;
-    }
-    const bool calm = least > 15 * 64 && in_game && other.bus.read8(0x10400A) == 7 && other.bus.read32(0x140128) == mask &&
-                      std::popcount(mask) >= 2 && !joining;
-    m.calm_frames = calm ? m.calm_frames + 1 : 0;
-    if (m.calm_frames >= 300) {
-        cab.ask_hand_back(gone);
-        m.calm_frames = 0;
-        std::printf("board %zu: board %zu handed back to side runs from frame %llu\n", m.index, gone, (unsigned long long)frame);
-    }
-}
-
-void one_board_hook(recomp::Context& c, uint32_t pc, void* user) {
-    Machine& m = *static_cast<Machine*>(user);
-    if (m.cabinets->inside()) { // (a side run's: only where it ends)
-        m.cabinets->hook(pc);
-        return;
-    }
-    // (--one-board-shadow of the master: at this board's dispatcher, from the master's own run then)
-    if (pc == tools::remote::kModeDispatch && m.shadow_from && !m.shadow_taken && m.timing.frames() >= m.shadow_from && m.index != 0) {
-        std::vector<uint8_t> ram;
-        ppc::CpuState cpu{};
-        if (m.cabinets->shadow_master(0, ram, cpu)) {
-            m.shadow_taken = true;
-            m3::State s; // (this board's devices and clock now; the master's CPU at its vblank wait)
-            tools::board_state(s, m.c, m.timing, {});
-            std::lock_guard guard(g_clone_lock);
-            g_clone_state = std::move(s.data()), g_master_ram = std::move(ram), g_master_cpu = cpu;
-            g_master_ready = true;
-            std::printf("board %zu: the master's shadow from its side run of count %u (frame %llu)\n", m.index,
-                        m.bus.read32(tools::remote::kLogicCounter), (unsigned long long)m.timing.frames());
-        }
-    }
-    if (pc == tools::remote::kLinkSkipped) keep_ram(m);
-    if (m.cabinets->hook(pc)) return;
-    if (pc == tools::remote::kLinkSkipped && m.one_board_auto) one_board_rules(m);
-    if (pc == tools::remote::kLinkSkipped && m.hand_back_at && m.timing.frames() == m.hand_back_at) // --one-board-hand-back FRAME
-        m.cabinets->ask_hand_back(m.peer);
-    // (--one-board-shadow: this board's state where it has finished a count's work, for the other's shadow)
-    if (pc == tools::remote::kLinkSkipped && m.shadow_from && !m.shadow_taken && m.timing.frames() >= m.shadow_from && m.index == 0) {
-        m.shadow_taken = true;
-        const uint32_t count = m.bus.read32(tools::remote::kLogicCounter);
-        const uint64_t frame = m.timing.frames();
-        std::printf("board %zu: state for the shadow asked at frame %llu, count %u\n", m.index, (unsigned long long)frame, count);
-        c.request_snapshot([&m, count, frame](uint32_t at) {
-            std::printf("board %zu: state for the shadow taken at frame %llu (asked at %llu), pc %08x%s\n", m.index,
-                        (unsigned long long)m.timing.frames(), (unsigned long long)frame, at, m.cabinets->inside() ? ", in a side run" : "");
-            m3::State s;
-            tools::board_state(s, m.c, m.timing, {});
-            std::lock_guard guard(g_clone_lock);
-            g_clone_state = std::move(s.data()), g_shadow_count = count, g_shadow_frame = frame;
-        });
-    }
-    m3::games::spikeout_hook(c, pc, nullptr);
-}
-
-// The leaving board's own bytes for a shadow of it later: where its RAM and the staying board's differ, at its
-// last count (from then on neither keeps its RAM).
-void shadow_own_bytes(Machine& m, Machine& other) {
-    std::scoped_lock guard(m.cabinets_lock, other.cabinets_lock);
-    if (!m.ram_at.empty())
-        if (const auto theirs = other.ram_at.find(m.ram_at.rbegin()->first); theirs != other.ram_at.end()) {
-            m.shadow_base = m.ram_at.rbegin()->second;
-            for (uint32_t a = 0; a < m.shadow_base.size(); ++a)
-                if (m.shadow_base[a] != theirs->second[a]) m.shadow_own.push_back(a);
-            std::printf("board %zu: %zu bytes its own (against board %zu's, after count %u)\n", m.index, m.shadow_own.size(),
-                        other.index, theirs->first);
-        }
-    m.keep_ram = other.keep_ram = false;
-    m.ram_at.clear(), other.ram_at.clear();
-}
-
-// A shadow's inputs for the frame it starts in, as its frame's end before would have set them: over the network
-// from the input table, else from its --press list.
-void shadow_inputs(Machine& m) {
-    if (m.net_inputs) {
-        if (const auto in = m.inputs->wait(m.index, m.timing.frames())) {
-            m.bus.inputs.bank0 = in->bank0, m.bus.inputs.bank1 = in->bank1;
-            m.bus.inputs.controls = in->controls, m.bus.inputs.controls2 = in->controls2;
-        }
-        return;
-    }
-    if (!g_presses) return;
-    uint8_t in[2] = {0xFF, 0xFF};
-    for (const Press& p : *g_presses)
-        if (for_board(p.board, m.index) && m.timing.frames() >= p.frame && m.timing.frames() < p.frame + p.frames)
-            in[p.bank] = static_cast<uint8_t>(in[p.bank] & ~(1u << p.bit));
-    m.bus.inputs.bank0 = in[0];
-    m.bus.inputs.controls = in[1];
-}
-
-// The master's shadow: once the staying board has its state (at its dispatcher's entry) and the master's RAM
-// (Cabinets::shadow_master), this board goes on from them, as the master, at that time: its own network board,
-// EEPROM and inputs kept, its role.
-bool load_master_shadow(Machine& m) {
-    std::vector<uint8_t> state, ram;
-    ppc::CpuState cpu{};
-    {
-        std::lock_guard guard(g_clone_lock);
-        if (!g_master_ready) return false;
-        g_master_ready = false;
-        state = std::move(g_clone_state), ram = std::move(g_master_ram), cpu = g_master_cpu;
-    }
-    m3::State nb, ee;
-    m.bus.netboard().state(nb);
-    m.bus.eeprom().state(ee);
-    const auto inputs = m.bus.inputs;
-    const uint8_t role = m.bus.read8(0x10019E);
-    m3::State s(std::move(state));
-    tools::board_state(s, m.c, m.timing, {});
-    m3::State nb_in(std::move(nb.data())), ee_in(std::move(ee.data()));
-    m.bus.netboard().state(nb_in);
-    m.bus.eeprom().state(ee_in);
-    m.bus.inputs = inputs;
-    shadow_inputs(m);
-    // (the master's RAM whole, as its run through its drawing left it, there in 0x36E94: its OS's work too (inside
-    // its calls there; its transfers' flags cleared where they were waited for))
-    std::copy(ram.begin(), ram.end(), m.bus.ram().begin());
-    // (in 0x36E94, its MSR as a board's there; on at its idle wait (0x36F44) with the flag as read there (r3, 0), the
-    // tile generator's flip before it (0x36F30, its 2D) passed by)
-    m.c.cpu = cpu;
-    m.c.cpu.pc = 0x36F44, m.c.cpu.gpr[3] = 0;
-    // (its wake-up, which came at its link time just before (this board's decrementer had fired): pending, to come
-    // as soon as it waits)
-    m.bus.write8(tools::remote::kWakeFlag, 0);
-    {
-        recomp::Context::Aside a = m.c.set_aside();
-        a.dec_pending = true;
-        m.c.put_back(a);
-    }
-    m.bus.write8(0x10019E, role);
-    m.shadowing = true;
-    std::printf("board %zu: the master's shadow from frame %llu, cycle %llu\n", m.index, (unsigned long long)m.timing.frames(),
-                (unsigned long long)(m.c.cycles() - m.timing.frame_start(m.timing.frames())));
-    return true;
-}
-
-// --one-board-shadow: the leaving board, its main board gone, waiting (taking its turns, a frame at a time)
-// for the staying board's state; then made the other cabinet's shadow from it, a frame on (a slave's
-// world is the master's a frame back), with what is that cabinet's own from the staying board's
-// tools::remote::Cabinets. False: the other board stopped first.
-bool shadow_wait(Machine& m, tools::Turns& turns, uint32_t slice) {
-    Machine& other = *(*g_machines)[m.peer];
-    tools::remote::Cabinets::Shadow own;
-    for (uint64_t f = m.timing.frames();; ++f) {
-        {
-            std::scoped_lock guard(g_clone_lock, other.cabinets_lock);
-            if (g_shadow_frame != ~0ull && f == g_shadow_frame + 1) {
-                if (other.cabinets->shadow_state(m.index, g_shadow_count, own)) break;
-                // (none for that count: that cabinet a count off this board's just then, after a frame it missed or
-                // held back: asked again the next frame)
-                std::printf("board %zu: no shadow state for count %u, again\n", m.index, g_shadow_count);
-                g_shadow_frame = ~0ull, other.shadow_taken = false;
-            }
-            if (g_shadow_frame != ~0ull && f > g_shadow_frame + 1) {
-                std::printf("board %zu: the staying board's state came too late (taken at frame %llu, here at %llu)\n", m.index,
-                            (unsigned long long)g_shadow_frame, (unsigned long long)f);
-                return false;
-            }
-        }
-        if (turns.alone(m.index)) return false;
-        // (its turns at the frame's lines, as a running board takes them; in the first, those still to come)
-        const uint64_t now = m.c.cycles(), start = m.timing.frame_start(f) + m.timing.line_cycles() * recomp::FrameTiming::kVBlankLines;
-        for (uint32_t line = slice - 1; line < recomp::FrameTiming::kDisplayLines; line += slice)
-            if (start + line * m.timing.line_cycles() >= now) {
-                turns.pass(m.index);
-                if (load_master_shadow(m)) return true; // (the master's: as soon as it is there, mid-frame)
-            }
-    }
-    m3::State nb, ee;
-    m.bus.netboard().state(nb);
-    m.bus.eeprom().state(ee);
-    const auto inputs = m.bus.inputs;
-    const uint8_t role = m.bus.read8(0x10019E);
-    {
-        std::lock_guard guard(other.cabinets_lock);
-        other.cabinets->stop_making(m.index);
-    }
-    {
-        std::lock_guard guard(g_clone_lock);
-        std::vector<uint8_t> bytes = g_clone_state;
-        m3::State s(std::move(bytes));
-        tools::board_state(s, m.c, m.timing, {});
-    }
-    m3::State nb_in(std::move(nb.data())), ee_in(std::move(ee.data()));
-    m.bus.netboard().state(nb_in);
-    m.bus.eeprom().state(ee_in);
-    m.bus.inputs = inputs;
-    const uint64_t shift = m.timing.frame_cycles(); // (its time: the staying board's, a frame on)
-    m.timing.move_on(1);
-    shadow_inputs(m); // (its inputs for this frame, as its frame's end before would have set them)
-    recomp::Context::Aside a = m.c.set_aside();
-    a.cycles += shift, a.next_check += shift, a.scheduler_due += shift;
-    a.tb_offset -= shift * 33 / 332;
-    m.c.put_back(a);
-    // (its own: first what differed from the staying board's at the hand-over, as it was then (the module's own
-    // variables aside, which it has newer); then the module's: link memory and variables, own variables (their
-    // own bits), camera, working record but +0x100)
-    auto ram = m.bus.ram();
-    {
-        std::vector<uint32_t> tracked = other.cabinets->own_addresses_list();
-        std::sort(tracked.begin(), tracked.end());
-        for (uint32_t at : m.shadow_own)
-            if (!std::binary_search(tracked.begin(), tracked.end(), at)) ram[at] = m.shadow_base[at];
-    }
-    std::copy(own.link.begin(), own.link.end(), ram.begin() + tools::remote::kLinkMemory);
-    {
-        std::size_t n = 0;
-        for (const auto& [lo, hi] : tools::remote::kLinkVars)
-            for (uint32_t addr = lo; addr < hi; ++addr) ram[addr] = own.link_vars[n++];
-    }
-    const auto& addrs = other.cabinets->own_addresses_list();
-    const auto& masks = other.cabinets->own_masks();
-    for (std::size_t k = 0; k < addrs.size(); ++k)
-        ram[addrs[k]] = static_cast<uint8_t>((ram[addrs[k]] & ~masks[k]) | (own.own[k] & masks[k]));
-    std::copy(own.camera.begin(), own.camera.end(), ram.begin() + kCamera);
-    if (own.regions.size() == tools::remote::kRegionBytes) tools::remote::scatter_regions(ram, own.regions);
-    for (uint32_t i = 0; i < 0x80; ++i)
-        if (i != 0x100 / 4) m.bus.write32(tools::remote::kWorkingRecord + 4 * i, own.working[i]);
-    m.bus.write8(0x10019E, role);
-    std::printf("board %zu: its shadow from board %zu's state after count %u (frame %llu), at frame %llu\n", m.index, other.index,
-                g_shadow_count, (unsigned long long)g_shadow_frame, (unsigned long long)m.timing.frames());
-    {
-        std::lock_guard guard(g_clone_lock);
-        g_shadow_frame = ~0ull; // (taken: the next shadow from a state taken anew)
-    }
-    m.shadowing = true;
-    return true;
-}
-// --one-board B@FRAME: board B made by the other (two boards) from the end of FRAME. With --one-board-camera
-// (a --camera-record of it, by logic count): its side runs started ten frames before, its own variables from
-// the leaving board's own as a flow of its started, the flows since run on. Without: board B handed over as a
-// shadow is (Cabinets::running, ask_hand_back): it stops where the module asks, which takes its own variables,
-// camera and own areas there, a slave's next count caught up (as network play will have it).
+// --one-board B@FRAME: board B made by the other (two boards) from the end of FRAME (tools/one_board.hpp). With
+// --one-board-camera (a --camera-record of it, by logic count): its side runs started ten frames before, its own
+// variables from the leaving board's own as a flow of its started, the flows since run on. Without: board B handed
+// over as a shadow is (Cabinets::running, ask_hand_back): it stops where the module asks, which takes its own
+// variables, camera and own areas there, a slave's next count caught up (as network play will have it).
 // More than one board may go at once (--one-board repeated; network play: every seat but this machine's), all made
 // by the one that stays (network play's own; else the master unless it goes, else the first that stays); any
 // others linked as usual. The camera recording, given missed frames, shadows and the rules: one board going only.
-void one_board_leaving_hook(recomp::Context& c, uint32_t pc, void* user);
+tools::one_board::Game g_one_board;
 bool one_board_goes(const Options& o, std::size_t board) {
     return o.one_board >= 0 && (static_cast<std::size_t>(o.one_board) == board ||
                                 std::find(o.one_board_also.begin(), o.one_board_also.end(), board) != o.one_board_also.end());
 }
 void set_up_one_board(std::vector<std::unique_ptr<Machine>>& machines, const Options& o) {
-    std::size_t stays = o.netplay ? o.local_seat : 0;
-    while (one_board_goes(o, stays)) ++stays;
-    const std::size_t gone = static_cast<std::size_t>(o.one_board);
-    Machine& m = *machines[stays];
-    m.peer = gone; // (the board the shadows and the rules are for)
-    // (its buttons: network play's from its player's machine, through the input table (the input delay: there before
-    // this board's frame needs them; waited for if not); else its --press list's)
-    auto held = [net = o.netplay != nullptr, here = &m](std::size_t seat, uint64_t frame) {
-        if (tools::InputTable* table = here->inputs; net && table) {
-            std::optional<tools::InputTable::Inputs> in = table->get(seat, frame);
-            if (!in && frame >= table->next(seat)) in = table->wait(seat, frame);
-            return in ? tools::remote::held_word(in->bank0, in->controls, in->controls2) : 0u; // (before its first: none)
-        }
-        uint8_t in[2] = {0xFF, 0xFF};
-        if (g_presses)
+    tools::one_board::Game::Settings s;
+    s.stays = o.netplay ? o.local_seat : 0;
+    while (one_board_goes(o, s.stays)) ++s.stays;
+    s.going.push_back(static_cast<std::size_t>(o.one_board));
+    for (std::size_t b : o.one_board_also) s.going.push_back(b);
+    s.frame = o.one_board_frame;
+    s.tasks = o.one_board_tasks, s.rules = o.one_board_auto, s.lookahead = o.one_board_lookahead;
+    s.shadow_from = o.one_board_shadow, s.hand_back_at = o.one_board_hand_back;
+    s.keep_ram = o.one_board_shadow != 0 || o.one_board_auto || !o.one_board_camera;
+    s.slice = o.slice;
+    s.net = o.netplay != nullptr; // (each board's table: given as it is made)
+    if (!s.net && g_presses) // (its --press list's: bank 0 and the controls)
+        s.buttons = [](std::size_t seat, uint64_t frame) -> std::optional<tools::InputTable::Inputs> {
+            uint8_t in[2] = {0xFF, 0xFF};
             for (const Press& p : *g_presses)
                 if (for_board(p.board, seat) && frame >= p.frame && frame < p.frame + p.frames)
                     in[p.bank] = static_cast<uint8_t>(in[p.bank] & ~(1u << p.bit));
-        return tools::remote::held_word(in[0], in[1]);
-    };
-    m.cabinets = std::make_unique<tools::remote::Cabinets>(m.c, m.bus, m.timing, stays, held);
-    m.shadow_from = o.one_board_shadow;
-    m.keep_ram = o.one_board_shadow != 0 || o.one_board_auto || !o.one_board_camera;
-    m.one_board_auto = o.one_board_auto;
-    m.lookahead = o.one_board_lookahead, m.net_inputs = o.netplay != nullptr;
-    m.hand_back_at = o.one_board_hand_back;
-    m.slice = o.slice;
-    auto cameras = std::make_shared<std::map<uint32_t, std::vector<uint8_t>>>();
+            return tools::InputTable::Inputs{in[0], 0xFF, in[1], 0xFF};
+        };
+    s.cameras = std::make_shared<std::map<uint32_t, std::vector<uint8_t>>>();
     if (o.one_board_camera) {
         const std::vector<uint8_t> bytes = tools::read_file(o.one_board_camera);
         for (std::size_t at = 0; at + 4 + kCameraBytes <= bytes.size(); at += 4 + kCameraBytes) {
             uint32_t logic = 0;
             std::memcpy(&logic, bytes.data() + at, 4);
-            (*cameras)[logic].assign(bytes.begin() + static_cast<std::ptrdiff_t>(at + 4), bytes.begin() + static_cast<std::ptrdiff_t>(at + 4 + kCameraBytes));
+            (*s.cameras)[logic].assign(bytes.begin() + static_cast<std::ptrdiff_t>(at + 4), bytes.begin() + static_cast<std::ptrdiff_t>(at + 4 + kCameraBytes));
         }
     }
-    const uint64_t from = o.one_board_frame >= 10 ? o.one_board_frame - 10 : 0;
-    Machine* s = &m;
-    for (std::size_t b = 0; b < machines.size(); ++b) {
-        if (!one_board_goes(o, b)) continue;
-        Machine* l = machines[b].get();
-        l->peer = stays, l->keep_ram = m.keep_ram, l->slice = o.slice, l->net_inputs = m.net_inputs;
-        // (its logic count less this board's: the master runs a count ahead of the slaves)
-        const int ahead = (b == 0 ? 1 : 0) - (stays == 0 ? 1 : 0);
-        m.cabinets->add(b, ahead,
-                        [cameras, l, s, from](std::size_t, uint32_t logic, tools::remote::Seed& seed) {
-                            if (s->timing.frames() < from) return false;
-                            if (cameras->empty()) { // (its own, camera and regions where it finished the count before: 0x36E94)
-                                std::lock_guard guard(l->cabinets_lock);
-                                const auto done = l->done_seed.find(logic - 1);
-                                if (done == l->done_seed.end()) return false;
-                                seed = done->second;
-                                return true;
-                            }
-                            const auto camera = cameras->find(logic);
-                            if (camera == cameras->end()) return false;
-                            std::lock_guard guard(l->cabinets_lock);
-                            auto own = l->own_seed.upper_bound(logic);
-                            if (own == l->own_seed.begin()) return false;
-                            --own;
-                            seed.camera = camera->second, seed.own = own->second, seed.own_logic = own->first - 1;
-                            seed.regions = tools::remote::gather_regions(l->bus.ram());
-                            return true;
-                        });
-        l->c.set_hook(one_board_leaving_hook, l);
-    }
-    for (uint64_t f : o.one_board_missed) m.cabinets->miss(gone, f);
-    m.cabinets->use_tasks(o.one_board_tasks);
+    const auto cameras = s.cameras;
+    std::vector<tools::one_board::Board*> boards;
+    for (auto& machine : machines) boards.push_back(&machine->ob);
+    Machine& m = *machines[s.stays];
+    const std::size_t gone = s.going.front();
+    g_one_board.set_up(std::move(boards), std::move(s));
+    for (uint64_t f : o.one_board_missed) m.ob.cabinets->miss(gone, f);
     // (its camera on the side against the recording's, as its update starts: the first difference shown)
-    m.cabinets->on_camera = [cameras, shown = false](std::size_t seat, uint32_t logic, const std::vector<uint8_t>& camera) mutable {
+    m.ob.cabinets->on_camera = [cameras, shown = false](std::size_t seat, uint32_t logic, const std::vector<uint8_t>& camera) mutable {
         const auto next = cameras->find(logic);
         if (shown || next == cameras->end()) return;
         std::string at;
@@ -1258,43 +910,6 @@ void set_up_one_board(std::vector<std::unique_ptr<Machine>>& machines, const Opt
         shown = true;
         std::printf("one board: seat %zu's camera first differs as its update of count %u starts, side/recorded:%s\n", seat + 1, logic, at.c_str());
     };
-    m.c.set_hook(one_board_hook, &m);
-    // (the game's other writes into the camera, for the other cabinets' cameras: not in tasks mode, where their own
-    // tasks make them; the watch sends every work RAM write the slow way)
-    if (!o.one_board_tasks)
-        m.bus.watch_writes(kCamera, kCamera + kCameraBytes, &tools::remote::Cabinets::camera_written, m.cabinets.get());
-}
-void one_board_leaving_hook(recomp::Context& c, uint32_t pc, void* user) {
-    Machine& m = *static_cast<Machine*>(user);
-    if (pc == tools::remote::kRecordWrite) m.last_link_frame = m.timing.frames(); // (its link of the frame: where its blocks are its own)
-    if (pc == tools::remote::kLinkSkipped) {
-        keep_ram(m);
-        // (where it finished a count: its own variables, camera and regions then, which side runs as it start from)
-        static const std::vector<uint32_t> own = tools::remote::own_addresses();
-        tools::remote::Seed seed;
-        const auto ram = m.bus.ram();
-        seed.own.resize(own.size());
-        for (std::size_t k = 0; k < own.size(); ++k) seed.own[k] = ram[own[k]];
-        seed.camera.assign(ram.begin() + kCamera, ram.begin() + kCamera + kCameraBytes);
-        seed.regions = tools::remote::gather_regions(ram);
-        seed.own_logic = m.bus.read32(tools::remote::kLogicCounter);
-        const uint32_t count = seed.own_logic;
-        std::lock_guard guard(m.cabinets_lock);
-        m.done_seed[count] = std::move(seed);
-        while (m.done_seed.size() > 4) m.done_seed.erase(m.done_seed.begin());
-        if (m.shadowing) { // (a shadow: stopped here when the module wants it back, after this count)
-            Machine& other = *(*g_machines)[m.peer];
-            if (other.cabinets->stop_after(m.index) == count) throw HandedBack{count};
-        }
-    }
-    if (pc == tools::remote::kModeDispatch) {
-        static const std::vector<uint32_t> own = tools::remote::own_addresses();
-        std::vector<uint8_t> bytes(own.size());
-        for (std::size_t k = 0; k < own.size(); ++k) bytes[k] = m.bus.read8(own[k]);
-        std::lock_guard guard(m.cabinets_lock);
-        m.own_seed[m.bus.read32(tools::remote::kLogicCounter)] = std::move(bytes);
-    }
-    m3::games::spikeout_hook(c, pc, nullptr);
 }
 void camera_hook(recomp::Context& c, uint32_t pc, void* user) {
     Machine& m = *static_cast<Machine*>(user);
@@ -1798,11 +1413,7 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             m.bus.netboard().sync(m.c.cycles());
             if (m.recording_host) m.host_log.push_back({HostCall::Pass, 0, 0, 0, m.c.cycles()});
             m.line = line;
-            if (m.cabinets) { // --one-board: the other cabinets' blocks due, their network boards brought up to the meeting
-                std::lock_guard guard(m.cabinets_lock);
-                const uint64_t f = m.timing.frames();
-                m.cabinets->meet(f, m.timing.frame_start(f) + m.timing.line_cycles() * (recomp::FrameTiming::kVBlankLines + line));
-            }
+            tools::one_board::Game::meet(m.ob, line); // (--one-board: the other cabinets' blocks due)
             turns.pass(m.index);
             if (m.rb.rewind) { // (--rollback-test: put back at the meeting, with the others)
                 m.rb.rewind = false;
@@ -1819,19 +1430,10 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         }, &m);
     m.timing.on_frame_end = [&m, &o] {
         const uint64_t frame = m.timing.frames();
-        if (m.cabinets) { // --one-board: the other cabinets' frames end with this board's (frames() counts those done)
-            std::lock_guard guard(m.cabinets_lock);
-            m.cabinets->end_frame(frame - 1);
-        }
+        tools::one_board::Game::end_frame(m.ob); // (--one-board: the other cabinets' frames end with this board's)
         if (one_board_goes(o, m.index) && frame == o.one_board_frame) { // --one-board B@FRAME
             if (o.one_board_camera) throw Dropped{2400000, o.slice, true, o.one_board_shadow != 0 || o.one_board_auto};
-            // (with no camera recording: this board handed over as a shadow is, where the module asks it to stop (a
-            // slave's next count then caught up there): its camera and own variables its own, as they are)
-            Machine& other = *(*g_machines)[m.peer];
-            std::lock_guard guard(other.cabinets_lock);
-            other.cabinets->running(m.index, m.bus.netboard());
-            other.cabinets->ask_hand_back(m.index);
-            m.shadowing = true;
+            g_one_board.hand_over(m.ob, o.one_board_held); // (--one-board-held: handed back when the rules find it calm)
         }
         if (o.drop_frame && static_cast<int>(m.index) == o.drop_board && frame == o.drop_frame) // --drop B@FRAME: its PC gone here
             throw Dropped{o.link_standin_at ? o.link_standin_at : 2400000, o.slice};
@@ -2614,14 +2216,14 @@ void run(Machine& m, tools::Turns& turns) {
         } catch (const Dropped& d) { // (--drop: this board's PC gone; its blocks made from board 0 from here on)
             m.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
             if (d.module) { // (--one-board: made by the other board's cabinets from the next frame's block, at its meetings)
-                Machine& other = *(*g_machines)[m.peer];
-                if (d.shadow) shadow_own_bytes(m, other);
+                tools::one_board::Board& other = (*g_machines)[m.ob.peer]->ob;
+                if (d.shadow) tools::one_board::Game::shadow_own_bytes(m.ob, other);
                 {
                     std::lock_guard guard(other.cabinets_lock);
                     other.cabinets->start_making(m.index, m.bus.netboard(), m.bus.ram(), m.timing.frames() - 1);
                 }
                 m.why = "one board: its blocks made by board " + std::to_string(other.index) + " from frame " + std::to_string(m.timing.frames());
-                if (d.shadow && shadow_wait(m, turns, d.slice)) { // (on as its shadow)
+                if (d.shadow && g_one_board.shadow_wait(m.ob, turns, d.slice)) { // (on as its shadow)
                     m.why.clear();
                     resume = true;
                     continue;
@@ -2631,28 +2233,11 @@ void run(Machine& m, tools::Turns& turns) {
             }
             made_blocks(m, turns, d.write_at, d.slice);
             return;
-        } catch (const HandedBack& h) { // (--one-board: its shadow stopped, the module on from where it finished h.count)
-            Machine& other = *(*g_machines)[m.peer];
-            m.shadowing = false;
-            if (m.keep_ram) { // (its main board itself handed over (--one-board with no camera recording): as a drop's)
-                shadow_own_bytes(m, other);
-                m.why = "one board: its blocks made by board " + std::to_string(other.index) + " from frame " + std::to_string(m.timing.frames());
-            }
-            {
-                std::scoped_lock guard(m.cabinets_lock, other.cabinets_lock);
-                other.cabinets->hand_back(m.index, m.done_seed.at(h.count), m.bus.ram(), m.last_link_frame ? m.last_link_frame : m.timing.frames() - 1);
-            }
-            std::printf("board %zu: its shadow handed back to board %zu's side runs after count %u (frame %llu)\n", m.index, other.index,
-                        h.count, (unsigned long long)m.timing.frames());
-            if (!other.one_board_auto && !other.shadow_from) { // (no shadow of it can be wanted: out of the meetings)
-                if (m.why.empty()) m.why = "one board: its shadow handed back";
-                break;
-            }
-            if (shadow_wait(m, turns, m.slice)) {
+        } catch (const tools::one_board::HandedBack& h) { // (--one-board: its shadow stopped, the module on from where it finished h.count)
+            if (g_one_board.handed_back(m.ob, turns, h.count, m.why)) {
                 resume = true;
                 continue;
             }
-            m.why = "one board: its shadow handed back, no other wanted";
         } catch (const Cloned&) { // (--clone-seat: on from board 0's state, as this cabinet)
             resume = true;
             continue;
@@ -2671,9 +2256,7 @@ void run(Machine& m, tools::Turns& turns) {
         }
         break;
     }
-    // (--net-one-board: this machine's own board stopped, its shadows of the others with it: their players may
-    // have gone already, nothing more of theirs to wait for)
-    if (m.net_inputs && m.cabinets) m.inputs->close();
+    tools::one_board::Game::stopped(m.ob); // (--net-one-board: this machine's own board's shadows stop with it)
     m.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     turns.finish(m.index);
 }
@@ -2977,15 +2560,15 @@ void report(Machine& m, const Options& o) {
     std::printf("Ran %lld blocks in %.2f s (%.0f million blocks/s), %.2f 603e cycles a block; its thread's CPU time %.2f s\n", ran,
                 m.seconds, static_cast<double>(ran) / m.seconds / 1e6,
                 ran > 0 ? static_cast<double>(c.cycles()) / static_cast<double>(ran) : 0.0, m.cpu_seconds);
-    if (m.cabinets) { // --one-board: the other cabinets' side runs
+    if (m.ob.cabinets) { // --one-board: the other cabinets' side runs
         std::printf("Other cabinets: %llu side runs, %.2f s in them (%.2f s with their set-ups; %llu RAM bytes written and put back), "
                     "their network boards %.2f s, %llu blocks made%s%s\n",
-                    (unsigned long long)m.cabinets->side_runs(), m.cabinets->side_seconds(), m.cabinets->whole_seconds(),
-                    (unsigned long long)m.cabinets->journal_bytes(), m.cabinets->netboard_seconds(), (unsigned long long)m.cabinets->made(),
-                    m.cabinets->failed().empty() ? "" : "; first failure: ", m.cabinets->failed().c_str());
-        if (m.cabinets->heavy_frames())
+                    (unsigned long long)m.ob.cabinets->side_runs(), m.ob.cabinets->side_seconds(), m.ob.cabinets->whole_seconds(),
+                    (unsigned long long)m.ob.cabinets->journal_bytes(), m.ob.cabinets->netboard_seconds(), (unsigned long long)m.ob.cabinets->made(),
+                    m.ob.cabinets->failed().empty() ? "" : "; first failure: ", m.ob.cabinets->failed().c_str());
+        if (m.ob.cabinets->heavy_frames())
             std::printf("Other cabinets: %llu heavy frames on side runs (first at %llu): a frame they may have lost, no shadow running\n",
-                        (unsigned long long)m.cabinets->heavy_frames(), (unsigned long long)m.cabinets->first_heavy());
+                        (unsigned long long)m.ob.cabinets->heavy_frames(), (unsigned long long)m.ob.cabinets->first_heavy());
     }
     std::printf("PC %08x  LR %08x  CTR %08x  MSR %08x  CR %08x\n", c.cpu.pc, c.cpu.lr, c.cpu.ctr, c.cpu.msr, c.cpu.cr);
     // Address translation as the game set it up (the runtime treats every
@@ -3530,6 +3113,7 @@ int main(int argc, char** argv) {
         else if (arg == "--one-board-auto") o.one_board_auto = o.one_board_tasks = true;
         else if (arg == "--one-board-lookahead" && i + 1 < argc) o.one_board_lookahead = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--one-board-hand-back" && i + 1 < argc) o.one_board_hand_back = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--one-board-held") o.one_board_held = true;
         else if (arg == "--camera-events") o.camera_events = true;
         else if (arg == "--script-actions") o.script_actions = true;
         else if (arg == "--map-trace" && i + 1 < argc) { // FROM:N
@@ -3659,7 +3243,8 @@ int main(int argc, char** argv) {
     // Network play: the game found or offered on the networks this machine
     // is on, every board run here, the boards as the host started them.
     if (!o.one_board_also.empty() &&
-        (o.one_board_camera || !o.one_board_missed.empty() || o.one_board_shadow || o.one_board_auto || o.one_board_hand_back)) {
+        (o.one_board_camera || !o.one_board_missed.empty() || o.one_board_shadow || o.one_board_auto || o.one_board_hand_back ||
+         o.one_board_held)) {
         std::fprintf(stderr, "gamerun: with more than one board going, side runs only (no camera, missed frames, shadows or rules)\n");
         return 2;
     }
@@ -4006,7 +3591,7 @@ int main(int argc, char** argv) {
             m.c.set_hook(camera_hook, &m);
         }
         if (linked.ring) machines.back()->linked = &linked;
-        machines.back()->inputs = &inputs;
+        machines.back()->inputs = machines.back()->ob.inputs = &inputs;
         set_up(*machines.back(), o, game, ring.get(), turns);
 #ifdef SPIKEOUT_GPU
         if (o.renderer != Options::Renderer::Software || o.gpu_time_scale) {

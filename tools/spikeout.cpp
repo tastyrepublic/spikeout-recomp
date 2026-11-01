@@ -95,6 +95,7 @@
 #include "arcade_settings.hpp"
 #include "netplay.hpp"
 #include "net/compress.hpp"
+#include "one_board.hpp"
 #include "settings.hpp"
 #ifdef SPIKEOUT_GPU
 #include "gpu/present.hpp"
@@ -229,6 +230,17 @@ struct Shared {
     std::atomic<bool> net_save_request{false}; // F9 in network play: every board's state in a file
     std::vector<uint8_t> net_state;
     std::atomic<bool> catching_up{false};
+    // --net-one-board (two players; docs/netplay.md, "One board a PC over the network"): from the
+    // first frames on, only this player's board runs whole here; the other cabinet is made from
+    // its player's buttons (tools/one_board.hpp), run whole as a shadow where that can't follow it
+    // (from power-on until both play, a time over, a coin). Every board registers its part before
+    // it runs; the last sets them up. Nothing sent differs: the others needn't do the same.
+    bool one_board = false;
+    std::unique_ptr<tools::one_board::Game> one_board_game; // (this run's, else none)
+    std::array<tools::one_board::Board*, kMaxBoards> one_board_parts{};
+    std::size_t one_board_arrived = 0;
+    std::condition_variable one_board_ready;
+    uint64_t one_board_frame = 0; // the hand-over (the frame each board started from, + 10)
 };
 
 // The input bits a player's actions are (bank 0: coin, start; the controls byte).
@@ -487,6 +499,42 @@ private:
 
 // Board `index`: run until quit. Board 0 paces the run (the others take
 // turns with it); with one board there are no turns.
+// Tests (SPIKEOUT_TEST_PRESS): a button held from a frame, as gamerun --press holds it.
+struct TestPress {
+    bool bank0 = false; // (else the controls byte)
+    int bit = 0;
+    uint64_t frame = 0, frames = 6;
+};
+std::vector<TestPress> parse_test_presses(const char* list) {
+    static const struct {
+        const char* name;
+        bool bank0;
+        int bit;
+    } kButtons[] = {{"coin", true, 0},   {"start", true, 4},  {"beat", false, 0}, {"charge", false, 1},
+                    {"shift", false, 2}, {"jump", false, 3},  {"down", false, 4}, {"up", false, 5},
+                    {"right", false, 6}, {"left", false, 7}};
+    std::vector<TestPress> out;
+    if (!list) return out;
+    const std::string text = list;
+    for (size_t at = 0; at < text.size();) {
+        const size_t comma = std::min(text.find(',', at), text.size());
+        const std::string one = text.substr(at, comma - at);
+        at = comma + 1;
+        const size_t sign = one.find('@');
+        if (sign == std::string::npos) continue;
+        TestPress p;
+        const std::string name = one.substr(0, sign);
+        const auto button = std::find_if(std::begin(kButtons), std::end(kButtons), [&](const auto& b) { return name == b.name; });
+        if (button == std::end(kButtons)) continue;
+        p.bank0 = button->bank0, p.bit = button->bit;
+        char* end = nullptr;
+        p.frame = std::strtoull(one.c_str() + sign + 1, &end, 0);
+        if (end && *end == ':') p.frames = std::strtoull(end + 1, nullptr, 0);
+        out.push_back(p);
+    }
+    return out;
+}
+
 void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, tools::Turns& turns, Shared& shared) {
     const m3::GameSpec& game = m3::games::kSpikeoutFinalEdition;
     const std::vector<recomp::FunctionEntry> functions = tools::game_functions();
@@ -510,7 +558,7 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             const std::vector<uint8_t> eeprom = tools::seat_eeprom(start, index);
             const auto words = tools::eeprom_words(eeprom);
             if (eeprom.size() == 128) std::copy(words.begin(), words.end(), bus.eeprom().words().begin());
-            else std::fill(bus.eeprom().words().begin(), bus.eeprom().words().end(), uint16_t{0}); // (a new cabinet: as a fresh board has it)
+            else bus.eeprom().erase_all(); // (a cabinet with none (gamerun's): a blank chip, as a fresh board has it, and gamerun)
             if (index < start.backup.size() && start.backup[index].size() == m3::Bus::kBackupRamSize)
                 std::copy(start.backup[index].begin(), start.backup[index].end(), bus.backup_ram().begin());
             else
@@ -586,6 +634,31 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             std::printf("spikeout: can't run on from %s\n", load_error.c_str());
         }
     }
+    // --net-one-board: this board's part, registered; the last to come sets them all up (the others wait for it).
+    tools::one_board::Board part(c, bus, timing, index);
+    part.inputs = shared.inputs;
+    tools::one_board::Game* const one_board = shared.one_board_game.get();
+    if (one_board) {
+        std::unique_lock guard(shared.lock);
+        shared.one_board_parts[index] = &part;
+        if (++shared.one_board_arrived == shared.boards) {
+            tools::one_board::Game::Settings s;
+            s.stays = shown;
+            for (std::size_t b = 0; b < shared.boards; ++b)
+                if (b != shown) s.going.push_back(b);
+            s.frame = shared.one_board_frame = timing.frames() + 10;
+            s.tasks = s.rules = true;
+            s.slice = kTurnLines;
+            s.net = true;
+            one_board->set_up({shared.one_board_parts.begin(), shared.one_board_parts.begin() + shared.boards}, std::move(s));
+            std::printf("spikeout: one board here from frame %llu, the other cabinet made from its player's buttons\n",
+                        static_cast<unsigned long long>(shared.one_board_frame));
+            shared.one_board_ready.notify_all();
+        } else {
+            shared.one_board_ready.wait(guard, [&] { return shared.one_board_arrived == shared.boards; });
+        }
+    }
+    const bool goes = one_board && index != shown; // (handed over at shared.one_board_frame)
     m3::TilegenRenderer tilegen;
     m3::Real3dRenderer real3d;
     real3d.set_fog_over_nothing(shared.fog_over_nothing);
@@ -601,6 +674,7 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
         }
         if (linked && line % kTurnLines == kTurnLines - 1) {
             bus.netboard().sync(c.cycles());
+            tools::one_board::Game::meet(part, line); // (--net-one-board: the other cabinet's blocks due)
             turns.pass(index);
         }
     };
@@ -677,6 +751,8 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
     auto run_started = clock::now(), frame_ended = clock::now();
     double run_ms = 0, input_ms = 0, frame_ms = 0, end_ms = 0;
     timing.on_frame_end = [&] {
+        tools::one_board::Game::end_frame(part); // (--net-one-board: the other cabinet's frame ends with this board's)
+        if (goes && timing.frames() == shared.one_board_frame) one_board->hand_over(part, true); // (whole until the game is calm)
         if (timing_debug && timing.frames() % 300 == 0) {
             const uint32_t logic = bus.read32(0x1000A8);
             static thread_local uint32_t logic_before2 = 0;
@@ -769,14 +845,25 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             const uint64_t frame = timing.frames();
             // Every board's state, asked for: saved at the end of a frame
             // every board is yet to finish (the last to save sends it: start_games).
-            if (index == shown && shared.linked.capture_frame == 0 && shared.netplay->take_state_request())
-                shared.linked.capture_frame = frame + 2;
+            // (--net-one-board: from the hand-over the other boards don't run here: none to send or save)
+            const bool alone = one_board && frame + 2 >= shared.one_board_frame;
+            if (index == shown && shared.linked.capture_frame == 0 && shared.netplay->take_state_request()) {
+                if (alone)
+                    std::printf("spikeout: every board's state asked for at frame %llu: only this one runs here, none sent\n",
+                                static_cast<unsigned long long>(frame));
+                else
+                    shared.linked.capture_frame = frame + 2;
+            }
             // F9: every board's state in a file, the same way (gamerun --boards N
             // --parallel --load-state runs on from it).
             if (index == shown && shared.linked.capture_frame == 0 && shared.net_save_request.exchange(false)) {
-                shared.linked.to_file = true;
-                shared.linked.path = "spikeout-net-" + std::to_string(frame + 2) + ".state";
-                shared.linked.capture_frame = frame + 2;
+                if (alone) {
+                    std::printf("spikeout: no save state: only this board runs here (--net-one-board)\n");
+                } else {
+                    shared.linked.to_file = true;
+                    shared.linked.path = "spikeout-net-" + std::to_string(frame + 2) + ".state";
+                    shared.linked.capture_frame = frame + 2;
+                }
             }
             if (shared.linked.capture_frame != 0 && frame == shared.linked.capture_frame)
                 c.request_snapshot([&](uint32_t) {
@@ -826,12 +913,23 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
                 }
             }
             if (index == shown) {
-                const tools::InputTable::Inputs in{out.bank0, out.bank1, out.controls, 0xFF};
+                tools::InputTable::Inputs in{out.bank0, out.bank1, out.controls, 0xFF};
+                // Tests: SPIKEOUT_TEST_PRESS=NAME@FRAME[:N],... (gamerun --press's names) holds this player's
+                // NAME for N frames (6) from FRAME instead of the keys and pads: a run gamerun can repeat.
+                static const std::vector<TestPress> test_presses = parse_test_presses(std::getenv("SPIKEOUT_TEST_PRESS"));
+                if (!test_presses.empty()) {
+                    in.bank0 = in.controls = 0xFF;
+                    for (const TestPress& p : test_presses)
+                        if (frame >= p.frame && frame < p.frame + p.frames)
+                            (p.bank0 ? in.bank0 : in.controls) &= static_cast<uint8_t>(~(1u << p.bit));
+                }
                 if (shared.input_delay && !inputs_started) shared.netplay->local(index, frame, {});
                 inputs_started = true;
                 shared.netplay->local(index, frame + shared.input_delay, in);
             }
-            if (frame % 120 == 0) shared.netplay->hash(frame, index, tools::Recording::ram_hash(bus.ram()));
+            // (--net-one-board: a shadow of another cabinet is exact in what it sends, not in all of its RAM)
+            if (frame % 120 == 0 && !(goes && frame > shared.one_board_frame))
+                shared.netplay->hash(frame, index, tools::Recording::ram_hash(bus.ram()));
             const auto waited = clock::now();
             const auto got = shared.inputs->wait(index, frame);
             if (timing_debug) input_ms += std::chrono::duration<double, std::milli>(clock::now() - waited).count();
@@ -873,17 +971,27 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
 
     std::string why;
     turns.wait(index);
-    try {
-        if (!load_error.empty()) throw recomp::GuestError(c.cpu.pc, "save state " + load_error);
-        if (loaded) c.resume_block(c.cpu.pc);
-        c.call(c.cpu.pc);
-        why = "the reset code returned";
-    } catch (const Stop&) {
-    } catch (const recomp::MissingCode& e) {
-        why = e.what();
-    } catch (const recomp::GuestError& e) {
-        why = e.what();
+    for (bool resume = loaded;;) {
+        try {
+            if (!load_error.empty()) throw recomp::GuestError(c.cpu.pc, "save state " + load_error);
+            if (resume) c.resume_block(c.cpu.pc);
+            c.call(c.cpu.pc);
+            why = "the reset code returned";
+        } catch (const tools::one_board::HandedBack& h) { // (--net-one-board: the other cabinet's shadow stopped, made on from there)
+            if (one_board->handed_back(part, turns, h.count, why)) { // (a shadow again later)
+                why.clear();
+                resume = true;
+                continue;
+            }
+        } catch (const Stop&) {
+        } catch (const recomp::MissingCode& e) {
+            why = e.what();
+        } catch (const recomp::GuestError& e) {
+            why = e.what();
+        }
+        break;
     }
+    tools::one_board::Game::stopped(part); // (--net-one-board: this player's board stopped, the other's shadow with it)
     turns.finish(index);
     std::lock_guard<std::mutex> guard(shared.lock);
     out.stopped = why.empty() ? "quit" : why;
@@ -994,7 +1102,7 @@ int main(int argc, char** argv) {
     const char* dir = nullptr;
     std::string record_path, load_state;
     int scale = 0, cli_render_scale = 0, cli_sound = -1, cli_music = -1;
-    bool real_netboard = true, old_link = false, fog_over_nothing = false;
+    bool real_netboard = true, old_link = false, fog_over_nothing = false, net_one_board = false;
     uint64_t max_frames = 0;
     bool mute = false, cli_quads = false, cli_smooth = false, cli_smooth_log = false, midi_burst = false, dma_instant = false, use_gpu = true, cli_soft_3d = false, fifo = false,
          sleep_pacing = false, list_audio = false;
@@ -1004,6 +1112,7 @@ int main(int argc, char** argv) {
         if (arg == "--scale" && i + 1 < argc) scale = std::max(1, std::atoi(argv[++i]));
         else if (arg == "--netboard" && i + 1 < argc) real_netboard = std::string(argv[++i]) == "real";
         else if (arg == "--net-old-link") old_link = true;
+        else if (arg == "--net-one-board") net_one_board = true;
         else if (arg == "--fog-over-nothing") fog_over_nothing = true;
         else if (arg == "--frames" && i + 1 < argc) max_frames = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--boards" && i + 1 < argc)
@@ -1126,6 +1235,7 @@ int main(int argc, char** argv) {
     shared.load_path = shared.last_state = load_state;
     shared.real_netboard = real_netboard;
     shared.old_link = old_link;
+    shared.one_board = net_one_board;
     shared.fog_over_nothing = fog_over_nothing;
     shared.quads = settings.quads;
     shared.midi_burst = midi_burst;
@@ -1298,6 +1408,13 @@ int main(int argc, char** argv) {
             });
         } else {
             turns = std::make_unique<tools::Turns>(boards);
+        }
+        // --net-one-board: a run's own (two players: the rules follow one other cabinet)
+        shared.one_board_game.reset();
+        shared.one_board_arrived = 0, shared.one_board_parts = {};
+        if (shared.netplay && shared.one_board) {
+            if (boards == 2) shared.one_board_game = std::make_unique<tools::one_board::Game>();
+            else std::printf("spikeout: --net-one-board is for two players for now: every board runs here\n");
         }
         for (std::size_t i = 0; i < boards; ++i)
             games.emplace_back([&, i] { run_game(roms, i, ring.get(), *turns, shared); });

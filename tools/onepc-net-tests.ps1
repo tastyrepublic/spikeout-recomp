@@ -6,14 +6,16 @@
 # delay), for as long as all of that run's boards ran (and a shadow in the process: it stops at its own block
 # limit, the board then on alone). Exit code 1 if any differs.
 #
-#   tools/onepc-net-tests.ps1 [-Only two,four,apart,coin1,coin0]
+#   tools/onepc-net-tests.ps1 [-Only two,four,apart,coin1,coin0,poweron]
 #
 # two: two seats from build/onepc/mash-5990.state (tools/onepc-tests.ps1 -Prepare makes it), both players
 # mashing (tools/onepc-mash-presses.txt), handed over at 6,000. four: four seats from
 # build/linkstudy/four2/four-8000.state, no presses, handed over at 8,100. With the rules (--one-board-auto):
 # apart, from build/onepc/mash-10890.state through both time overs, the continues and a game over; coin1 and
 # coin0, the slave's and the master's coin at 6,100 in the middle of the fight. Input delay 2 (the rules see the
-# other cabinet's coin only that far ahead). Outputs go to build/onepc/net. Run from PowerShell with the
+# other cabinet's coin only that far ahead). poweron, as the window plays (--one-board-held): from power-on,
+# handed over at 100, the other board whole until the rules find the game calm; player 1 in a game alone at
+# 1,300, player 2 joining it at 2,700. Outputs go to build/onepc/net. Run from PowerShell with the
 # toolchain's PATH (CLAUDE.md); it loads every core for several minutes.
 param([string[]]$Only)
 $ErrorActionPreference = 'Stop'
@@ -24,6 +26,9 @@ $out = 'build/onepc/net'
 New-Item -ItemType Directory -Force $out | Out-Null
 $mash = (Get-Content -Raw tools/onepc-mash-presses.txt).Trim() -split '\s+'
 $auto = @('--one-board-auto')
+# (from power-on, as the window plays: the link's roles set, player 1 in a game alone, player 2 joining it)
+$poweron = @('--poke', '0:10019E=1@0:2000', '--poke', '1:10019E=2@0:2000', '--press', '0:coin@1200', '--press', '0:start@1300',
+    '--press', '0:beat@1700', '--press', '1:coin@2600', '--press', '1:start@2700', '--press', '1:beat@3300', '--press', '1:beat@3650')
 
 # Name, seats, state, blocks, hand-over frame, options of every run (presses), options of the network runs.
 $tests = @(
@@ -31,7 +36,8 @@ $tests = @(
     @('four',  4, 'build/linkstudy/four2/four-8000.state', 700000000,  8100,  @(), @()),
     @('apart', 2, 'build/onepc/mash-10890.state',          1400000000, 10900, $mash, $auto),
     @('coin1', 2, 'build/onepc/mash-5990.state',           700000000,  6000,  ($mash + @('--press', '1:coin@6100')), $auto),
-    @('coin0', 2, 'build/onepc/mash-5990.state',           700000000,  6000,  ($mash + @('--press', '0:coin@6100')), $auto)
+    @('coin0', 2, 'build/onepc/mash-5990.state',           700000000,  6000,  ($mash + @('--press', '0:coin@6100')), $auto),
+    @('poweron', 2, '',                                    5000000000, 100,   $poweron, ($auto + @('--one-board-held')))
 )
 $pattern = { param($b) "^board $b frame (\d+): RAM (\w+)" }
 $last = { param($file, $b) Select-String -Path $file -Pattern (& $pattern $b) | Select-Object -Last 1 | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } }
@@ -39,8 +45,9 @@ $failed = 0
 foreach ($t in $tests) {
     $name, $seats, $state, $blocks, $from, $every, $net = $t
     if ($Only -and $Only -notcontains $name) { continue }
-    if (-not (Test-Path $state)) { "$name : no $state, skipped"; continue }
-    $common = @('build/roms/spikeofe', '--no-sound', '--no-2d', '--load-state', $state, '--blocks', "$blocks", '--input-delay', '2') + $every
+    if ($state -and -not (Test-Path $state)) { "$name : no $state, skipped"; continue }
+    $from_state = if ($state) { @('--load-state', $state) } else { @() } # (none: from power-on)
+    $common = @('build/roms/spikeofe', '--no-sound', '--no-2d') + $from_state + @('--blocks', "$blocks", '--input-delay', '2') + $every
     $game = "onepc-$name-$PID"
     $procs = @(Start-Process $exe -ArgumentList ($common + @('--boards', "$seats", '--parallel', '--one-board', '1@99999999')) -RedirectStandardOutput "$out/$name-ref.txt" -NoNewWindow -PassThru)
     $procs += Start-Process $exe -ArgumentList ($common + $net + @('--net-host', $game, '--seats', "$seats", '--net-one-board', "$from")) -RedirectStandardOutput "$out/$name-0.txt" -RedirectStandardError "$out/$name-0.err" -NoNewWindow -PassThru
