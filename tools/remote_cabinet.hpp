@@ -344,6 +344,11 @@ public:
     uint64_t first_heavy() const { return first_heavy_; }
     static constexpr uint64_t kHeavyWork = 1'000'000;
     double side_seconds() const { return side_seconds_; }
+    // (and with what each costs around it: the other cabinet's state put in and taken out, RAM put back; and the
+    // time its network boards took, brought up to this board's meetings)
+    double whole_seconds() const { return whole_seconds_; }
+    double netboard_seconds() const { return netboard_seconds_; }
+    uint64_t journal_bytes() const { return journal_bytes_; } // (RAM bytes its side runs wrote, put back after)
     uint64_t side_runs() const { return side_runs_; }
     std::string failed() const { return failed_; }
 
@@ -475,8 +480,21 @@ private:
     uint32_t idle_msr_ = 0; // (this board's MSR at its last 0x36F24)
     bool tasks_mode_ = false;
     uint64_t made_ = 0, side_runs_ = 0;
+    uint64_t journal_bytes_ = 0;
     uint64_t heavy_frames_ = 0, first_heavy_ = 0;
-    double side_seconds_ = 0;
+    double side_seconds_ = 0, whole_seconds_ = 0, netboard_seconds_ = 0;
+    int timer_depth_ = 0;
+    struct Timer { // (adds the time it lived to `to`; one inside another counted once)
+        double& to;
+        int& depth;
+        std::chrono::steady_clock::time_point from = std::chrono::steady_clock::now();
+        Timer(double& t, int& d) : to(t), depth(d) { ++depth; }
+        ~Timer() {
+            if (--depth == 0) to += std::chrono::duration<double>(std::chrono::steady_clock::now() - from).count();
+        }
+        Timer(const Timer&) = delete;
+        Timer& operator=(const Timer&) = delete;
+    };
     std::string failed_;
 };
 
@@ -498,6 +516,7 @@ inline bool Cabinets::started(Remote& r, uint32_t logic) {
 }
 
 inline void Cabinets::side_run(Remote& r, uint32_t pc, uint32_t* flags, bool keep_camera, uint32_t count, uint32_t character, bool tasks) {
+    const Timer whole{whole_seconds_, timer_depth_};
     const uint32_t logic = bus_.read32(kLogicCounter);
     const recomp::Context::Aside aside = c_.set_aside();
     bus_.journal(true);
@@ -611,6 +630,7 @@ inline void Cabinets::side_run(Remote& r, uint32_t pc, uint32_t* flags, bool kee
             if (r.own[k] != before[k]) d.emplace_back(static_cast<uint32_t>(k), r.own[k]);
         while (!r.flow_delta.empty() && r.flow_delta.begin()->first + 16 < count) r.flow_delta.erase(r.flow_delta.begin());
     }
+    journal_bytes_ += bus_.journal_size();
     bus_.undo_journal();
     bus_.journal(false);
     c_.put_back(aside);
@@ -862,6 +882,7 @@ inline void Cabinets::merge_own(const std::vector<uint8_t>& own) {
 }
 
 inline void Cabinets::link_run(Remote& r, uint64_t frame) {
+    const Timer whole{whole_seconds_, timer_depth_};
     const uint32_t logic = r.logic + 1; // (the count it goes on to, unless held back)
     // (two counts ahead of this board (this one missed a frame): its flow of the count before run now, on this
     // board's world after the count before that, its working record from it)
@@ -967,6 +988,7 @@ inline void Cabinets::link_run(Remote& r, uint64_t frame) {
     if (r.regions.size() == kRegionBytes) r.regions = gather_regions(ram);
     for (uint32_t i = 0; i < kBlockWords; ++i) r.block[i] = bus_.read32(kBlock + 4 * i);
     const uint32_t now_logic = bus_.read32(kLogicCounter);
+    journal_bytes_ += bus_.journal_size();
     bus_.undo_journal();
     bus_.journal(false);
     c_.put_back(aside);
@@ -1038,13 +1060,17 @@ inline void Cabinets::meet(uint64_t frame, uint64_t t) {
     for (Remote& r : remotes_) {
         if (!r.making) continue;
         if (r.written_frame != frame && t >= at) {
-            r.netboard->sync(at);
+            {
+                const Timer nb{netboard_seconds_, timer_depth_};
+                r.netboard->sync(at);
+            }
             r.written_frame = frame;
             if (!missed(r, frame)) {
                 if (ready(r)) link_run(r, frame);
                 else r.pending = frame;
             }
         }
+        const Timer nb{netboard_seconds_, timer_depth_};
         r.netboard->sync(t);
     }
 }
@@ -1055,6 +1081,7 @@ inline void Cabinets::end_frame(uint64_t frame) {
     for (Remote& r : remotes_) {
         if (!r.making) continue;
         if (r.pending == frame) link_run(r, frame), r.pending = ~0ull; // (the frame's end: its link as it is)
+        const Timer nb{netboard_seconds_, timer_depth_};
         r.netboard->end_frame();
     }
 }

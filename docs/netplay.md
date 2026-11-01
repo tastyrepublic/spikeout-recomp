@@ -2058,6 +2058,125 @@ Four players in one game, seat 2, 3 or 4 made by the master from 8,100,
 in tasks mode, and seat 4 by the rules: board 0 the same as the
 four-board run for all 1,899 frames compared (to the reference's own end,
 where its first board stopped at its block limit). In the test script.
+(Run again 2026-11-01: 1,849 frames, 8,001-9,849, where all four of the
+reference's boards stop.)
+
+## One board a PC over the network (2026-11-01, uncommitted when written)
+
+gamerun `--net-one-board FRAME` (with `--net-host` / `--net-join`, on every
+machine): the session runs as Mode B up to the end of FRAME, every board
+on every machine; then each machine hands every other board over to its
+own board's `tools::remote::Cabinets` (tasks mode) and runs only its own.
+The remote cabinets' network boards stay on the ring here, fed by the
+module; their buttons come from the input table, which the session fills
+with the other players' inputs as Mode B does (the input delay brings them
+before this board's frame needs them; the module waits if one isn't in).
+Mode B stays the default: without the switch nothing changes.
+
+**Why nothing is sent at the hand-over.** The brief was to send what the
+module takes from a leaving board (own variables, camera, own areas, link
+memory and variables, working record) over the network. But the module
+also needs that board's network board in step with this machine's, which
+only running its main board up to the hand-over gives (or its writes to
+the network board, which the link needs within a frame: the reason the
+blocks are made here at all, "But a sent block comes too late"). With the
+Mode B frames before the hand-over each machine has every leaving board
+itself, exactly, and takes all of it there, as `--one-board` does in one
+process: so no transfer, and no stall. Sending it is still needed for a
+seat taken later (a player joining a one-board game in progress); not
+done yet.
+
+What changed for it:
+- `--load-state FILE` in network play: every machine starts from its own
+  copy of the same linked state (its hash mixed into the build id, so
+  machines with different states don't join each other).
+- The module's buttons for a remote seat: from the input table (network
+  play), else from `--press` as before. The table keeps 64 frames back.
+- `--one-board` repeated hands several boards over at once (network play:
+  every seat but this machine's), the one that stays making them all; each
+  one's offset from its role (the master a count ahead of the slaves: +1,
+  -1 or 0, slave from slave). Camera recordings, given missed frames,
+  shadows and the rules stay one board only.
+- A handed-over board whose shadow can never be wanted (no rules, no
+  `--one-board-shadow`) leaves the meetings instead of passing turns
+  (`Turns::finish`): the board that stays meets no one.
+- The camera write watch only outside tasks mode (its callback returned at
+  once in tasks mode, and the watch sends every work RAM write the slow
+  way).
+- A state request (a player joining in progress) after the hand-over is
+  refused with a message: the other boards no longer run here.
+- Reports: each board's thread CPU time and the process's; the module's
+  time with its set-ups and its network boards'; `--no-frame-hashes` for
+  timing runs without the comparisons' 8 MB hash a frame.
+
+**Proved** (`tools/onepc-net-tests.ps1`): processes on this PC over
+localhost, input delay 2, each process's own board's RAM hash every frame
+against `gamerun --boards N --parallel --input-delay 2` with the same
+presses (`--one-board 1@99999999`: hooks only, the hashes printed), for as
+long as all of the reference's boards ran:
+
+| run | from | hand-over | process (board) | frames, all identical |
+|---|---|---|---|---|
+| two seats, both mashing | mash-5990.state | 6,000 | host (0) / joiner (1) | 2,149 / 2,148 |
+| four seats, no presses | four-8000.state | 8,100 | each of the four | 1,093-1,094 |
+
+Hashes at the last compared frames, the same in the processes and the
+reference: two seats, board 0 at 8,139 `1311e7868460da7b`, board 1 at
+8,138 `f3e3b11d7cf5e099`; four seats at 9,093, boards 0-3 `0408e7edd12704d4`,
+`0aa89b99e78f98d3`, `c67f84d9bc3c57ff`, `bdae448a28d0f641`. No network
+hash check differed. In one process first, `--parallel` (network play's)
+like the turns of `tools/onepc-tests.ps1`: master or slave staying, 1,075 /
+1,074 frames; four boards with three going, the master staying (1,098) and
+a slave staying, making the master and the other slaves (1,099 and 1,101):
+the first runs of a slave making another slave (offset 0), all exact.
+
+**What it costs (measured 2026-11-01, i7-8700K, quiet, no 2D or sound on
+any board).** Thread CPU times from `GetThreadTimes` were wrong here:
+Windows charges whole clock ticks (15.6 ms) to whichever thread runs at
+each, so linked boards that wait every few hundred microseconds came out
+far too low (under 1 ms a frame a board). gamerun now counts cycles
+(`QueryThreadCycleTime`, its rate measured against the performance counter;
+`m3::thread_cpu_seconds`, within about 10%). Those show that linked boards
+run `--parallel` keep their threads busy while they wait at each meeting
+(the waits spin), so a parallel run's CPU time isn't its work. Each board
+alone on one thread is: Mode B in turns mode (the boards one at a time on
+one core) against one board making the others (alone, no meetings),
+one process, wall time:
+
+| seats | frames | Mode B, every board | one board, the others made | a remote cabinet |
+|---|---|---|---|---|
+| 2 | 2,154 | 46.5 s (21.6 ms a frame) | 27.9 s (13.0 ms) | run 9.5 ms, made 3.7 ms |
+| 4 | 1,100 | 48.0 s (43.7 ms a frame) | 25.2 s (22.9 ms) | run 10.9 ms, made 4.3 ms |
+
+(A board's own frame here, the idle loop included, is about 9.5 ms; real
+time is 17.4 ms.) The module's own timers for the two seats: 5.7 s in its
+side runs, 8.0 s with their set-ups (the cabinet's camera, own variables,
+288 KB of own areas and 64 KB of link memory copied in and out, RAM put
+back from the byte journal), 0.65 s its network board. So making a cabinet
+costs about 40% of running it; most of the rest is the board's own. The
+two processes over localhost, as the table's two seats: Mode B 45.2-45.6 s
+CPU a process (two threads, busy waiting included), 25.5 s wall; one board
+31.7-32.4 s CPU on one thread, 29.7 s wall (both faster than the 37.5 s of
+real time).
+
+Where the module's time goes (two seats, 527 frames from 6,000): 95% of
+its side runs' time is the tasks run (the other cabinet's flow and its
+frame's tasks up to its drawing, about 2.6 ms a frame); its view tests and
+link runs are small (0.08 s together). They write about 270 KB of RAM a
+frame, put back after (17% of it the cabinet's own areas swapped in, the
+rest the game code's own writes), each byte the slow way into the bus's
+journal. Tried: a journal of whole pages instead (each page kept once, at
+its first write): 4 KB pages copied 645 MB against 141 MB of bytes and were
+slower, 256-byte pieces the same as the bytes. So the journal isn't the
+cost; the cabinet's own game work is, about what its own board's frame
+does before its drawing. The bigger part of a frame here is the board's own
+(about 9.5 ms, mostly its idle loop spinning until the next frame), which an
+idle-wait skip would cut for Mode B and one board alike.
+
+Still to do: the module cheaper; a
+seat taken in a one-board game (the state for it sent); the rules over the
+network (their 60 frames of the other cabinet's buttons ahead aren't known
+there, only the input delay's); rollback (step 2).
 
 ## Plan
 
