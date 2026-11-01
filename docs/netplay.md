@@ -1960,6 +1960,71 @@ rules handing a shadow back in the middle of a game after trouble (the
 hand-back itself is exact, above); banner frames in tasks mode; the
 players 3/4 objects as a cabinet's own only while those seats are empty.
 
+**The test in the repo; the rules mid-game; banners; four cabinets
+(2026-11-01, uncommitted when written).** `tools/onepc-tests.ps1` runs the
+table's runs and more (fourteen, in parallel, about 80 s; exit code 1 if
+any differs); `-Prepare` makes the reference and the two states from
+`build/onepc/fight-4700.state` with the presses in
+`tools/onepc-mash-presses.txt` (made again, they came out the same: both
+states byte for byte, all 21,361 hashes). New in it: the leaving cabinet's
+coin at 6,100 in the middle of the fight, both ways: a shadow from 6,041
+(the 60 frames before a press), handed back by the rules at 6,405, every
+frame the same as its own two-board run (1,075 / 1,074).
+
+Banners: side runs can't follow them. A side run of the other cabinet's
+tasks now includes its 2D task (its own 2D area kept; every run above the
+same with it), and that shows them: its work, usually about 0.3M cycles,
+was 3.5M, 3.8M and 5.6M in the TIME OVER and continue frames. Whether such
+a frame is lost depends on the cabinet's drawing (not run on the side) and
+on its own player's banner (each cabinet shows its own), so only a shadow
+started before covers it: the rules (5 s or less). A side run whose tasks
+take over 1M cycles is counted, and gamerun reports it ("heavy frames on
+side runs"): a frame the other may have lost with no shadow running. Also
+fixed there: the OS's wait for a transfer (0x4DD8) in a side run's tasks
+spun until its budget ran out (device writes held, the transfer never
+ends); passed at once now, as in the master's capture.
+
+Players 3 and 4's objects (0x1A8000-0x1AFFFF) are a cabinet's own only
+while their seat is empty in the link's players (`region_own`). gamerun's
+`--one-board` takes more than two boards (the master stays unless it is
+the one that goes). Tried on four players in one game
+(`build/linkstudy/four2/four-8000.state`, any of seats 2-4 leaving at
+8,100): the made blocks fail the link's own check within four counts. The
+side link run sets error bit 1 (0x106288, -7544(r13)) and ends in the game's
+"link broken ... call staff" halt (0x74350). The check (0x74364) compares,
+for each of the 12 characters, the entry's +8 in this cabinet's record with
+every other cabinet's, wherever either is marked. Not from the players 3/4
+change (the same with those objects always own).
+
+Found and fixed (2026-11-01), two faults, both invisible with two
+cabinets:
+- The made record kept its +0x34 and +0x40 from the cabinet's previous
+  block, as "the empty slots' leftovers". Those are players 3 and 4's
+  entries' +8 (a coordinate). Each cabinet's own while the seat is empty
+  (0x74808 writes them from its unused players' objects), the shared
+  game's once a player is in it. Now kept only while the seat is empty.
+  (Found by evaluating the check again at the end of each side link run:
+  characters 2 and 3 disagreed, one old value in every count.)
+- A main board handed over in the same frame as its own link (its 0x36E94
+  for the count before that frame's end) was linked again by the module in
+  that frame: the hand-over passed `frames() - 1` as its last frame. The
+  extra link is an extra write to 0xE0, so the network board's bank swap
+  and the ring's forwarding moved one exchange on, and the next cabinet
+  round the ring received the master's block one exchange early (seen as
+  its header's counters, +0x03 and +0x5B, one ahead). Seat 4, handed over
+  in the next frame, didn't show it. gamerun now passes the frame of the
+  board's own last link (its record write, 0x6DA90).
+Ruled out on the way: the time the made block is written (1.5M to 2.8M
+cycles into the frame, the same every time; the real slaves link at
+1.96-1.98M); the working record's address (0x140200 is right: 0x6DA74
+sets r31 = 0x140100 and 0x6EE80 copies 0x140200 into the block's slot,
+whole).
+
+Four players in one game, seat 2, 3 or 4 made by the master from 8,100,
+in tasks mode, and seat 4 by the rules: board 0 the same as the
+four-board run for all 1,899 frames compared (to the reference's own end,
+where its first board stopped at its block limit). In the test script.
+
 ## Plan
 
 1. Single board, single player (milestones 1–4).

@@ -113,20 +113,32 @@ constexpr uint32_t kVblankLoop = 0x36E08, kVblankCount = 0x100038, kTransferLoop
 constexpr uint32_t kAnimationStep = 0x62AF4;
 // Each cabinet's own areas, kept for it whole: its 2D (0x180000-0x19FFFF: its layers, its tasks' 2D state, which
 // its 2D tasks read back: run on another's, they unpack from nonsense), the objects of players 3 and 4 (0x1A8000-
-// 0x1AFFFF: unused with two players, each cabinet's leftovers there, which its tasks copy into its records; with
-// more players they are the game's: still to follow the link's players) and its pose buffers (0x210000-0x22FFFF).
-constexpr std::pair<uint32_t, uint32_t> kOwnRegions[] = {{0x180000, 0x1A0000}, {0x1A8000, 0x1B0000}, {0x210000, 0x230000}};
+// 0x1AFFFF: unused with two players, each cabinet's leftovers there, which its tasks copy into its records; a
+// seat with a player in it (the link's players, the header's +0x28: 0x80000000 >> its node) the game's, not
+// a cabinet's) and its pose buffers (0x210000-0x22FFFF).
+constexpr std::pair<uint32_t, uint32_t> kOwnRegions[] = {{0x180000, 0x1A0000}, {0x1A8000, 0x1AC000}, {0x1AC000, 0x1B0000}, {0x210000, 0x230000}};
 constexpr uint32_t kRegionBytes = 0x48000;
+constexpr uint32_t kLinkPlayers = 0x140128;
+constexpr uint32_t kLinkError = 0x106288; // (the link's error bits, -7544(r13): its checks of the entries received)
+// Whether own area `i` is a cabinet's own with the link's players `mask` (players 3 and 4: while their seats are empty).
+inline bool region_own(std::size_t i, uint32_t mask) {
+    return !(i == 1 && (mask & (0x80000000u >> 2))) && !(i == 2 && (mask & (0x80000000u >> 3)));
+}
 inline std::vector<uint8_t> gather_regions(std::span<const uint8_t> ram) {
     std::vector<uint8_t> out;
     out.reserve(kRegionBytes);
     for (const auto& [lo, hi] : kOwnRegions) out.insert(out.end(), ram.begin() + lo, ram.begin() + hi);
     return out;
 }
+// (its own areas into `ram`, those of the link's players there as `ram` has them)
 inline void scatter_regions(std::span<uint8_t> ram, const std::vector<uint8_t>& regions) {
-    std::size_t n = 0;
-    for (const auto& [lo, hi] : kOwnRegions)
-        for (uint32_t a = lo; a < hi; ++a) ram[a] = regions[n++];
+    const uint32_t mask = uint32_t(ram[kLinkPlayers]) << 24 | uint32_t(ram[kLinkPlayers + 1]) << 16 | uint32_t(ram[kLinkPlayers + 2]) << 8 | ram[kLinkPlayers + 3];
+    std::size_t n = 0, i = 0;
+    for (const auto& [lo, hi] : kOwnRegions) {
+        if (region_own(i++, mask))
+            for (uint32_t a = lo; a < hi; ++a) ram[a] = regions[n + a - lo];
+        n += hi - lo;
+    }
 }
 constexpr uint32_t kLinkMemory = 0x140000, kLinkBytes = 0x10000;
 constexpr std::pair<uint32_t, uint32_t> kLinkVars[] = {{0x100004, 0x100008}, {0x1000A4, 0x1000AC}, {0x106288, 0x106295}};
@@ -324,6 +336,13 @@ public:
     // In a side run (the board's other hooks are skipped then too).
     bool inside() const { return inside_; }
     uint64_t made() const { return made_; }
+    // Another cabinet's frames on side runs whose tasks (its 2D's with them) took over kHeavyWork cycles (a
+    // banner's: TIME OVER's tiles unpacked in one go; usually about 0.3M): a frame it may have lost (its drawing,
+    // not run here, decides), which side runs can't follow. A shadow must cover those; the rules start one
+    // beforehand. The first such frame, or 0.
+    uint64_t heavy_frames() const { return heavy_frames_; }
+    uint64_t first_heavy() const { return first_heavy_; }
+    static constexpr uint64_t kHeavyWork = 1'000'000;
     double side_seconds() const { return side_seconds_; }
     uint64_t side_runs() const { return side_runs_; }
     std::string failed() const { return failed_; }
@@ -404,6 +423,18 @@ private:
     // and the other reads the newest record once).
     bool ready(const Remote& r) const;
     void merge_own(const std::vector<uint8_t>& own);
+    // (a cabinet's own areas written in, through the bus (journalled), those of the link's players left as they are)
+    void put_regions(const std::vector<uint8_t>& regions) {
+        const auto ram = bus_.ram();
+        const uint32_t mask = bus_.read32(kLinkPlayers);
+        std::size_t n = 0, i = 0;
+        for (const auto& [lo, hi] : kOwnRegions) {
+            if (region_own(i++, mask))
+                for (uint32_t a = lo; a < hi; ++a)
+                    if (ram[a] != regions[n + a - lo]) bus_.write8(a, regions[n + a - lo]);
+            n += hi - lo;
+        }
+    }
     bool missed(const Remote& r, uint64_t frame) const { return std::find(r.missed.begin(), r.missed.end(), frame) != r.missed.end(); }
     // Its frame for count `logic` (its buttons then): counted on from its last
     // count while made here, missed frames skipped; before, this board's less its offset.
@@ -444,6 +475,7 @@ private:
     uint32_t idle_msr_ = 0; // (this board's MSR at its last 0x36F24)
     bool tasks_mode_ = false;
     uint64_t made_ = 0, side_runs_ = 0;
+    uint64_t heavy_frames_ = 0, first_heavy_ = 0;
     double side_seconds_ = 0;
     std::string failed_;
 };
@@ -505,13 +537,7 @@ inline void Cabinets::side_run(Remote& r, uint32_t pc, uint32_t* flags, bool kee
     std::vector<uint8_t> before; // (its flow's: its own bytes before, for what it changed)
     if (pc == kModeDispatch)
         for (uint32_t a : own_) before.push_back(bus_.read8(a));
-    if ((pc == kAnimationStep || tasks) && r.regions.size() == kRegionBytes) { // (its own areas: its 2D, its poses)
-        const auto ram = bus_.ram();
-        std::size_t n = 0;
-        for (const auto& [lo, hi] : kOwnRegions)
-            for (uint32_t a = lo; a < hi; ++a, ++n)
-                if (ram[a] != r.regions[n]) bus_.write8(a, r.regions[n]);
-    }
+    if ((pc == kAnimationStep || tasks) && r.regions.size() == kRegionBytes) put_regions(r.regions); // (its own areas: its 2D, its poses)
     const auto started_at = std::chrono::steady_clock::now();
     try {
         if (pc == kViewTest) { // (with this camera's view matrix, as the game has it in f20-f31 then)
@@ -535,14 +561,7 @@ inline void Cabinets::side_run(Remote& r, uint32_t pc, uint32_t* flags, bool kee
             if (pc == kModeDispatch && tasks) { // (and its frame's tasks, up to the drawing: the world's step)
                 c_.cpu = aside.cpu;
                 c_.cpu.msr &= ~recomp::Context::kMsrEE;
-                // (but its 2D task: its HUD's maps, from its own 2D state, which isn't kept here)
-                uint32_t task_2d = 0, task_2d_flags = 0;
-                for (uint32_t at = kTaskList, n = 0; n < 64; ++n) {
-                    const uint32_t next = bus_.read32(at + 8);
-                    if (bus_.read32(at + 12) == k2dTask) task_2d = at, task_2d_flags = bus_.read32(at), bus_.write32(at, task_2d_flags & ~1u);
-                    if (next == 0) break;
-                    at += next;
-                }
+                // (its 2D task too, on its own 2D area: a banner's unpacking shows in its work)
                 if (capture_) { // (the master's shadow: on through its drawing and the main loop to its 0x36E94, kept
                                 // there to go on from: its 2D task as it was)
                     in_drawing_ = true, drawing_r1_ = aside.cpu.gpr[1];
@@ -551,17 +570,18 @@ inline void Cabinets::side_run(Remote& r, uint32_t pc, uint32_t* flags, bool kee
                         c_.call(kTasksReturn); // (the main loop on after its tasks: 0xCB84, then 0x36E94)
                     } catch (const DrawingDone&) {
                         captured_cpu_ = c_.cpu, captured_cpu_.pc = kBeforeIdle;
-                        if (task_2d) bus_.write32(task_2d, task_2d_flags);
                         captured_.assign(bus_.ram().begin(), bus_.ram().end());
                     }
                     in_drawing_ = false;
                 } else {
                     in_tasks_ = true;
+                    const uint64_t t0 = c_.cycles();
                     try {
                         c_.call(kTasks);
                     } catch (const TasksDrawing&) {
                     }
                     in_tasks_ = false;
+                    if (c_.cycles() - t0 > kHeavyWork && !heavy_frames_++) first_heavy_ = timing_.frames();
                 }
                 c_.cpu = aside.cpu; // (and what makes its camera's view, which the drawing does)
                 c_.cpu.msr &= ~recomp::Context::kMsrEE;
@@ -611,7 +631,10 @@ inline bool Cabinets::hook(uint32_t pc) {
     }
     if (in_link_ && pc == kLinkSkipped) throw LinkSkipped{};
     if (in_tasks_ && pc == kVblankWait) throw TasksDrawing{};
-    if (inside_) return true;
+    if (inside_) { // (a transfer its tasks wait for (a banner's tiles): done at once, its device writes held)
+        if (pc == kTransferLoop) bus_.write8(kTransferBusy, 0);
+        return true;
+    }
     if (pc == kBeforeIdle) { // (this board's MSR there, which a master's shadow starting there takes)
         idle_msr_ = c_.cpu.msr;
         return true;
@@ -806,8 +829,12 @@ inline void Cabinets::make_record(Remote& r, Block& next, const Block& mine, uin
     next[(rec + 0x10) / 4] = p[0];
     if (const auto v = r.view_at.find({logic - 1, player}); v != r.view_at.end()) // (its own view bits; the rest the shared game's)
         next[(rec + 0x10) / 4] = (p[0] & ~0x18u) | (v->second & 0x18u);
-    // (the empty slots' leftovers and the on-screen bits, as they were)
-    next[(rec + 0x34) / 4] = r.block[(old + 0x34) / 4], next[(rec + 0x40) / 4] = r.block[(old + 0x40) / 4];
+    // (the empty slots' leftovers, as they were: players 3 and 4's +8 (+0x34, +0x40), each cabinet's own while their
+    // seat is empty (0x74808 writes them from its unused players' objects), the game's once a player is in it; and the
+    // on-screen bits)
+    const uint32_t players = bus_.read32(kLinkPlayers);
+    if (!(players & (0x80000000u >> 2))) next[(rec + 0x34) / 4] = r.block[(old + 0x34) / 4];
+    if (!(players & (0x80000000u >> 3))) next[(rec + 0x40) / 4] = r.block[(old + 0x40) / 4];
     for (uint32_t byte : {0x47u, 0x5Fu, 0x6Bu, 0x77u}) put8(next, rec + byte, get8(r.block, old + byte));
     // (every character's view bits, players 1-4 then enemies 1-8, from its camera's tests two counts before; none
     // for one gone since: this board's entry all zero)
@@ -855,12 +882,7 @@ inline void Cabinets::link_run(Remote& r, uint64_t frame) {
     for (uint32_t i = 0; i < kLinkBytes; ++i)
         if (ram[kLinkMemory + i] != r.link[i]) bus_.write8(kLinkMemory + i, r.link[i]);
     merge_own(r.state_own);
-    if (r.regions.size() == kRegionBytes) { // (its own areas: the entries it processes read its unused players' objects)
-        std::size_t n = 0;
-        for (const auto& [lo, hi] : kOwnRegions)
-            for (uint32_t a = lo; a < hi; ++a, ++n)
-                if (ram[a] != r.regions[n]) bus_.write8(a, r.regions[n]);
-    }
+    if (r.regions.size() == kRegionBytes) put_regions(r.regions); // (its own areas: the entries it processes read its unused players' objects)
     for (auto d = r.flow_delta.upper_bound(r.flow_applied); d != r.flow_delta.end() && d->first <= r.logic; ++d)
         for (const auto& [k, v] : d->second) {
             const uint8_t here = bus_.read8(own_[k]), w = static_cast<uint8_t>((here & ~own_mask_[k]) | (v & own_mask_[k]));
@@ -917,7 +939,11 @@ inline void Cabinets::link_run(Remote& r, uint64_t frame) {
         c_.call(kLink);
     } catch (const LinkSkipped&) {
     } catch (const std::exception& e) {
-        if (failed_.empty()) failed_ = "seat " + std::to_string(r.seat + 1) + ", link run: " + e.what();
+        if (failed_.empty()) { // (with the link's error word, -7544(r13): set, its run ends in the "link broken" halt, 0x74350)
+            char w[64];
+            std::snprintf(w, sizeof w, " (link error %08x, count %u)", bus_.read32(kLinkError), bus_.read32(kLogicCounter));
+            failed_ = "seat " + std::to_string(r.seat + 1) + ", link run: " + e.what() + w;
+        }
     }
     side_seconds_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - started_at).count();
     ++side_runs_;
