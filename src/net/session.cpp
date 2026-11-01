@@ -13,10 +13,9 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-// Every datagram: "SK", the protocol, its type, the session, the sender's seat.
+// Every datagram: "SK", the protocol, its type, the session, the sender's seat (13 bytes).
 enum Type : uint8_t { kBeacon = 1, kJoin = 2, kReliable = 3, kInput = 4, kRefuse = 5, kPunch = 6 };
 constexpr uint8_t kNoSeat = 0xFF;
-constexpr std::size_t kHeader = 13;
 
 // Control messages, on the reliable channel.
 enum Message : uint8_t { kWelcome = 1, kRoster = 2, kStart = 3, kSuspect = 4, kHave = 5, kIdle = 6, kHash = 7, kBye = 8, kCabinet = 9,
