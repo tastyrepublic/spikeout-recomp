@@ -13,8 +13,27 @@ namespace gpu {
 
 // ---- Device ----
 
+namespace {
+
+// Metal's older Macs too (MTLGPUFamilyMac1: Haswell and Broadwell's Iris and
+// HD, e.g. the 2014 Mac mini), which SDL leaves out unless asked: it allows
+// them for programs that never write to sRGB textures, and nothing here does
+// (the swapchain is SDR, every texture UNORM).
+SDL_GPUDevice* create_device() {
+    const SDL_PropertiesID props = SDL_CreateProperties();
+    SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_SHADERS_SPIRV_BOOLEAN, true);
+    SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_SHADERS_MSL_BOOLEAN, true);
+    SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_DEBUGMODE_BOOLEAN, false);
+    SDL_SetBooleanProperty(props, SDL_PROP_GPU_DEVICE_CREATE_METAL_ALLOW_MACFAMILY1_BOOLEAN, true);
+    SDL_GPUDevice* device = SDL_CreateGPUDeviceWithProperties(props);
+    SDL_DestroyProperties(props);
+    return device;
+}
+
+} // namespace
+
 bool Device::open(SDL_Window* window, bool fifo) {
-    device_ = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_MSL, false, nullptr);
+    device_ = create_device();
     if (!device_) {
         error_ = SDL_GetError();
         return false;
@@ -44,7 +63,7 @@ bool Device::open_headless() {
         return false;
     }
     video_ = true;
-    device_ = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_MSL, false, nullptr);
+    device_ = create_device();
     if (!device_) error_ = SDL_GetError();
     return device_ != nullptr;
 }

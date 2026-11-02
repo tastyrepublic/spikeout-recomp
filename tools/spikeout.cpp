@@ -90,6 +90,7 @@
 #include "runtime/widescreen.hpp"
 #include "runtime/real3d_interp.hpp"
 #include "game_setup.hpp"
+#include "game_thread.hpp"
 #include "recording.hpp"
 #include "png_write.hpp"
 #include "arcade_settings.hpp"
@@ -1625,7 +1626,7 @@ int main(int argc, char** argv) {
 
     std::unique_ptr<m3::LinkRing> ring;
     std::unique_ptr<tools::Turns> turns;
-    std::vector<std::thread> games;
+    std::vector<tools::GameThread> games;
     auto start_games = [&] {
         ring.reset();
         if (boards > 1) ring = std::make_unique<m3::LinkRing>(boards);
@@ -1696,7 +1697,7 @@ int main(int argc, char** argv) {
     auto stop_games = [&] {
         shared.quit = true;
         if (shared.inputs) shared.inputs->close(); // (a board waiting for another player's inputs)
-        for (std::thread& g : games) g.join();
+        for (tools::GameThread& g : games) g.join();
         games.clear();
     };
     // The boards' EEPROM and backup RAM from the last run (not for test runs).
@@ -3135,7 +3136,7 @@ int main(int argc, char** argv) {
     sound.reset();
     for (SDL_Gamepad* pad : gamepads) SDL_CloseGamepad(pad);
 #ifdef SPIKEOUT_GPU
-    presenter->overlay = nullptr;
+    if (presenter) presenter->overlay = nullptr; // (none without a GPU: SDL's renderer)
     menu.shutdown();
     real3d_gpu.reset(); // before the device, and all before the window
     presenter.reset();
