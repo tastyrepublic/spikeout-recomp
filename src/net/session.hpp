@@ -190,6 +190,9 @@ public:
     // asking seat `seat` for its whole next (ours of it is missing what its changes are from).
     void send_backup(uint8_t seat, uint64_t frame, std::vector<uint8_t> backup);
     void want_backup(uint8_t seat);
+    // Tests: our own inputs sent to the others `frames` frames after they're set (the others, with rollback, run on
+    // on guesses meanwhile).
+    void hold_inputs(uint64_t frames);
     // A player joined in progress, its boards caught up with the others':
     // its cabinet is its own from a frame the authority chooses (until
     // then, none; Callbacks::taken).
@@ -200,6 +203,8 @@ public:
     // machine running on from a state, its table made afresh).
     void feed_inputs(uint64_t frame);
     bool running() const { return started_; }
+    // Our cabinet ours: from the start, or (joined in progress) once taken.
+    bool seated() const;
 
     // This machine's player's inputs, set at the end of `frame` (in order;
     // frames skipped hold the last).

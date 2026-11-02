@@ -91,8 +91,12 @@ public:
     }
     uint64_t frame() const { return frame_; }
     bool changes_possible() const { return base_ != 0; }
+    // (not packed yet: net::compress, best off the game's thread)
     std::vector<uint8_t> whole() const {
         detail::Out o;
+        std::size_t bytes = 64 + snaps_.small().size();
+        for (std::size_t r = 0; r < snaps_.regions(); ++r) bytes += 8 + snaps_.region(r).size();
+        o.b.reserve(bytes);
         header(o, detail::kWhole);
         for (std::size_t r = 0; r < snaps_.regions(); ++r) {
             const std::vector<uint8_t>& region = snaps_.region(r);
@@ -100,7 +104,7 @@ public:
             o.bytes(region.data(), region.size());
         }
         small(o);
-        return net::compress(o.b);
+        return std::move(o.b);
     }
     std::vector<uint8_t> changes() const {
         detail::Out o;
@@ -115,7 +119,7 @@ public:
             o.bytes(r.data() + at, std::min(m3::Snapshots::kPageBytes, r.size() - at));
         });
         small(o);
-        return net::compress(o.b);
+        return std::move(o.b);
     }
 
 private:

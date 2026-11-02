@@ -711,6 +711,148 @@ differing on either side. The sound under WSLg stutters when the window is
 resized: WSLg's audio goes to Windows over its remote-desktop channel;
 not seen on Windows.
 
+## Rollback in play (2026-11-02, uncommitted when written)
+
+Step 4, every board on every PC (Mode B; one board a PC comes next). The
+owner's choices: the sound plays at once (a frame run again plays nothing:
+a rare wrong or doubled sound effect when a guess was wrong, no delay on
+the sound); Mode B first.
+
+- `InputTable::guess`: a board reads its inputs for a frame; not in yet
+  and fewer than N frames past the last in (`--net-rollback N`), a guess:
+  what that player held last (a dropped seat: none, as held). Each guess
+  is kept; when that frame comes in different, the table notes the first
+  frame guessed wrong. Further ahead than N: waited for, as before.
+- `tools::rollback::Linked` (tools/rollback.hpp): each board's state kept
+  after every frame by its written pages (`m3::Snapshots`, as the rollback
+  test), the last snapshot asked at that frame's end (another state taken
+  there would leave no cut); the ring's part cut where the boards meet,
+  once all have saved the frame. A guess found wrong: there, every board
+  and the ring put back to the frame before it (and each board's state
+  where it started is kept too, for a first guess), each board leaving the
+  meeting goes on from its own snapshot (`Rewound`), and the frames since
+  run again with the inputs now in: drawing nothing (the window's 2D and
+  GPU frame, the frame count it shows), playing nothing (the sound
+  commands dropped), not paced; the texture RAM then taken afresh by the
+  GPU.
+- Only frames that won't run again leave the machine: the RAM hashes the
+  machines compare (kept until every board's inputs up to that frame are
+  in, none guessed wrong, and the board has run it again if it went back),
+  the backups, every board's state for a player joining (its frame waited
+  for, then saved if none was guessed wrong; else saved when it's run
+  again). A linked save state of that frame takes the ring's part as the
+  rollback cut it.
+- gamerun `--net-rollback N`, `--net-hold-inputs N` (tests: this
+  machine's inputs sent N frames late, `Session::hold_inputs`); the window
+  `--net-rollback N` (one board off for now). Neither is on by default
+  yet.
+
+Proved (gamerun, two processes on localhost, from mash-5990.state, both
+players mashing, input delay 0; each process's last run of every frame
+compared with a run of both boards in one process):
+
+| held back | rollback | went back (each process) | frames run again | result |
+|---|---|---|---|---|
+| 3 frames | 6 | 36, 35 | 190, 203 | 2,149 of 2,149 frames on each board, both processes; no hash check differing |
+| 6 | 8 | 32, 31 | 265, 263 | the same |
+| 4 | 8 | 36, 37 | 230, 246 | the same |
+
+A snapshot 0.45 ms a board, going back 2.3-3.0 ms (both boards and the
+ring). A byte poked on one machine is caught by the hash checks (1 on each
+side), so they still run with rollback. A join in progress (player 2
+leaving at 5,000, a new player joining, both holding inputs back): the
+host's state of frame 5,425, the joiner and the host the same every frame
+after (5,150 of 5,150). Two windows (`tools/onepc-window-test.ps1
+-OneBoard none -Extra "--net-rollback 6"`): the host went back 8 times (24
+frames), no hash check differing to frame 7,000.
+
+A silent player and the drop's freeze. Guessed only a few frames ahead, a
+silent player still stopped the game for the 3 seconds before the drop.
+The owner's choice (2026-11-02): a window longer than that,
+`tools::rollback::kWindow` = 210 frames (3.65 s), about 0.4-0.7 MB of
+pages a board a frame (80-140 MB a board; memory only, a snapshot costs
+the same 0.45 ms a frame however many are kept). A player not heard from
+is guessed to hold what they held for 8 frames (`InputTable::kGuessHeld`),
+then nothing pressed, which is what the drop makes them: the drop's idle
+frames mostly match the guesses, and only the first few frames are run
+again. A player who comes back within the window: the frames since run
+again once.
+
+Proved: gamerun with `--net-rollback 210`, player 2 gone at 5,000 without
+a word (`--net-vanish-at`): the host went back once (7 frames) when the
+drop came (idle from 4,998), and a new player joining after agreed with
+the host every frame (4,438 of 4,438), the crashed player's own frames
+too (10,000); no hash check differing. gamerun runs as fast as it can, so
+there it waited 1.3 s at most (210 frames are 1.3 s at its speed). The
+window at the game's own speed (`tools/onepc-window-test.ps1 -OneBoard
+crash -Extra "--net-rollback 210"`, the joining window killed): the host
+ran on at 17.35 ms a frame through the drop, nothing waited for; a gamerun
+joining then got every board (frame 5,182) and agreed, no hash check
+differing. On the way: the window's state for a joiner waited for every
+seat's inputs of its frame, this machine's own too, which it sets after
+(`InputTable::wait_all`'s `but`).
+
+Machines with rollback and machines without play together: each computes
+the same game from the same inputs, however it gets there. Proved (gamerun,
+power-on, both players joining, input delay 2): a host with rollback
+(every board, window 210) and a joiner on one board, delay-based (held
+whole until calm, then side runs): the host's boards and the joiner's own
+the same as a plain run of both every frame (14,000 and 7,000), no hash
+check differing. (The host went back once, 202 frames: gamerun runs as fast
+as it can and the host ran far ahead of the slower one-board machine; at
+the game's speed that can't build up.) So a slower PC or a tablet on one
+board, waiting for inputs as before, can join players with rollback; only
+it stutters when inputs are late, and it alone still waits out a silent
+player's 3 seconds.
+
+Not yet: one board a PC with rollback (the cabinet module's state going
+back with the boards, the boards on side runs snapshotted with this one's,
+switches between side runs and whole only on frames that won't be run
+again); rollback by default and the menu; Auto input delay with it.
+
+## Joining in progress: the wait (2026-11-02, uncommitted when written)
+
+The owner's report (a Linux window, WSL, joining a Windows window's game):
+the player list said JOINING for about two minutes, the window showing an
+old picture and taking no keys. A machine joining in progress runs every
+board on from the host's state, unpaced, until it reaches the others
+(`catching_up`), and only then asks for its cabinet. Measured (two windows,
+the joiner coming in at ~5,370, a busy scene): it started 46 frames behind
+and never caught up in 1,100 frames: drawing every frame on the way, it ran
+no faster than the game. How long it takes doesn't depend on how long the
+game has run (the state is ~9 MB either way), only on how far behind it
+starts (packing, sending, loading the state) and how much faster than the
+game it can run.
+
+- Catching up draws nothing (the 2D, the GPU frame; the textures taken
+  afresh after), the sound still played (the music goes on). The same join:
+  caught up in 1.0 s at 1.5x the game's speed. The Linux window (WSL): 0.9 s
+  at 1.9x, where drawing it ran at about 0.64x.
+- A machine still joining sends no backups (`Session::seated`): its first
+  backup is the whole board (5-9 MB) on the reliable channel, and its
+  cabinet's request waited behind it (taken 196 frames after catching up;
+  now 12).
+- A loading screen meanwhile (`ui::Menu::set_loading`): JOINING THE GAME,
+  how far behind it is; the game's picture hidden until it's real.
+- A PC that can't run every board faster than the game even so (not
+  gaining 30 frames in 5 seconds) takes its cabinet anyway: the others then
+  wait at the cabinet's first frame for it, as for any slow player, once;
+  then Auto may take it to one board. (Not tested yet: no machine here is
+  that slow without drawing.)
+
+The Linux window joining the Windows window's game now: the state at frame
+4,764, caught up 1.0 s later (2.36x), its cabinet at 4,915.
+
+The owner's other report, the joined player's character in the game but
+not answering and its timer stopped, isn't network play: two linked boards
+in one process with the windows' settings EEPROM and the same buttons give
+the same pictures. Player 2 started just as player 1's time ran out (TIME
+OVER); its cabinet went into the stage and stayed there, its timer at 90,
+while player 1's went to its continue, game over and attract. With the
+game's default settings player 1's time hadn't run out by then and player
+2 played. Whether the arcade does this or the link's emulation does is
+open (docs/fidelity.md).
+
 ## Repeated host changes: found and fixed (2026-10-27)
 
 The deep test (build\speedcheck\scripts\deep-test.ps1, gamerun, LAN): a
@@ -2554,13 +2696,28 @@ before any of this; the backup's run itself costs nothing seen, the game
 at 56-58 frames a second meanwhile, 41 ms at the switch). The owner's
 decision (2026-11-02): no shorter drop time; rollback will take it away
 (the game run on with that player's inputs guessed as none, which is what
-the drop makes them; run again if they come back).
+the drop makes them; run again if they come back). Done for every board
+on every PC: "Rollback in play", its long window; one board a PC with
+rollback is still to do.
 
-Still to do: a board run whole here for a player gone stays whole after a
-new player takes its seat (that player's own machine could have it on
-side runs here again: handed back as a shadow is); the whole backup
-compressed on the game's thread (about 110 ms, once for each machine that
-joins).
+Then (2026-11-02, uncommitted when written):
+- A board run whole here for a player gone goes back to side runs once a
+  new player takes its seat (`Game::seat_taken`, from the session's
+  `taken`): that player's machine has it now, asked of it as any other's,
+  handed back when the game is calm (vanish: at 5,963, 4 seconds after the
+  seat was taken; vanish3 at 7,651).
+- Backups are packed and sent on a thread of their own (`NetPlay::
+  send_backup`, one queue, so each machine gets them in order): the game's
+  thread only takes the pages and copies them out (the whole board's
+  copy, 27 MB, a few ms) instead of packing 5 MB (110 ms).
+- Every machine in network play sends backups of its own board, one board
+  or not: a machine running every board can be the one that drops. The
+  window test showed it: the gamerun that joined (every board there) ended
+  without a parting; the host ran its board on from its backup (6,600 to
+  6,821, 2.4 s).
+
+Proved again: the suite's 14 runs (the leave and vanish ones with the
+hand-back after the join), ctest, and the window's leave and crash tests.
 
 gamerun: `--net-leave-at FRAME` (leaves 30 frames after FRAME, as above),
 `--frame-hashes` (the per-frame hashes in any run: a joiner's, compared).

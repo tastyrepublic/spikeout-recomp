@@ -258,6 +258,7 @@ struct Session::Impl {
     // A game joined in progress (or a machine put back in step): its start
     // (and then every board's state) from the host; our cabinet ours from
     // `mine_from`, our inputs before then kept until they can go out.
+    uint64_t send_hold = 0; // (tests: our inputs sent this many frames late, Session::hold_inputs)
     bool late = false, want_state = false;
     std::optional<StartInfo> late_start;
     std::optional<uint64_t> mine_from;
@@ -351,16 +352,13 @@ struct Session::Impl {
             static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now - p.their_time_at).count());
         w.u32(now_ms()), w.u32(p.their_time), w.u16(static_cast<uint16_t>(std::min<uint32_t>(held, 65535)));
         w.u8(seats);
-        for (uint8_t s = 0; s < seats; ++s) w.u64(streams[s].next());
+        for (uint8_t s = 0; s < seats; ++s) w.u64(s == my_seat ? held_back(streams[s].next()) : streams[s].next());
         uint8_t chunks = 0;
         const std::size_t count_at = w.out.size();
         w.u8(0);
         for (uint8_t s = 0; s < seats; ++s) {
             const Stream& st = streams[s];
-            // Its own seat's only while that cabinet had no player (a game
-            // joined in progress: the frames before it took it over).
-            const uint64_t end = s != to ? st.next() : cabinets[s].until ? std::min(st.next(), *cabinets[s].until)
-                                                     : cabinets[s].open ? st.next() : 0;
+            const uint64_t end = sendable(s, to);
             if (!st.known) continue;
             const uint64_t from = std::max(p.acks[s], st.first);
             if (from >= end) continue;
@@ -377,13 +375,19 @@ struct Session::Impl {
         p.inputs_due = false;
     }
     bool inputs_pending(uint8_t to, const Peer& p) const {
-        for (uint8_t s = 0; s < seats; ++s) {
-            const uint64_t end = s != to ? streams[s].next() : cabinets[s].until ? std::min(streams[s].next(), *cabinets[s].until)
-                                                            : cabinets[s].open ? streams[s].next() : 0;
-            if (streams[s].known && std::max(p.acks[s], streams[s].first) < end) return true;
-        }
+        for (uint8_t s = 0; s < seats; ++s)
+            if (streams[s].known && std::max(p.acks[s], streams[s].first) < sendable(s, to)) return true;
         return false;
     }
+    // Seat s's frames to send to `to`: up to this. Its own seat's only while that cabinet had no player (a game
+    // joined in progress: the frames before it took it over); ours held back (tests: hold_inputs).
+    uint64_t sendable(uint8_t s, uint8_t to) const {
+        const Stream& st = streams[s];
+        const uint64_t end = s != to ? st.next() : cabinets[s].until ? std::min(st.next(), *cabinets[s].until)
+                                                 : cabinets[s].open ? st.next() : 0;
+        return s == my_seat ? held_back(end) : end;
+    }
+    uint64_t held_back(uint64_t end) const { return send_hold && end > streams[my_seat].first + send_hold ? end - send_hold : end; }
 
     static void put_addresses(Writer& w, const std::vector<Address>& list) {
         const std::size_t n = std::min<std::size_t>(list.size(), 16);
@@ -1315,6 +1319,16 @@ void Session::send_backup(uint8_t seat, uint64_t frame, std::vector<uint8_t> bac
     Writer w;
     w.u8(kBackup), w.u64(frame), w.bytes(backup);
     m.send_reliable(seat, w.out);
+}
+
+bool Session::seated() const {
+    std::lock_guard guard(impl_->lock);
+    return !impl_->late || impl_->mine_from.has_value();
+}
+
+void Session::hold_inputs(uint64_t frames) {
+    std::lock_guard guard(impl_->lock);
+    impl_->send_hold = frames;
 }
 
 void Session::want_backup(uint8_t seat) {

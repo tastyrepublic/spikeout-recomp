@@ -97,6 +97,9 @@ public:
     // them (`header`: the game's name and room, or a room waiting to start;
     // empty: none), and pills under that (the input delay, the rollbacks).
     void set_net(const std::vector<NetRow>& rows, const std::string& header = {}, const NetPills& pills = {});
+    // A screen over the whole window, the game's picture hidden (a network game joined in progress, catching up with
+    // the others): a title, a bar filled to `percent` (0-100; -1: no bar) and a line under it (an empty title: none).
+    void set_loading(const std::string& title, int percent = -1, const std::string& detail = {});
 
     bool is_open() const { return open_; }
     void open(MenuPage root);
@@ -138,7 +141,7 @@ private:
     std::unique_ptr<Impl> impl_;
     std::string error_;
     bool open_ = false;
-    bool fps_shown_ = false, net_shown_ = false;
+    bool fps_shown_ = false, net_shown_ = false, loading_shown_ = false;
     std::string net_rml_; // (what the seat list shows: not set again unchanged)
     void show_corner();   // the corner page shown while either is
     std::vector<MenuPage> stack_;

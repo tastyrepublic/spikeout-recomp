@@ -144,6 +144,7 @@ public:
             table_.hold_until(seat, frame);
             keeper_.hold_until(seat, frame);
             std::lock_guard guard(lock_);
+            taken_.push_back(seat);
             if (seat < absent_.size()) absent_[seat] = false;
         };
         cb.state_wanted = [this] { state_wanted_ = true; };
@@ -190,6 +191,30 @@ public:
     // One board a PC: every other board's last backup, the packets to it and its player's inputs since
     // (tools::backup); and the seats wanting this machine's own board's next backup whole, since the last asked.
     backup::Keeper& keeper() { return keeper_; }
+    // This machine's own board's backup out (backup::Maker's, not packed yet) to each of `seats`: packed and sent on
+    // a thread of its own (the whole board takes 100 ms or so), every backup in the order given.
+    void send_backup(uint64_t frame, std::vector<uint8_t> raw, std::vector<uint8_t> seats) {
+        {
+            std::lock_guard guard(backup_lock_);
+            backups_out_.push_back({frame, std::move(raw), std::move(seats)});
+            if (!backup_sender_.joinable())
+                backup_sender_ = std::jthread([this](std::stop_token stop) {
+                    for (;;) {
+                        BackupOut b;
+                        {
+                            std::unique_lock guard2(backup_lock_);
+                            backup_queued_.wait(guard2, stop, [&] { return !backups_out_.empty(); });
+                            if (stop.stop_requested()) return;
+                            b = std::move(backups_out_.front());
+                            backups_out_.pop_front();
+                        }
+                        const std::vector<uint8_t> packed = net::compress(b.raw);
+                        for (const uint8_t seat : b.seats) session_->send_backup(seat, b.frame, packed);
+                    }
+                });
+        }
+        backup_queued_.notify_all();
+    }
     std::vector<uint8_t> take_whole_wanted() {
         std::lock_guard guard(lock_);
         return std::exchange(whole_wanted_, {});
@@ -226,6 +251,11 @@ public:
     std::vector<uint8_t> take_gone() {
         std::lock_guard guard(lock_);
         return std::exchange(gone_, {});
+    }
+    // And those taken by a player (a game joined in progress), since the last asked.
+    std::vector<uint8_t> take_taken() {
+        std::lock_guard guard(lock_);
+        return std::exchange(taken_, {});
     }
     std::optional<std::vector<uint8_t>> wait_board(uint8_t seat, uint64_t frame, std::chrono::milliseconds timeout) {
         std::unique_lock guard(lock_);
@@ -276,13 +306,22 @@ private:
     std::condition_variable changed_;
     std::optional<net::StartInfo> start_, resync_;
     std::vector<std::pair<uint8_t, uint64_t>> boards_wanted_, partings_;     // (seat, frame)
-    std::vector<uint8_t> gone_, whole_wanted_, backup_missing_;
+    std::vector<uint8_t> gone_, taken_, whole_wanted_, backup_missing_;
     std::array<bool, net::kMaxSeats> absent_{}; // (by seat: its player gone, nobody's since)
     std::map<std::pair<uint8_t, uint64_t>, std::vector<uint8_t>> boards_; // (seat, frame): a board's state, compressed
     backup::Keeper keeper_{net::kMaxSeats};
     std::atomic<uint64_t> desyncs_{0};
     std::atomic<bool> state_wanted_{false}, resync_pending_{false};
-    std::unique_ptr<net::Session> session_; // (last: its thread, calling back into the above, stops first)
+    std::unique_ptr<net::Session> session_; // (its thread, calling back into the above, stops before them)
+    // (backups being packed and sent: stopped first, before the session they send through)
+    struct BackupOut {
+        uint64_t frame = 0;
+        std::vector<uint8_t> raw, seats;
+    };
+    std::mutex backup_lock_;
+    std::condition_variable_any backup_queued_;
+    std::deque<BackupOut> backups_out_;
+    std::jthread backup_sender_;
 };
 
 // ---- Internet play: the lobby (net::LobbyClient) ----

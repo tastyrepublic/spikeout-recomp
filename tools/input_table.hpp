@@ -14,12 +14,15 @@
 
 #include "recording.hpp"
 
+#include <algorithm>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace tools {
@@ -27,6 +30,7 @@ namespace tools {
 class InputTable {
 public:
     using Inputs = Recording::Inputs;
+    static constexpr uint64_t kGuessHeld = 8; // (rollback: frames a missing player is guessed to hold what they held)
 
     explicit InputTable(std::size_t boards) : boards_(boards) {}
     std::size_t boards() const { return boards_.size(); }
@@ -40,8 +44,8 @@ public:
             Board& b = boards_[board];
             if (b.known && frame < b.next) return;
             if (!b.known) b.next = frame; // (the first: frames before it are never read)
-            while (b.next < frame) push(b, b.frames.empty() ? Inputs{} : b.frames.back()); // (gaps: the last held)
-            push(b, in);
+            while (b.next < frame) settle(b, b.frames.empty() ? Inputs{} : b.frames.back()); // (gaps: the last held)
+            settle(b, in);
         }
         changed_.notify_all();
     }
@@ -57,6 +61,56 @@ public:
         std::unique_lock guard(lock_);
         changed_.wait(guard, [&] { return closed_ || find(boards_[board], frame); });
         return find(boards_[board], frame);
+    }
+
+    // Rollback (tools/rollback.hpp): the inputs set at the end of `frame`; or, not set yet and fewer than `ahead`
+    // frames past the last set, a guess, remembered (`guessed` true): what this board's player held last (a cabinet
+    // held: as held). Set later to something else, it was guessed wrong (wrong_from). Further ahead: waited for, as
+    // wait() (nothing: the table closed).
+    std::optional<Inputs> guess(std::size_t board, uint64_t frame, uint64_t ahead, bool& guessed) {
+        std::unique_lock guard(lock_);
+        Board& b = boards_[board];
+        changed_.wait(guard, [&] { return closed_ || find(b, frame) || !b.known || frame < b.next + ahead; });
+        guessed = false;
+        if (const auto in = find(b, frame)) return in;
+        if (closed_) return std::nullopt;
+        // (held for kGuessHeld frames past the last in; further: none, a player gone quiet as the drop will have it)
+        const Inputs g = b.known && !b.frames.empty() && frame < b.next + kGuessHeld ? b.frames.back() : Inputs{};
+        b.guesses[frame] = g;
+        guessed = true;
+        return g;
+    }
+    // The first frame guessed wrong since the last asked (~0: none).
+    uint64_t take_wrong() {
+        std::lock_guard guard(lock_);
+        return std::exchange(wrong_, ~0ull);
+    }
+    uint64_t wrong_from() const {
+        std::lock_guard guard(lock_);
+        return wrong_;
+    }
+    // Going back to the end of `frame`: the guesses after it made again as the frames run again.
+    void forget_guesses_after(uint64_t frame) {
+        std::lock_guard guard(lock_);
+        for (Board& b : boards_) b.guesses.erase(b.guesses.upper_bound(frame), b.guesses.end());
+    }
+    // Every board's inputs up to `frame` set (none guessed or still to be).
+    bool all_set(uint64_t frame, std::size_t boards) const { // (the first `boards`: those in the game)
+        std::lock_guard guard(lock_);
+        for (std::size_t i = 0; i < boards && i < boards_.size(); ++i)
+            if (!find(boards_[i], frame)) return false;
+        return true;
+    }
+    // And waited for (nothing: the table closed).
+    bool wait_all(uint64_t frame, std::size_t boards, std::size_t but = ~std::size_t{0}) { // (`but`: this machine's own, set after)
+        std::unique_lock guard(lock_);
+        changed_.wait(guard, [&] {
+            if (closed_) return true;
+            for (std::size_t i = 0; i < boards && i < boards_.size(); ++i)
+                if (i != but && !find(boards_[i], frame)) return false;
+            return true;
+        });
+        return !closed_;
     }
 
     // The first frame not yet set (0: none).
@@ -84,6 +138,8 @@ public:
             b.hold_from = frame;
             b.hold_until.reset();
             b.held = in;
+            for (auto it = b.guesses.lower_bound(frame); it != b.guesses.end(); it = b.guesses.erase(it)) // (guessed: held now)
+                if (!same(it->second, in)) wrong_ = std::min(wrong_, it->first);
         }
         changed_.notify_all();
     }
@@ -100,6 +156,7 @@ public:
         std::lock_guard guard(lock_);
         for (Board& b : boards_) b = Board{};
         closed_ = false;
+        wrong_ = ~0ull;
     }
 
     // Wakes every wait (a session ending).
@@ -118,7 +175,20 @@ private:
         bool known = false; // any set yet
         std::optional<uint64_t> hold_from, hold_until;
         Inputs held;
+        std::map<uint64_t, Inputs> guesses; // (rollback: frames read before they were set, as guessed)
     };
+    static bool same(const Inputs& a, const Inputs& b) {
+        return a.bank0 == b.bank0 && a.bank1 == b.bank1 && a.controls == b.controls && a.controls2 == b.controls2;
+    }
+    // A frame set: a guess of it checked (the lock held).
+    void settle(Board& b, const Inputs& in) {
+        if (const auto it = b.guesses.find(b.next); it != b.guesses.end()) {
+            const bool held = b.hold_from && b.next >= *b.hold_from && (!b.hold_until || b.next < *b.hold_until);
+            if (!held && !same(it->second, in)) wrong_ = std::min(wrong_, b.next);
+            b.guesses.erase(it);
+        }
+        push(b, in);
+    }
     static void push(Board& b, const Inputs& in) {
         if (!b.known) b.first = b.next;
         b.known = true;
@@ -135,6 +205,7 @@ private:
     std::condition_variable changed_;
     std::vector<Board> boards_;
     bool closed_ = false;
+    uint64_t wrong_ = ~0ull; // (rollback: the first frame guessed wrong)
 };
 
 } // namespace tools

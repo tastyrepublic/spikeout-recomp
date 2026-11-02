@@ -1,0 +1,145 @@
+// Rollback for network play (docs/netplay.md, "Rollback in play"): the boards run on with a guess for any player's
+// inputs not in yet (InputTable::guess: what they held last), a few frames ahead at most; each board's state is kept
+// after every frame by its written pages (m3::Snapshots), and the link ring's part of every frame, cut where the boards
+// meet; when a guess turns out wrong, every board and the ring go back to the frame before it, together, where they
+// meet, and run the frames since again with the inputs as they were, drawing and playing nothing (the sound of a
+// frame heard once, the first time: the owner's choice), on to where they were. As gamerun --rollback-test proves on
+// linked boards, frame for frame.
+//
+// A board: save() at its snapshot point after each frame (Context::request_snapshot, the last asked that frame:
+// another state taken there leaves no cut under way, LinkRing::abandon_cut); between() where the boards meet, every
+// one stopped (Turns' between, after the ring's exchange); rewind() as each leaves the meeting: true once after
+// going back, the board then going on from its own snapshot (throw Rewound, caught where it runs: resume_block).
+#pragma once
+
+#include "input_table.hpp"
+#include "runtime/netboard.hpp"
+#include "runtime/snapshots.hpp"
+#include "runtime/state.hpp"
+
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <functional>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace tools::rollback {
+
+struct Rewound {}; // (thrown by a board leaving the meeting after going back: it goes on from its snapshot)
+
+// The window (the owner's choice, 2026-11-02): longer than a silent player takes to be dropped (net::kDropAfter, 3
+// seconds), so that the game runs on meanwhile, guessing them as the drop will have them (none, after a few frames
+// held); the frames since run again once, when they come back or are dropped. About 0.4-0.7 MB of pages a board a frame.
+constexpr uint64_t kWindow = 210;
+
+class Linked {
+public:
+    // `depth`: frames a guess may run ahead (InputTable::guess's `ahead`); kept one more than that.
+    Linked(std::size_t boards, uint64_t depth, m3::LinkRing* ring, InputTable& table)
+        : depth_(depth), ring_(ring), table_(table), parts_(boards) {
+        for (Part& p : parts_) p.snaps = std::make_unique<m3::Snapshots>(depth + 1);
+    }
+    uint64_t depth() const { return depth_; }
+    // Each board's state as its snapshots walk it (tools::board_state, without the sound board: it hears a frame once).
+    void attach(std::size_t board, std::function<void(m3::State&)> walk) { parts_[board].walk = std::move(walk); }
+
+    // Before the boards run (every one stopped where it starts, at the end of `frame`: power-on, or a state loaded):
+    // that frame kept too, the first guess's frame before.
+    void start(uint64_t frame) {
+        for (std::size_t b = 0; b < parts_.size(); ++b) save(b, frame);
+        m3::State s;
+        ring_->cut_state(s);
+        cuts_[frame] = std::move(s.data());
+    }
+    // A board's snapshot point after frame `frame`.
+    void save(std::size_t board, uint64_t frame) {
+        Part& p = parts_[board];
+        const auto t0 = std::chrono::steady_clock::now();
+        p.snaps->save(frame, p.walk);
+        p.saved = frame;
+        p.save_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        ++p.saves;
+    }
+
+    // Where the boards meet, every one stopped: the ring's part of the frame every board has saved (kept, and handed
+    // to `cut` when asked: a linked save state of that frame); and back to the frame before a guess found wrong. The
+    // frame gone back to (0: none).
+    uint64_t between(std::vector<uint8_t>* cut = nullptr) {
+        if (!ring_->cut_complete()) return 0;
+        const uint64_t frame = parts_[0].saved;
+        for (const Part& p : parts_)
+            if (p.saved != frame) {
+                std::fprintf(stderr, "rollback: the boards saved different frames (%llu, %llu)\n", (unsigned long long)frame,
+                             (unsigned long long)p.saved);
+                return 0;
+            }
+        m3::State s;
+        ring_->cut_state(s);
+        if (cut) *cut = s.data();
+        cuts_[frame] = std::move(s.data());
+        if (frame > depth_ + 1) cuts_.erase(cuts_.begin(), cuts_.lower_bound(frame - depth_ - 1));
+        const uint64_t wrong = table_.wrong_from();
+        if (wrong > frame) return 0; // (none, or for a frame not saved yet: at a later meeting)
+        const uint64_t back = wrong - 1;
+        if (!cuts_.count(back) || !parts_[0].snaps->has(back)) {
+            std::fprintf(stderr, "rollback: frame %llu guessed wrong, too far back to go (at %llu)\n", (unsigned long long)wrong,
+                         (unsigned long long)frame);
+            table_.take_wrong();
+            return 0;
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        for (Part& p : parts_) { // (each board's walk marks its ring port saved: the ring's load after clears it)
+            p.snaps->restore(back, p.walk);
+            p.rewind = true;
+            p.quiet_through = frame;
+        }
+        m3::State load(std::vector<uint8_t>(cuts_.at(back)));
+        ring_->cut_state(load);
+        cuts_.erase(cuts_.upper_bound(back), cuts_.end());
+        table_.forget_guesses_after(back);
+        table_.take_wrong();
+        ++backs_;
+        frames_again_ += frame - back;
+        back_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        return back;
+    }
+    // A board leaving the meeting: true once after going back.
+    bool rewind(std::size_t board) { return std::exchange(parts_[board].rewind, false); }
+    // A frame being run again (drawn and heard nothing).
+    bool quiet(std::size_t board, uint64_t frame) const { return frame <= parts_[board].quiet_through; }
+
+    // How it went: times gone back, frames run again, the average snapshot (a board) and going back (all of them).
+    std::string report() const {
+        double save = 0;
+        uint64_t saves = 0;
+        for (const Part& p : parts_) save += p.save_ms, saves += p.saves;
+        char buf[200];
+        std::snprintf(buf, sizeof buf, "went back %llu times, %llu frames run again; a snapshot %.2f ms, going back %.2f ms",
+                      (unsigned long long)backs_, (unsigned long long)frames_again_, saves ? save / static_cast<double>(saves) : 0.0,
+                      backs_ ? back_ms_ / static_cast<double>(backs_) : 0.0);
+        return buf;
+    }
+
+private:
+    struct Part {
+        std::function<void(m3::State&)> walk;
+        std::unique_ptr<m3::Snapshots> snaps;
+        uint64_t saved = 0, quiet_through = 0, saves = 0;
+        bool rewind = false;
+        double save_ms = 0;
+    };
+    uint64_t depth_;
+    m3::LinkRing* ring_;
+    InputTable& table_;
+    std::vector<Part> parts_;
+    std::map<uint64_t, std::vector<uint8_t>> cuts_; // the ring's part, by frame
+    uint64_t backs_ = 0, frames_again_ = 0;
+    double back_ms_ = 0;
+};
+
+} // namespace tools::rollback

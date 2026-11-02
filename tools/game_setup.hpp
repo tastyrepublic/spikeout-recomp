@@ -281,10 +281,13 @@ struct LinkedState {
     // before capture_frame.
     bool to_file = false;
 
+    // (rollback: the ring's part of the frame, cut where the boards met: tools::rollback::Linked::between)
+    std::vector<uint8_t> cut;
+
     void finish() {
         {
             std::lock_guard guard(lock);
-            if (written || saved < boards.size() || !ring->cut_complete()) return;
+            if (written || saved < boards.size() || (!ring->cut_complete() && cut.empty())) return;
             written = true;
         }
         m3::State s;
@@ -311,7 +314,9 @@ struct LinkedState {
     // The file: saving or loading (before the boards run).
     void io(m3::State& s) {
         s.tag("spikeout linked save state 1");
-        ring->cut_state(s);
+        if (!s.loading() && !cut.empty()) s.bytes(cut.data(), cut.size()); // (cut already)
+        else ring->cut_state(s);
+        cut.clear();
         for (auto& b : boards) s.io(b);
         s.tag("end");
         if (s.loading() && !s.done()) throw std::runtime_error("save state: longer than this build's");

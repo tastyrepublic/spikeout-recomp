@@ -320,6 +320,14 @@ public:
         std::printf("board %zu: board %zu's player leaving after frame %llu: a shadow of it from its state then, whole from there on\n",
                     m.index, seat, (unsigned long long)frame);
     }
+    // A player taking a seat whose player went (a game joined in progress): its board is that player's machine's now,
+    // to be asked of it and handed back to side runs here as any other's once the game is calm.
+    void seat_taken(std::size_t seat) {
+        std::lock_guard guard(lock_);
+        if (departed_.erase(seat) + lost_.erase(seat))
+            std::printf("board %zu: board %zu taken by a new player: its machine's from here, handed back when calm\n", settings_.stays,
+                        seat);
+    }
     // (called at the staying board's frame end)
     void seat_gone(std::size_t seat) {
         Board& m = *boards_[settings_.stays];

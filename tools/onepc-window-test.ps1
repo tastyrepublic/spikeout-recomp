@@ -22,7 +22,7 @@
 #
 # The windows open and run at the arcade's speed (two minutes); don't touch them. Run from PowerShell with the
 # toolchain's PATH (CLAUDE.md). Outputs in build/onepc/window.
-param([ValidateSet('joiner', 'host', 'auto', 'none', 'plain', 'leave', 'crash')][string]$OneBoard = 'joiner', [int]$Frames = 7000)
+param([ValidateSet('joiner', 'host', 'auto', 'none', 'plain', 'leave', 'crash')][string]$OneBoard = 'joiner', [int]$Frames = 7000, [string]$Extra = '')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot
 Set-Location $root
@@ -44,6 +44,7 @@ function Start-Window($name, $keys, $presses, $frames = $Frames) {
     }
     if ($OneBoard -eq 'auto' -and $name -eq 'joiner') { $env:SPIKEOUT_TEST_AUTO_MS = '1' }
     $arglist = @($roms, '--frames', "$frames") + $(if ($mode) { @($mode) } else { @() })
+    if ($Extra) { $arglist += $Extra -split ' ' } # (-Extra: more options for both windows, e.g. "--net-rollback 6")
     $p = Start-Process build/spikeout.exe -ArgumentList $arglist -RedirectStandardOutput "$out/$name.txt" -RedirectStandardError "$out/$name.err" -PassThru
     Remove-Item Env:SPIKEOUT_MENU_KEYS, Env:SPIKEOUT_TEST_PRESS, Env:SPIKEOUT_NET_DEBUG
     Remove-Item Env:SPIKEOUT_TEST_AUTO_MS -ErrorAction SilentlyContinue
@@ -60,6 +61,7 @@ Start-Sleep -Seconds 1
 $joinFrames = if ($OneBoard -eq 'leave') { 5500 } else { $Frames }
 $joinWindow = Start-Window 'joiner' ('esc,down,enter' + (',F13' * 8) + ',enter,enter') $joinPresses $joinFrames
 $gone = $OneBoard -eq 'leave' -or $OneBoard -eq 'crash'
+$rollback = $Extra -match '--net-rollback' # (the windows with rollback: every board, no backups run on: none needed)
 if ($OneBoard -eq 'crash') { # (the joiner's window ended as a crash would, mid-game: about frame 5,600)
     Start-Sleep -Seconds 104
     Stop-Process -Id $joinWindow.Id -Force
@@ -89,12 +91,12 @@ if ($gone) { # (the joiner's board handed to the host as it left, or run on ther
     if ($OneBoard -eq 'leave') {
         if (-not (Select-String -Path "$out/joiner.txt" -Pattern "this board's state sent, leaving" -Quiet)) { "the joiner didn't send its board as it left"; $failed = $true }
         if (-not (Select-String -Path "$out/host.txt" -Pattern 'shadow from its machine''s state' -Quiet)) { "the host didn't run the joiner's board on"; $failed = $true }
-    } elseif (-not (Select-String -Path "$out/host.txt" -Pattern 'run on from its backup at frame' -Quiet)) { "the host didn't run the joiner's board on from its backup"; $failed = $true }
+    } elseif (-not $rollback -and -not (Select-String -Path "$out/host.txt" -Pattern 'run on from its backup at frame' -Quiet)) { "the host didn't run the joiner's board on from its backup"; $failed = $true }
     if (-not (Select-String -Path "$out/late.txt" -Pattern 'running on from the host' -Quiet)) { "the gamerun didn't join in progress"; $failed = $true }
     if (-not (Select-String -Path "$out/late.txt" -Pattern 'Network: 0 hash checks differed' -Quiet)) { "the gamerun's boards differed from the host's"; $failed = $true }
 }
 $expect = switch ($OneBoard) { 'joiner' { 'joiner' } 'host' { 'host' } 'auto' { 'joiner' } 'leave' { 'host' } 'crash' { 'host' } default { $null } }
-if ($expect) {
+if ($expect -and -not $rollback) { # (rollback: every board here, no one board yet)
     $file = "$out/$expect.txt"
     if (-not (Select-String -Path $file -Pattern 'one board here' -Quiet)) { "the $expect didn't go to one board"; $failed = $true }
     elseif (-not (Select-String -Path $file -Pattern 'handed back to side runs' -Quiet)) { "the $expect never handed the other cabinet over"; $failed = $true }

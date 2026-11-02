@@ -878,3 +878,18 @@ What the firmware's handlers settle (`hardware-notes.md` has the detail):
   `gamerun --poke 10019E=1@0:2000` the game starts the board, shows
   "NETWORK CHECKING / THIS IS MASTER SITE", brings the ring of one up
   (status 1 `0x2021`) and plays as a linked master.
+
+### Open: a player joining as the leader's time runs out (2026-11-02)
+
+Two linked boards (`gamerun --boards 2 --parallel`, both with the owner's
+settings EEPROM: `--eeprom`), player 1 alone in the game from 1,300 (beat
+every 8 frames), player 2 coin 9,000, start 9,100: at 9,300 player 2 is on
+the select screen and player 1's TIME OVER comes; player 2's cabinet then
+goes into the stage and stays there, its timer at 90, its buttons doing
+nothing, through player 1's continue, game over and attract (frame 12,000
+the same). With the game's default settings (a blank EEPROM) player 1's
+time hadn't run out by 9,000 and player 2 played (930 points by 12,000).
+Network play gives the same pictures (docs/netplay.md, "Joining in
+progress: the wait"). Not known: whether a real pair of cabinets does this
+or the link's emulation (the network board model) does. Needs the arcade,
+or Supermodel with two linked instances, on the same timing.
