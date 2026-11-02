@@ -122,6 +122,7 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -245,6 +246,17 @@ struct Shared {
     std::atomic<bool> one_board_back{false};              // (every board again: the module gone at a meeting, once it can be)
     m3::LinkRing* ring = nullptr;                         // (the run's: a board's packets counted with its state)
     std::atomic<uint64_t> one_board_frame{~0ull};         // the hand-over (~0: none yet)
+    // Leaving a game this machine runs one board of: the others told of a frame half a second ahead, this board's
+    // state at its end sent to each (they run the cabinet on whole from it), then the goodbye.
+    std::atomic<bool> parting_wanted{false}, parted{false};
+    uint64_t parting_frame = 0;
+    bool state_pending = false; // (every board's state asked for: once every board runs whole here)
+    uint64_t whole_until = 0;
+    // This board's backups on the other machines (one board here: tools::backup), the seats sent one (changes from it
+    // next); and the game's ROMs (a board whose player went run on from its backup).
+    tools::backup::Maker backups;
+    std::set<uint8_t> backup_bases;
+    const m3::RomSet* roms = nullptr;
 };
 
 // The input bits a player's actions are (bank 0: coin, start; the controls byte).
@@ -872,9 +884,41 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             // every board is yet to finish (the last to save sends it: start_games).
             // One board a PC: another machine's shadow of this player's board wants its state at the end of this frame
             // (taken where a save state is, without the sound board; sent compressed, with its packets' counts).
-            if (index == shown)
-                if (std::vector<uint8_t> seats = shared.netplay->take_board_requests(frame); !seats.empty()) // (one state for all who asked)
-                    c.request_snapshot([&, seats, frame](uint32_t) {
+            // One board here: this board's backup on every other machine now and then (the pages changed since the
+            // last, or whole to a machine with none of it): tools::backup.
+            if (index == shown && one_board && shared.one_board_frame != ~0ull && frame % tools::backup::kEvery == 0) {
+                for (const uint8_t s : shared.netplay->take_whole_wanted()) shared.backup_bases.erase(s);
+                c.request_snapshot([&, frame](uint32_t) {
+                    m3::LinkRing* r = shared.ring;
+                    shared.backups.take(frame, [&](m3::State& st) { tools::board_state(st, c, timing, {}); }, r ? r->taken(index) : 0,
+                                        r ? r->sent(index) : 0);
+                    if (r) r->abandon_cut(index); // (one board's state alone: no cut under way)
+                    std::vector<uint8_t> changes, whole;
+                    for (uint8_t s = 0; s < shared.boards; ++s) {
+                        if (s == index) continue;
+                        const bool base = shared.backups.changes_possible() && shared.backup_bases.count(s);
+                        std::vector<uint8_t>& b = base ? changes : whole;
+                        if (b.empty()) b = base ? shared.backups.changes() : shared.backups.whole();
+                        shared.netplay->session().send_backup(s, frame, b);
+                        shared.backup_bases.insert(s);
+                    }
+                });
+            }
+            // Leaving (Shared::parting_wanted): the others told of a frame a little ahead; at its end, this board's state
+            // to every one of them.
+            if (index == shown && one_board && shared.parting_wanted && !shared.parting_frame) {
+                shared.parting_frame = frame + tools::one_board::Game::kAskAhead;
+                shared.netplay->session().announce_parting(shared.parting_frame);
+                std::printf("spikeout: leaving after frame %llu\n", static_cast<unsigned long long>(shared.parting_frame));
+            }
+            if (index == shown) {
+                std::vector<uint8_t> seats = shared.netplay->take_board_requests(frame);
+                const bool parting = shared.parting_frame && frame == shared.parting_frame;
+                if (parting)
+                    for (uint8_t s = 0; s < shared.boards; ++s)
+                        if (s != index && std::find(seats.begin(), seats.end(), s) == seats.end()) seats.push_back(s);
+                if (!seats.empty()) // (one state for all who asked)
+                    c.request_snapshot([&, seats, frame, parting](uint32_t) {
                         m3::State s;
                         tools::board_state(s, c, timing, {});
                         m3::LinkRing* r = shared.ring;
@@ -886,21 +930,42 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
                                         static_cast<unsigned long long>(frame), seat + 1u, packed.size() / 1024);
                             shared.netplay->session().send_board(seat, frame, packed);
                         }
+                        if (parting) shared.parted = true;
                     });
-            // (one board: from the hand-over the other boards don't run whole here: none to send or save)
-            const bool alone = one_board && shared.one_board_frame != ~0ull;
-            if (index == shown && shared.linked.capture_frame == 0 && shared.netplay->take_state_request()) {
-                if (alone)
-                    std::printf("spikeout: every board's state asked for at frame %llu: only this one runs here, none sent\n",
-                                static_cast<unsigned long long>(frame));
-                else
-                    shared.linked.capture_frame = frame + 2;
             }
+            // (one board: from the hand-over every other board runs whole here (a shadow from its machine's real board,
+            // asked for: Game::want_whole) before every board's state is saved; a board whose player went without a
+            // parting can't be)
+            const bool alone = one_board && shared.one_board_frame != ~0ull;
+            if (index == shown && alone) {
+                for (const auto& [seat, at] : shared.netplay->take_partings()) one_board->parting(seat, at);
+                for (const uint8_t seat : shared.netplay->take_gone()) one_board->seat_gone(seat);
+            }
+            if (index == shown && shared.linked.capture_frame == 0 && shared.netplay->take_state_request()) {
+                if (!alone || one_board->all_whole()) {
+                    shared.linked.capture_frame = frame + 2;
+                } else if (one_board->can_be_whole()) {
+                    std::printf("spikeout: every board's state asked for at frame %llu: every board whole here first\n",
+                                static_cast<unsigned long long>(frame));
+                    one_board->want_whole(true);
+                    shared.state_pending = true;
+                } else {
+                    std::printf("spikeout: every board's state asked for at frame %llu: a board whose player went is had "
+                                "nowhere whole, none sent\n",
+                                static_cast<unsigned long long>(frame));
+                }
+            }
+            if (index == shown && alone && shared.state_pending && shared.linked.capture_frame == 0 && one_board->all_whole()) {
+                shared.linked.capture_frame = frame + 2;
+                shared.state_pending = false, shared.whole_until = frame + 10;
+            }
+            if (index == shown && alone && shared.whole_until && frame >= shared.whole_until)
+                one_board->want_whole(false), shared.whole_until = 0;
             // F9: every board's state in a file, the same way (gamerun --boards N
             // --parallel --load-state runs on from it).
             if (index == shown && shared.linked.capture_frame == 0 && shared.net_save_request.exchange(false)) {
-                if (alone) {
-                    std::printf("spikeout: no save state: only this board runs here (one board)\n");
+                if (alone && !one_board->all_whole()) {
+                    std::printf("spikeout: no save state: not every board runs whole here (one board)\n");
                 } else {
                     shared.linked.to_file = true;
                     shared.linked.path = "spikeout-net-" + std::to_string(frame + 2) + ".state";
@@ -1005,6 +1070,10 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             if (frame % tools::Recording::kHashEvery == 0) recording.hash(frame, tools::Recording::ram_hash(bus.ram()));
             recording.inputs(frame, {bus.inputs.bank0, bus.inputs.bank1, bus.inputs.controls, bus.inputs.controls2});
         }
+        // (--frames in a network game run on one board: this board handed over before the end, as leaving does)
+        if (shared.max_frames && networked && one_board && index == shown && shared.one_board_frame != ~0ull &&
+            timing.frames() + tools::one_board::Game::kAskAhead + 5 == shared.max_frames)
+            shared.parting_wanted = true;
         if (shared.max_frames && timing.frames() >= shared.max_frames) shared.quit = true;
         if (shared.quit) throw Stop{};
         run_started = clock::now(); // (SPIKEOUT_NET_DEBUG: the next frame runs from here)
@@ -1068,6 +1137,36 @@ void set_up_one_board(Shared& shared) {
         ring->rewind(seat, b.taken);
         ring->unsend(seat, b.sent);
     };
+    // (a board whose player went without a parting: its last backup run on here, the packets to each board and its
+    // player's inputs kept since its backup for that: tools::backup)
+    if (shared.real_netboard && shared.roms) {
+        s.backup_frame = [net](std::size_t seat) { return net->keeper().frame(seat); };
+        s.replay = [net, &shared](std::size_t seat, uint64_t until,
+                                  std::function<bool(uint64_t)> live) -> std::optional<tools::one_board::RemoteBoard> {
+            const tools::backup::Copy copy = net->keeper().copy(seat);
+            m3::CommBoardOptions options;
+            if (shared.old_link) options.use_old_link();
+            tools::backup::Replay r{*shared.roms, m3::games::kSpikeoutFinalEdition, options,
+                                    [&shared](m3::Bus& bus) { bus.midi_burst = shared.midi_burst, bus.dma_timed = !shared.dma_instant; },
+                                    [](recomp::Context& c) { m3::games::install_spikeout_hooks(c); }, kTurnLines, copy,
+                                    net->keeper().log(seat),
+                                    [net, seat](uint64_t frame) { return net->keeper().inputs(seat, frame); }, std::move(live), {}};
+            try {
+                auto result = r.run(until);
+                if (!result) return std::nullopt;
+                std::printf("spikeout: board %zu run on from its backup at frame %llu to %llu in %.1f s\n", seat,
+                            static_cast<unsigned long long>(copy.frame), static_cast<unsigned long long>(until), result->seconds);
+                return tools::one_board::RemoteBoard{std::move(result->state), result->taken, result->sent};
+            } catch (const std::exception& e) {
+                std::printf("spikeout: board %zu's backup can't be run on: %s\n", seat, e.what());
+                return std::nullopt;
+            }
+        };
+        if (shared.ring)
+            shared.ring->on_departure([net](std::size_t to, uint64_t seq, uint64_t at, const std::vector<uint8_t>& data) {
+                net->keeper().packet(to, seq, at, data);
+            });
+    }
     tools::one_board::Game& game = *shared.one_board_game;
     game.set_up({shared.one_board_parts.begin(), shared.one_board_parts.begin() + shared.boards}, std::move(s));
     for (std::size_t b = 0; b < shared.boards; ++b)
@@ -1311,6 +1410,7 @@ int main(int argc, char** argv) {
 
     Shared shared;
     shared.boards = boards;
+    shared.roms = &roms;
     shared.max_frames = max_frames;
     shared.record_path = record_path;
     shared.load_path = shared.last_state = load_state;
@@ -1756,8 +1856,20 @@ int main(int argc, char** argv) {
         std::printf("spikeout: put back in step with the host (frame %llu)\n", static_cast<unsigned long long>(*again.state_frame));
     };
     // Leaving: back to this computer's own cabinets, as they were.
+    // (one board here: its state to the others first, so that each runs this cabinet on whole; a few seconds at most)
+    auto parting = [&] {
+        if (!netgame || !netgame->running || !shared.one_board_game || shared.one_board_frame == ~0ull) return;
+        shared.parting_wanted = true;
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (!shared.parted && std::chrono::steady_clock::now() < until) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        while (netgame->session().sending() && std::chrono::steady_clock::now() < until)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        std::printf("spikeout: %s\n", shared.parted ? "this board's state sent, leaving" : "leaving without this board's state sent");
+        shared.parting_wanted = false, shared.parted = false, shared.parting_frame = 0;
+    };
     auto net_leave = [&] {
         if (!netgame) return;
+        parting();
         netgame->session().leave();
         if (netgame->running)
             reset_game([&] {
@@ -2920,7 +3032,7 @@ int main(int argc, char** argv) {
     (void)menu_ready;
 #endif
     shared.paused = false;
-    if (netgame) netgame->session().leave();
+    if (netgame) parting(), netgame->session().leave();
     stop_games();
     keep_seat(); // (a network game: only this player's board is ours to keep)
     if (!test_run && !shared.netplay) save_nvram(data_folder, shared, boards); // (a network game's boards aren't ours to keep)

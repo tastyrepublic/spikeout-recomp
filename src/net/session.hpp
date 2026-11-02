@@ -128,6 +128,12 @@ public:
         // of it; and a seat's board's state, as we asked (want_board).
         std::function<void(uint8_t seat, uint64_t frame)> board_wanted;
         std::function<void(uint8_t seat, uint64_t frame, std::vector<uint8_t> state)> board;
+        // Seat `seat` is leaving after `frame`, its board's state at its end sent to all (Callbacks::board).
+        std::function<void(uint8_t seat, uint64_t frame)> parting;
+        // One board a PC: seat `seat`'s backup of its own board at the end of `frame` (send_backup), and seat `seat`
+        // wanting ours whole next (want_backup).
+        std::function<void(uint8_t seat, uint64_t frame, std::vector<uint8_t> backup)> backup;
+        std::function<void(uint8_t seat)> backup_wanted;
         std::function<void(const std::string&)> log; // what happened, for the frontend
     };
 
@@ -173,6 +179,17 @@ public:
     // asked (Callbacks::board_wanted; compressed).
     void want_board(uint8_t seat, uint64_t frame);
     void send_board(uint8_t seat, uint64_t frame, std::vector<uint8_t> state);
+    // Leaving a game in progress: this machine's board's state at the end of `frame` will go to every other (send_board),
+    // then the goodbye (leave), so that each runs its cabinet on whole from it (Callbacks::parting).
+    void announce_parting(uint64_t frame);
+    // Something sent on the reliable channel not yet acknowledged by every machine still there (a parting state: wait
+    // for it before leaving).
+    bool sending() const;
+    // One board a PC: our own board's backup at the end of `frame` to seat `seat` (whole, or the pages changed since
+    // the last sent it: tools::backup), so that the others can run it on from there if this machine is lost; and
+    // asking seat `seat` for its whole next (ours of it is missing what its changes are from).
+    void send_backup(uint8_t seat, uint64_t frame, std::vector<uint8_t> backup);
+    void want_backup(uint8_t seat);
     // A player joined in progress, its boards caught up with the others':
     // its cabinet is its own from a frame the authority chooses (until
     // then, none; Callbacks::taken).

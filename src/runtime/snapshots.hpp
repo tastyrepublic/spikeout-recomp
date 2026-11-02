@@ -36,6 +36,17 @@ public:
     bool has(uint64_t frame) const;
     uint64_t last() const { return frames_.empty() ? 0 : frames_.back().frame; }
 
+    // The last save, as it found the board (one board's backups, tools::backup): its small state, each big buffer as
+    // it was then, and the pages it found written since the save before (none after starting again: started()).
+    const std::vector<uint8_t>& small() const { return frames_.back().small; }
+    std::size_t regions() const { return regions_.size(); }
+    const std::vector<uint8_t>& region(std::size_t i) const { return regions_[i].copy; }
+    bool started() const { return started_; }
+    void pages(const std::function<void(std::size_t region, std::size_t page)>& fn) const {
+        for (const Page& p : frames_.back().pages) fn(p.region, p.page);
+    }
+    static constexpr std::size_t kPageBytes = 4096;
+
     // For measuring: the last save's small state and pages, the time it took.
     std::size_t small_bytes() const { return frames_.empty() ? 0 : frames_.back().small.size(); }
     std::size_t pages_saved() const { return pages_last_; }
@@ -76,7 +87,7 @@ private:
     std::deque<Frame> frames_;
     std::vector<std::vector<uint8_t>> spare_; // page buffers to use again
     std::size_t pages_last_ = 0, load_writes_ = 0;
-    bool watched_ = false, compare_only_ = false;
+    bool watched_ = false, compare_only_ = false, started_ = false;
     std::vector<uint8_t> small_spare_;
     std::vector<std::size_t> pages_; // (a region's written pages, reused)
 };

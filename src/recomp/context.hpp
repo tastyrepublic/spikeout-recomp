@@ -216,9 +216,16 @@ public:
 
     // Calls `fn` at the start of the next block run outside any exception
     // (where resume_block can start again), before anything else is done
-    // there; it may save the state then.
+    // there; it may save the state then. Several asked before then: each in
+    // turn, the first asked first.
     void request_snapshot(std::function<void(uint32_t pc)> fn) {
-        snapshot_ = std::move(fn);
+        if (snapshot_)
+            snapshot_ = [first = std::move(snapshot_), then = std::move(fn)](uint32_t pc) {
+                first(pc);
+                then(pc);
+            };
+        else
+            snapshot_ = std::move(fn);
         recheck();
     }
     // The CPU, clock, time base and decrementer (the bus has the rest), as

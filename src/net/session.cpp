@@ -19,7 +19,8 @@ constexpr uint8_t kNoSeat = 0xFF;
 
 // Control messages, on the reliable channel.
 enum Message : uint8_t { kWelcome = 1, kRoster = 2, kStart = 3, kSuspect = 4, kHave = 5, kIdle = 6, kHash = 7, kBye = 8, kCabinet = 9,
-                        kState = 10, kWantState = 11, kTake = 12, kTaken = 13, kWantBoard = 14, kBoard = 15 };
+                        kState = 10, kWantState = 11, kTake = 12, kTaken = 13, kWantBoard = 14, kBoard = 15, kParting = 16, kBackup = 17,
+                        kWantBackup = 18 };
 
 constexpr std::size_t kFragment = 1000;    // reliable payload a datagram
 constexpr std::size_t kWindow = 256;       // reliable fragments in flight (a save state: some MB)
@@ -694,12 +695,26 @@ struct Session::Impl {
             if (r.ok() && from < seats && cb.board_wanted) cb.board_wanted(from, frame);
             break;
         }
+        case kParting: { // (it leaves after this frame, its board's state at its end to come: a shadow of it from it)
+            const uint64_t frame = r.u64();
+            if (r.ok() && from < seats && cb.parting) cb.parting(from, frame);
+            break;
+        }
         case kBoard: { // (its own board's state, as we asked)
             const uint64_t frame = r.u64();
             std::vector<uint8_t> state = r.bytes();
             if (r.ok() && from < seats && cb.board) cb.board(from, frame, std::move(state));
             break;
         }
+        case kBackup: { // (its own board's backup: the pages changed since its last, or whole)
+            const uint64_t frame = r.u64();
+            std::vector<uint8_t> backup = r.bytes();
+            if (r.ok() && from < seats && cb.backup) cb.backup(from, frame, std::move(backup));
+            break;
+        }
+        case kWantBackup: // (ours whole next: it hasn't what the changes are from)
+            if (from < seats && cb.backup_wanted) cb.backup_wanted(from);
+            break;
         case kTake: { // (the authority) a player joined in progress takes its cabinet
             if (authority() != my_seat || from >= seats) break; // (it asks the authority again)
             if (cabinets[from].until) { // already handed over (asked again: the answer lost with a host that left)
@@ -1268,12 +1283,46 @@ void Session::want_board(uint8_t seat, uint64_t frame) {
     m.send_reliable(seat, w.out);
 }
 
+bool Session::sending() const {
+    const Impl& m = *impl_;
+    std::lock_guard guard(m.lock);
+    for (uint8_t s = 0; s < kMaxSeats; ++s)
+        if (s != m.my_seat && m.peers[s].present && !m.peers[s].dropped && !m.peers[s].rel.out.empty()) return true;
+    return false;
+}
+
+void Session::announce_parting(uint64_t frame) {
+    Impl& m = *impl_;
+    std::lock_guard guard(m.lock);
+    Writer w;
+    w.u8(kParting), w.u64(frame);
+    m.send_all(w.out);
+}
+
 void Session::send_board(uint8_t seat, uint64_t frame, std::vector<uint8_t> state) {
     Impl& m = *impl_;
     std::lock_guard guard(m.lock);
     if (seat >= kMaxSeats || seat == m.my_seat || !m.peers[seat].present) return;
     Writer w;
     w.u8(kBoard), w.u64(frame), w.bytes(state);
+    m.send_reliable(seat, w.out);
+}
+
+void Session::send_backup(uint8_t seat, uint64_t frame, std::vector<uint8_t> backup) {
+    Impl& m = *impl_;
+    std::lock_guard guard(m.lock);
+    if (seat >= kMaxSeats || seat == m.my_seat || !m.peers[seat].present || m.peers[seat].dropped) return;
+    Writer w;
+    w.u8(kBackup), w.u64(frame), w.bytes(backup);
+    m.send_reliable(seat, w.out);
+}
+
+void Session::want_backup(uint8_t seat) {
+    Impl& m = *impl_;
+    std::lock_guard guard(m.lock);
+    if (seat >= kMaxSeats || seat == m.my_seat || !m.peers[seat].present) return;
+    Writer w;
+    w.u8(kWantBackup);
     m.send_reliable(seat, w.out);
 }
 

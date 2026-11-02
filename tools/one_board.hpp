@@ -23,6 +23,7 @@
 #include <atomic>
 #include <bit>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
@@ -30,7 +31,9 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace tools::one_board {
@@ -99,6 +102,7 @@ struct Board {
     // whether the other is to be run whole from now on (a shadow, never handed back: every board again)
     uint64_t calm_frames = 0, mask_since = 0;
     bool whole = false;
+    bool whole_for_state = false; // (and for now: every board's state wanted, a player joining in progress)
     uint32_t last_mask = 0;
     // a shadow wanted: on the board that stays, from when its state is taken for the other's shadow (at its first
     // 0x36E94 from then on), and whether it has been
@@ -142,6 +146,11 @@ public:
         std::function<void(std::size_t seat, uint64_t frame)> ask_board;
         std::function<std::optional<RemoteBoard>(std::size_t seat, uint64_t frame)> wait_board;
         std::function<void(std::size_t seat, const RemoteBoard& board)> rewind_link; // (its port of the ring as there)
+        // Network play: a board whose player went without a parting, run on here from its machine's last backup
+        // (tools::backup): that backup's frame (none: no backup of it), and the run, to the end of `until` (waits, with
+        // `live`, for this machine's game to have run each frame first: its packets to it in the log).
+        std::function<std::optional<uint64_t>(std::size_t seat)> backup_frame;
+        std::function<std::optional<RemoteBoard>(std::size_t seat, uint64_t until, std::function<bool(uint64_t)> live)> replay;
     };
     static constexpr uint64_t kAskAhead = 30; // (frames: the other machine reaching it, its state on its way)
 
@@ -227,8 +236,11 @@ public:
     // The staying board's frame end: the other cabinets' frames end with it (frames() counts those done).
     static void end_frame(Board& m) {
         if (!m.cabinets) return;
-        std::lock_guard guard(m.cabinets_lock);
-        m.cabinets->end_frame(m.timing.frames() - 1);
+        {
+            std::lock_guard guard(m.cabinets_lock);
+            m.cabinets->end_frame(m.timing.frames() - 1);
+        }
+        if (m.game) m.game->live(m.timing.frames());
     }
 
     // A board that goes, at the end of the hand-over's frame (no camera recording): handed over as a shadow is,
@@ -271,6 +283,85 @@ public:
     // On the staying board's thread: whether the other cabinet is made by side runs now (not run whole); and the
     // other to be run whole from now on (with the rules: a shadow again at once, never handed back).
     static bool on_side_runs(const Board& stays) { return stays.cabinets && stays.cabinets->making(stays.peer); }
+    // On the staying board's thread, network play (shadows from the real boards: rules_each):
+    // - whether every other board runs whole here (held, or a shadow; or the module gone): every board's state can be
+    //   saved here as it is (a player joining in progress);
+    // - every board run whole for now (shadows asked of their machines), or no longer (want_whole);
+    // - seat `seat` leaving after `frame`, its board's state at its end sent by its machine (Session::announce_parting):
+    //   a shadow of it from that, its cabinet whole here from then on (the player gone, its inputs none).
+    // - a seat whose player has gone without a parting (Session's idle: a crash, a lost connection): its board is had
+    //   nowhere whole any more; never asked for, and every board's state can't be saved here while it is made.
+    bool whole_here(std::size_t seat) const {
+        return boards_[settings_.stays]->cabinets->shadowed(seat) && boards_[seat]->shadowing;
+    }
+    bool all_whole() const {
+        const Board& m = *boards_[settings_.stays];
+        if (!m.cabinets) return true;
+        for (const std::size_t gone : settings_.going)
+            if (!whole_here(gone)) return false;
+        return true;
+    }
+    bool can_be_whole() const { // (every board whole here, or each that isn't to be asked of its machine)
+        const Board& m = *boards_[settings_.stays];
+        if (!m.cabinets) return true;
+        std::lock_guard guard(lock_);
+        for (const std::size_t gone : settings_.going)
+            if (!whole_here(gone) && lost_.count(gone)) return false;
+        return true;
+    }
+    void want_whole(bool on) { boards_[settings_.stays]->whole_for_state = on; }
+    void parting(std::size_t seat, uint64_t frame) {
+        const Board& m = *boards_[settings_.stays];
+        if (!m.cabinets || !goes(seat)) return;
+        std::lock_guard guard(lock_);
+        departed_.insert(seat);
+        if (whole_here(seat)) return; // (whole here already: on as it is)
+        remote_frames_[seat] = frame;
+        std::printf("board %zu: board %zu's player leaving after frame %llu: a shadow of it from its state then, whole from there on\n",
+                    m.index, seat, (unsigned long long)frame);
+    }
+    // (called at the staying board's frame end)
+    void seat_gone(std::size_t seat) {
+        Board& m = *boards_[settings_.stays];
+        std::lock_guard guard(lock_);
+        if (departed_.count(seat) || lost_.count(seat) || !m.cabinets || !goes(seat)) return;
+        if (whole_here(seat)) { // (whole here as it went: on as it is, never handed back)
+            departed_.insert(seat);
+            std::printf("board %zu: board %zu's player gone, its board whole here: on from here\n", m.index, seat);
+            return;
+        }
+        const uint64_t now = m.timing.frames();
+        const std::optional<uint64_t> from = settings_.backup_frame ? settings_.backup_frame(seat) : std::nullopt;
+        if (!from || !settings_.replay || *from >= now) {
+            lost_.insert(seat);
+            std::printf("board %zu: board %zu's player gone, no backup of its board: had nowhere whole\n", m.index, seat);
+            return;
+        }
+        // (run from its backup on its own, a frame of it once this game has run that frame, to a frame ahead: as
+        // many frames on as it is behind (twice as fast as the game), at least two seconds; this game waits there
+        // if it hasn't come)
+        const uint64_t until = now + std::max<uint64_t>(120, now - *from);
+        departed_.insert(seat);
+        remote_frames_[seat] = until;
+        replays_[seat] = Replaying{};
+        std::printf("board %zu: board %zu's player gone: its board run on here from its backup at frame %llu, whole from frame %llu\n",
+                    m.index, seat, (unsigned long long)*from, (unsigned long long)until);
+        replay_threads_.emplace_back([this, seat, until] {
+            std::optional<RemoteBoard> board = settings_.replay(seat, until, [this](uint64_t f) { return wait_live(f); });
+            std::lock_guard g(lock_);
+            replays_[seat].done = true;
+            replays_[seat].board = std::move(board);
+            replayed_.notify_all();
+        });
+    }
+    ~Game() {
+        {
+            std::lock_guard guard(lock_);
+            live_stopped_ = true;
+        }
+        live_changed_.notify_all();
+        replay_threads_.clear();
+    }
     static void keep_whole(Board& stays) { stays.whole = true; }
     // Where the boards meet (every one stopped): once the other is run whole for good (keep_whole) and its shadow is
     // running, nothing of the module is needed: the game's own hooks back, the side runs' machinery gone (every
@@ -294,6 +385,7 @@ public:
     // gone already, nothing more of theirs to wait for).
     static void stopped(Board& m) {
         if (m.net_inputs && m.cabinets && m.inputs) m.inputs->close();
+        if (m.cabinets && m.game) m.game->live(~0ull, true);
     }
 
     // The leaving board's own bytes for a shadow of it later: where its RAM and the staying board's differ, at its
@@ -334,7 +426,10 @@ public:
                     const bool loaded = load_remote_shadow(m, want);
                     {
                         std::lock_guard guard(lock_);
-                        remote_frames_.erase(m.index); // (used; or none came: asked again, while wanted)
+                        // (used; or none came: asked again, while wanted; unless set again meanwhile: its player gone,
+                        // its backup run on to a frame ahead)
+                        if (const auto it = remote_frames_.find(m.index); it != remote_frames_.end() && it->second == want)
+                            remote_frames_.erase(it);
                     }
                     if (loaded) return true;
                 }
@@ -570,9 +665,10 @@ private:
             Board& other = *boards_[gone];
             if (!cab.making(gone) && !cab.shadowed(gone)) continue; // (its main board still there)
             if (!cab.shadowed(gone)) {
-                const bool trouble = m.whole || least <= 5 * 64 || !all_in_game || frame < m.mask_since + 60 || joining;
+                const bool trouble =
+                    m.whole || m.whole_for_state || least <= 5 * 64 || !all_in_game || frame < m.mask_since + 60 || joining;
                 std::lock_guard guard(lock_);
-                if (trouble && !remote_frames_.count(gone)) { // (asked once, for a frame a little ahead)
+                if (trouble && !remote_frames_.count(gone) && !lost_.count(gone)) { // (asked once, for a frame a little ahead)
                     remote_frames_[gone] = frame + kAskAhead;
                     settings_.ask_board(gone, frame + kAskAhead);
                     std::printf("board %zu: a shadow of board %zu wanted at frame %llu (least time %u/64 s, mode %u, mask %08x%s): its "
@@ -582,8 +678,12 @@ private:
                 }
                 continue;
             }
-            const bool calm = !m.whole && least > 15 * 64 && all_in_game && other.bus.read32(0x140128) == mask &&
-                              std::popcount(mask) >= 2 && !joining;
+            {
+                std::lock_guard guard(lock_);
+                if (departed_.count(gone)) continue; // (its player gone: whole here from its parting on, never handed back)
+            }
+            const bool calm = !m.whole && !m.whole_for_state && least > 15 * 64 && all_in_game &&
+                              other.bus.read32(0x140128) == mask && std::popcount(mask) >= 2 && !joining;
             uint64_t& calm_frames = calm_[gone];
             calm_frames = calm ? calm_frames + 1 : 0;
             if (other.held) other.keeping = calm_frames >= 290; // (still held: its seeds wanted from 10 frames before)
@@ -687,9 +787,22 @@ private:
     // (waited for here, at the top of the frame on from it: the staying board waits at its first meeting meanwhile).
     bool load_remote_shadow(Board& m, uint64_t frame) {
         const auto started = std::chrono::steady_clock::now();
-        std::optional<RemoteBoard> state = settings_.wait_board(m.index, frame);
+        std::optional<RemoteBoard> state;
+        bool replayed = false;
+        {
+            std::unique_lock guard(lock_);
+            if (const auto it = replays_.find(m.index); it != replays_.end()) { // (its player gone: run on here from its backup)
+                replayed = true;
+                replayed_.wait(guard, [&] { return replays_[m.index].done; });
+                state = std::move(replays_[m.index].board);
+                replays_.erase(m.index);
+                if (!state) lost_.insert(m.index), departed_.erase(m.index);
+            }
+        }
+        if (!replayed) state = settings_.wait_board(m.index, frame);
         if (!state) {
-            std::printf("board %zu: no state of it came from its machine for frame %llu\n", m.index, (unsigned long long)frame);
+            std::printf("board %zu: no state of it %s for frame %llu\n", m.index, replayed ? "from its backup" : "came from its machine",
+                        (unsigned long long)frame);
             return false;
         }
         Board& other = *boards_[m.peer];
@@ -760,12 +873,37 @@ private:
     // A shadow's start: the staying board's state, taken where it finished count shadow_count_, in its frame
     // shadow_frame_ (~0: not yet); or the master's (master_ready_): the staying board's state at its dispatcher's
     // entry, the master's RAM and CPU.
-    std::mutex lock_;
+    mutable std::mutex lock_;
     std::vector<uint8_t> state_;
     uint32_t shadow_count_ = 0;
     uint64_t shadow_frame_ = ~0ull, shadow_cycles_ = 0; // (and its time there)
-    // (network play: by board, the frame whose end its state was asked for of its machine; and its calm frames in a row)
+    // (network play: by board, the frame whose end its state was asked for of its machine; and its calm frames in a row;
+    // the seats whose player left with a parting (kept whole), or went without one (never asked for))
     std::map<std::size_t, uint64_t> remote_frames_, calm_;
+    std::set<std::size_t> departed_, lost_;
+    // (a board whose player went, run on here from its backup: by board, the run's state when done)
+    struct Replaying {
+        bool done = false;
+        std::optional<RemoteBoard> board;
+    };
+    std::map<std::size_t, Replaying> replays_;
+    std::condition_variable replayed_, live_changed_;
+    uint64_t live_frame_ = 0;
+    bool live_stopped_ = false;
+    std::vector<std::jthread> replay_threads_;
+    void live(uint64_t frame, bool stop = false) {
+        {
+            std::lock_guard guard(lock_);
+            if (stop) live_stopped_ = true;
+            else live_frame_ = frame;
+        }
+        live_changed_.notify_all();
+    }
+    bool wait_live(uint64_t frame) {
+        std::unique_lock guard(lock_);
+        live_changed_.wait(guard, [&] { return live_stopped_ || live_frame_ >= frame; });
+        return live_frame_ >= frame;
+    }
     std::vector<uint8_t> master_ram_;
     ppc::CpuState master_cpu_{};
     bool master_ready_ = false;

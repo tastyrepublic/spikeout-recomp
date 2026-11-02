@@ -5,6 +5,7 @@
 #pragma once
 
 #include "arcade_settings.hpp"
+#include "board_backup.hpp"
 #include "input_table.hpp"
 #include "net/lobby.hpp"
 #include "net/session.hpp"
@@ -26,6 +27,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace tools {
@@ -124,8 +126,26 @@ public:
         };
         cb.input = [this](uint8_t seat, uint64_t frame, const net::InputBytes& in) {
             table_.set(seat, frame, {in[0], in[1], in[2], in[3]});
+            keeper_.input(seat, frame, {in[0], in[1], in[2], in[3]});
         };
-        cb.idle = [](uint8_t, uint64_t) {}; // (its inputs none from there come as anyone's)
+        cb.idle = [this](uint8_t seat, uint64_t frame) { // (its inputs none from there come as anyone's)
+            // (and are none here at once: they come as far as the authority's own, and one board a PC reads the other
+            // cabinets' a frame or so ahead of its own: with no input delay, a wait for frames made only as ours are)
+            table_.hold_from(seat, frame, {});
+            keeper_.hold_from(seat, frame);
+            {
+                std::lock_guard guard(lock_);
+                gone_.push_back(seat);
+                if (seat < absent_.size()) absent_[seat] = true;
+            }
+            changed_.notify_all(); // (a wait for its board ends)
+        };
+        cb.taken = [this](uint8_t seat, uint64_t frame) { // (a player's again: its board asked of its machine as any)
+            table_.hold_until(seat, frame);
+            keeper_.hold_until(seat, frame);
+            std::lock_guard guard(lock_);
+            if (seat < absent_.size()) absent_[seat] = false;
+        };
         cb.state_wanted = [this] { state_wanted_ = true; };
         cb.resync = [this](const net::StartInfo& info) {
             std::lock_guard guard(lock_);
@@ -144,6 +164,10 @@ public:
             std::lock_guard guard(lock_);
             boards_wanted_.push_back({seat, frame});
         };
+        cb.parting = [this](uint8_t seat, uint64_t frame) {
+            std::lock_guard guard(lock_);
+            partings_.push_back({seat, frame});
+        };
         cb.board = [this](uint8_t seat, uint64_t frame, std::vector<uint8_t> state) {
             {
                 std::lock_guard guard(lock_);
@@ -151,13 +175,37 @@ public:
             }
             changed_.notify_all();
         };
+        cb.backup = [this](uint8_t seat, uint64_t, std::vector<uint8_t> backup) {
+            if (keeper_.backup(seat, backup)) return;
+            std::lock_guard guard(lock_); // (changes from one not had: its whole asked for next, not from in here)
+            backup_missing_.push_back(seat);
+        };
+        cb.backup_wanted = [this](uint8_t seat) {
+            std::lock_guard guard(lock_);
+            whole_wanted_.push_back(seat);
+        };
         session_ = std::make_unique<net::Session>(std::move(cb), build);
+    }
+
+    // One board a PC: every other board's last backup, the packets to it and its player's inputs since
+    // (tools::backup); and the seats wanting this machine's own board's next backup whole, since the last asked.
+    backup::Keeper& keeper() { return keeper_; }
+    std::vector<uint8_t> take_whole_wanted() {
+        std::lock_guard guard(lock_);
+        return std::exchange(whole_wanted_, {});
     }
 
     // One board a PC (tools/one_board.hpp): the seats that want this machine's own board's state at the end of
     // `frame` (taken: answer each with session().send_board); and a seat's board's state at the end of `frame`, as
     // asked with session().want_board, waited for (nothing: the time is up, or the session closed).
+    // (each frame's: the backups to be asked for whole are asked for here, not from the session's own thread)
     std::vector<uint8_t> take_board_requests(uint64_t frame) {
+        std::vector<uint8_t> missing;
+        {
+            std::lock_guard guard(lock_);
+            missing = std::exchange(backup_missing_, {});
+        }
+        for (const uint8_t seat : missing) session_->want_backup(seat);
         std::lock_guard guard(lock_);
         std::vector<uint8_t> seats;
         for (auto it = boards_wanted_.begin(); it != boards_wanted_.end();)
@@ -169,9 +217,19 @@ public:
             }
         return seats;
     }
+    // The seats leaving, each after a frame, their boards' states at its end to come (Session::announce_parting); and
+    // those whose player has gone (left or dropped), since the last asked.
+    std::vector<std::pair<uint8_t, uint64_t>> take_partings() {
+        std::lock_guard guard(lock_);
+        return std::exchange(partings_, {});
+    }
+    std::vector<uint8_t> take_gone() {
+        std::lock_guard guard(lock_);
+        return std::exchange(gone_, {});
+    }
     std::optional<std::vector<uint8_t>> wait_board(uint8_t seat, uint64_t frame, std::chrono::milliseconds timeout) {
         std::unique_lock guard(lock_);
-        changed_.wait_for(guard, timeout, [&] { return boards_.count({seat, frame}) != 0; });
+        changed_.wait_for(guard, timeout, [&] { return boards_.count({seat, frame}) != 0 || (seat < absent_.size() && absent_[seat]); });
         const auto it = boards_.find({seat, frame});
         if (it == boards_.end()) return std::nullopt;
         std::vector<uint8_t> state = std::move(it->second);
@@ -217,8 +275,11 @@ private:
     std::mutex lock_;
     std::condition_variable changed_;
     std::optional<net::StartInfo> start_, resync_;
-    std::vector<std::pair<uint8_t, uint64_t>> boards_wanted_;                // (seat, frame)
+    std::vector<std::pair<uint8_t, uint64_t>> boards_wanted_, partings_;     // (seat, frame)
+    std::vector<uint8_t> gone_, whole_wanted_, backup_missing_;
+    std::array<bool, net::kMaxSeats> absent_{}; // (by seat: its player gone, nobody's since)
     std::map<std::pair<uint8_t, uint64_t>, std::vector<uint8_t>> boards_; // (seat, frame): a board's state, compressed
+    backup::Keeper keeper_{net::kMaxSeats};
     std::atomic<uint64_t> desyncs_{0};
     std::atomic<bool> state_wanted_{false}, resync_pending_{false};
     std::unique_ptr<net::Session> session_; // (last: its thread, calling back into the above, stops first)

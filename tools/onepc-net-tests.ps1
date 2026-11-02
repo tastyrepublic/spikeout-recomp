@@ -6,7 +6,7 @@
 # delay), for as long as all of that run's boards ran (and a shadow in the process: it stops at its own block
 # limit, the board then on alone). Exit code 1 if any differs.
 #
-#   tools/onepc-net-tests.ps1 [-Only two,four,apart,coin1,coin0,poweron,late1,late0,fourauto,three]
+#   tools/onepc-net-tests.ps1 [-Only two,four,apart,coin1,coin0,poweron,late1,late0,fourauto,three,leave,leave3,vanish,vanish3]
 #
 # two: two seats from build/onepc/mash-5990.state (tools/onepc-tests.ps1 -Prepare makes it), both players
 # mashing (tools/onepc-mash-presses.txt), handed over at 6,000. four: four seats from
@@ -103,6 +103,63 @@ foreach ($t in $tests) {
         '{0,-5} board {1}: {2} of {3} frames the same ({4} after the hand-over){5}  {6}' -f $name, $seat, $same, $n, $after,
             $(if ($first) { ", first difference at $first" } else { '' }), $notes
     }
+}
+# leave: the poweron game; player 2 leaves after 5,030 (--net-leave-at 5000: its board's state sent to the host, which
+# runs that cabinet on whole from it), then a new player joins in progress (every board's state from the host) and
+# takes the seat. leave3: the three game, player 3 leaving after 7,030; the new player's join then finds player 2's
+# board on side runs on the host, which asks player 2's machine for it first (every board whole for the state). Each
+# machine's hashes (its own board and any it runs whole) are compared with the host's, and the joiner's (every board
+# run there, Mode B) with every other machine's, frame by frame and the whole states every 100 frames.
+# vanish, vanish3: the same, the player gone without a word instead (--net-vanish-at: as a crash): each other machine
+# runs its board on from its last backup (tools::backup); its RAM each frame there (replay board N) compared with the
+# board's own up to where it went.
+$hashes = { param($file) $t = @{}; Select-String -Path $file -Pattern '^(?:replay )?board (\d) frame (\d+): (RAM|whole state) (\w+)' | ForEach-Object { $g = $_.Matches[0].Groups; $t["$($g[1].Value):$($g[2].Value):$($g[3].Value)"] = $g[4].Value }; $t }
+$leaves = @(
+    @('leave', 2, $poweron, 5000, 8000, 'leave'),
+    @('leave3', 3, $three, 7000, 10000, 'leave'),
+    @('vanish', 2, $poweron, 5000, 8000, 'vanish'),
+    @('vanish3', 3, $three, 7000, 10000, 'vanish')
+)
+foreach ($t in $leaves) {
+    $name, $seats, $presses, $leave, $end, $how = $t
+    if ($Only -and $Only -notcontains $name) { continue }
+    $game = "onepc-$name-$PID"
+    $common = @('build/roms/spikeofe', '--no-sound', '--no-2d', '--input-delay', '2', '--blocks', '30000000000') + $presses
+    $net = $auto + @('--one-board-held', '--net-one-board', '100')
+    $stay = @(Start-Process $exe -ArgumentList ($common + $net + @('--frames', "$($end + 300)", '--net-host', $game, '--seats', "$seats")) -RedirectStandardOutput "$out/$name-0.txt" -RedirectStandardError "$out/$name-0.err" -NoNewWindow -PassThru)
+    Start-Sleep -Milliseconds 500
+    for ($k = 1; $k -lt $seats - 1; $k++) {
+        $stay += Start-Process $exe -ArgumentList ($common + $net + @('--frames', "$($end + 300)", '--net-join', $game)) -RedirectStandardOutput "$out/$name-$k.txt" -RedirectStandardError "$out/$name-$k.err" -NoNewWindow -PassThru
+        Start-Sleep -Milliseconds 500
+    }
+    $leaver = $seats - 1
+    $l = Start-Process $exe -ArgumentList ($common + $net + @('--net-join', $game, "--net-$how-at", "$leave")) -RedirectStandardOutput "$out/$name-$leaver.txt" -RedirectStandardError "$out/$name-$leaver.err" -NoNewWindow -PassThru
+    $l.WaitForExit()
+    if ($how -eq 'vanish') { Start-Sleep -Seconds 6 } # (gone without a word: the others drop it after 3 seconds)
+    $joiner = $seats
+    $j = Start-Process $exe -ArgumentList @('build/roms/spikeofe', '--no-sound', '--no-2d', '--input-delay', '2', '--blocks', '30000000000', '--frames', "$end", '--frame-hashes', '--net-join', $game) -RedirectStandardOutput "$out/$name-$joiner.txt" -RedirectStandardError "$out/$name-$joiner.err" -NoNewWindow -PassThru
+    $j.WaitForExit(); $stay | ForEach-Object { $_.WaitForExit() }
+    $all = @{}
+    foreach ($k in 0..$joiner) { $all[$k] = & $hashes "$out/$name-$k.txt" }
+    $pairs = @(1..$joiner | ForEach-Object { , @(0, $_) }) + @(if ($seats -gt 2) { 1..($seats - 2) | ForEach-Object { , @($_, $joiner) } })
+    foreach ($p in $pairs) {
+        $a, $b = $p
+        $n = 0; $same = 0
+        foreach ($key in $all[$b].Keys) { if ($all[$a].ContainsKey($key)) { $n++; if ($all[$a][$key] -eq $all[$b][$key]) { $same++ } } }
+        $label = { param($k) if ($k -eq 0) { 'the host' } elseif ($k -eq $leaver) { 'the leaver' } elseif ($k -eq $joiner) { 'the joiner' } else { "player $($k + 1)" } }
+        $ok = $n -gt 100 -and $same -eq $n
+        if (-not $ok) { $failed++ }
+        '{0,-6} {1} and {2}: {3} of {4} hashes the same' -f $name, (& $label $a), (& $label $b), $same, $n
+    }
+    if ($how -eq 'vanish') { # (each other machine's replay of the board, where the board itself ran: the same)
+        for ($k = 0; $k -lt $leaver; $k++) {
+            $r = @(Select-String -Path "$out/$name-$k.txt" -Pattern "^replay board $leaver frame").Count
+            if (-not $r) { $failed++; "$name : machine $k didn't run board $leaver on from its backup" }
+        }
+    }
+    $notes = @(Select-String -Path "$out/$name-0.txt" -Pattern 'player gone|run on from its backup|leaving after frame|its shadow from its machine''s state|every board whole here|every board''s state at frame|taken from frame|hash checks differed' | ForEach-Object { $_.Line })
+    if (-not (Select-String -Quiet -Path "$out/$name-$joiner.txt" -Pattern 'running on from the host')) { $failed++; "$name : the joiner didn't run on from the host's state" }
+    $notes | ForEach-Object { "  $_" }
 }
 if ($failed) { "$failed failed"; exit 1 }
 'all the same'

@@ -109,6 +109,11 @@ public:
     }
     // And each taken in (board, the packet's number, the time it could arrive, the receiver's time).
     void on_receive(std::function<void(std::size_t, uint64_t, uint64_t, uint64_t)> fn) { state_->on_receive = std::move(fn); }
+    // Every packet sent, deferred or not (the receiving board, the packet's number on its link, the time it can
+    // arrive, the data): one board a PC keeps those to each other board since its last backup (tools::backup).
+    void on_departure(std::function<void(std::size_t, uint64_t, uint64_t, const std::vector<uint8_t>&)> fn) {
+        state_->on_departure = std::move(fn);
+    }
 
     // Save states: true once every board's state has been saved since the
     // last cut_state (a cut is under way while some have).
@@ -151,6 +156,7 @@ private:
         bool deferred = false;
         std::function<void(std::size_t, uint64_t, const std::vector<uint8_t>&)> on_send;
         std::function<void(std::size_t, uint64_t, uint64_t, uint64_t)> on_receive;
+        std::function<void(std::size_t, uint64_t, uint64_t, const std::vector<uint8_t>&)> on_departure;
         // A cut under way: by board, whether it has saved, its counts then,
         // and (as receiver) the packets it has taken in since.
         std::vector<uint8_t> saved; // (bytes: each board's thread writes its own)

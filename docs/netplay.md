@@ -2450,6 +2450,146 @@ cabinet); a seat taken in a one-board game (the state for it sent); the
 menu setting and an automatic choice (one board when this PC can't keep
 up); the module cheaper; rollback (step 2).
 
+**Leaving, and joining in progress, with one board a PC (2026-11-02,
+uncommitted when written).** A player joining a game in progress gets
+every board's state from the host. A host running one board doesn't have
+the others whole, and a board on side runs has nothing more than the
+packets it sends. So, two pieces:
+- Leaving hands over the board. A machine leaving tells every other of a
+  frame half a second ahead (`Session::announce_parting`, kParting, the
+  reliable channel). At that frame's end it sends its board's state to
+  each (as a shadow's, `send_board`), waits until they all have it
+  (`Session::sending`) and says goodbye. Each other machine loads it into
+  that board at that frame, as any shadow from a real board, and runs it
+  whole from then on (`Game::parting`: the seat departed, never handed
+  back to side runs; its inputs none once the authority makes it idle, as
+  any dropped seat's). A seat already whole there goes on as it is.
+- A state asked for (a player joining). If every other board runs whole
+  here, it's saved as usual. Otherwise each board on side runs is asked of
+  its machine as for trouble (`Game::want_whole`: trouble for the rules
+  until the state is saved, and 10 frames on); once every board runs whole,
+  the state is saved and sent; then the rules hand them back as they
+  become calm.
+
+A player who goes without a parting (a crash, the network lost) takes
+the only whole copy of a board on side runs with them. Hence backups,
+below; without one (none had yet), their character stands idle as in
+Mode B, but nobody can join in progress any more (`Game::seat_gone`; the
+host says so and sends nothing). A board already whole somewhere (a
+shadow at that moment) is kept on as it is.
+
+**A player who drops, one board a PC (2026-11-02, uncommitted when
+written).** `tools/board_backup.hpp`. Every 120 frames (about 2 s) each
+machine takes its own board by pages (`m3::Snapshots`, the rollback
+code's: well under a millisecond, where a whole save is 30 ms) and sends
+every other machine the pages written since its last backup (`kBackup`,
+the reliable channel), or the whole board to one that has none of it
+(`kWantBackup` asks for it: a player joined, or changes from one it
+lacks). Measured over the three-player game: the changes 96 KB a backup
+at the median, 860 KB at the 90th percentile, 3.6 MB at the most (a scene
+loading its textures); the whole board 5.3 MB packed. Each machine keeps,
+for every other board (`backup::Keeper`, in `tools::NetPlay`): its last
+backup, the packets sent to it since (`LinkRing::on_departure`, by their
+number on its link: the next it takes is the one its backup's count
+names) and its player's inputs since.
+
+Its player gone (the session's idle), each machine runs that board on
+from its backup (`backup::Replay`): a board of its own on its own thread
+(the bus, the network board with a link that hands it the logged packets
+at their times, the game's code and hooks), each frame once this
+machine's game has run it (all its packets in the log by then; they come
+a slice of lines ahead), its inputs as they were (the player's, then
+none from the idle frame, as everyone's). It runs to a frame as far
+ahead as it is behind (at least 120); there it goes in as a shadow from
+a real board would (`load_remote_shadow`), whole from then on, never
+handed back. The game waits there if it hasn't come (it hasn't yet: a
+board alone runs several times faster than the game). Then a player can
+join in progress as after a parting.
+
+Found on the way: a context ran only the last of several snapshots asked
+for in one frame (`Context::request_snapshot`); they now run each in turn
+(the backups at every 120th frame met gamerun's whole-state hashes at
+every 100th). And the session's callbacks run under its lock: a backup
+that couldn't be applied asked for the whole from inside one, which hung
+that machine (now asked from the game's thread). A board asked of a
+machine that then drops is no longer waited for 30 seconds (the wait ends
+with the drop).
+
+gamerun `--net-vanish-at FRAME` goes at the end of FRAME without a word
+(the session stopped, the process ended at once); `ONEBOARD_BACKUPS=1`
+prints each backup's size. The window takes and sends backups and runs a
+board on from its backup the same way.
+
+The window's first test of it hung the host as soon as the other window
+was dropped, before any of this: a cabinet nobody has gets its inputs of
+none from the authority only as far as the authority's own, and one board
+a PC reads the other cabinets' a frame or so ahead of its own; with no
+input delay (the window's) it waited for frames made only once it went
+on. A dropped seat's inputs are now none in the input table at once, from
+its idle frame until a player takes it (`InputTable::hold_from`,
+`hold_until`: the same values the session sends). Any drop in a one-board
+window game would have hung it so.
+
+The window (`tools/onepc-window-test.ps1 -OneBoard crash`): both windows
+on one board, the joiner's ended mid-game as a crash would (its process
+killed, ~4,560-4,640); the host drops it, runs its board on from its
+backup at 4,560 to 4,751 (2.1 s); a gamerun asking to join meanwhile
+(4,641) gets every board once that board is whole (4,754), takes the seat
+at 4,793, no hash check differing to 6,700.
+
+Proved (`tools/onepc-net-tests.ps1 -Only vanish,vanish3`): vanish, the
+poweron game, player 2 gone at 5,000: the host runs its board on from its
+backup at 4,920 to 5,123 (1.2 s), the RAM there the same as the board's
+own every frame to 5,000 (80 of 80); a new player then joins (5,625) and
+agrees with the host on both boards every frame (4,796 of 4,796 hashes).
+vanish3, the three game, player 3 gone at 7,000: the host and player 2
+each run its board on from 6,960 to 7,123 (2.8 s) and agree with each
+other and with the board itself; the new player's join then asks player
+2's board of its machine (side runs) as before, and every machine agrees
+with every other (5,745 hashes with the host, 5,434 with player 2).
+
+The game still stops for the 3 seconds before a silent player is dropped
+(`kDropAfter`: every machine waits for that player's inputs, as in Mode B
+before any of this; the backup's run itself costs nothing seen, the game
+at 56-58 frames a second meanwhile, 41 ms at the switch). The owner's
+decision (2026-11-02): no shorter drop time; rollback will take it away
+(the game run on with that player's inputs guessed as none, which is what
+the drop makes them; run again if they come back).
+
+Still to do: a board run whole here for a player gone stays whole after a
+new player takes its seat (that player's own machine could have it on
+side runs here again: handed back as a shadow is); the whole backup
+compressed on the game's thread (about 110 ms, once for each machine that
+joins).
+
+gamerun: `--net-leave-at FRAME` (leaves 30 frames after FRAME, as above),
+`--frame-hashes` (the per-frame hashes in any run: a joiner's, compared).
+The window: leaving (the menu, or closing it) hands its board over the
+same way, a few seconds at most; F9 saves only when every board runs whole
+here.
+
+Proved (`tools/onepc-net-tests.ps1 -Only leave`): the poweron game, player
+2 leaving after 5,030 (its state 5,360 KB packed, loaded by the host 590-750
+ms later, the hash at 5,031 the leaver's own), a new player joining at
+~5,400 (every board whole already; 5,774 KB packed) and taking the seat:
+the joiner, every board run there, and the host agree on both boards every
+frame from the join to 8,000 (2,630 of 2,630 frames each, 52 of 52 whole
+states), no hash check differing. `-Only leave3`: the three game, player 3
+leaving after 7,030; the new player's join (7,168) finds player 2's board
+on side runs, asks its machine for it (loaded at 7,198), saves every board
+at 7,201 (6,331 KB packed) and hands it back at 7,508 once calm. Every
+machine's hashes agree with every other's where both have them (the joiner
+with the host on all three boards, 5,963 of 5,963; with player 2, 5,652
+of 5,652). The other ten runs of the suite unchanged.
+
+The window (`tools/onepc-window-test.ps1 -OneBoard leave`): both windows
+on one board, the joiner's quitting at 5,500 (`--frames` in such a game
+starts its leaving 35 frames before the end): its state at 5,496 to the
+host window, run on whole there; then a gamerun joining in progress got
+every board at 5,700 and took the seat at 5,741, no hash check differing
+to 6,700 (they compare the host's own board only: a board it doesn't run
+on side runs isn't hashed).
+
 ## Plan
 
 1. Single board, single player (milestones 1–4).

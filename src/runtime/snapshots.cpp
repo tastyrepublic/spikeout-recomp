@@ -10,6 +10,7 @@ namespace m3 {
 
 namespace {
 constexpr std::size_t kPage = watched::kPage;
+static_assert(kPage == Snapshots::kPageBytes);
 
 // The big buffers a state walks, in order.
 struct Collect : State::Regions {
@@ -52,6 +53,7 @@ void Snapshots::save(uint64_t frame, const std::function<void(State&)>& walk) {
     bool same = !frames_.empty() && frame > frames_.back().frame && found.size() == regions_.size();
     for (std::size_t i = 0; same && i < found.size(); ++i)
         same = found[i].first == regions_[i].data && found[i].second == regions_[i].bytes;
+    started_ = !same;
     if (!same) { // (the first, or the buffers moved: start again, a copy of each)
         frames_.clear();
         regions_.clear();
