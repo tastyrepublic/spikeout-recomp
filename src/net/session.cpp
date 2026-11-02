@@ -1474,6 +1474,20 @@ std::array<bool, kMaxSeats> Session::relayed() const {
     return out;
 }
 
+std::array<Session::PeerTiming, kMaxSeats> Session::timing() const {
+    const Impl& m = *impl_;
+    std::lock_guard guard(m.lock);
+    const auto now = Clock::now();
+    std::array<PeerTiming, kMaxSeats> out{};
+    for (uint8_t s = 0; s < kMaxSeats && s < m.seats; ++s) {
+        out[s].next = m.streams[s].next();
+        if (s == m.my_seat || !m.peers[s].present || m.peers[s].dropped) continue;
+        out[s].rtt = m.peers[s].rtt;
+        out[s].quiet_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now - m.peers[s].heard).count());
+    }
+    return out;
+}
+
 std::array<int, kMaxSeats> Session::round_trips() const {
     const Impl& m = *impl_;
     std::lock_guard guard(m.lock);

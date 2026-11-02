@@ -368,6 +368,19 @@ public:
     uint64_t journal_bytes() const { return journal_bytes_; } // (RAM bytes its side runs wrote, put back after)
     uint64_t side_runs() const { return side_runs_; }
     std::string failed() const { return failed_; }
+    // (measuring: the bytes its own state holds, what a copy of it every frame would cost)
+    std::size_t state_bytes() const {
+        std::size_t n = 0;
+        for (const Remote& r : remotes_) {
+            n += r.camera.size() + r.own.size() + r.link.size() + r.link_vars.size() + r.state_own.size() + r.saved_world.size() +
+                 r.view_world.size() + r.regions.size() + r.heading_at.size() * 8 + r.view_at.size() * 12 + r.frame_at.size() * 12;
+            for (const auto& [k, d] : r.flow_delta) n += d.size() * 8;
+            for (const auto& [k, s] : r.own_snap) n += s.own.size() + s.camera.size() + s.regions.size();
+            for (const auto& [k, s] : r.link_snap) n += s.first.size() + s.second.size();
+        }
+        for (const auto& [k, v] : view_chars_) n += v.size() * sizeof(ppc::CpuState);
+        return n + players_at_.size() * sizeof(Players) + ahead_record_.size() * 4 + captured_.size();
+    }
 
 private:
     struct Remote {

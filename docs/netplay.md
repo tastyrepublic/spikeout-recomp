@@ -792,6 +792,40 @@ differing. On the way: the window's state for a joiner waited for every
 seat's inputs of its frame, this machine's own too, which it sets after
 (`InputTable::wait_all`'s `but`).
 
+Time sync (2026-11-02, uncommitted when written). Without it a machine
+with rollback ran on ahead of a slower one (or one stalled) as far as its
+window, and each of the other's inputs then took it back that far (202
+frames at once in the mixed test below). Now each machine reckons how far
+ahead of each other machine it is from the inputs that have come
+(`NetPlay::lead`: its own next frame less the other's, half the round trip
+allowed; the same input delay assumed), leaving out any not heard from for
+300 ms (gone silent: a crash; the game runs on with guesses for them). More
+than 4 frames ahead: the window holds that frame a little later (a
+twentieth of a frame for each frame ahead beyond, up to half a frame);
+more than 8 behind the furthest on: that frame not paced (catching up).
+gamerun, which runs as fast as it can, waits while more than 4 ahead.
+
+Measured (two windows on one PC, rollback 210, 7,000 frames): the lead
+between them stayed within -7 and +6 frames (without the sync's slowing
+growing with the gap: up to 21); the one ahead slowed on 469 frames, none
+ran unpaced; 8 rollbacks, 24 frames. gamerun: the mixed test went back once,
+1 frame (time sync holding back 590 frames); held inputs (3 frames late,
+window 210): 64 times, 233 frames, every frame the same as the reference;
+the crash test: 5 times, 13 frames, the silent machine left out. Three
+players from power-on (the third joining at 4,600, one machine 3 frames
+late): 22,222 of 22,222 board-frames on each, 7 rollbacks each; four
+players from four-8000.state (two mashing, two machines 3 frames late):
+6,870 of 6,870 on each, 61-143 rollbacks of 3-4 frames, a snapshot 0.88 ms
+for the four boards, going back 5-7 ms; no hash check differing anywhere.
+
+One board a PC with rollback (to come): the cabinet module keeps about 1.8
+MB of its own a remote cabinet (`Cabinets::state_bytes`,
+`ONEBOARD_STATE_BYTES=1`): its window's frames each need it too. A short
+window (~12 frames, ~22 MB a remote cabinet; a silent player still stops
+that machine for the drop's 3 seconds, the others running on) or the long
+one (copy-on-write for its big buffers: ~120 MB a remote cabinet): the
+owner to choose.
+
 Machines with rollback and machines without play together: each computes
 the same game from the same inputs, however it gets there. Proved (gamerun,
 power-on, both players joining, input delay 2): a host with rollback

@@ -239,6 +239,10 @@ public:
         {
             std::lock_guard guard(m.cabinets_lock);
             m.cabinets->end_frame(m.timing.frames() - 1);
+            static const bool say = std::getenv("ONEBOARD_STATE_BYTES") != nullptr; // (tests: the module's own state, every 300 frames)
+            if (say && m.timing.frames() % 300 == 0)
+                std::printf("board %zu frame %llu: the module's state %zu KB\n", m.index, (unsigned long long)m.timing.frames(),
+                            m.cabinets->state_bytes() / 1024);
         }
         if (m.game) m.game->live(m.timing.frames());
     }

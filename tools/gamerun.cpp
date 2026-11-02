@@ -581,6 +581,7 @@ struct Machine {
     tools::backup::Maker backups;   // (--net-one-board: this board's backups on the other machines, tools::backup)
     std::map<uint64_t, uint64_t> hash_pending; // (--net-rollback: RAM hashes for the others, once their frames are settled)
     double input_wait_max = 0; // (network play: the longest a frame waited for inputs, ms)
+    uint64_t sync_waits = 0;   // (--net-rollback: frames held back by the time sync)
     std::set<uint8_t> backup_bases; // (the seats sent one: changes from it next)
     uint64_t watch_from = 0, watch_to = 0; // --watch-write: the frames whose writes are printed
     // --replay: the next recorded inputs and hash, hashes matched, the first frame not
@@ -1992,6 +1993,13 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         {
             bool guessed = false; // (--net-rollback: a guess, a few frames ahead at most)
             const auto waited = std::chrono::steady_clock::now();
+            // (--net-rollback, time sync: more than a few frames ahead of another machine (its inputs show it), waited
+            // here until it is close (gamerun runs as fast as it can: the window slows a little instead))
+            if (g_net_rb && m.index == o.local_seat)
+                for (int k = 0; k < 3000 && o.netplay->lead(m.index).ahead > 4; ++k) {
+                    if (k == 0) ++m.sync_waits;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
             const auto got = g_net_rb ? m.inputs->guess(m.index, frame, o.net_rollback, guessed) : m.inputs->wait(m.index, frame);
             if (o.netplay) // (network play: the longest a frame waited for inputs, at the end)
                 m.input_wait_max = std::max(m.input_wait_max,
@@ -4112,7 +4120,9 @@ int main(int argc_given, char** argv_given) {
         std::printf("Network: %llu hash checks differed\n", static_cast<unsigned long long>(netplay->desyncs()));
         if (g_net_rb) std::printf("Rollback: %s\n", g_net_rb->report().c_str());
         double wait_max = 0;
-        for (const auto& m : machines) wait_max = std::max(wait_max, m->input_wait_max);
+        uint64_t sync_waits = 0;
+        for (const auto& m : machines) wait_max = std::max(wait_max, m->input_wait_max), sync_waits += m->sync_waits;
+        if (g_net_rb) std::printf("Rollback: time sync held back %llu frames\n", (unsigned long long)sync_waits);
         std::printf("Network: the longest a frame waited for inputs: %.0f ms\n", wait_max);
     }
     std::printf("CPU time: %.2f s (the whole process, every thread)\n", m3::process_cpu_seconds());

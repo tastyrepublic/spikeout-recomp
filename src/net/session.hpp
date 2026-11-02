@@ -217,6 +217,13 @@ public:
     // lost its network (the others drop it after kDropAfter).
     void vanish();
 
+    // Rollback's time sync (tools::NetPlay::lead): by seat, its inputs in up to (not including) this frame, the round
+    // trip (ms, -1: none) and how long since anything came from it (ms; -1: not a machine in the game).
+    struct PeerTiming {
+        uint64_t next = 0;
+        int rtt = -1, quiet_ms = -1;
+    };
+    std::array<PeerTiming, kMaxSeats> timing() const;
     // How it goes, for an overlay: round trip to each seat (ms, -1: none).
     std::array<int, kMaxSeats> round_trips() const;
     // Each seat of a game in progress, for an overlay.

@@ -37,8 +37,9 @@
 // sound plays. A testing aid: linked play is meant to be one cabinet per
 // computer.
 //
-// The window draws through the GPU (Vulkan, Metal) when SDL finds one it
-// can use, else, or with --no-gpu, through SDL's 2D renderer. On the GPU the
+// The window draws through the GPU (Vulkan, Direct3D 12, Metal); without one
+// it says so and quits (the owner's choice); --no-gpu draws through SDL's 2D
+// renderer (developers: no menu then). On the GPU the
 // 3D is drawn there too (gpu::Real3dGpu), one board only; --soft-3d (or the
 // menu) keeps it in software. The render scale draws the 3D N times as large
 // each way (Auto: as large as the window shows it), antialiasing that again
@@ -134,6 +135,9 @@ namespace {
 constexpr int kWidth = m3::TilegenRenderer::kWidth, kHeight = m3::TilegenRenderer::kHeight;
 constexpr std::size_t kMaxBoards = 4;
 constexpr uint32_t kTurnLines = 8; // display lines a linked board runs before passing the turn on
+// Rollback's time sync: frames ahead of another player before this machine slows a little, and behind the one
+// furthest on before it runs unpaced to catch up.
+constexpr int64_t kSyncAhead = 4, kSyncBehind = 8;
 
 struct Stop {}; // thrown from the frame callback to end the run
 
@@ -249,6 +253,7 @@ struct Shared {
     // back together when a guess was wrong (0: none, as delay-based play). The run's, while it runs.
     uint64_t rollback_frames = 0;
     std::unique_ptr<tools::rollback::Linked> rollback;
+    std::atomic<uint64_t> sync_slowed{0}, sync_free{0}; // (rollback's time sync: frames slowed a little, frames run unpaced)
     std::unique_ptr<tools::one_board::Game> one_board_game; // (this run's, else none)
     std::array<tools::one_board::Board*, kMaxBoards> one_board_parts{};
     std::atomic<bool> one_board_wanted{false};            // (asked: set up at the next meeting)
@@ -708,6 +713,27 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             paced_from = timing.frames();
             repace = shared.fast || shared.catching_up;
             return;
+        }
+        // Rollback's time sync: ahead of another player by more than a few frames (as their inputs show): this frame
+        // a little later (more the further ahead: the game at 50-95% until they are close); well behind the one furthest on: not
+        // held to the pace this frame (catching up). Without it a machine runs on ahead of a slower or stalled one
+        // as far as the window, and every input of the other's then takes it back that far.
+        if (shared.rollback && shared.netplay) {
+            const auto lead = shared.netplay->lead(shown);
+            if (std::getenv("SPIKEOUT_NET_DEBUG") && timing.frames() % 30 == 0) // (SPIKEOUT_NET_DEBUG: the lead it goes by)
+                std::printf("spikeout: frame %llu: ahead %lld, behind %lld\n", static_cast<unsigned long long>(timing.frames()),
+                            static_cast<long long>(lead.ahead), static_cast<long long>(lead.behind));
+            if (lead.behind < -kSyncBehind) {
+                ++shared.sync_free;
+                start = clock::now();
+                paced_from = timing.frames();
+                return;
+            }
+            if (lead.ahead > kSyncAhead) { // (the further ahead, the more: a twentieth of a frame for each frame, up to half)
+                ++shared.sync_slowed;
+                const double later = std::min(0.5, 0.05 * static_cast<double>(lead.ahead - kSyncAhead + 1));
+                start += std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(later / recomp::FrameTiming::kRefreshHz));
+            }
         }
         const auto due = start + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(
                                      static_cast<double>(timing.frames() - paced_from) / recomp::FrameTiming::kRefreshHz));
@@ -1174,7 +1200,9 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
         break;
     }
     tools::one_board::Game::stopped(part); // (--net-one-board: this player's board stopped, the other's shadow with it)
-    if (shared.rollback && index == shown) std::printf("spikeout: rollback: %s\n", shared.rollback->report().c_str());
+    if (shared.rollback && index == shown)
+        std::printf("spikeout: rollback: %s; time sync: %llu frames slowed, %llu run unpaced\n", shared.rollback->report().c_str(),
+                    static_cast<unsigned long long>(shared.sync_slowed.load()), static_cast<unsigned long long>(shared.sync_free.load()));
     turns.finish(index);
     std::lock_guard<std::mutex> guard(shared.lock);
     out.stopped = why.empty() ? "quit" : why;
@@ -1247,6 +1275,43 @@ void set_up_one_board(Shared& shared) {
     std::printf("spikeout: one board here from frame %llu: the other cabinet held whole until the game is calm, then made from "
                 "its player's buttons\n",
                 static_cast<unsigned long long>(shared.one_board_frame.load()));
+}
+
+// No GPU (the owner's choice, 2026-11-02: such a device doesn't run the game): said in the window in the menu's
+// colours, drawn with SDL's 2D renderer (the menu itself needs the GPU) in its built-in 8x8 font, in plain words (the
+// technical reason only in the log); until a key, a button or the window closed.
+void show_no_gpu(SDL_Window* window) {
+    SDL_Renderer* r = SDL_CreateRenderer(window, nullptr);
+    if (!r) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Spikeout",
+                                 "Spikeout needs a graphics card with Vulkan, Direct3D 12 or Metal, and its driver.", window);
+        return;
+    }
+    SDL_ShowWindow(window);
+    auto line = [&](const std::string& text, float y, float scale, SDL_Color c) {
+        int w = 0, h = 0;
+        SDL_GetRenderOutputSize(r, &w, &h);
+        SDL_SetRenderScale(r, scale, scale);
+        SDL_SetRenderDrawColor(r, c.r, c.g, c.b, 255);
+        const float x = (static_cast<float>(w) / scale - static_cast<float>(text.size()) * SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE) / 2;
+        SDL_RenderDebugText(r, x, static_cast<float>(h) * y / scale, text.c_str());
+        SDL_SetRenderScale(r, 1, 1);
+    };
+    for (bool done = false; !done;) {
+        for (SDL_Event e; SDL_PollEvent(&e);)
+            if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN ||
+                e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED)
+                done = true;
+        SDL_SetRenderDrawColor(r, 0x0b, 0x0d, 0x12, 255);
+        SDL_RenderClear(r);
+        line("NO GRAPHICS CARD", 0.36f, 4, {0xff, 0xd3, 0x4a, 255});
+        line("Spikeout needs a graphics card with Vulkan,", 0.50f, 2, {0xc8, 0xcc, 0xd4, 255});
+        line("Direct3D 12 or Metal, and its driver.", 0.55f, 2, {0xc8, 0xcc, 0xd4, 255});
+        line("Press any key to quit", 0.75f, 2, {0xff, 0xff, 0xff, 255});
+        SDL_RenderPresent(r);
+        SDL_Delay(30);
+    }
+    SDL_DestroyRenderer(r);
 }
 
 // The boards' screens side by side (2) or 2 x 2 (3, 4).
@@ -1458,10 +1523,13 @@ int main(int argc, char** argv) {
         if (on_gpu)
             std::printf("spikeout: drawing with the GPU (%s, %s)\n", gpu_device->driver(),
                         gpu_device->mailbox() ? "mailbox" : "vsync");
-        else {
-            std::printf("spikeout: no GPU (%s); drawing with SDL's renderer\n", gpu_device->error().c_str());
-            presenter.reset(); // gives the window back
+        else { // (the owner's choice, 2026-11-02: a device without one doesn't run the game; --no-gpu still draws without)
+            const std::string why = gpu_device->error();
+            std::printf("spikeout: no GPU (%s)\n", why.c_str());
+            presenter.reset(); // (the window given back, for SDL's 2D renderer)
             gpu_device.reset();
+            show_no_gpu(window);
+            return 1;
         }
     }
 #else

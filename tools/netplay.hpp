@@ -269,6 +269,30 @@ public:
 
     net::Session& session() { return *session_; }
 
+    // Rollback's time sync: how far this machine (seat `me`) runs ahead of the others, in frames, as their inputs
+    // show it (each frame's inputs go out as that machine sets them, the input delay on: the same for all is
+    // assumed), half the round trip allowed for their way here. `ahead`: of the furthest behind, `behind`: of the
+    // furthest ahead (negative: behind it). Machines not heard from for a while (gone silent: a crash, a stall) left
+    // out: the game runs on with guesses for them rather than waiting. None to go by: both 0.
+    struct Lead {
+        int64_t ahead = 0, behind = 0;
+    };
+    Lead lead(std::size_t me) const {
+        const auto t = session_->timing();
+        const int64_t mine = static_cast<int64_t>(t[me].next);
+        Lead l;
+        bool any = false;
+        for (std::size_t s = 0; s < t.size(); ++s) {
+            if (s == me || t[s].quiet_ms < 0 || t[s].quiet_ms > 300 || t[s].next == 0) continue;
+            const int64_t transit = t[s].rtt > 0 ? static_cast<int64_t>(t[s].rtt / 2 / 17.4 + 0.5) : 0;
+            const int64_t d = mine - (static_cast<int64_t>(t[s].next) + transit);
+            l.ahead = any ? std::max(l.ahead, d) : d;
+            l.behind = any ? std::min(l.behind, d) : d;
+            any = true;
+        }
+        return l;
+    }
+
     // Until the game starts (the host's start, or ours), or the time is up.
     std::optional<net::StartInfo> wait_start(std::chrono::milliseconds timeout) {
         std::unique_lock guard(lock_);
