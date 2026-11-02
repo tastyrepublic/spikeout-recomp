@@ -145,6 +145,9 @@ constexpr std::pair<uint32_t, uint32_t> kLinkVars[] = {{0x100004, 0x100008}, {0x
 // The main loop's own count (-32764(r13), one up at its top every time round: what a link resync puts in the
 // header's +0x20).
 constexpr uint32_t kLoopCount = 0x100004;
+// Twelve countdowns (-16188(r13) on), each nonzero one a step down at every vblank (0x496C, at the end of its
+// interrupt): 0x1040C7, one of them, a cabinet's own (set to 10 at 0x36838).
+constexpr uint32_t kVblankCountdowns = 0x1040C4;
 using Block = std::array<uint32_t, kBlockWords>;
 
 // A cabinet's own variables (its flow's, its camera's): the bytes of r13's
@@ -256,6 +259,20 @@ public:
         std::array<uint32_t, 0x80> working{};
     };
     bool shadow_state(std::size_t seat, uint32_t count, Shadow& out);
+    // Whether shadow_state of `count` has what it needs now (nothing printed); and, if not, its link run of this frame
+    // wanted at the first meeting from `from` on (its shadow starting soon after, before write_at: the staying board
+    // finished the count late in its frame, so its link of it comes in the frame its shadow starts in).
+    bool shadow_ready(std::size_t seat, uint32_t count) const {
+        for (const Remote& r : remotes_)
+            if (r.seat == seat) {
+                const auto own = r.own_snap.find(count + 1);
+                return own != r.own_snap.end() && !own->second.camera.empty() && r.link_snap.count(count) != 0;
+            }
+        return false;
+    }
+    void link_early(std::size_t seat, uint64_t from) {
+        if (Remote* r = find(seat)) r->link_from = from;
+    }
     // The master's shadow, at this board's dispatcher of count L (the master then just past its link of L+1, a
     // count ahead): its count L run here as it, flow and tasks, up to its drawing's vblank wait; `ram` and `cpu`
     // its RAM and CPU there, for a board to go on from as it (its drawing of L, its link of L+1 at once, its count
@@ -372,6 +389,7 @@ private:
         Block block{};                     // (its last block)
         uint64_t written_frame = ~0ull;
         uint64_t pending = ~0ull;     // (a frame whose link run waits for its camera's view of its player)
+        uint64_t link_from = 0;       // (its link run of this frame wanted from this time, not write_at's: its shadow's start)
         std::vector<uint64_t> missed; // (its frames lost, no block written)
         // (once made here: its logic count, the frame it reached it, and each count's frame, for its buttons)
         uint32_t logic = 0;
@@ -849,12 +867,14 @@ inline void Cabinets::make_record(Remote& r, Block& next, const Block& mine, uin
     next[(rec + 0x10) / 4] = p[0];
     if (const auto v = r.view_at.find({logic - 1, player}); v != r.view_at.end()) // (its own view bits; the rest the shared game's)
         next[(rec + 0x10) / 4] = (p[0] & ~0x18u) | (v->second & 0x18u);
-    // (the empty slots' leftovers, as they were: players 3 and 4's +8 (+0x34, +0x40), each cabinet's own while their
-    // seat is empty (0x74808 writes them from its unused players' objects), the game's once a player is in it; and the
-    // on-screen bits)
+    // (the empty slots' leftovers, as they were: players 3 and 4's +4 and +8 (+0x30 and +0x34, +0x3C and +0x40), each
+    // cabinet's own while their seat is empty (0x74808 writes them from its unused players' objects), the game's once a
+    // player is in it (+4: with three players, player 4's +7 was the third cabinet's own); and the on-screen bits)
     const uint32_t players = bus_.read32(kLinkPlayers);
-    if (!(players & (0x80000000u >> 2))) next[(rec + 0x34) / 4] = r.block[(old + 0x34) / 4];
-    if (!(players & (0x80000000u >> 3))) next[(rec + 0x40) / 4] = r.block[(old + 0x40) / 4];
+    if (!(players & (0x80000000u >> 2)))
+        for (uint32_t at : {0x30u, 0x34u}) next[(rec + at) / 4] = r.block[(old + at) / 4];
+    if (!(players & (0x80000000u >> 3)))
+        for (uint32_t at : {0x3Cu, 0x40u}) next[(rec + at) / 4] = r.block[(old + at) / 4];
     for (uint32_t byte : {0x47u, 0x5Fu, 0x6Bu, 0x77u}) put8(next, rec + byte, get8(r.block, old + byte));
     // (every character's view bits, players 1-4 then enemies 1-8, from its camera's tests two counts before; none
     // for one gone since: this board's entry all zero)
@@ -1059,10 +1079,11 @@ inline void Cabinets::meet(uint64_t frame, uint64_t t) {
     const uint64_t at = timing_.frame_start(frame) + write_at_;
     for (Remote& r : remotes_) {
         if (!r.making) continue;
-        if (r.written_frame != frame && t >= at) {
+        const uint64_t due = r.link_from && r.link_from < at ? r.link_from : at; // (link_early: sooner)
+        if (r.written_frame != frame && t >= due) {
             {
                 const Timer nb{netboard_seconds_, timer_depth_};
-                r.netboard->sync(at);
+                r.netboard->sync(std::min(at, t));
             }
             r.written_frame = frame;
             if (!missed(r, frame)) {
@@ -1079,7 +1100,13 @@ inline void Cabinets::end_frame(uint64_t frame) {
     const uint64_t end = timing_.frame_start(frame) + timing_.frame_cycles();
     meet(frame, end);
     for (Remote& r : remotes_) {
+        if (r.link_from < end) r.link_from = 0; // (link_early's, if it was this frame's)
         if (!r.making) continue;
+        // (its vblank's countdowns, once a frame (0x496C, from its interrupt, which side runs never take): those of its own
+        // variables, its copy's, else they'd stay where its flow set them)
+        if (!r.own.empty())
+            for (std::size_t k = 0; k < own_.size(); ++k)
+                if (own_[k] >= kVblankCountdowns && own_[k] < kVblankCountdowns + 12 && r.own[k] != 0) --r.own[k];
         if (r.pending == frame) link_run(r, frame), r.pending = ~0ull; // (the frame's end: its link as it is)
         const Timer nb{netboard_seconds_, timer_depth_};
         r.netboard->end_frame();

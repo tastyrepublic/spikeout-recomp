@@ -178,6 +178,11 @@ public:
         std::lock_guard lock(mutex_);
         return !done_[i] && running() == 1;
     }
+    // Whether board i has stopped.
+    bool finished(std::size_t i) {
+        std::lock_guard lock(mutex_);
+        return done_[i];
+    }
 
     void wait(std::size_t i) {
         if (parallel_) return; // (all start together)

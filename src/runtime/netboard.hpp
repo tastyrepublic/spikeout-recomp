@@ -107,6 +107,8 @@ public:
     void on_send(std::function<void(std::size_t, uint64_t, const std::vector<uint8_t>&)> fn) {
         state_->on_send = std::move(fn);
     }
+    // And each taken in (board, the packet's number, the time it could arrive, the receiver's time).
+    void on_receive(std::function<void(std::size_t, uint64_t, uint64_t, uint64_t)> fn) { state_->on_receive = std::move(fn); }
 
     // Save states: true once every board's state has been saved since the
     // last cut_state (a cut is under way while some have).
@@ -115,6 +117,21 @@ public:
     // cut_complete() (and ends the cut); loading, before the boards run.
     // Every board stopped.
     void cut_state(m3::State& s);
+
+    // One board's state alone (one board a PC: a board taken whole from another machine's): the packets board `i`
+    // has taken in (saved with its state, there), and loaded here, those since given to it again (here it had
+    // them; there they hadn't come yet), or, it having taken more there, as many dropped on arrival. A state taken
+    // of one board alone leaves no cut under way (abandon_cut).
+    uint64_t taken(std::size_t i) const { return state_->taken[i] + state_->drop[i]; }
+    uint64_t sent(std::size_t i) const { return state_->sent[i]; }
+    void rewind(std::size_t i, uint64_t taken);
+    // And the packets it had sent there: those sent here since (by the module's copy of it, at their times), which
+    // it will send again as it catches up: as many of its next sends not sent.
+    void unsend(std::size_t i, uint64_t sent);
+    void abandon_cut(std::size_t i) {
+        state_->saved[i] = 0;
+        state_->taken_since[i].clear();
+    }
 
 private:
     struct Packet {
@@ -133,11 +150,14 @@ private:
         uint64_t latency = 0;
         bool deferred = false;
         std::function<void(std::size_t, uint64_t, const std::vector<uint8_t>&)> on_send;
+        std::function<void(std::size_t, uint64_t, uint64_t, uint64_t)> on_receive;
         // A cut under way: by board, whether it has saved, its counts then,
         // and (as receiver) the packets it has taken in since.
         std::vector<uint8_t> saved; // (bytes: each board's thread writes its own)
         std::vector<uint64_t> saved_sent, saved_taken, saved_delivered;
         std::vector<std::deque<Packet>> taken_since;
+        std::vector<std::deque<Packet>> recent; // by receiver: the last it took in (rewind)
+        std::vector<uint64_t> skip;             // by sender: its next sends not sent (unsend)
         void arrive(std::size_t to, Packet p);
     };
     class Port;

@@ -84,6 +84,9 @@
 // process too; 60 by default). --one-board-held (with the rules): at the
 // hand-over each other board runs on whole, as its shadow, until the rules
 // find the game calm (the window's way: from power-on, through attract).
+// --one-board-late (--parallel): nothing of it until FRAME, then set up at
+// a meeting there, every board stopped (the window's Auto, when this PC
+// finds it can't run every board at full speed).
 // --no-frame-hashes leaves out the comparisons' RAM hash of every frame.
 // --no-2d and --no-sound leave out the tile generator's drawing and the
 // sound and music boards: the game runs the same without them (nothing
@@ -354,6 +357,9 @@ struct Options {
     uint64_t one_board_lookahead = 60;      // --one-board-lookahead N (the rules' look at the other cabinet's coin and start)
     uint64_t one_board_hand_back = 0;       // --one-board-hand-back FRAME (its shadow back to side runs, asked then)
     bool one_board_held = false;            // --one-board-held (at the hand-over its board runs on whole, until the rules hand it back)
+    bool one_board_late = false;            // --one-board-late (set up at a meeting in FRAME, not before the boards start)
+    uint64_t one_board_whole = 0;           // --one-board-whole FRAME (the other run whole from then on: Game::keep_whole)
+    bool one_board_local_shadows = false;   // --one-board-local-shadows (network play: shadows from this board's state, not the other's)
     int wait_board = -1;               // --wait-seat B@FROM:UNTIL
     uint64_t wait_from = 0, wait_until = 0;
     int clone_board = -1;               // --clone-seat B@FRAME
@@ -698,6 +704,7 @@ struct Dropped {
     bool shadow = false; // (--one-board-shadow: it waits to be that cabinet's shadow)
 };
 std::vector<std::unique_ptr<struct Machine>>* g_machines = nullptr; // (--drop: board 0, whose block the made ones start from)
+m3::LinkRing* g_ring = nullptr; // (linked boards' ring: one board a PC's shadows from another machine's board)
 // --clone-seat B@FRAME: board 0's state at its first block after FRAME's end (no sound), which
 // board B takes at its own, as its own cabinet (thrown after: run() goes on from it).
 std::vector<uint8_t> g_clone_state;
@@ -871,6 +878,24 @@ void set_up_one_board(std::vector<std::unique_ptr<Machine>>& machines, const Opt
     s.keep_ram = o.one_board_shadow != 0 || o.one_board_auto || !o.one_board_camera;
     s.slice = o.slice;
     s.net = o.netplay != nullptr; // (each board's table: given as it is made)
+    if (o.netplay && !o.one_board_local_shadows) { // (shadows from the other machine's real board: --one-board-local-shadows, this one's)
+        tools::NetPlay* net = o.netplay;
+        s.ask_board = [net](std::size_t seat, uint64_t frame) { net->session().want_board(static_cast<uint8_t>(seat), frame); };
+        s.wait_board = [net](std::size_t seat, uint64_t frame) -> std::optional<tools::one_board::RemoteBoard> {
+            auto packed = net->wait_board(static_cast<uint8_t>(seat), frame, std::chrono::seconds(30));
+            if (!packed) return std::nullopt;
+            return tools::one_board::unpack_remote(*packed, [](std::span<const uint8_t> d) { return net::decompress(d); });
+        };
+        s.rewind_link = [](std::size_t seat, const tools::one_board::RemoteBoard& b) {
+            // (taken at the same point of the same frame, the counts are the same here and there; put right if not)
+            if (!g_ring || (g_ring->taken(seat) == b.taken && g_ring->sent(seat) == b.sent)) return;
+            std::printf("one board: board %zu's port there: taken %llu, sent %llu; here: taken %llu, sent %llu\n", seat,
+                        (unsigned long long)b.taken, (unsigned long long)b.sent, (unsigned long long)g_ring->taken(seat),
+                        (unsigned long long)g_ring->sent(seat));
+            g_ring->rewind(seat, b.taken);
+            g_ring->unsend(seat, b.sent);
+        };
+    }
     if (!s.net && g_presses) // (its --press list's: bank 0 and the controls)
         s.buttons = [](std::size_t seat, uint64_t frame) -> std::optional<tools::InputTable::Inputs> {
             uint8_t in[2] = {0xFF, 0xFF};
@@ -1411,6 +1436,24 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         }
         if (turns.boards() > 1 && line % slice == slice - 1) {
             m.bus.netboard().sync(m.c.cycles());
+            // (tests: GAMERUN_MEET_FRAMES=B:FROM:TO, board B's network board hashed at each meeting of those frames)
+            static long long meet_board = -1;
+            static unsigned long long meet_from = 0, meet_to = 0;
+            if (static const char* spec = std::getenv("GAMERUN_MEET_FRAMES"); spec && meet_board == -1)
+                std::sscanf(spec, "%lld:%llu:%llu", &meet_board, &meet_from, &meet_to);
+            if (static_cast<long long>(m.index) == meet_board && m.timing.frames() >= meet_from && m.timing.frames() <= meet_to) {
+                m3::State nb;
+                m.bus.netboard().state(nb);
+                if (g_ring) g_ring->abandon_cut(m.index);
+                const uint64_t f = m.timing.frames();
+                std::printf("meet board %zu frame %llu line %u: netboard %016llx, taken %llu, cycles %llu (line start %llu)\n", m.index,
+                            (unsigned long long)f, line, (unsigned long long)state_hash([&](m3::State& s) {
+                                std::vector<uint8_t> b = nb.data();
+                                s.io(b);
+                            }),
+                            (unsigned long long)(g_ring ? g_ring->taken(m.index) : 0), (unsigned long long)m.c.cycles(),
+                            (unsigned long long)(m.timing.frame_start(f) + m.timing.line_cycles() * (recomp::FrameTiming::kVBlankLines + line)));
+            }
             if (m.recording_host) m.host_log.push_back({HostCall::Pass, 0, 0, 0, m.c.cycles()});
             m.line = line;
             tools::one_board::Game::meet(m.ob, line); // (--one-board: the other cabinets' blocks due)
@@ -1431,7 +1474,11 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
     m.timing.on_frame_end = [&m, &o] {
         const uint64_t frame = m.timing.frames();
         tools::one_board::Game::end_frame(m.ob); // (--one-board: the other cabinets' frames end with this board's)
-        if (one_board_goes(o, m.index) && frame == o.one_board_frame) { // --one-board B@FRAME
+        if (o.one_board_whole && frame == o.one_board_whole && m.ob.cabinets) { // --one-board-whole FRAME
+            tools::one_board::Game::keep_whole(m.ob);
+            std::printf("board %zu: the other run whole from frame %llu\n", m.index, (unsigned long long)frame);
+        }
+        if (one_board_goes(o, m.index) && frame == o.one_board_frame && !o.one_board_late) { // --one-board B@FRAME
             if (o.one_board_camera) throw Dropped{2400000, o.slice, true, o.one_board_shadow != 0 || o.one_board_auto};
             g_one_board.hand_over(m.ob, o.one_board_held); // (--one-board-held: handed back when the rules find it calm)
         }
@@ -1842,6 +1889,21 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         }
         if ((o.link_record || o.link_standin || o.camera_test || o.drop_frame || o.clone_frame || o.one_board >= 0) &&
             !o.no_frame_hashes) { // (each frame's main RAM, and every 100th the whole board's, to compare the two runs)
+            // (tests: GAMERUN_PARTS_FRAMES=FROM:TO, every frame there: its state's parts hashed, the CPU, the frame timing,
+            // the network board, the bus with its devices, RAM)
+            static unsigned long long parts_from = ~0ull, parts_to = 0;
+            if (static const char* parts = std::getenv("GAMERUN_PARTS_FRAMES"); parts && parts_from == ~0ull)
+                std::sscanf(parts, "%llu:%llu", &parts_from, &parts_to);
+            if (frame >= parts_from && frame <= parts_to)
+                m.c.request_snapshot([&m, frame](uint32_t at) {
+                    const auto h = [](const std::function<void(m3::State&)>& walk) { return static_cast<unsigned long long>(state_hash(walk)); };
+                    std::printf("board %zu frame %llu parts (pc %08x): cpu %016llx timing %016llx netboard %016llx bus %016llx ram %016llx\n",
+                                m.index, static_cast<unsigned long long>(frame), at, h([&](m3::State& s) { m.c.state(s); }),
+                                h([&](m3::State& s) { m.timing.state(s); }), h([&](m3::State& s) { m.bus.netboard().state(s); }),
+                                h([&](m3::State& s) { m.bus.state(s); }),
+                                static_cast<unsigned long long>(tools::Recording::ram_hash(m.bus.ram())));
+                    if (g_ring) g_ring->abandon_cut(m.index); // (the network board's part saved alone: no cut under way)
+                });
             std::printf("board %zu frame %llu: RAM %016llx\n", m.index, static_cast<unsigned long long>(frame),
                         static_cast<unsigned long long>(tools::Recording::ram_hash(m.bus.ram())));
             if (frame % 100 == 0)
@@ -1879,6 +1941,22 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
                             static_cast<unsigned long long>(frame));
             else m.linked->capture_frame = frame + 2;
         }
+        // One board a PC: another machine's shadow of this board wants its state at the end of this frame (taken where
+        // a save state is, without the sound board; sent compressed).
+        if (o.netplay && m.index == o.local_seat)
+            if (std::vector<uint8_t> seats = o.netplay->take_board_requests(frame); !seats.empty()) // (one state for all who asked)
+                m.c.request_snapshot([&m, &o, seats, frame](uint32_t) {
+                    m3::State s;
+                    tools::board_state(s, m.c, m.timing, {});
+                    const uint64_t taken = g_ring ? g_ring->taken(m.index) : 0, sent = g_ring ? g_ring->sent(m.index) : 0;
+                    if (g_ring) g_ring->abandon_cut(m.index); // (one board's state alone: no cut under way)
+                    const std::vector<uint8_t> packed = tools::one_board::pack_remote(taken, sent, net::compress(s.data()));
+                    for (const uint8_t seat : seats) {
+                        std::printf("net: this board's state at frame %llu to seat %u (%zu KB packed)\n", (unsigned long long)frame,
+                                    seat + 1u, packed.size() / 1024);
+                        o.netplay->session().send_board(seat, frame, packed);
+                    }
+                });
         // A player who joined in progress: its cabinet, at once (gamerun runs
         // as fast as it can, as the host does: it wouldn't catch up first,
         // as the window does; the host then waits for its inputs).
@@ -3114,6 +3192,9 @@ int main(int argc, char** argv) {
         else if (arg == "--one-board-lookahead" && i + 1 < argc) o.one_board_lookahead = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--one-board-hand-back" && i + 1 < argc) o.one_board_hand_back = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--one-board-held") o.one_board_held = true;
+        else if (arg == "--one-board-late") o.one_board_late = true;
+        else if (arg == "--one-board-whole" && i + 1 < argc) o.one_board_whole = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--one-board-local-shadows") o.one_board_local_shadows = true;
         else if (arg == "--camera-events") o.camera_events = true;
         else if (arg == "--script-actions") o.script_actions = true;
         else if (arg == "--map-trace" && i + 1 < argc) { // FROM:N
@@ -3399,8 +3480,9 @@ int main(int argc, char** argv) {
         }
         o.eeprom_bytes.clear(); // (not this process's own: every board as every machine has it)
         o.netplay = netplay.get();
-        if (o.net_one_board && o.one_board_auto && start->seats != 2) {
-            std::fprintf(stderr, "gamerun: --one-board-auto (shadows) is for two seats so far\n");
+        if (o.net_one_board && o.one_board_auto && start->seats != 2 && o.one_board_local_shadows) {
+            std::fprintf(stderr, "gamerun: --one-board-auto with this board's own shadows is for two seats (from the others' real "
+                                 "boards: any number)\n");
             return 2;
         }
         if (o.net_one_board) { // (this machine's board stays; the others are handed over to its module, tasks mode)
@@ -3454,6 +3536,28 @@ int main(int argc, char** argv) {
     std::unique_ptr<m3::LinkRing> ring;
     if (o.boards > 1) {
         ring = std::make_unique<m3::LinkRing>(o.boards);
+        g_ring = ring.get();
+        // (tests: ONEBOARD_SENDS=B:FROM:TO prints board B's packets taken in and sent (as the ring's exchange passes them
+        // on, numbered by it) from FROM to TO, with a hash of each)
+        if (const char* spec = std::getenv("ONEBOARD_SENDS")) {
+            unsigned long long b = 0, from = 0, to = 0;
+            if (std::sscanf(spec, "%llu:%llu:%llu", &b, &from, &to) == 3) {
+                auto counts = std::make_shared<std::vector<uint64_t>>(o.boards, 0);
+                ring->on_receive([b, from, to](std::size_t board, uint64_t seq, uint64_t at, uint64_t now) {
+                    if (board == b && seq >= from && seq <= to)
+                        std::printf("recv board %zu #%llu: could arrive at %llu, taken at %llu\n", board, (unsigned long long)seq,
+                                    (unsigned long long)at, (unsigned long long)now);
+                });
+                ring->on_send([counts, b, from, to](std::size_t board, uint64_t t, const std::vector<uint8_t>& data) {
+                    const uint64_t n = (*counts)[board]++;
+                    if (board != b || n < from || n > to) return;
+                    uint64_t h = 0xCBF29CE484222325ull;
+                    for (uint8_t v : data) h = (h ^ v) * 0x100000001B3ull;
+                    std::printf("send board %zu #%llu at %llu: %zu bytes, hash %016llx\n", board, (unsigned long long)n,
+                                (unsigned long long)t, data.size(), (unsigned long long)h);
+                });
+            }
+        }
         ring->set_latency(o.link_latency);
         if (o.link_trace)
             ring->on_send([left = o.link_trace](std::size_t from, uint64_t at, const std::vector<uint8_t>& data) mutable {
@@ -3523,6 +3627,16 @@ int main(int argc, char** argv) {
             if (o.linked_inputs) // (--inputs: what the bot changed where it stopped the boards, at a meeting)
                 for (auto& m : machines)
                     linked_change(*m, o, tools::LinkedInputLog::At::Meeting, machines[0]->timing.frames(), machines[0]->line);
+            // --one-board-late: set up and handed over at the first meeting in FRAME, every board stopped there (the
+            // window's way when it finds this PC too slow for every board: nothing of it before)
+            static bool late_done = false;
+            if (o.one_board_late && !late_done && machines[0]->timing.frames() >= o.one_board_frame) {
+                late_done = true;
+                set_up_one_board(machines, o);
+                for (auto& m : machines)
+                    if (one_board_goes(o, m->index)) g_one_board.hand_over(m->ob, o.one_board_held);
+                std::printf("one board: set up at frame %llu, line %u\n", (unsigned long long)machines[0]->timing.frames(), machines[0]->line);
+            }
             if (linked.ring && (!linked.path.empty() || linked.sink)) linked.finish();
             if (rollback.ring) rollback.between(o);
         }) : std::function<void()>());
@@ -3563,7 +3677,7 @@ int main(int argc, char** argv) {
                 m.bus.watch_writes(kCamera, kCamera + kCameraBytes, camera_written, &m);
             }
         }
-        if (o.one_board >= 0 && i + 1 == o.boards) set_up_one_board(machines, o);
+        if (o.one_board >= 0 && i + 1 == o.boards && !o.one_board_late) set_up_one_board(machines, o);
         if (o.drop_frame && static_cast<int>(i) == o.drop_board && o.camera_test_free) // (its own flow's bytes, for the side flow)
             machines.back()->c.set_hook(camera_hook, machines.back().get());
         if ((o.camera_record && static_cast<int>(i) == o.camera_record_board) ||

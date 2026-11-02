@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -139,7 +140,43 @@ public:
         cb.log = [this](const std::string& s) {
             if (log_) log_(s);
         };
+        cb.board_wanted = [this](uint8_t seat, uint64_t frame) {
+            std::lock_guard guard(lock_);
+            boards_wanted_.push_back({seat, frame});
+        };
+        cb.board = [this](uint8_t seat, uint64_t frame, std::vector<uint8_t> state) {
+            {
+                std::lock_guard guard(lock_);
+                boards_[{seat, frame}] = std::move(state);
+            }
+            changed_.notify_all();
+        };
         session_ = std::make_unique<net::Session>(std::move(cb), build);
+    }
+
+    // One board a PC (tools/one_board.hpp): the seats that want this machine's own board's state at the end of
+    // `frame` (taken: answer each with session().send_board); and a seat's board's state at the end of `frame`, as
+    // asked with session().want_board, waited for (nothing: the time is up, or the session closed).
+    std::vector<uint8_t> take_board_requests(uint64_t frame) {
+        std::lock_guard guard(lock_);
+        std::vector<uint8_t> seats;
+        for (auto it = boards_wanted_.begin(); it != boards_wanted_.end();)
+            if (it->second <= frame) {
+                if (it->second == frame) seats.push_back(it->first); // (one asked for a frame gone by: too late, dropped)
+                it = boards_wanted_.erase(it);
+            } else {
+                ++it;
+            }
+        return seats;
+    }
+    std::optional<std::vector<uint8_t>> wait_board(uint8_t seat, uint64_t frame, std::chrono::milliseconds timeout) {
+        std::unique_lock guard(lock_);
+        changed_.wait_for(guard, timeout, [&] { return boards_.count({seat, frame}) != 0; });
+        const auto it = boards_.find({seat, frame});
+        if (it == boards_.end()) return std::nullopt;
+        std::vector<uint8_t> state = std::move(it->second);
+        boards_.erase(it);
+        return state;
     }
 
     net::Session& session() { return *session_; }
@@ -180,6 +217,8 @@ private:
     std::mutex lock_;
     std::condition_variable changed_;
     std::optional<net::StartInfo> start_, resync_;
+    std::vector<std::pair<uint8_t, uint64_t>> boards_wanted_;                // (seat, frame)
+    std::map<std::pair<uint8_t, uint64_t>, std::vector<uint8_t>> boards_; // (seat, frame): a board's state, compressed
     std::atomic<uint64_t> desyncs_{0};
     std::atomic<bool> state_wanted_{false}, resync_pending_{false};
     std::unique_ptr<net::Session> session_; // (last: its thread, calling back into the above, stops first)

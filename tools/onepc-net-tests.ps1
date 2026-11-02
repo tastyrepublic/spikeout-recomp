@@ -6,7 +6,7 @@
 # delay), for as long as all of that run's boards ran (and a shadow in the process: it stops at its own block
 # limit, the board then on alone). Exit code 1 if any differs.
 #
-#   tools/onepc-net-tests.ps1 [-Only two,four,apart,coin1,coin0,poweron]
+#   tools/onepc-net-tests.ps1 [-Only two,four,apart,coin1,coin0,poweron,late1,late0,fourauto,three]
 #
 # two: two seats from build/onepc/mash-5990.state (tools/onepc-tests.ps1 -Prepare makes it), both players
 # mashing (tools/onepc-mash-presses.txt), handed over at 6,000. four: four seats from
@@ -15,7 +15,10 @@
 # coin0, the slave's and the master's coin at 6,100 in the middle of the fight. Input delay 2 (the rules see the
 # other cabinet's coin only that far ahead). poweron, as the window plays (--one-board-held): from power-on,
 # handed over at 100, the other board whole until the rules find the game calm; player 1 in a game alone at
-# 1,300, player 2 joining it at 2,700. Outputs go to build/onepc/net. Run from PowerShell with the
+# 1,300, player 2 joining it at 2,700. late1 and late0: the same game, the slave's or the master's coin at 6,100,
+# 1,480 frames after the hand-back: a shadow from the other machine's real board (Session::want_board). fourauto: four
+# seats from four-8000.state, each other cabinet held until calm, seat 3's coin at 8,600; three: three seats from power-on,
+# the third player joining at 4,600: the rules following each other cabinet. Outputs go to build/onepc/net. Run from PowerShell with the
 # toolchain's PATH (CLAUDE.md); it loads every core for several minutes.
 param([string[]]$Only)
 $ErrorActionPreference = 'Stop'
@@ -29,6 +32,9 @@ $auto = @('--one-board-auto')
 # (from power-on, as the window plays: the link's roles set, player 1 in a game alone, player 2 joining it)
 $poweron = @('--poke', '0:10019E=1@0:2000', '--poke', '1:10019E=2@0:2000', '--press', '0:coin@1200', '--press', '0:start@1300',
     '--press', '0:beat@1700', '--press', '1:coin@2600', '--press', '1:start@2700', '--press', '1:beat@3300', '--press', '1:beat@3650')
+# (three cabinets from power-on: the third a slave too, its player joining at 4,600)
+$three = $poweron + @('--poke', '2:10019E=2@0:3000', '--press', '2:coin@4600', '--press', '2:start@4700', '--press', '2:beat@5300',
+    '--press', '2:beat@5650')
 
 # Name, seats, state, blocks, hand-over frame, options of every run (presses), options of the network runs.
 $tests = @(
@@ -37,7 +43,11 @@ $tests = @(
     @('apart', 2, 'build/onepc/mash-10890.state',          1400000000, 10900, $mash, $auto),
     @('coin1', 2, 'build/onepc/mash-5990.state',           700000000,  6000,  ($mash + @('--press', '1:coin@6100')), $auto),
     @('coin0', 2, 'build/onepc/mash-5990.state',           700000000,  6000,  ($mash + @('--press', '0:coin@6100')), $auto),
-    @('poweron', 2, '',                                    5000000000, 100,   $poweron, ($auto + @('--one-board-held')))
+    @('poweron', 2, '',                                    5000000000, 100,   $poweron, ($auto + @('--one-board-held'))),
+    @('late1', 2, '',                                      5000000000, 100,   ($poweron + @('--press', '1:coin@6100')), ($auto + @('--one-board-held'))),
+    @('late0', 2, '',                                      5000000000, 100,   ($poweron + @('--press', '0:coin@6100')), ($auto + @('--one-board-held'))),
+    @('fourauto', 4, 'build/linkstudy/four2/four-8000.state', 1100000000, 8100, @('--press', '2:coin@8600'), ($auto + @('--one-board-held'))),
+    @('three', 3, '',                                      5000000000, 100,   $three, ($auto + @('--one-board-held')))
 )
 $pattern = { param($b) "^board $b frame (\d+): RAM (\w+)" }
 $last = { param($file, $b) Select-String -Path $file -Pattern (& $pattern $b) | Select-Object -Last 1 | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } }

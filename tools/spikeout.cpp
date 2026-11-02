@@ -230,17 +230,21 @@ struct Shared {
     std::atomic<bool> net_save_request{false}; // F9 in network play: every board's state in a file
     std::vector<uint8_t> net_state;
     std::atomic<bool> catching_up{false};
-    // --net-one-board (two players; docs/netplay.md, "One board a PC over the network"): from the
-    // first frames on, only this player's board runs whole here; the other cabinet is made from
-    // its player's buttons (tools/one_board.hpp), run whole as a shadow where that can't follow it
-    // (from power-on until both play, a time over, a coin). Every board registers its part before
-    // it runs; the last sets them up. Nothing sent differs: the others needn't do the same.
-    bool one_board = false;
+    // One board a PC (docs/netplay.md, "One board a PC in the window"): only this player's board
+    // run whole here, the other cabinets made from their players' buttons (tools/one_board.hpp),
+    // each run whole as a shadow where that can't follow it (held whole until every player is in
+    // and the game is calm; a time over, a coin), a shadow from its machine's real board. Auto (the
+    // default; --net-auto-board): every board, none of it, until this PC can't run them at full
+    // speed; --net-one-board from the start; --net-every-board never. Each board registers its part
+    // as it starts; the module is set up
+    // where they meet, every board stopped. Nothing sent differs: the others needn't do the same.
+    enum class OneBoard { automatic, always, never } one_board = OneBoard::automatic;
     std::unique_ptr<tools::one_board::Game> one_board_game; // (this run's, else none)
     std::array<tools::one_board::Board*, kMaxBoards> one_board_parts{};
-    std::size_t one_board_arrived = 0;
-    std::condition_variable one_board_ready;
-    uint64_t one_board_frame = 0; // the hand-over (the frame each board started from, + 10)
+    std::atomic<bool> one_board_wanted{false};            // (asked: set up at the next meeting)
+    std::atomic<bool> one_board_back{false};              // (every board again: the module gone at a meeting, once it can be)
+    m3::LinkRing* ring = nullptr;                         // (the run's: a board's packets counted with its state)
+    std::atomic<uint64_t> one_board_frame{~0ull};         // the hand-over (~0: none yet)
 };
 
 // The input bits a player's actions are (bank 0: coin, start; the controls byte).
@@ -634,31 +638,19 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             std::printf("spikeout: can't run on from %s\n", load_error.c_str());
         }
     }
-    // --net-one-board: this board's part, registered; the last to come sets them all up (the others wait for it).
+    // One board a PC: this board's part, registered (set up at a meeting, when it's wanted: set_up_one_board).
     tools::one_board::Board part(c, bus, timing, index);
     part.inputs = shared.inputs;
     tools::one_board::Game* const one_board = shared.one_board_game.get();
     if (one_board) {
-        std::unique_lock guard(shared.lock);
+        std::lock_guard guard(shared.lock);
         shared.one_board_parts[index] = &part;
-        if (++shared.one_board_arrived == shared.boards) {
-            tools::one_board::Game::Settings s;
-            s.stays = shown;
-            for (std::size_t b = 0; b < shared.boards; ++b)
-                if (b != shown) s.going.push_back(b);
-            s.frame = shared.one_board_frame = timing.frames() + 10;
-            s.tasks = s.rules = true;
-            s.slice = kTurnLines;
-            s.net = true;
-            one_board->set_up({shared.one_board_parts.begin(), shared.one_board_parts.begin() + shared.boards}, std::move(s));
-            std::printf("spikeout: one board here from frame %llu, the other cabinet made from its player's buttons\n",
-                        static_cast<unsigned long long>(shared.one_board_frame));
-            shared.one_board_ready.notify_all();
-        } else {
-            shared.one_board_ready.wait(guard, [&] { return shared.one_board_arrived == shared.boards; });
-        }
     }
-    const bool goes = one_board && index != shown; // (handed over at shared.one_board_frame)
+    const bool goes = one_board && index != shown; // (handed over at shared.one_board_frame, if it comes)
+    const uint64_t auto_from = timing.frames(); // (Auto: this board's frames timed from 600 on)
+    double auto_ms = 0, auto_every_ms = 0; // (and every board's, when one board was taken for it)
+    uint64_t auto_frames = 0;
+    bool auto_decided = false; // (one board tried: kept, or every board again)
     m3::TilegenRenderer tilegen;
     m3::Real3dRenderer real3d;
     real3d.set_fog_over_nothing(shared.fog_over_nothing);
@@ -751,8 +743,41 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
     auto run_started = clock::now(), frame_ended = clock::now();
     double run_ms = 0, input_ms = 0, frame_ms = 0, end_ms = 0;
     timing.on_frame_end = [&] {
-        tools::one_board::Game::end_frame(part); // (--net-one-board: the other cabinet's frame ends with this board's)
-        if (goes && timing.frames() == shared.one_board_frame) one_board->hand_over(part, true); // (whole until the game is calm)
+        tools::one_board::Game::end_frame(part); // (one board: the other cabinet's frame ends with this board's)
+        // One board, Auto: this board's frames timed (from the end of one frame's waits to the end of the next: its
+        // own work and its meetings with the others, not the waits for inputs or the pacing), 300 at a time; over
+        // 97% of a frame on average, this PC can't run every board at full speed: one board from the next meeting.
+        // Then, once the other cabinet is made by side runs, timed again: one board kept only if it is 5% faster than
+        // every board was, else the other cabinet run whole again (a shadow never handed back) for the rest of the
+        // game (a PC with cores to spare runs every board faster; one busy with something else, neither helps).
+        // (Not while running free (Tab) or catching up, nor in the first 600 frames: the boot's loads.)
+        if (one_board && index == shown && shared.one_board == Shared::OneBoard::automatic && !auto_decided) {
+            const bool switched = shared.one_board_frame != ~0ull;
+            const bool timed = switched ? tools::one_board::Game::on_side_runs(part) : !shared.one_board_wanted;
+            if (!timed || shared.fast || shared.catching_up || timing.frames() < auto_from + 600) {
+                auto_ms = 0, auto_frames = 0;
+            } else {
+                auto_ms += std::chrono::duration<double, std::milli>(clock::now() - run_started).count();
+                if (++auto_frames == 300) {
+                    const double budget = 1000.0 / recomp::FrameTiming::kRefreshHz, ms = auto_ms / 300;
+                    // (tests: SPIKEOUT_TEST_AUTO_MS=N, one board once frames take over N ms: a PC too slow, played)
+                    static const char* test_ms = std::getenv("SPIKEOUT_TEST_AUTO_MS");
+                    if (!switched && ms > (test_ms ? std::atof(test_ms) : 0.97 * budget)) {
+                        std::printf("spikeout: every board takes %.2f ms a frame here (a frame is %.2f): one board from now\n", ms,
+                                    budget);
+                        auto_every_ms = ms;
+                        shared.one_board_wanted = true;
+                    } else if (switched) {
+                        auto_decided = true;
+                        const bool keep = ms < 0.95 * auto_every_ms;
+                        std::printf("spikeout: one board takes %.2f ms a frame here (every board %.2f): %s\n", ms, auto_every_ms,
+                                    keep ? "kept" : "every board again, for the rest of the game");
+                        if (!keep) tools::one_board::Game::keep_whole(part), shared.one_board_back = true;
+                    }
+                    auto_ms = 0, auto_frames = 0;
+                }
+            }
+        }
         if (timing_debug && timing.frames() % 300 == 0) {
             const uint32_t logic = bus.read32(0x1000A8);
             static thread_local uint32_t logic_before2 = 0;
@@ -845,8 +870,25 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             const uint64_t frame = timing.frames();
             // Every board's state, asked for: saved at the end of a frame
             // every board is yet to finish (the last to save sends it: start_games).
-            // (--net-one-board: from the hand-over the other boards don't run here: none to send or save)
-            const bool alone = one_board && frame + 2 >= shared.one_board_frame;
+            // One board a PC: another machine's shadow of this player's board wants its state at the end of this frame
+            // (taken where a save state is, without the sound board; sent compressed, with its packets' counts).
+            if (index == shown)
+                if (std::vector<uint8_t> seats = shared.netplay->take_board_requests(frame); !seats.empty()) // (one state for all who asked)
+                    c.request_snapshot([&, seats, frame](uint32_t) {
+                        m3::State s;
+                        tools::board_state(s, c, timing, {});
+                        m3::LinkRing* r = shared.ring;
+                        const uint64_t taken = r ? r->taken(index) : 0, sent = r ? r->sent(index) : 0;
+                        if (r) r->abandon_cut(index); // (one board's state alone: no cut under way)
+                        const std::vector<uint8_t> packed = tools::one_board::pack_remote(taken, sent, net::compress(s.data()));
+                        for (const uint8_t seat : seats) {
+                            std::printf("spikeout: this board's state at frame %llu to seat %u (%zu KB packed)\n",
+                                        static_cast<unsigned long long>(frame), seat + 1u, packed.size() / 1024);
+                            shared.netplay->session().send_board(seat, frame, packed);
+                        }
+                    });
+            // (one board: from the hand-over the other boards don't run whole here: none to send or save)
+            const bool alone = one_board && shared.one_board_frame != ~0ull;
             if (index == shown && shared.linked.capture_frame == 0 && shared.netplay->take_state_request()) {
                 if (alone)
                     std::printf("spikeout: every board's state asked for at frame %llu: only this one runs here, none sent\n",
@@ -858,7 +900,7 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             // --parallel --load-state runs on from it).
             if (index == shown && shared.linked.capture_frame == 0 && shared.net_save_request.exchange(false)) {
                 if (alone) {
-                    std::printf("spikeout: no save state: only this board runs here (--net-one-board)\n");
+                    std::printf("spikeout: no save state: only this board runs here (one board)\n");
                 } else {
                     shared.linked.to_file = true;
                     shared.linked.path = "spikeout-net-" + std::to_string(frame + 2) + ".state";
@@ -1000,6 +1042,42 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
     out.bus = nullptr;
 }
 
+// One board a PC, wanted: set up where the boards meet (every one stopped there), this player's board
+// staying, the others held whole until the rules find the game calm.
+void set_up_one_board(Shared& shared) {
+    shared.one_board_wanted = false;
+    tools::one_board::Board& stays = *shared.one_board_parts[shared.local];
+    tools::one_board::Game::Settings s;
+    s.stays = shared.local;
+    for (std::size_t b = 0; b < shared.boards; ++b)
+        if (b != shared.local) s.going.push_back(b);
+    s.frame = stays.timing.frames();
+    s.tasks = s.rules = true;
+    s.slice = kTurnLines;
+    s.net = true;
+    // (a shadow from the other machine's real board, asked of it: docs/netplay.md)
+    tools::NetPlay* net = shared.netplay;
+    s.ask_board = [net](std::size_t seat, uint64_t frame) { net->session().want_board(static_cast<uint8_t>(seat), frame); };
+    s.wait_board = [net](std::size_t seat, uint64_t frame) -> std::optional<tools::one_board::RemoteBoard> {
+        auto packed = net->wait_board(static_cast<uint8_t>(seat), frame, std::chrono::seconds(30));
+        if (!packed) return std::nullopt;
+        return tools::one_board::unpack_remote(*packed, [](std::span<const uint8_t> d) { return net::decompress(d); });
+    };
+    s.rewind_link = [ring = shared.ring](std::size_t seat, const tools::one_board::RemoteBoard& b) {
+        if (!ring || (ring->taken(seat) == b.taken && ring->sent(seat) == b.sent)) return;
+        ring->rewind(seat, b.taken);
+        ring->unsend(seat, b.sent);
+    };
+    tools::one_board::Game& game = *shared.one_board_game;
+    game.set_up({shared.one_board_parts.begin(), shared.one_board_parts.begin() + shared.boards}, std::move(s));
+    for (std::size_t b = 0; b < shared.boards; ++b)
+        if (b != shared.local) game.hand_over(*shared.one_board_parts[b], true);
+    shared.one_board_frame = stays.timing.frames();
+    std::printf("spikeout: one board here from frame %llu: the other cabinet held whole until the game is calm, then made from "
+                "its player's buttons\n",
+                static_cast<unsigned long long>(shared.one_board_frame.load()));
+}
+
 // The boards' screens side by side (2) or 2 x 2 (3, 4).
 int grid_columns(std::size_t boards) { return boards == 1 ? 1 : 2; }
 int grid_rows(std::size_t boards) { return boards <= 2 ? 1 : 2; }
@@ -1102,7 +1180,8 @@ int main(int argc, char** argv) {
     const char* dir = nullptr;
     std::string record_path, load_state;
     int scale = 0, cli_render_scale = 0, cli_sound = -1, cli_music = -1;
-    bool real_netboard = true, old_link = false, fog_over_nothing = false, net_one_board = false;
+    bool real_netboard = true, old_link = false, fog_over_nothing = false;
+    Shared::OneBoard net_one_board = Shared::OneBoard::automatic; // --net-every-board, --net-one-board (Auto: the default)
     uint64_t max_frames = 0;
     bool mute = false, cli_quads = false, cli_smooth = false, cli_smooth_log = false, midi_burst = false, dma_instant = false, use_gpu = true, cli_soft_3d = false, fifo = false,
          sleep_pacing = false, list_audio = false;
@@ -1112,7 +1191,9 @@ int main(int argc, char** argv) {
         if (arg == "--scale" && i + 1 < argc) scale = std::max(1, std::atoi(argv[++i]));
         else if (arg == "--netboard" && i + 1 < argc) real_netboard = std::string(argv[++i]) == "real";
         else if (arg == "--net-old-link") old_link = true;
-        else if (arg == "--net-one-board") net_one_board = true;
+        else if (arg == "--net-one-board") net_one_board = Shared::OneBoard::always;
+        else if (arg == "--net-every-board") net_one_board = Shared::OneBoard::never;
+        else if (arg == "--net-auto-board") net_one_board = Shared::OneBoard::automatic;
         else if (arg == "--fog-over-nothing") fog_over_nothing = true;
         else if (arg == "--frames" && i + 1 < argc) max_frames = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--boards" && i + 1 < argc)
@@ -1374,6 +1455,7 @@ int main(int argc, char** argv) {
     auto start_games = [&] {
         ring.reset();
         if (boards > 1) ring = std::make_unique<m3::LinkRing>(boards);
+        shared.ring = ring.get();
         if (shared.netplay) { // network play: the boards at once, the link's packets a slice late (as gamerun --parallel)
             ring->set_deferred(true);
             ring->set_latency((recomp::FrameTiming().frame_cycles() * kTurnLines + recomp::FrameTiming::kLines - 1) /
@@ -1405,16 +1487,24 @@ int main(int argc, char** argv) {
             turns = std::make_unique<tools::Turns>(boards, true, [&] {
                 ring->exchange();
                 shared.linked.finish();
+                // (one board, wanted: set up here, every board stopped; not while their states are being saved)
+                if (shared.one_board_game && shared.one_board_wanted && shared.linked.capture_frame == 0) set_up_one_board(shared);
+                // (every board again: once the other's shadow runs, the module gone)
+                if (shared.one_board_game && shared.one_board_back && shared.one_board_game->tear_down()) {
+                    shared.one_board_back = false;
+                    std::printf("spikeout: every board here again (the other cabinet run whole), as plain network play\n");
+                }
             });
         } else {
             turns = std::make_unique<tools::Turns>(boards);
         }
-        // --net-one-board: a run's own (two players: the rules follow one other cabinet)
+        // One board a PC: a run's own (any number of players: the rules follow each other cabinet, its shadows from its
+        // machine's real board); --net-one-board's wanted at once
         shared.one_board_game.reset();
-        shared.one_board_arrived = 0, shared.one_board_parts = {};
-        if (shared.netplay && shared.one_board) {
-            if (boards == 2) shared.one_board_game = std::make_unique<tools::one_board::Game>();
-            else std::printf("spikeout: --net-one-board is for two players for now: every board runs here\n");
+        shared.one_board_parts = {}, shared.one_board_wanted = false, shared.one_board_back = false, shared.one_board_frame = ~0ull;
+        if (shared.netplay && shared.one_board != Shared::OneBoard::never && boards >= 2) {
+            shared.one_board_game = std::make_unique<tools::one_board::Game>();
+            shared.one_board_wanted = shared.one_board == Shared::OneBoard::always;
         }
         for (std::size_t i = 0; i < boards; ++i)
             games.emplace_back([&, i] { run_game(roms, i, ring.get(), *turns, shared); });

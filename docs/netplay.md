@@ -2265,6 +2265,164 @@ spare one board is slower than every board, for all it costs less in all
 every board at full speed. (Each player's TIME is their own: the two
 windows show different ones.)
 
+**Auto: one board only where every board can't keep up (2026-11-01,
+uncommitted when written).** What holding costs a PC that never needs it
+(gamerun, two boards from power-on, 4,000 frames): 19.0 s plain, 35.2 s
+held (each board's 8 MB RAM kept at every logic count: 22.5 s without it).
+So a held board keeps its RAM and its seeds (`Board::keeping`) only from 10
+frames before the rules ask for it back: 22.4 s, the rest the module's own
+bookkeeping (~0.85 ms a board a frame). Better: none of it until wanted.
+The module is set up where the boards meet (`Turns`' `between`, every board
+stopped there; gamerun `--one-board-late`: from frame 3,500 of the power-on
+game, 7,376 of 7,376 frames the same while both ran), the other board held
+whole until the game is calm.
+
+The window's Auto (`--net-auto-board`): this player's board's frames timed
+(its own work and its meetings, not the waits for inputs or the pacing), 300
+at a time from frame 600; over 97% of a frame (16.86 ms), one board from the
+next meeting. Then, once the other cabinet is on side runs, timed again: kept
+only if 5% faster than every board was, else the other run whole again for
+the rest of the game (`Game::keep_whole`: a shadow never handed back), and
+once its shadow runs the module goes (`Game::tear_down`: the game's own
+hooks back; its hash and state still kept to itself). Seen in
+`tools/onepc-window-test.ps1 -OneBoard auto` (the joiner told it's slow,
+`SPIKEOUT_TEST_AUTO_MS`): one board at 899, handed back at 4,624, then 13.1
+ms against every board's 8.7: every board again from 4,924, the module gone,
+18.3-18.7 ms in the fight's heavy scenes (17.4-18.2 plain; 19-19.6 with
+the module kept); no hash check differed. Two games on one PC are slow
+enough there that the host's own Auto switched too (17.2-17.9 ms).
+
+**Not yet: a slave's shadow in the power-on game.** In the power-on game
+(gamerun, both boards in one process, the master staying), a shadow of the
+slave never started: "no shadow state for count N, again" every count (each
+a state taken: 27 ms frames). The side runs stay exact (6,043 frames the
+same), but where the master has finished count C (its 0x36E94, where the
+state is taken), the module has the slave's link only of C-1 and its own
+variables only after C-1 (`Cabinets::shadow_state` wants both after C; in
+the fight tests, from the same point, it has them, and a count of own
+variables more). A coin at 4,700 the same: not the heavy frame at 4,920
+(first thought), nor the hold (an immediate hand-over at 4,620 the same),
+nor the counts' relation at the frames' ends (the slave a count behind the
+master in both games), nor the hand-back's catch-up (the same in both).
+
+Where each board links and finishes a count (`ONEBOARD_TRACE=FROM:TO`, the
+line in its frame): in the fight both finish a count at line ~40 (the
+master's work spilling into the next frame) and link at ~290; in the
+power-on game the master finishes at ~390, in the frame it linked, the
+slave at ~40 two frames on. The shadow's rule (the master's state a frame
+on is the slave after C) holds in both; but there the shadow starts at
+line ~390, after the frame's meetings, and the check was at the frame's
+top, before the slave's link (~287) and flow. Fixed:
+- the leaving board takes the shadow's frame's meetings up to its start,
+  and checks then (`shadow_wait`; in the fight the start comes before the
+  first meeting: as before);
+- the module makes the slave's link near its frame's end (write_at, line
+  ~412): asked for one at the meeting before the shadow's start instead
+  (`Cabinets::link_early`, a request kept to its own frame);
+- 0x1040C4-0x1040CF are twelve countdowns the vblank's interrupt steps down
+  (0x496C), which side runs never take: 0x1040C7, a cabinet's own, stayed at
+  10 in the module's copy; now stepped each frame (`Cabinets::end_frame`).
+With them a coin at 4,700 (a shadow 21 frames after the hand-back) is exact,
+7,376 of 7,376 frames (the shadow, and its hand-back at 5,005), and the
+test scripts the same as before (onepc-tests 18/18, the network runs 6/6).
+
+Still not: a coin at 6,100 (its shadow 1,420 frames after the hand-back)
+differs 4 frames after the shadow starts: the slave's record's camera
+heading (+0x0D) first. (Where master and slave differ, 100 counts of that
+fight paired by count: their variables, link memory, drawing, players 3
+and 4, the camera and around it; the bytes the module keeps cover the
+variables, the camera and the areas.) The master finishes count C at line
+~391 of frame F, the slave at ~38 of F+2, 1.17 frames on (its own camera's
+view drawn: its work longer, over the next vblank), so the shadow, the
+master's state a frame on, starts ~70 lines before the real slave finishes.
+Tested with the real slave's whole RAM where it finished C (dumped in the
+whole-board game, given to the shadow as it starts): differs at 6,045; the
+same placed where the slave finished (71 lines on): 6,044. So not its RAM,
+nor only where it starts: its devices and CPU too (its Real3D and DMA
+timings, its decrementer: the master's, in a state taken from the master).
+A slave's shadow made from the master's state is exact only where the
+slave's work fits the master's frame (the fight tests, the coin at 4,700),
+not in general.
+
+**Shadows from the other machine's real board (2026-11-01, uncommitted
+when written).** In network play a shadow is no longer made from this
+board's state: the rules, wanting one, ask the other cabinet's machine
+(`net::Session::want_board`: a reliable message, as a joiner's state comes)
+for its own board's state at the end of a frame 30 ahead
+(`one_board::Game::kAskAhead`); that machine takes it there, as a save
+state is taken (`tools::board_state`, no sound board), with the packets its
+network board had taken in and sent (`LinkRing::taken`, `sent`), and sends
+it compressed (`Session::send_board`; ~5.3 MB packed in the fight). Here
+the leaving board's thread waits for it at the top of that frame (the
+staying board at its first meeting meanwhile: 0.5-0.7 s on this machine,
+a pause), loads it whole and runs on as the shadow. Exact by construction:
+the module's guesses at the other cabinet go no further than the blocks it
+makes. gamerun `--one-board-local-shadows` keeps the old way (and one
+process has no other machine: unchanged there).
+
+Getting it exact (the tools: `GAMERUN_PARTS_FRAMES=FROM:TO`, each part of a
+board's state hashed every frame (CPU, frame timing, network board, bus,
+RAM); `GAMERUN_MEET_FRAMES=B:FROM:TO`, its network board at each meeting;
+`ONEBOARD_SENDS=B:FROM:TO`, its packets taken in and sent): the state is of
+the end of frame Y, the frame count then Y, so it goes on from the top of
+frame Y here; first it went on from Y+1, a frame behind the staying board
+(its packets a frame ahead of it), and it differed within two frames. With
+that right, both machines' counts of the board's packets are the same where
+it is taken, and the shadow is the real board, every part, frame after
+frame. (`LinkRing::rewind` and `unsend` put the ring right were they to
+differ: not seen since.)
+
+Proved, `tools/onepc-net-tests.ps1` (two processes, every frame of each
+machine's own board against the whole-board run): the eight runs the same,
+among them late1 and late0, the coin at 6,100 1,480 frames after the
+hand-back that no shadow could follow before (a shadow of the slave, and
+of the master), 7,374 of 7,374 frames on both machines; apart, coin1 and
+coin0 with shadows from the real boards too. And two windows
+(`tools/onepc-window-test.ps1 -OneBoard joiner`, the host's coin at
+6,100): the joiner's shadow of the host's board from the host's window
+(5,256 KB, 555 ms), handed back at 6,430; no hash check differed to frame
+7,000.
+
+A shadow wanted after the trouble has started is proved by these runs: the
+coins at 6,100 are seen at 6,097-6,101 (the input delay's frames ahead)
+and their shadows start at 6,127-6,131, the side runs following the
+cabinets 27-31 frames into it; apart's shadow is wanted at 10,902 with the
+time already at 0 and starts at 10,932. All exact.
+
+**Three and four players (2026-11-01, uncommitted when written).** With
+shadows from the real boards the rules follow each other cabinet
+(`Game::rules_each`; the old rules, one other cabinet, kept for this
+board's own shadows): a shadow of each asked of its machine, its own calm
+frames and hand-back. Trouble and calm made for more than two: a cabinet
+run whole here (held or shadowed) out of the game's mode, a player
+joining, is trouble for all and keeps every one from calm; any cabinet's
+coin or start too (a join changes every cabinet's game). A machine asked
+by several at once sends them one state. And with these shadows no board
+keeps its RAM at each count (`keep_ram`: the local shadows' only). Found
+on the way:
+- three players: the third cabinet's records differed as soon as it was
+  on side runs (in one process too, not the network): player 4's slot,
+  empty, carries each cabinet's own leftovers in its entry's second word as
+  in its third (0x74808 writes it from the unused players' objects); the
+  module now takes both (+0x30 and +0x34 for player 3, +0x3C and +0x40 for
+  player 4) from the cabinet's own while the seat is empty. In one process,
+  board 2 of three handed over alone: 7,444 of 7,444 frames; boards 1 and
+  2: to 7,385, where the reference's others stopped.
+- a leaving board's thread waits through the meetings as long as it isn't
+  alone: with four, three of them went on meeting each other after the
+  staying board had stopped (`Turns::finished`: they stop with it).
+
+Proved (`tools/onepc-net-tests.ps1`, now ten runs): fourauto, four
+processes from four-8000.state, each other cabinet held until calm, seat
+3's coin at 8,600 (every other machine a shadow of it from its real board,
+one state sent to three; every machine shadowing all the others then, any
+coin being everyone's trouble): 1,718 of 1,718 frames on each of the
+four; three, three processes from power-on, the third player joining at
+4,600 (everyone held until all three are in and calm, ~6,620).
+
+The window's default is Auto again (`--net-every-board` for every board,
+`--net-one-board` from the start).
+
 **gamerun and the window in one game (2026-11-01).** A gamerun host with a
 window joining differed on the host's board by frame 120, every board run
 in both. gamerun sends no settings EEPROM (unless `--eeprom`); for a seat

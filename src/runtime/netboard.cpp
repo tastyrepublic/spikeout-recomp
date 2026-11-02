@@ -46,6 +46,10 @@ public:
     Port(std::shared_ptr<State> state, std::size_t index) : state_(std::move(state)), index_(index) {}
 
     void send(const uint8_t* data, std::size_t size) override {
+        if (state_->skip[index_]) { // (LinkRing::unsend: sent already)
+            --state_->skip[index_];
+            return;
+        }
         Packet p{now_ + state_->latency, state_->sent[index_]++, std::vector<uint8_t>(data, data + size)};
         if (state_->deferred) {
             state_->outbox[index_].push_back(std::move(p));
@@ -58,6 +62,10 @@ public:
         auto& inbox = state_->inbox[index_];
         if (inbox.empty() || inbox.front().at > now_) return {};
         if (state_->saved[index_]) state_->taken_since[index_].push_back(inbox.front()); // (a cut under way)
+        if (state_->on_receive) state_->on_receive(index_, inbox.front().seq, inbox.front().at, now_);
+        auto& recent = state_->recent[index_]; // (the last few, for a rewind)
+        recent.push_back(inbox.front());
+        while (recent.size() > 64) recent.pop_front();
         std::vector<uint8_t> packet = std::move(inbox.front().data);
         inbox.pop_front();
         ++state_->delivered[index_];
@@ -92,6 +100,37 @@ LinkRing::LinkRing(std::size_t boards) : state_(std::make_shared<State>()) {
         v->resize(n, 0);
     state_->saved.resize(n, 0);
     state_->taken_since.resize(n);
+    state_->recent.resize(n);
+    state_->skip.resize(n, 0);
+}
+
+void LinkRing::unsend(std::size_t i, uint64_t sent) {
+    State& r = *state_;
+    if (sent < r.sent[i]) r.skip[i] += r.sent[i] - sent; // (sent here already, at their times: its own again not sent)
+}
+
+void LinkRing::rewind(std::size_t i, uint64_t taken) {
+    State& r = *state_;
+    const uint64_t here = r.taken[i] + r.drop[i];
+    if (taken > here) { // (it had taken in more there: those to come here dropped)
+        r.drop[i] += taken - here;
+        return;
+    }
+    if (r.drop[i]) { // (some still to drop: fewer now)
+        const uint64_t less = std::min(r.drop[i], here - taken);
+        r.drop[i] -= less;
+        if (r.taken[i] + r.drop[i] == taken) return;
+    }
+    // (those it took in from `taken` on, given again as still on their way: in the sender's queue, before any it has
+    // sent since, to come in at the next meeting's exchange (deferred), as they came there; taken in sooner, the board's
+    // first look at its link would find them where there it found none)
+    std::deque<Packet> again;
+    for (const Packet& p : r.recent[i])
+        if (p.seq >= taken) again.push_back(p);
+    auto& queue = r.deferred ? r.outbox[(i + r.inbox.size() - 1) % r.inbox.size()] : r.inbox[i];
+    for (auto it = again.rbegin(); it != again.rend(); ++it) queue.push_front(*it);
+    r.delivered[i] -= std::min<uint64_t>(r.delivered[i], again.size());
+    r.taken[i] -= std::min<uint64_t>(r.taken[i], again.size());
 }
 
 void LinkRing::State::arrive(std::size_t to, Packet p) {

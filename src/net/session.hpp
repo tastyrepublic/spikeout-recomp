@@ -124,6 +124,10 @@ public:
         std::function<void(const StartInfo&)> resync;
         // Seat `seat` is a player's from `frame` on (a cabinet taken).
         std::function<void(uint8_t seat, uint64_t frame)> taken;
+        // One board a PC: seat `seat` wants our own board's state at the end of `frame` (send_board), for its shadow
+        // of it; and a seat's board's state, as we asked (want_board).
+        std::function<void(uint8_t seat, uint64_t frame)> board_wanted;
+        std::function<void(uint8_t seat, uint64_t frame, std::vector<uint8_t> state)> board;
         std::function<void(const std::string&)> log; // what happened, for the frontend
     };
 
@@ -165,6 +169,10 @@ public:
     // The host, asked (Callbacks::state_wanted): every board's state at
     // the end of `frame` (compressed), for the machines waiting for it.
     void send_state(uint64_t frame, std::vector<uint8_t> state);
+    // One board a PC: ask seat `seat` for its own board's state at the end of `frame` (Callbacks::board); and send ours,
+    // asked (Callbacks::board_wanted; compressed).
+    void want_board(uint8_t seat, uint64_t frame);
+    void send_board(uint8_t seat, uint64_t frame, std::vector<uint8_t> state);
     // A player joined in progress, its boards caught up with the others':
     // its cabinet is its own from a frame the authority chooses (until
     // then, none; Callbacks::taken).
