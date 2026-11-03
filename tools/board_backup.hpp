@@ -37,7 +37,7 @@
 
 namespace tools::backup {
 
-constexpr uint64_t kEvery = 120; // frames between a board's backups (about 2 seconds)
+constexpr uint64_t kEvery = 120; // frames between a board's backups (about 2 seconds; rollback: at the first settled frame from then)
 
 namespace detail {
 struct Out {
@@ -83,6 +83,10 @@ enum : uint8_t { kWhole = 0, kChanges = 1 };
 // the board's packets' counts then (LinkRing::taken / sent); then whole() or changes() for each machine to send to.
 class Maker {
 public:
+    // (pages compared with its copy, not listed from the memory's record of writes: that record is read once and
+    // starts again, and rollback's snapshots read it every frame; each taking the other's pages, a backup's changes
+    // missed most of them (a board from them wrong), and the frames' snapshots at a backup missed its)
+    Maker() { snaps_.compare_only(true); }
     void take(uint64_t frame, const std::function<void(m3::State&)>& walk, uint64_t taken, uint64_t sent) {
         base_ = frame_;
         snaps_.save(frame, walk);

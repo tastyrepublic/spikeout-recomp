@@ -170,9 +170,19 @@ public:
             partings_.push_back({seat, frame});
         };
         cb.board = [this](uint8_t seat, uint64_t frame, std::vector<uint8_t> state) {
+            // ("my backup of that frame" (one_board::pack_remote with no state: its 16 bytes of counts): that backup came
+            // just before it; the copy kept then, as another backup (for another machine's shadow) may follow at once)
+            std::optional<backup::Copy> copy;
+            if (state.size() == 16)
+                if (backup::Copy c = keeper_.copy(seat); c.frame == frame) copy = std::move(c);
             {
                 std::lock_guard guard(lock_);
                 boards_[{seat, frame}] = std::move(state);
+                if (copy) {
+                    for (auto it = board_copies_.begin(); it != board_copies_.end();) // (any never taken, long gone by)
+                        it = it->first.first == seat && it->first.second + 600 < frame ? board_copies_.erase(it) : std::next(it);
+                    board_copies_[{seat, frame}] = std::move(*copy);
+                }
             }
             changed_.notify_all();
         };
@@ -196,7 +206,7 @@ public:
     void send_backup(uint64_t frame, std::vector<uint8_t> raw, std::vector<uint8_t> seats) {
         {
             std::lock_guard guard(backup_lock_);
-            backups_out_.push_back({frame, std::move(raw), std::move(seats)});
+            backups_out_.push_back({frame, std::move(raw), std::move(seats), {}});
             if (!backup_sender_.joinable())
                 backup_sender_ = std::jthread([this](std::stop_token stop) {
                     for (;;) {
@@ -208,10 +218,23 @@ public:
                             b = std::move(backups_out_.front());
                             backups_out_.pop_front();
                         }
+                        if (b.raw.empty()) { // (send_board_after_backups)
+                            for (const uint8_t seat : b.seats) session_->send_board(seat, b.frame, b.board);
+                            continue;
+                        }
                         const std::vector<uint8_t> packed = net::compress(b.raw);
                         for (const uint8_t seat : b.seats) session_->send_backup(seat, b.frame, packed);
                     }
                 });
+        }
+        backup_queued_.notify_all();
+    }
+    // One board a PC: a board's state for other machines' shadows, sent after the backups queued before it (from
+    // their thread: it may say "my backup of this frame", which must come first).
+    void send_board_after_backups(uint64_t frame, std::vector<uint8_t> board, std::vector<uint8_t> seats) {
+        {
+            std::lock_guard guard(backup_lock_);
+            backups_out_.push_back({frame, {}, std::move(seats), std::move(board)});
         }
         backup_queued_.notify_all();
     }
@@ -269,6 +292,31 @@ public:
     std::vector<uint8_t> take_taken() {
         std::lock_guard guard(lock_);
         return std::exchange(taken_, {});
+    }
+    // One board a PC: a board's state for a shadow said to be its backup of `frame` (send_board_after_backups): the
+    // copy kept here of that board, once that backup is in (sent before it; a few seconds at most).
+    std::optional<backup::Copy> backup_at(uint8_t seat, uint64_t frame) {
+        {
+            std::lock_guard guard(lock_);
+            if (const auto it = board_copies_.find({seat, frame}); it != board_copies_.end()) {
+                backup::Copy copy = std::move(it->second);
+                board_copies_.erase(it);
+                return copy;
+            }
+        }
+        for (int k = 0; k < 5000; ++k) {
+            const auto f = keeper_.frame(seat);
+            if (f && *f >= frame) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        backup::Copy copy = keeper_.copy(seat);
+        if (copy.frame != frame) return std::nullopt;
+        return copy;
+    }
+    // Whether that state has come (waited for up to `timeout`), left for wait_board.
+    bool has_board(uint8_t seat, uint64_t frame, std::chrono::milliseconds timeout) {
+        std::unique_lock guard(lock_);
+        return changed_.wait_for(guard, timeout, [&] { return boards_.count({seat, frame}) != 0; });
     }
     std::optional<std::vector<uint8_t>> wait_board(uint8_t seat, uint64_t frame, std::chrono::milliseconds timeout) {
         std::unique_lock guard(lock_);
@@ -348,6 +396,7 @@ private:
     std::vector<uint8_t> gone_, taken_, whole_wanted_, backup_missing_;
     std::array<bool, net::kMaxSeats> absent_{}; // (by seat: its player gone, nobody's since)
     std::map<std::pair<uint8_t, uint64_t>, std::vector<uint8_t>> boards_; // (seat, frame): a board's state, compressed
+    std::map<std::pair<uint8_t, uint64_t>, backup::Copy> board_copies_;    // (and "my backup": the copy as it came)
     backup::Keeper keeper_{net::kMaxSeats};
     std::atomic<uint64_t> desyncs_{0};
     std::atomic<bool> state_wanted_{false}, resync_pending_{false};
@@ -356,6 +405,7 @@ private:
     struct BackupOut {
         uint64_t frame = 0;
         std::vector<uint8_t> raw, seats;
+        std::vector<uint8_t> board; // (send_board_after_backups: a board's state, sent as is; raw empty)
     };
     std::mutex backup_lock_;
     std::condition_variable_any backup_queued_;

@@ -24,6 +24,7 @@
 #include <bit>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
@@ -32,6 +33,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -45,9 +47,16 @@ struct HandedBack {
 
 // Network play: a board's state as its own machine took it at the end of a frame (tools::board_state, no sound), and
 // the packets its network board had taken in from the ring there (LinkRing::taken).
+// Or (from_backup) as its backup of that frame has it (tools::backup::Copy, kept here and brought up to it by changes:
+// the state's big buffers whole, the small rest), sent instead of the whole state (5 MB packed, saved and packed on
+// the game's thread): only the pages written since its last backup, off it (no state here: "my backup", pack_remote
+// with none; the counts then from the backup).
 struct RemoteBoard {
     std::vector<uint8_t> state;
     uint64_t taken = 0, sent = 0; // (and those it had sent)
+    std::vector<std::vector<uint8_t>> regions; // (from_backup)
+    std::vector<uint8_t> small;
+    bool from_backup() const { return !regions.empty(); }
 };
 // (on the network: the counts, then the state compressed)
 inline std::vector<uint8_t> pack_remote(uint64_t taken, uint64_t sent, std::vector<uint8_t> packed_state) {
@@ -67,6 +76,7 @@ inline std::optional<RemoteBoard> unpack_remote(const std::vector<uint8_t>& in,
         b.taken |= uint64_t{in[static_cast<std::size_t>(k)]} << (8 * k);
         b.sent |= uint64_t{in[static_cast<std::size_t>(8 + k)]} << (8 * k);
     }
+    if (in.size() == 16) return b; // ("my backup": no state)
     auto state = unpack(std::span<const uint8_t>(in).subspan(16));
     if (!state) return std::nullopt;
     b.state = std::move(*state);
@@ -161,6 +171,11 @@ public:
         std::function<uint64_t(std::size_t board)> rewound;
         std::function<void(uint64_t frame)> pin; // (rollback::Linked::pin: nothing gone back to before it)
         uint64_t guess_ahead = 0; // (the frames a guess may run ahead: the rollback's window)
+        // Rollback, a shadow's state not come by its frame: whether it has (waited for up to `ms`, left to wait_board),
+        // and every board run again from a frame (InputTable::run_again_from). The game runs on meanwhile, the other
+        // cabinet on side runs; once it comes, back to its frame, loaded there (shadow_wait).
+        std::function<bool(std::size_t seat, uint64_t frame, uint32_t ms)> has_board;
+        std::function<void(uint64_t frame)> run_again_from;
     };
     static constexpr uint64_t kAskAhead = 30; // (frames: the other machine reaching it, its state on its way)
     // (the calm frames before a hand-back; tests: ONEBOARD_CALM=N, a hand-back put where wanted)
@@ -382,6 +397,15 @@ public:
         return true;
     }
     void want_whole(bool on) { boards_[settings_.stays]->whole_for_state = on; }
+    // Rollback: whether a shadow here waits for a state of a frame before `frame` (Settings::has_board): every board
+    // will go back to that one and run `frame` again, so this board's own state of `frame`, asked by another machine,
+    // is taken when it does (as after a guess found wrong: what was run first had that cabinet on side runs).
+    bool late_before(uint64_t frame) const {
+        std::lock_guard guard(lock_);
+        for (const auto& [seat, l] : late_)
+            if (l.frame < frame) return true;
+        return false;
+    }
     void parting(std::size_t seat, uint64_t frame) {
         const Board& m = *boards_[settings_.stays];
         if (!m.cabinets || !goes(seat)) return;
@@ -496,11 +520,49 @@ public:
                 // (its state at the end of frame `want`, its count of frames then `want`: on from the top of frame
                 // `want` here, this board having taken frame want - 1's meetings, the staying board at its first of `want`)
                 uint64_t want = ~0ull;
+                bool late = false; // (its state not come by its frame: on side runs meanwhile)
                 {
                     std::lock_guard guard(lock_);
                     if (const auto it = remote_frames_.find(m.index); it != remote_frames_.end()) {
                         want = it->second;
-                        if (f > want) remote_frames_.erase(it), want = ~0ull; // (gone by: asked again)
+                        if (const auto l = late_.find(m.index); l != late_.end() && l->second.frame == want) late = true;
+                        else if (f > want) remote_frames_.erase(it), want = ~0ull; // (gone by: asked again)
+                    }
+                }
+                // (rollback, its state late: once it has come, every board back to its frame, this one loading it there
+                // as the boards meet again (rewound below: f set back to it); come too late to go back that far, waited
+                // for where there is still room)
+                if (late && f > want) {
+                    bool back_asked = false;
+                    {
+                        std::lock_guard guard(lock_);
+                        back_asked = late_.at(m.index).back_asked;
+                    }
+                    const uint64_t room = settings_.guess_ahead > kLateRoom ? settings_.guess_ahead - kLateRoom : 0;
+                    if (!back_asked) {
+                        const bool last = f >= want + room;
+                        // (every shadow asked for that frame come: they go back together, loaded at it together; one
+                        // loaded there already couldn't be gone back to)
+                        if (come(m.index, want, f, last ? 30000 : 0) && all_come(want, f, last ? 30000 : 0)) {
+                            {
+                                std::lock_guard guard(lock_);
+                                for (const auto& [seat, at] : remote_frames_)
+                                    if (at == want) late_[seat] = Late{want, true};
+                            }
+                            settings_.run_again_from(want + 1);
+                            std::printf("board %zu: its shadow's state for frame %llu came at frame %llu: every board back to it\n",
+                                        m.index, (unsigned long long)want, (unsigned long long)f);
+                        } else if (last) {
+                            std::printf("board %zu: no state of it came from its machine for frame %llu\n", m.index,
+                                        (unsigned long long)want);
+                            std::lock_guard guard(lock_);
+                            late_.erase(m.index), remote_frames_.erase(m.index); // (asked again by the rules, if still wanted)
+                            want = ~0ull;
+                        }
+                    } else if (f > want + settings_.guess_ahead) { // (not gone back after all: given up, asked again)
+                        std::lock_guard guard(lock_);
+                        late_.erase(m.index), remote_frames_.erase(m.index);
+                        want = ~0ull;
                     }
                 }
                 // (rollback: only where every input up to it is in (waited for: the other machine's for this frame
@@ -514,9 +576,31 @@ public:
                     {
                         std::lock_guard guard(lock_);
                         remote_frames_[m.index] = again;
+                        late_.erase(m.index);
                     }
                     settings_.ask_board(m.index, again);
+                    if (late_loads()) settings_.pin(again);
                     want = ~0ull;
+                }
+                // (rollback: its state not come yet, the game run on, the other cabinet on side runs meanwhile; loaded
+                // here once it has, every board gone back to this frame)
+                if (want != ~0ull && f == want && late_loads()) {
+                    // (the shadows of one frame deciding one at a time: all of them loaded at it, or none, gone back to
+                    // it together once every state has come (one loaded there, that frame couldn't be gone back to);
+                    // one deciding to load marked so first, its state then taken from those come)
+                    std::lock_guard group(group_lock_);
+                    const bool wait = late_waiting(want) || !come(m.index, want, f, 0) || !all_come(want, f, 0);
+                    std::lock_guard guard(lock_);
+                    if (!wait) {
+                        loading_[m.index] = want;
+                    } else {
+                        if (!late_.count(m.index)) {
+                            late_[m.index] = Late{want, false};
+                            std::printf("board %zu: its shadow's state for frame %llu not come yet: on side runs meanwhile\n", m.index,
+                                        (unsigned long long)want);
+                        }
+                        want = ~0ull; // (not loaded at this frame now)
+                    }
                 }
                 if (want != ~0ull && f == want) {
                     const bool loaded = load_remote_shadow(m, want);
@@ -524,6 +608,10 @@ public:
                         // frame up to it settled)
                         settings_.part_whole(m.index, true, want);
                         if (settings_.pin) settings_.pin(want);
+                        // (loaded late, gone back to: the link's part of this frame kept from before the load; nothing
+                        // gone back to it again, the next frame's inputs waited for, not guessed)
+                        std::lock_guard guard(lock_);
+                        if (late_.count(m.index)) no_guess_[m.index] = std::max(no_guess_[m.index], want + 1);
                     }
                     {
                         std::lock_guard guard(lock_);
@@ -531,6 +619,8 @@ public:
                         // its backup run on to a frame ahead)
                         if (const auto it = remote_frames_.find(m.index); it != remote_frames_.end() && it->second == want)
                             remote_frames_.erase(it);
+                        late_.erase(m.index);
+                        loading_.erase(m.index);
                     }
                     if (loaded) return true;
                 }
@@ -787,6 +877,7 @@ private:
                 if (trouble && !remote_frames_.count(gone) && !lost_.count(gone)) { // (asked once, for a frame a little ahead)
                     remote_frames_[gone] = frame + kAskAhead;
                     settings_.ask_board(gone, frame + kAskAhead);
+                    if (late_loads()) settings_.pin(frame + kAskAhead); // (kept as it is, should its state come late)
                     std::printf("board %zu: a shadow of board %zu wanted at frame %llu (least time %u/64 s, mode %u, mask %08x%s): its "
                                 "machine's state asked for frame %llu\n",
                                 m.index, gone, (unsigned long long)frame, least, m.bus.read8(0x10400A), mask, joining ? ", its buttons" : "",
@@ -931,8 +1022,29 @@ private:
             std::lock_guard guard(other.cabinets_lock);
             other.cabinets->stop_making(m.index);
         }
-        m3::State s(std::move(state->state));
-        board_state(s, m.c, m.timing, {}); // (its network board, EEPROM and all, as they are there)
+        if (state->from_backup()) { // (its big buffers copied in, then the small rest loaded around them: backup::Replay)
+            struct Collect : m3::State::Regions {
+                std::vector<std::pair<uint8_t*, std::size_t>> found;
+                void region(void* data, std::size_t bytes) override { found.emplace_back(static_cast<uint8_t*>(data), bytes); }
+            } here;
+            {
+                m3::State s;
+                s.set_regions(&here);
+                board_state(s, m.c, m.timing, {});
+            }
+            if (here.found.size() != state->regions.size()) throw std::runtime_error("shadow from a backup: not this board's buffers");
+            for (std::size_t r = 0; r < here.found.size(); ++r) {
+                if (here.found[r].second != state->regions[r].size()) throw std::runtime_error("shadow from a backup: a buffer's size");
+                std::memcpy(here.found[r].first, state->regions[r].data(), here.found[r].second);
+            }
+            Collect check;
+            m3::State s(std::move(state->small));
+            s.set_regions(&check);
+            board_state(s, m.c, m.timing, {});
+        } else {
+            m3::State s(std::move(state->state));
+            board_state(s, m.c, m.timing, {}); // (its network board, EEPROM and all, as they are there)
+        }
         // (and the ring's packets to it from where its network board had taken them in there: over there this board's
         // blocks are written by the module, later in the frame, so one may not have come yet that has come here)
         if (settings_.rewind_link) settings_.rewind_link(m.index, *state);
@@ -1007,6 +1119,56 @@ private:
     uint64_t held_waits_ = 0;          // (held_waits: the staying board's thread only)
     double held_wait_seconds_ = 0;
     bool rolling() const { return static_cast<bool>(settings_.settled); }
+    // (rollback: a shadow's state loaded late, the game gone back to its frame (Settings::has_board); tests and the
+    // old way: ONEBOARD_WAIT_SHADOWS=1, waited for at its frame)
+    bool late_loads() const {
+        static const bool wait = std::getenv("ONEBOARD_WAIT_SHADOWS") != nullptr;
+        return rolling() && settings_.has_board && settings_.run_again_from && settings_.pin && !wait;
+    }
+    // (a shadow whose state hadn't come by its frame: that frame, and whether every board was sent back to it; lock_)
+    struct Late {
+        uint64_t frame = 0;
+        bool back_asked = false;
+    };
+    std::map<std::size_t, Late> late_;
+    std::map<std::size_t, uint64_t> loading_; // (a shadow loading at that frame: all_come; lock_)
+    std::mutex group_lock_; // (shadow_wait: whether each shadow loads at its frame, one board at a time)
+    // (going back from as far as the window less this: waited for there, the frames since still kept)
+    static constexpr uint64_t kLateRoom = 20;
+    // (whether a shadow's state for `want` has come, at this board's frame `f`; tests: ONEBOARD_LATE_TEST=N, taken
+    // as not come before frame want + N)
+    bool come(std::size_t seat, uint64_t want, uint64_t f, uint32_t ms) const {
+        static const uint64_t hold = [] {
+            const char* n = std::getenv("ONEBOARD_LATE_TEST");
+            return n ? std::strtoull(n, nullptr, 0) : uint64_t{0};
+        }();
+        if (f < want + hold) {
+            std::lock_guard guard(lock_);
+            if (const auto l = late_.find(seat); l == late_.end() || !l->second.back_asked) return false; // (gone back for it: come)
+        }
+        return settings_.has_board(seat, want, ms);
+    }
+    // (another shadow of that frame found late already, not gone back for yet: this one waits with it, though its own
+    // state has come, the two loaded there together; loaded first, that frame couldn't be gone back to for the other)
+    bool late_waiting(uint64_t want) const {
+        std::lock_guard guard(lock_);
+        for (const auto& [seat, l] : late_)
+            if (l.frame == want && !l.back_asked) return true;
+        return false;
+    }
+    // (and every other shadow asked for the same frame)
+    bool all_come(uint64_t want, uint64_t f, uint32_t ms) const {
+        std::vector<std::size_t> seats;
+        {
+            std::lock_guard guard(lock_);
+            // (one being loaded: come, its state taken from those come (wait_board) as it loads)
+            for (const auto& [seat, at] : remote_frames_)
+                if (at == want && !(loading_.count(seat) && loading_.at(seat) == want)) seats.push_back(seat);
+        }
+        for (const std::size_t seat : seats)
+            if (!come(seat, want, f, ms)) return false;
+        return true;
+    }
     std::set<std::size_t> departed_, lost_;
     // (a board whose player went, run on here from its backup: by board, the run's state when done)
     struct Replaying {

@@ -36,12 +36,23 @@ Read this first; the older hand-off below is history.
   rollback) never took that path; gamerun's tests don't use rollback. The
   window now logs the ports' counts and the staying board's frame at a
   shadow's load, and the state's save/compress/wait/unpack times.
-  NEXT (owner's order): the ~1 s stutter at a coin in one board mode (the
-  shadow's state: saved 35 ms + compressed 110 ms on the sender's game
-  thread, ~500 ms waited here on localhost, 5.3 MB: seconds online):
-  1. don't wait: keep on side runs, and when the state comes, roll back to
-  its frame, load it and run on quietly; 2. send changes against the last
-  backup; 3. compress off the game thread.
+  DONE (2026-11-03): the stutter at a coin in one board mode (was ~0.5 s
+  frozen): with rollback a shadow's state no longer waited for (late
+  loads: on side runs meanwhile, every board back to its frame once it
+  comes, shadows of one frame together), and sent as the board's backup
+  of that frame (~700 KB of changes, packed off the game thread, not 27 MB
+  saved and packed on it). Window: ~51 fps for a second at the coin. Fixed
+  with it (all root causes, docs/netplay.md "Shadows that come late"):
+  states served only for frames not run again; the ring's recent packets
+  after a rollback; backups and rollback reading the same write record
+  (backups compare pages now); a backup copy kept as its note came;
+  "come" counting a shadow being loaded. Tests: ONEBOARD_LATE_TEST=N,
+  ONEBOARD_WAIT_SHADOWS=1 (the old wait), ONEBOARD_WHOLE_STATES=1 (gamerun:
+  whole states); the scratchpad's late-load checks were obrb.ps1 (2
+  seats) and obrbn.ps1 (3-4) from the previous session, against a
+  reference. OPEN: onepc-net-tests "leave" fails now and then in a full
+  back-to-back run (the leaver's whole state never reaching the host;
+  passes alone; that path unchanged).
 - Proof tools: gamerun GAMERUN_2D_HASH=1 (2D layers each frame),
   GAMERUN_STATE_PARTS=1, GAMERUN_NETBOARD_DUMP=DIR (network board state
   files at whole-state frames), GAMERUN_FLUSH=1, ONEBOARD_CALM=N,

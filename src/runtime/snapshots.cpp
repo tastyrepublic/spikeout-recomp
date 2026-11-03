@@ -62,7 +62,7 @@ void Snapshots::save(uint64_t frame, const std::function<void(State&)>& walk) {
         pages_last_ = 0;
         for (const auto& [data, bytes] : found) {
             regions_.push_back({data, bytes, std::vector<uint8_t>(data, data + bytes)});
-            watched::forget_written(data, bytes);
+            if (watched_) watched::forget_written(data, bytes); // (comparing: the record left to whoever reads it)
             pages_last_ += (bytes + kPage - 1) / kPage;
         }
         frames_.push_back(std::move(f));
@@ -156,7 +156,8 @@ void Snapshots::restore(uint64_t frame, const std::function<void(State&)>& walk)
         }
         frames_.pop_back();
     }
-    for (Region& r : regions_) watched::forget_written(r.data, r.bytes);
+    if (watched_)
+        for (Region& r : regions_) watched::forget_written(r.data, r.bytes);
     // The small state (the big buffers' bytes are in place already: as a
     // state loads them, in the walk, before what follows them).
     Collect check;

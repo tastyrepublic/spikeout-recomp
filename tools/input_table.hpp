@@ -89,6 +89,12 @@ public:
         std::lock_guard guard(lock_);
         return wrong_;
     }
+    // Every board to run again from `frame` on, as if a guess there had been wrong (one board a PC: a shadow's state
+    // come after its frame, loaded there: tools::one_board).
+    void run_again_from(uint64_t frame) {
+        std::lock_guard guard(lock_);
+        wrong_ = std::min(wrong_, frame);
+    }
     // Going back to the end of `frame`: the guesses after it made again as the frames run again.
     void forget_guesses_after(uint64_t frame) {
         std::lock_guard guard(lock_);

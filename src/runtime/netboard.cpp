@@ -127,7 +127,7 @@ void LinkRing::rewind(std::size_t i, uint64_t taken) {
     // first look at its link would find them where there it found none)
     std::deque<Packet> again;
     for (const Packet& p : r.recent[i])
-        if (p.seq >= taken) again.push_back(p);
+        if (p.seq >= taken && p.seq < r.taken[i]) again.push_back(p); // (taken in here, not there)
     auto& queue = r.deferred ? r.outbox[(i + r.inbox.size() - 1) % r.inbox.size()] : r.inbox[i];
     for (auto it = again.rbegin(); it != again.rend(); ++it) queue.push_front(*it);
     r.delivered[i] -= std::min<uint64_t>(r.delivered[i], again.size());
@@ -188,6 +188,10 @@ void LinkRing::cut_state(m3::State& s) {
             r.delivered[to] = delivered;
             r.inbox[to] = std::move(on_way);
             r.outbox[from].clear();
+            // (the last it took in, for a rewind: only those before its point; those after it taken in after the
+            // point gone back to (rollback), on their way again or not sent yet: a rewind would give them again)
+            auto& recent = r.recent[to];
+            while (!recent.empty() && recent.back().seq >= r.taken[to]) recent.pop_back();
         }
     }
     std::fill(r.saved.begin(), r.saved.end(), 0);

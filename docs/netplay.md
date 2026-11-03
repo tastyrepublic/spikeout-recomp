@@ -2855,6 +2855,61 @@ every board at 5,700 and took the seat at 5,741, no hash check differing
 to 6,700 (they compare the host's own board only: a board it doesn't run
 on side runs isn't hashed).
 
+### Shadows that come late (2026-11-03)
+
+The owner's report: in the window (one board, rollback) the host froze
+for good right after the joiner's coin, and the coin's shadow made every
+game stutter. The freeze: a board on side runs waiting for its shadow
+(Game::shadow_wait) took a rollback's frame as the last one run, a frame
+ahead of the staying board from then on; the shadow taken after it was
+loaded a frame early, its link two packets past the staying board's, and
+both waited for ever (game logic +0, no packets). Fixed: f = rewound - 1.
+
+The stutter was the shadow's state: saved (35 ms) and packed (110 ms,
+27 MB to 5.3 MB) on the asked machine's game thread, waited for here
+(~500 ms on one PC; seconds over the internet). Now, with rollback:
+- Late loads. The frame asked for is pinned when asked (kept as it is).
+  At it, a state not come yet isn't waited for: the game runs on, the
+  cabinet on side runs (`not come yet`); once it comes, every board is
+  sent back to that frame (InputTable::run_again_from, as a guess found
+  wrong), the shadow loaded there as the boards meet again, the frames
+  since run again quietly, the next frame's inputs waited for (nothing
+  gone back to the load's frame again: the ring's part of it is from
+  before the load). Shadows asked for one frame load there together or
+  wait together (a frame with one loaded can't be gone back to for
+  another); each decides one at a time, marked loading before it takes
+  its state (those come are counted from what has come: one taken out
+  for loading still counts). Come too late to go back (the window less
+  20 frames), waited for there.
+- A machine asked for its board's state takes it only for a frame it
+  won't run again (its inputs in, no guess wrong) and while no shadow of
+  its own waits late for an earlier frame (it goes back there: its
+  first run of this frame had that cabinet on side runs).
+- The state is the board's backup of that frame (tools::backup::Maker):
+  the pages written since its last backup, sent to every machine by the
+  backup thread (packed there), then "my backup" (pack_remote with no
+  state) to those who asked; the receiver keeps the copy as that note
+  comes (another backup may follow at once) and loads it as a backup
+  replay does. ~700 KB unpacked at a coin. A player leaving still sends
+  the whole state (its process ends after it).
+- Backups with rollback: taken at the first settled frame once 120 have
+  passed (only on multiples of 120, they almost stopped); and they
+  compare pages with their copy: the memory's record of writes is read
+  once and starts again, rollback's snapshots read it every frame, and
+  each took the other's pages (a backup's changes missed most; the
+  frame's snapshot at a backup missed its).
+- The ring: after a rollback's cut is loaded, the packets a port took
+  after that point dropped from its recent list (a later rewind gave them
+  again: 64 stale packets, the loaded board wrong from its first frame).
+
+Proved against a reference (linked boards in one process, every frame's
+RAM hash): 2 seats (either coin, the state on time or held back 15 or 40
+frames, ONEBOARD_LATE_TEST), 3 and 4 seats (a coin after the hand-backs:
+6 and 12 shadows, all loaded); onepc-tests and onepc-net-tests the same.
+The window: ~51 fps for a second at the coin (was ~0.5 s frozen). The
+old ways for comparison: ONEBOARD_WAIT_SHADOWS=1, ONEBOARD_WHOLE_STATES=1
+(gamerun).
+
 ## Plan
 
 1. Single board, single player (milestones 1–4).

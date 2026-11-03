@@ -915,7 +915,17 @@ void set_up_one_board(std::vector<std::unique_ptr<Machine>>& machines, const Opt
         s.wait_board = [net](std::size_t seat, uint64_t frame) -> std::optional<tools::one_board::RemoteBoard> {
             auto packed = net->wait_board(static_cast<uint8_t>(seat), frame, std::chrono::seconds(30));
             if (!packed) return std::nullopt;
-            return tools::one_board::unpack_remote(*packed, [](std::span<const uint8_t> d) { return net::decompress(d); });
+            auto board = tools::one_board::unpack_remote(*packed, [](std::span<const uint8_t> d) { return net::decompress(d); });
+            if (board && board->state.empty()) { // ("my backup of that frame": from the copy kept here)
+                auto copy = net->backup_at(static_cast<uint8_t>(seat), frame);
+                if (!copy) {
+                    std::printf("board %zu: its backup of frame %llu not here\n", seat, (unsigned long long)frame);
+                    return std::nullopt;
+                }
+                board->regions = std::move(copy->regions), board->small = std::move(copy->small);
+                board->taken = copy->taken, board->sent = copy->sent;
+            }
+            return board;
         };
         s.rewind_link = [](std::size_t seat, const tools::one_board::RemoteBoard& b) {
             // (taken at the same point of the same frame, the counts are the same here and there; put right if not)
@@ -946,7 +956,7 @@ void set_up_one_board(std::vector<std::unique_ptr<Machine>>& machines, const Opt
                 if (!result) return std::nullopt;
                 std::printf("board %zu: run on from its backup at frame %llu to %llu in %.1f s\n", seat, (unsigned long long)copy.frame,
                             (unsigned long long)until, result->seconds);
-                return tools::one_board::RemoteBoard{std::move(result->state), result->taken, result->sent};
+                return tools::one_board::RemoteBoard{std::move(result->state), result->taken, result->sent, {}, {}};
             } catch (const std::exception& e) {
                 std::printf("board %zu: its backup can't be run on: %s\n", seat, e.what());
                 return std::nullopt;
@@ -970,6 +980,12 @@ void set_up_one_board(std::vector<std::unique_ptr<Machine>>& machines, const Opt
             s.pin = [](uint64_t frame) {
                 if (g_net_rb) g_net_rb->pin(frame);
             };
+            if (!o.one_board_local_shadows) {
+                s.has_board = [net](std::size_t seat, uint64_t frame, uint32_t ms) {
+                    return net->has_board(static_cast<uint8_t>(seat), frame, std::chrono::milliseconds(ms));
+                };
+                s.run_again_from = [](uint64_t frame) { (*g_machines)[0]->inputs->run_again_from(frame); };
+            }
         }
         if (g_ring)
             g_ring->on_departure([net](std::size_t to, uint64_t seq, uint64_t at, const std::vector<uint8_t>& data) {
@@ -2110,13 +2126,13 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         // (network play: this board's backup on every other machine, now and then, for one board a PC's (any of them may
         // be running this board on side runs): the pages changed since the last, or whole to a machine that has none of
         // it; packed and sent off this thread)
-        if (o.netplay && m.index == o.local_seat && !o.one_board_local_shadows && frame % tools::backup::kEvery == 0 &&
-            o.netplay->session().seated() && // (a machine still joining sends none: its cabinet asked for first)
-            (!g_net_rb || (m.inputs->all_set(frame, o.boards) && m.inputs->wrong_from() > frame))) { // (--net-rollback: a settled frame's)
+        // (at the snapshot point; a shadow's request too: the backups first)
+        const auto backup_now = [&m, &o](uint64_t at) {
+            if (m.backups.frame() == at) return; // (taken already: the backups' turn this frame)
             for (const uint8_t s : o.netplay->take_whole_wanted()) m.backup_bases.erase(s);
-            m.c.request_snapshot([&m, &o, frame](uint32_t) {
+            {
                 const uint64_t taken = g_ring ? g_ring->taken(m.index) : 0, sent = g_ring ? g_ring->sent(m.index) : 0;
-                m.backups.take(frame, [&m](m3::State& s) { tools::board_state(s, m.c, m.timing, {}); }, taken, sent);
+                m.backups.take(at, [&m](m3::State& s) { tools::board_state(s, m.c, m.timing, {}); }, taken, sent);
                 if (g_ring) g_ring->abandon_cut(m.index); // (one board's state alone: no cut under way)
                 std::vector<uint8_t> to_changes, to_whole;
                 for (uint8_t s = 0; s < o.boards; ++s) {
@@ -2128,18 +2144,22 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
                 if (!to_changes.empty()) {
                     std::vector<uint8_t> raw = m.backups.changes();
                     changes = raw.size();
-                    o.netplay->send_backup(frame, std::move(raw), std::move(to_changes));
+                    o.netplay->send_backup(at, std::move(raw), std::move(to_changes));
                 }
                 if (!to_whole.empty()) {
                     std::vector<uint8_t> raw = m.backups.whole();
                     whole = raw.size();
-                    o.netplay->send_backup(frame, std::move(raw), std::move(to_whole));
+                    o.netplay->send_backup(at, std::move(raw), std::move(to_whole));
                 }
                 static const bool say = std::getenv("ONEBOARD_BACKUPS") != nullptr; // (tests: their sizes, before packing)
                 if (say) std::printf("board %zu frame %llu: backup, %zu KB of changes, %zu KB whole (unpacked)\n", m.index,
-                                     (unsigned long long)frame, changes / 1024, whole / 1024);
-            });
-        }
+                                     (unsigned long long)at, changes / 1024, whole / 1024);
+            }
+        };
+        if (o.netplay && m.index == o.local_seat && !o.one_board_local_shadows && frame >= m.backups.frame() + tools::backup::kEvery &&
+            o.netplay->session().seated() && // (a machine still joining sends none: its cabinet asked for first)
+            (!g_net_rb || (m.inputs->all_set(frame, o.boards) && m.inputs->wrong_from() > frame))) // (--net-rollback: a settled frame's)
+            m.c.request_snapshot([backup_now, frame](uint32_t) { backup_now(frame); });
         // One board a PC: another machine's shadow of this board wants its state at the end of this frame (taken where
         // a save state is, without the sound board; sent compressed); or every other machine, this player leaving.
         if (o.netplay && m.index == o.local_seat) {
@@ -2148,10 +2168,12 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             // frame before: a frame's are set at its end, for the next; the machine that asked sets its own of this
             // frame only once its shadow is loaded); one guessed wrong, the frame is run again (from the next meeting)
             // and the state taken then)
+            // (and none while a shadow here waits for a state of a frame before it, come late: every board goes back
+            // there, this frame run again with that cabinet whole)
             if (g_net_rb && !seats.empty() && frame &&
-                (!m.inputs->wait_all(frame - 1, o.boards) || m.inputs->wrong_from() < frame)) {
+                (!m.inputs->wait_all(frame - 1, o.boards) || m.inputs->wrong_from() < frame || g_one_board.late_before(frame))) {
                 for (const uint8_t seat : seats) o.netplay->board_request_again(seat, frame);
-                std::printf("board %zu: frame %llu guessed wrong: its state taken when it is run again\n", m.index,
+                std::printf("board %zu: frame %llu guessed wrong or to be run again: its state taken when it is\n", m.index,
                             static_cast<unsigned long long>(frame));
                 seats.clear();
             }
@@ -2160,7 +2182,19 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
                     if (s != m.index && std::find(seats.begin(), seats.end(), s) == seats.end()) seats.push_back(s);
                 m.leave_next = true;
             }
-            if (!seats.empty()) // (one state for all who asked)
+            // (as its backup of this frame, the pages written since the last one, sent to every machine off this thread,
+            // then "my backup" to those who asked; leaving, the whole state, sent at once. Tests and the old way:
+            // ONEBOARD_WHOLE_STATES=1)
+            static const bool whole_states = std::getenv("ONEBOARD_WHOLE_STATES") != nullptr;
+            const bool by_backup = !seats.empty() && !m.leave_next && !o.one_board_local_shadows && !whole_states;
+            if (by_backup)
+                m.c.request_snapshot([&m, &o, backup_now, seats, frame](uint32_t) {
+                    backup_now(frame);
+                    std::printf("net: this board's state at frame %llu to seat(s) %u..: its backup\n", (unsigned long long)frame,
+                                seats.front() + 1u);
+                    o.netplay->send_board_after_backups(frame, tools::one_board::pack_remote(0, 0, {}), seats);
+                });
+            else if (!seats.empty()) // (one state for all who asked)
                 m.c.request_snapshot([&m, &o, seats, frame](uint32_t) {
                     m3::State s;
                     tools::board_state(s, m.c, m.timing, {});
