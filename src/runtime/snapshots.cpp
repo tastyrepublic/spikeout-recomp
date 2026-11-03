@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace m3 {
 
@@ -85,11 +86,52 @@ void Snapshots::save(uint64_t frame, const std::function<void(State&)>& walk) {
         pages_last_ += pages_.size();
     }
     frames_.push_back(std::move(f));
+    if (every_) { // (sparse: the older frames thinned, and kept as far back as `depth` frames)
+        const uint64_t newest = frames_.back().frame;
+        for (std::size_t i = 1; i + 1 < frames_.size();) { // (the oldest kept as it is: the run's start, until gone by)
+            const uint64_t k = frames_[i].frame;
+            if (newest - k > dense_ && k % every_ != 0 && !pinned_.count(k)) merge_into_next(i);
+            else ++i;
+        }
+        while (frames_.size() > 1 && frames_[1].frame + depth_ <= newest) {
+            for (Page& pg : frames_.front().pages) spare_.push_back(std::move(pg.before));
+            small_spare_ = std::move(frames_.front().small);
+            frames_.pop_front();
+        }
+        pinned_.erase(pinned_.begin(), pinned_.lower_bound(frames_.front().frame)); // (gone by)
+        return;
+    }
     while (frames_.size() > depth_ + 1) { // (the oldest's pages go back to a frame no longer kept)
         for (Page& pg : frames_.front().pages) spare_.push_back(std::move(pg.before));
         small_spare_ = std::move(frames_.front().small);
         frames_.pop_front();
     }
+}
+
+void Snapshots::merge_into_next(std::size_t i) {
+    Frame& gone = frames_[i];
+    Frame& next = frames_[i + 1];
+    // (undoing `next` then `gone` gives the frame before `gone`: one list, the older contents where both have a page)
+    std::unordered_map<uint64_t, std::size_t> at; // (next's pages by region and page)
+    at.reserve(next.pages.size());
+    for (std::size_t k = 0; k < next.pages.size(); ++k) at[uint64_t{next.pages[k].region} << 32 | next.pages[k].page] = k;
+    for (Page& pg : gone.pages) {
+        if (const auto it = at.find(uint64_t{pg.region} << 32 | pg.page); it != at.end()) {
+            spare_.push_back(std::move(next.pages[it->second].before));
+            next.pages[it->second].before = std::move(pg.before);
+        } else {
+            next.pages.push_back(std::move(pg));
+        }
+    }
+    small_spare_ = std::move(gone.small);
+    frames_.erase(frames_.begin() + static_cast<std::ptrdiff_t>(i));
+}
+
+uint64_t Snapshots::kept_at_or_before(uint64_t frame) const {
+    uint64_t best = ~0ull;
+    for (const Frame& f : frames_)
+        if (f.frame <= frame) best = f.frame;
+    return best;
 }
 
 bool Snapshots::has(uint64_t frame) const {

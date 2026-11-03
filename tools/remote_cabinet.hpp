@@ -367,6 +367,17 @@ public:
     double netboard_seconds() const { return netboard_seconds_; }
     uint64_t journal_bytes() const { return journal_bytes_; } // (RAM bytes its side runs wrote, put back after)
     uint64_t side_runs() const { return side_runs_; }
+    // (where the side runs' time went, by kind: runs, ms set up, ms in the game code, ms put back)
+    std::string profile() const {
+        std::string out;
+        char line[160];
+        for (const auto& [pc, p] : profile_) {
+            std::snprintf(line, sizeof line, "  %06x%s: %llu runs, %.0f ms set up, %.0f ms game code, %.0f ms put back\n", pc & ~1u,
+                          (pc & 1) ? " (its tasks)" : "", (unsigned long long)p.runs, 1000 * p.setup, 1000 * p.game, 1000 * p.after);
+            out += line;
+        }
+        return out;
+    }
     std::string failed() const { return failed_; }
     // (measuring: the bytes its own state holds, what a copy of it every frame would cost)
     std::size_t state_bytes() const {
@@ -427,6 +438,26 @@ private:
     struct Players { // (as this board writes its own record of a count: each player's first word, +0x44, +0x2A, +0x74, +0x76)
         std::array<std::array<uint32_t, 5>, 4> p{};
     };
+
+public:
+    // Rollback (tools/rollback.hpp): everything it carries from one frame to the next, the other cabinets' made
+    // here, to be put back with the boards (taken at a frame's end, outside any side run).
+    struct Kept {
+        std::vector<Remote> remotes;
+        std::map<uint32_t, Players> players_at;
+        std::vector<uint32_t> ahead_record;
+        std::map<uint32_t, std::vector<ppc::CpuState>> view_chars;
+        std::vector<uint8_t> captured;
+        ppc::CpuState captured_cpu{};
+        uint32_t idle_msr = 0;
+    };
+    Kept keep() const { return {remotes_, players_at_, ahead_record_, view_chars_, captured_, captured_cpu_, idle_msr_}; }
+    void put_back(const Kept& k) {
+        remotes_ = k.remotes, players_at_ = k.players_at, ahead_record_ = k.ahead_record, view_chars_ = k.view_chars;
+        captured_ = k.captured, captured_cpu_ = k.captured_cpu, idle_msr_ = k.idle_msr;
+    }
+
+private:
 
     Remote* find(std::size_t seat) {
         for (Remote& r : remotes_)
@@ -515,6 +546,19 @@ private:
     uint64_t heavy_frames_ = 0, first_heavy_ = 0;
     double side_seconds_ = 0, whole_seconds_ = 0, netboard_seconds_ = 0;
     int timer_depth_ = 0;
+    struct Prof {
+        uint64_t runs = 0;
+        double setup = 0, game = 0, after = 0; // (seconds: set up, its game code, put back)
+    };
+    std::map<uint32_t, Prof> profile_; // (by the side run's PC, +1 with its tasks; kLink the link's)
+    void profiled(uint32_t key, std::chrono::steady_clock::time_point begun, std::chrono::steady_clock::time_point ran_from,
+                  std::chrono::steady_clock::time_point ran_to) {
+        Prof& p = profile_[key];
+        ++p.runs;
+        p.setup += std::chrono::duration<double>(ran_from - begun).count();
+        p.game += std::chrono::duration<double>(ran_to - ran_from).count();
+        p.after += std::chrono::duration<double>(std::chrono::steady_clock::now() - ran_to).count();
+    }
     struct Timer { // (adds the time it lived to `to`; one inside another counted once)
         double& to;
         int& depth;
@@ -548,6 +592,7 @@ inline bool Cabinets::started(Remote& r, uint32_t logic) {
 
 inline void Cabinets::side_run(Remote& r, uint32_t pc, uint32_t* flags, bool keep_camera, uint32_t count, uint32_t character, bool tasks) {
     const Timer whole{whole_seconds_, timer_depth_};
+    const auto begun = std::chrono::steady_clock::now(); // (profile_)
     const uint32_t logic = bus_.read32(kLogicCounter);
     const recomp::Context::Aside aside = c_.set_aside();
     bus_.journal(true);
@@ -643,7 +688,8 @@ inline void Cabinets::side_run(Remote& r, uint32_t pc, uint32_t* flags, bool kee
         in_tasks_ = in_drawing_ = false;
         if (failed_.empty()) failed_ = "seat " + std::to_string(r.seat + 1) + ", side run at " + std::to_string(pc) + ": " + e.what();
     }
-    side_seconds_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - started_at).count();
+    const auto ran_to = std::chrono::steady_clock::now();
+    side_seconds_ += std::chrono::duration<double>(ran_to - started_at).count();
     ++side_runs_;
     inside_ = false;
     bus_.hold_device_writes(false);
@@ -665,6 +711,7 @@ inline void Cabinets::side_run(Remote& r, uint32_t pc, uint32_t* flags, bool kee
     bus_.undo_journal();
     bus_.journal(false);
     c_.put_back(aside);
+    profiled(pc | (tasks ? 1u : 0u), begun, started_at, ran_to);
 }
 
 inline void Cabinets::shake(Remote& r, uint32_t kind) {
@@ -702,6 +749,9 @@ inline bool Cabinets::hook(uint32_t pc) {
         if (c_.cpu.lr == kAfterUpdateReturn) in_update_ = false;
         return true;
     case kRecordWrite: {
+        // (none after this count: kept from before the count went back (a cabinet joining a link: its own count, run
+        // alone in attract, set to the link's), else found again when the count gets there)
+        players_at_.erase(players_at_.upper_bound(logic), players_at_.end());
         Players& at = players_at_[logic];
         for (std::size_t k = 0; k < 4; ++k) {
             const uint32_t p = player_object(k);
@@ -784,6 +834,7 @@ inline bool Cabinets::hook(uint32_t pc) {
         return true;
     case kViewTest:
         in_view_ = false;
+        view_chars_.erase(view_chars_.upper_bound(logic), view_chars_.end()); // (as players_at_: none from before the count went back)
         view_chars_[logic].push_back(c_.cpu);
         while (view_chars_.size() > 4) view_chars_.erase(view_chars_.begin());
         for (Remote& r : remotes_) {
@@ -916,6 +967,7 @@ inline void Cabinets::merge_own(const std::vector<uint8_t>& own) {
 
 inline void Cabinets::link_run(Remote& r, uint64_t frame) {
     const Timer whole{whole_seconds_, timer_depth_};
+    const auto begun = std::chrono::steady_clock::now(); // (profile_)
     const uint32_t logic = r.logic + 1; // (the count it goes on to, unless held back)
     // (two counts ahead of this board (this one missed a frame): its flow of the count before run now, on this
     // board's world after the count before that, its working record from it)
@@ -999,7 +1051,8 @@ inline void Cabinets::link_run(Remote& r, uint64_t frame) {
             failed_ = "seat " + std::to_string(r.seat + 1) + ", link run: " + e.what() + w;
         }
     }
-    side_seconds_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - started_at).count();
+    const auto ran_to = std::chrono::steady_clock::now();
+    side_seconds_ += std::chrono::duration<double>(ran_to - started_at).count();
     ++side_runs_;
     bus_.borrow_netboard(nullptr);
     bus_.hold_device_writes(false);
@@ -1024,6 +1077,7 @@ inline void Cabinets::link_run(Remote& r, uint64_t frame) {
     journal_bytes_ += bus_.journal_size();
     bus_.undo_journal();
     bus_.journal(false);
+    profiled(kLink, begun, started_at, ran_to);
     c_.put_back(aside);
     if (now_logic != r.logic) {
         r.logic = now_logic, r.logic_frame = frame, r.frame_at[now_logic] = frame;

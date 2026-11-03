@@ -63,6 +63,7 @@ add_library(m3runtime
     src/runtime/watched_memory.cpp
     src/runtime/snapshots.cpp
     src/runtime/cpu_time.cpp
+    src/runtime/memory_free.cpp
     src/games/games.cpp
     src/games/spikeofe.cpp)
 target_include_directories(m3runtime PUBLIC src)

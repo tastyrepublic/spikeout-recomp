@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <set>
 #include <vector>
 
 namespace m3 {
@@ -25,6 +26,26 @@ class Snapshots {
 public:
     // `depth`: how many frames back one can go.
     explicit Snapshots(std::size_t depth) : depth_(depth) {}
+    // Kept sparser further back (rollback's long window: going far back is rare, and the frames after a kept one
+    // can be run again): every frame for the newest `dense`, beyond that only frames that are multiples of `every`
+    // (the others merged into the one after: going back past them gives the same); `depth` then counts frames, not
+    // snapshots. Before the first save.
+    void set_sparse(std::size_t dense, std::size_t every) { dense_ = dense, every_ = every; }
+    // And `frame` kept as it is once saved, never merged into the next (rollback: the first frame after a switch
+    // between side runs and whole: nothing gone back to before it), until it is out of the window.
+    void pin(uint64_t frame) { pinned_.insert(frame); }
+    // The newest kept frame at or before `frame` (none: ~0).
+    uint64_t kept_at_or_before(uint64_t frame) const;
+    std::size_t kept() const { return frames_.size(); }
+    // What the kept frames hold (their pages and small states), the copy of the big buffers aside.
+    std::size_t kept_bytes() const {
+        std::size_t n = 0;
+        for (const Frame& f : frames_) {
+            n += f.small.size();
+            for (const Page& p : f.pages) n += p.before.size();
+        }
+        return n;
+    }
 
     // The board as it is now, as frame `frame` (later than the last, or the
     // history is started again). `walk` is the board's state function (as
@@ -82,7 +103,12 @@ private:
     void written(Region& r, std::vector<std::size_t>& pages);
     static std::size_t page_bytes(const Region& r, std::size_t page);
 
+    // A frame kept no longer: its pages into the next one's (where both have a page, the older contents, its).
+    void merge_into_next(std::size_t i);
+
     std::size_t depth_;
+    std::size_t dense_ = 0, every_ = 0; // (set_sparse; 0: every frame kept)
+    std::set<uint64_t> pinned_;         // (pin)
     std::vector<Region> regions_;
     std::deque<Frame> frames_;
     std::vector<std::vector<uint8_t>> spare_; // page buffers to use again

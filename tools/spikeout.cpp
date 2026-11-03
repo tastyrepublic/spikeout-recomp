@@ -135,9 +135,9 @@ namespace {
 constexpr int kWidth = m3::TilegenRenderer::kWidth, kHeight = m3::TilegenRenderer::kHeight;
 constexpr std::size_t kMaxBoards = 4;
 constexpr uint32_t kTurnLines = 8; // display lines a linked board runs before passing the turn on
-// Rollback's time sync: frames ahead of another player before this machine slows a little, and behind the one
-// furthest on before it runs unpaced to catch up.
-constexpr int64_t kSyncAhead = 4, kSyncBehind = 8;
+// Rollback's time sync: frames ahead of another player before this machine slows a little, behind the one furthest
+// on before it runs a little faster, and before it runs unpaced to catch up (a stall).
+constexpr int64_t kSyncAhead = 4, kSyncBehind = 8, kSyncFar = 60;
 
 struct Stop {}; // thrown from the frame callback to end the run
 
@@ -251,9 +251,10 @@ struct Shared {
     enum class OneBoard { automatic, always, never } one_board = OneBoard::automatic;
     // Rollback (--net-rollback N, tools::rollback): every board running up to N frames ahead on guessed inputs, going
     // back together when a guess was wrong (0: none, as delay-based play). The run's, while it runs.
-    uint64_t rollback_frames = 0;
+    uint64_t rollback_frames = 0, rollback_wanted = 0; // (wanted: --net-rollback's; the run's what this machine's memory can keep)
     std::unique_ptr<tools::rollback::Linked> rollback;
-    std::atomic<uint64_t> sync_slowed{0}, sync_free{0}; // (rollback's time sync: frames slowed a little, frames run unpaced)
+    std::atomic<uint64_t> sync_slowed{0}, sync_sooner{0}, sync_free{0}; // (rollback's time sync: frames slowed, sooner, unpaced)
+    std::atomic<uint64_t> rollback_from{0}; // (rollback's snapshots and guesses from this frame on: a joiner's, once caught up)
     std::unique_ptr<tools::one_board::Game> one_board_game; // (this run's, else none)
     std::array<tools::one_board::Board*, kMaxBoards> one_board_parts{};
     std::atomic<bool> one_board_wanted{false};            // (asked: set up at the next meeting)
@@ -689,6 +690,8 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
     using clock = std::chrono::steady_clock;
     auto start = clock::now();
     uint64_t paced_from = timing.frames(); // frame count at `start` (a save state's, loaded)
+    static const bool meet_timing = std::getenv("SPIKEOUT_NET_DEBUG") != nullptr; // (its reports, below)
+    double meet_ms = 0, pass_ms = 0, side_ms_before = 0;
     timing.on_display_line = [&](uint32_t line) {
         if (pictured && !shared.catching_up && !(shared.rollback && shared.rollback->quiet(index, timing.frames() + 1))) { // (a board not shown needn't draw its 2D: the game never reads it back)
             if (line == 0) tilegen.begin_frame();
@@ -696,8 +699,13 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
         }
         if (linked && line % kTurnLines == kTurnLines - 1) {
             bus.netboard().sync(c.cycles());
+            const auto met = meet_timing ? clock::now() : clock::time_point{};
             tools::one_board::Game::meet(part, line); // (--net-one-board: the other cabinet's blocks due)
+            const auto passing = meet_timing ? clock::now() : clock::time_point{};
             turns.pass(index);
+            if (meet_timing) // (SPIKEOUT_NET_DEBUG: the module's link runs at the meetings, and the meetings' waits)
+                meet_ms += std::chrono::duration<double, std::milli>(passing - met).count(),
+                    pass_ms += std::chrono::duration<double, std::milli>(clock::now() - passing).count();
             if (shared.rollback && shared.rollback->rewind(index)) throw tools::rollback::Rewound{}; // (gone back, with the others)
         }
     };
@@ -715,19 +723,27 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             return;
         }
         // Rollback's time sync: ahead of another player by more than a few frames (as their inputs show): this frame
-        // a little later (more the further ahead: the game at 50-95% until they are close); well behind the one furthest on: not
-        // held to the pace this frame (catching up). Without it a machine runs on ahead of a slower or stalled one
+        // a little later (more the further ahead: the game at 50-95% until they are close); well behind the one furthest on:
+        // a little sooner (the game at up to 110%), or, far behind, not held to the pace (catching up after a stall).
+        // Without it a machine runs on ahead of a slower or stalled one
         // as far as the window, and every input of the other's then takes it back that far.
         if (shared.rollback && shared.netplay) {
             const auto lead = shared.netplay->lead(shown);
             if (std::getenv("SPIKEOUT_NET_DEBUG") && timing.frames() % 30 == 0) // (SPIKEOUT_NET_DEBUG: the lead it goes by)
                 std::printf("spikeout: frame %llu: ahead %lld, behind %lld\n", static_cast<unsigned long long>(timing.frames()),
                             static_cast<long long>(lead.ahead), static_cast<long long>(lead.behind));
-            if (lead.behind < -kSyncBehind) {
+            // (behind: this frame a little earlier, a fiftieth of a frame for each frame beyond, up to a tenth (the game's
+            // sound commands come that much faster: run unpaced, the music raced); far behind (a stall): unpaced)
+            if (lead.behind < -kSyncFar) {
                 ++shared.sync_free;
                 start = clock::now();
                 paced_from = timing.frames();
                 return;
+            }
+            if (lead.behind < -kSyncBehind) {
+                ++shared.sync_sooner;
+                const double sooner = std::min(0.1, 0.02 * static_cast<double>(-lead.behind - kSyncBehind));
+                start -= std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(sooner / recomp::FrameTiming::kRefreshHz));
             }
             if (lead.ahead > kSyncAhead) { // (the further ahead, the more: a twentieth of a frame for each frame, up to half)
                 ++shared.sync_slowed;
@@ -852,10 +868,13 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
                 // (and the game's own logic counter: 300 more a 300 frames at full speed; docs/fidelity.md)
                 const uint32_t logic = bus.read32(0x1000A8);
                 static thread_local uint32_t logic_before = 0;
+                const double side_ms = part.cabinets ? 1000 * part.cabinets->whole_seconds() - side_ms_before : 0;
+                side_ms_before += side_ms;
                 std::printf("spikeout: board %zu, frames to %llu: %.2f ms a frame (%.2f running, %.2f its end, %.2f waiting for "
-                            "inputs), game logic +%u\n",
+                            "inputs; of the running %.2f side runs, %.2f at meetings, %.2f waiting at them), game logic +%u\n",
                             index, static_cast<unsigned long long>(timing.frames()), frame_ms / 300, run_ms / 300, end_ms / 300,
-                            input_ms / 300, logic - logic_before);
+                            input_ms / 300, side_ms / 300, meet_ms / 300, pass_ms / 300, logic - logic_before);
+                meet_ms = pass_ms = 0;
                 logic_before = logic;
                 if (shared.sound)
                     if (const auto m = shared.sound->music_now())
@@ -966,6 +985,15 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
                         if (s != index && std::find(seats.begin(), seats.end(), s) == seats.end()) seats.push_back(s);
                 if (!seats.empty()) // (one state for all who asked)
                     c.request_snapshot([&, seats, frame, parting](uint32_t) {
+                        // (rollback: only a frame that won't be run again: the inputs it ran on waited for (those up
+                        // to the frame before: a frame's are set at its end, for the next; the machine that asked sets
+                        // its own of this frame only once its shadow is loaded); one guessed wrong, asked again and
+                        // taken when the frame is run again, from the next meeting)
+                        if (shared.rollback && !parting && frame &&
+                            (!shared.inputs->wait_all(frame - 1, shared.boards, shown) || shared.inputs->wrong_from() < frame)) {
+                            for (const uint8_t seat : seats) shared.netplay->board_request_again(seat, frame);
+                            return;
+                        }
                         m3::State s;
                         tools::board_state(s, c, timing, {});
                         m3::LinkRing* r = shared.ring;
@@ -1089,6 +1117,7 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
                                 static_cast<unsigned long long>(frame), static_cast<unsigned long long>(frame - catch_up_frame), s,
                                 s > 0 ? static_cast<double>(frame - catch_up_frame) / s / recomp::FrameTiming::kRefreshHz : 0.0);
                     catch_up_frame = 0;
+                    shared.rollback_from = frame + 2; // (rollback: snapshots and guesses again, every board from there)
                     shared.catching_up = false;
                     shared.netplay->session().take_seat(); // (a cabinet joined in progress; else nothing)
                 }
@@ -1122,7 +1151,9 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             }
             const auto waited = clock::now();
             bool guessed = false; // (rollback: a guess, a few frames ahead at most)
-            const auto got = shared.rollback ? shared.inputs->guess(index, frame, shared.rollback_frames, guessed)
+            // (one board: not around a switch between side runs and whole, Game::may_guess)
+            const bool may_guess = shared.rollback && frame >= shared.rollback_from && (!one_board || one_board->may_guess(frame));
+            const auto got = may_guess ? shared.inputs->guess(index, frame, shared.rollback_frames, guessed)
                                              : shared.inputs->wait(index, frame);
             if (timing_debug) input_ms += std::chrono::duration<double, std::milli>(clock::now() - waited).count();
             if (!got || shared.quit) throw Stop{};
@@ -1158,7 +1189,9 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             recording.inputs(frame, {bus.inputs.bank0, bus.inputs.bank1, bus.inputs.controls, bus.inputs.controls2});
         }
         // (rollback: this board's snapshot after the frame, the last asked: another state taken here leaves no cut)
-        if (shared.rollback) c.request_snapshot([&, frame = timing.frames()](uint32_t) { shared.rollback->save(index, frame); });
+        // (not while catching up: every input of those frames is in, none guessed; all the boards from the same frame on)
+        if (shared.rollback && timing.frames() >= shared.rollback_from)
+            c.request_snapshot([&, frame = timing.frames()](uint32_t) { shared.rollback->save(index, frame); });
         // (--frames in a network game run on one board: this board handed over before the end, as leaving does)
         if (shared.max_frames && networked && one_board && index == shown && shared.one_board_frame != ~0ull &&
             timing.frames() + tools::one_board::Game::kAskAhead + 5 == shared.max_frames)
@@ -1171,7 +1204,15 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
 
     // Rollback: this board's snapshots (its state where it starts kept first: a first guess's frame before)
     if (shared.rollback) {
-        shared.rollback->attach(index, [&](m3::State& st) { tools::board_state(st, c, timing, {}); });
+        shared.rollback->attach(index, [&](m3::State& st) {
+            // (one board: the boards on side runs, made by this one's module, their network boards with it; first:
+            // board_state ends with its check that nothing follows it)
+            if (part.cabinets)
+                for (std::size_t b = 0; b < shared.boards; ++b)
+                    if (b != index && shared.one_board_parts[b] && !shared.rollback->active(b))
+                        shared.one_board_parts[b]->bus.netboard().state(st);
+            tools::board_state(st, c, timing, {});
+        });
         shared.rollback->save(index, timing.frames());
     }
     std::string why;
@@ -1200,9 +1241,16 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
         break;
     }
     tools::one_board::Game::stopped(part); // (--net-one-board: this player's board stopped, the other's shadow with it)
+    if (part.cabinets && one_board) // (one board: what the other cabinets' side runs cost, and the waits for their buttons)
+        std::printf("spikeout: other cabinets: %llu side runs, %.2f s in them (%.2f s with their set-ups); their buttons "
+                    "waited for %llu times, %.2f s\n%s",
+                    static_cast<unsigned long long>(part.cabinets->side_runs()), part.cabinets->side_seconds(),
+                    part.cabinets->whole_seconds(), static_cast<unsigned long long>(one_board->held_waits()),
+                    one_board->held_wait_seconds(), part.cabinets->profile().c_str());
     if (shared.rollback && index == shown)
-        std::printf("spikeout: rollback: %s; time sync: %llu frames slowed, %llu run unpaced\n", shared.rollback->report().c_str(),
-                    static_cast<unsigned long long>(shared.sync_slowed.load()), static_cast<unsigned long long>(shared.sync_free.load()));
+        std::printf("spikeout: rollback: %s; time sync: %llu frames slowed, %llu sooner, %llu run unpaced\n",
+                    shared.rollback->report().c_str(), static_cast<unsigned long long>(shared.sync_slowed.load()),
+                    static_cast<unsigned long long>(shared.sync_sooner.load()), static_cast<unsigned long long>(shared.sync_free.load()));
     turns.finish(index);
     std::lock_guard<std::mutex> guard(shared.lock);
     out.stopped = why.empty() ? "quit" : why;
@@ -1267,10 +1315,34 @@ void set_up_one_board(Shared& shared) {
                 net->keeper().packet(to, seq, at, data);
             });
     }
+    // (rollback: the switches only on frames that won't be run again, Game::may_guess; a board on side runs no part of
+    // its own, its network board in this one's snapshots; the module's state kept and put back with this board's)
+    if (tools::rollback::Linked* rb = shared.rollback.get()) {
+        s.guess_ahead = shared.rollback_frames;
+        tools::InputTable* table = shared.inputs;
+        const std::size_t boards = shared.boards;
+        s.settled = [table, boards](uint64_t frame) { return table->all_set(frame, boards) && table->wrong_from() > frame; };
+        s.wait_settled = [table, boards, stays = shared.local](uint64_t frame) { // (this machine's own never guessed)
+            return table->wait_all(frame, boards, stays) && table->wrong_from() > frame;
+        };
+        s.part_whole = [rb](std::size_t board, bool whole, uint64_t) { rb->set_active(board, whole); };
+        s.rewound = [rb](std::size_t board) { return rb->rewound_to(board); };
+        s.pin = [rb](uint64_t frame) { rb->pin(frame); };
+    }
     tools::one_board::Game& game = *shared.one_board_game;
     game.set_up({shared.one_board_parts.begin(), shared.one_board_parts.begin() + shared.boards}, std::move(s));
     for (std::size_t b = 0; b < shared.boards; ++b)
         if (b != shared.local) game.hand_over(*shared.one_board_parts[b], true);
+    if (tools::rollback::Linked* rb = shared.rollback.get()) {
+        tools::remote::Cabinets* cab = stays.cabinets.get();
+        rb->attach_extra(
+            shared.local, [cab] { return std::shared_ptr<const void>(std::make_shared<tools::remote::Cabinets::Kept>(cab->keep())); },
+            [cab](const void* k) { cab->put_back(*static_cast<const tools::remote::Cabinets::Kept*>(k)); });
+        // (a switch: set up only on a settled frame, no guesses through the next, nothing gone back to before that one:
+        // the module's state kept from its save on)
+        game.hold_guesses(stays.timing.frames() + 1);
+        rb->pin(stays.timing.frames() + 1);
+    }
     shared.one_board_frame = stays.timing.frames();
     std::printf("spikeout: one board here from frame %llu: the other cabinet held whole until the game is calm, then made from "
                 "its player's buttons\n",
@@ -1558,8 +1630,8 @@ int main(int argc, char** argv) {
     shared.load_path = shared.last_state = load_state;
     shared.real_netboard = real_netboard;
     shared.old_link = old_link;
-    shared.one_board = net_rollback ? Shared::OneBoard::never : net_one_board; // (rollback: every board here, for now)
-    shared.rollback_frames = net_rollback;
+    shared.one_board = net_one_board;
+    shared.rollback_frames = shared.rollback_wanted = net_rollback;
     shared.fog_over_nothing = fog_over_nothing;
     shared.quads = settings.quads;
     shared.midi_burst = midi_burst;
@@ -1728,19 +1800,35 @@ int main(int argc, char** argv) {
                 linked.boards.assign(boards, {});
                 shared.net_state.clear();
             }
-            // (rollback: every board's snapshots and the ring's cuts; each board keeps its state where it starts first)
+            // (rollback: every board's snapshots and the ring's cuts; each board keeps its state where it starts first;
+            // the window this machine's memory can keep, tools::rollback::fit_window)
+            shared.rollback_frames = tools::rollback::fit_window(shared.rollback_wanted, boards, tools::rollback::free_for_window());
+            if (shared.netplay && shared.rollback_frames < shared.rollback_wanted)
+                std::printf("spikeout: rollback over %llu frames, not %llu: what this machine's memory can keep\n",
+                            (unsigned long long)shared.rollback_frames, (unsigned long long)shared.rollback_wanted);
             shared.rollback = shared.netplay && shared.rollback_frames
                                   ? std::make_unique<tools::rollback::Linked>(boards, shared.rollback_frames, ring.get(), *shared.inputs)
                                   : nullptr;
             turns = std::make_unique<tools::Turns>(boards, true, [&] {
                 ring->exchange();
+                uint64_t back = 0;
                 if (shared.rollback) { // (the ring's part of the frame every board saved; back, if a guess was wrong)
                     const bool capturing = !shared.linked.boards.empty() && shared.linked.saved == shared.linked.boards.size();
-                    shared.rollback->between(capturing ? &shared.linked.cut : nullptr);
+                    back = shared.rollback->between(capturing ? &shared.linked.cut : nullptr);
                 }
                 shared.linked.finish();
-                // (one board, wanted: set up here, every board stopped; not while their states are being saved)
-                if (shared.one_board_game && shared.one_board_wanted && shared.linked.capture_frame == 0) set_up_one_board(shared);
+                // (one board, wanted: set up here, every board stopped; not while their states are being saved; rollback:
+                // not where going back, and only on a frame that won't be run again, every input of it in)
+                const auto settled = [&] {
+                    if (!shared.rollback) return true;
+                    const uint64_t frame = shared.one_board_parts[shared.local] ? shared.one_board_parts[shared.local]->timing.frames() : 0;
+                    return back == 0 && frame >= shared.rollback_from && shared.inputs->all_set(frame, shared.boards) &&
+                           shared.inputs->wrong_from() > frame;
+                };
+                // (wanted: no guesses meanwhile, so that a frame settles soon: running ahead on guesses, none would)
+                if (shared.one_board_game && shared.one_board_wanted && shared.rollback) shared.one_board_game->hold_guesses(~0ull);
+                if (shared.one_board_game && shared.one_board_wanted && shared.linked.capture_frame == 0 && settled())
+                    set_up_one_board(shared);
                 // (every board again: once the other's shadow runs, the module gone)
                 if (shared.one_board_game && shared.one_board_back && shared.one_board_game->tear_down()) {
                     shared.one_board_back = false;
@@ -1980,6 +2068,10 @@ int main(int argc, char** argv) {
         }
         reset_game([&] {
             shared.netplay = netgame->play.get();
+            // (tests: SPIKEOUT_TEST_HOLD_INPUTS=N, this machine's inputs sent N frames' time late, as gamerun
+            // --net-hold-inputs: the others go on on guesses meanwhile, with rollback)
+            if (const char* hold = std::getenv("SPIKEOUT_TEST_HOLD_INPUTS"))
+                shared.netplay->session().hold_inputs(std::strtoull(hold, nullptr, 0));
             shared.inputs = &netgame->table;
             shared.local = start.my_seat;
             shared.net_start = start;
@@ -1987,6 +2079,7 @@ int main(int argc, char** argv) {
             shared.net_state = std::move(state);
             shared.catching_up = start.state_frame.has_value();
             shared.catch_up_behind = 0, shared.catch_up_start = 0;
+            shared.rollback_from = start.state_frame ? ~0ull : 0; // (joined in progress: none until caught up)
             boards = start.seats;
             shared.boards = boards;
             focus = start.my_seat;
@@ -2005,6 +2098,7 @@ int main(int argc, char** argv) {
             shared.net_state = std::move(*unpacked);
             netgame->table.reset();
             netgame->session().feed_inputs(*again.state_frame);
+            shared.rollback_from = ~0ull; // (rollback: none until caught up)
             shared.catching_up = true;
         });
         std::printf("spikeout: put back in step with the host (frame %llu)\n", static_cast<unsigned long long>(*again.state_frame));

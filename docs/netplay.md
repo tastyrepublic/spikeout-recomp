@@ -818,13 +818,22 @@ players from four-8000.state (two mashing, two machines 3 frames late):
 6,870 of 6,870 on each, 61-143 rollbacks of 3-4 frames, a snapshot 0.88 ms
 for the four boards, going back 5-7 ms; no hash check differing anywhere.
 
-One board a PC with rollback (to come): the cabinet module keeps about 1.8
-MB of its own a remote cabinet (`Cabinets::state_bytes`,
-`ONEBOARD_STATE_BYTES=1`): its window's frames each need it too. A short
-window (~12 frames, ~22 MB a remote cabinet; a silent player still stops
-that machine for the drop's 3 seconds, the others running on) or the long
-one (copy-on-write for its big buffers: ~120 MB a remote cabinet): the
-owner to choose.
+Kept sparsely further back (2026-11-02, uncommitted when written): going
+far back is rare (a drop, a long stall), so `m3::Snapshots::set_sparse`
+keeps every frame for the newest 16 and beyond that only every 8th
+(`rollback::kDense`, `kEvery`); a frame no longer kept has its pages merged
+into the next kept one's (where both have a page, the older contents), so
+going back past it gives the same. Going back then restores the nearest
+kept frame at or before the one wanted and runs the few more frames again.
+The oldest kept stays as it is (the run's start) until it is out of the
+window. A unit test checks every kept frame against a copy, going back
+anywhere in the window. gamerun, inputs held 40 frames late, time sync off
+(`ROLLBACK_NO_SYNC=1`, rollbacks of up to 40 frames): the same frames as
+keeping every one (`ROLLBACK_EVERY_FRAME=1`), every frame the reference's
+but the last 40 (the run ending on guesses for them), and the memory 68-93
+MB at most over the 210-frame window, where every frame kept was 340 MB
+(39-41 frames kept, not 212). A joiner catching up takes no snapshots and
+guesses nothing until caught up (every input of those frames is in).
 
 Machines with rollback and machines without play together: each computes
 the same game from the same inputs, however it gets there. Proved (gamerun,
@@ -839,10 +848,75 @@ board, waiting for inputs as before, can join players with rollback; only
 it stutters when inputs are late, and it alone still waits out a silent
 player's 3 seconds.
 
-Not yet: one board a PC with rollback (the cabinet module's state going
-back with the boards, the boards on side runs snapshotted with this one's,
-switches between side runs and whole only on frames that won't be run
-again); rollback by default and the menu; Auto input delay with it.
+One board a PC with rollback (2026-11-02, uncommitted when written; gamerun
+`--net-rollback N` with `--net-one-board`, `--one-board-held` and shadows
+from the real boards). The cabinet module's own state (`Cabinets::Kept`:
+its remotes, the players' fields by count, the ahead record, the view
+tests' registers, the captured state; about 1.8 MB a remote cabinet) is
+kept with the staying board's every kept frame and put back with it
+(`Linked::attach_extra`); a board on side runs isn't a part of its own
+(`Linked::set_active`): its network board is in the staying board's walk,
+before the board's own state (`board_state` ends with its check that
+nothing follows: after it, every going back during side runs stopped that
+board, "save state: longer than this build's"). A switch between side
+runs and whole happens only on a frame that won't be run again
+(`Settings::settled`: every input in, none guessed wrong): around one
+(a shadow asked, a hand-back) nothing is guessed (`Game::may_guess`, the
+module's buttons too), a hand-back is asked only where every frame up to
+it is in, and a shadow's frame is waited for (`Settings::wait_settled`:
+the other machine's inputs for it come with time) and, guessed wrong,
+asked again at once for a frame 30 on (the rules wouldn't ask again: what
+wanted it is gone by). A board's state sent to another machine
+(`NetPlay::take_board_requests`) is of a frame whose inputs are all in; one guessed
+wrong is asked again and sent when the frame is run again. A board on
+side runs going back re-syncs its turns (`Linked::rewound_to`); the
+module isn't torn down while rolling (its kept frames hold its state).
+
+Found on the way:
+- The tests' late inputs (`--net-hold-inputs N`, `Session::hold_inputs`)
+  held our frames back by count: sent once this machine reached N frames
+  on. Around a switch every machine waits for the others' real inputs, so
+  each waited for the other's next frame: no one went on. Now by time (N
+  sixtieths of a second after each frame is set), as a network's latency.
+- Four players from power-on (every player joining in turn, the fourth at
+  6,400): the fourth cabinet's machine went wrong 67 frames after its
+  hand-back (frame 8,490; with rollback, 3-9 frames after it, then right
+  again), with or without rollback. The module keeps each player's fields
+  by count (`players_at_`, and the view tests' registers `view_chars_`),
+  dropping the oldest only; that cabinet ran alone in attract with its own
+  count, higher, then joined the link and took its count: the entries above
+  the new count stayed, and when the count got there the record for
+  cabinet 2 was made from attract's player (first word 0x40100408, not
+  0x0100800D). Now every entry after the count written is dropped. From a
+  state at 8,300 (the module new there) it never showed.
+- The rollback report's memory figure added every board's kept frames from
+  each board's thread (another's changing, or replaced by `set_active`):
+  nonsense now and then (23,096,868 MB). Each board's own peak now, added.
+
+Proved (gamerun, power-on, both players joining, every machine
+`--one-board-auto --one-board-held --net-one-board 100 --net-rollback 210`,
+one machine's inputs 3 frames late): two players, the slave's coin at
+6,100 during side runs: 7,209 of 7,209 frames on each, its shadow from the
+other machine's state at 6,129 and handed back at 6,428 as without
+rollback, 6-8 rollbacks each, 175 MB at most (three runs, and one as if
+600 MB were free: 154 frames, 142 MB); three players (the third joining at
+4,600): 7,195 of 7,195 on each, 7-9 rollbacks, 270 MB; four (the fourth
+joining at 6,400, players 2 and 4 late): 9,526 of 9,526 on each, 10-13
+rollbacks, 370 MB, and the same without rollback. `tools/onepc-net-tests.ps1`
+(every run) the same as before.
+
+The memory a machine can give it (`rollback::fit_window`): at the start of
+a game, the window shortened where the kept frames of every board (about
+0.44 MB a board a frame, measured, and a copy of its big buffers, about 32
+MB) wouldn't fit in a third of the memory free then
+(`m3::memory_free_bytes`: Windows' available physical memory, Linux's and
+Android's MemAvailable, macOS's and iOS's free and inactive pages), 30
+frames at the least, said in a line. Each machine its own: the window is
+only how far its guesses run ahead. Tests: `ROLLBACK_FREE_MB=N`.
+
+Not yet: one board a PC with rollback in the window (it still turns one
+board off with rollback); rollback by default and the menu; Auto input
+delay with it.
 
 ## Joining in progress: the wait (2026-11-02, uncommitted when written)
 

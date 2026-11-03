@@ -151,8 +151,23 @@ public:
         // `live`, for this machine's game to have run each frame first: its packets to it in the log).
         std::function<std::optional<uint64_t>(std::size_t seat)> backup_frame;
         std::function<std::optional<RemoteBoard>(std::size_t seat, uint64_t until, std::function<bool(uint64_t)> live)> replay;
+        // Rollback (tools/rollback.hpp) with one board: a board made whole or put on side runs here (a part of the
+        // rollback's own, or one in the staying board's); whether every input up to a frame is in and none of them
+        // was guessed wrong (a switch only there: never gone back across); a board on side runs, as its turns go:
+        // the frame gone back to since it last asked (0: none).
+        std::function<void(std::size_t board, bool whole, uint64_t frame)> part_whole;
+        std::function<bool(uint64_t frame)> settled;
+        std::function<bool(uint64_t frame)> wait_settled; // (the same, its inputs waited for: false, one guessed wrong)
+        std::function<uint64_t(std::size_t board)> rewound;
+        std::function<void(uint64_t frame)> pin; // (rollback::Linked::pin: nothing gone back to before it)
+        uint64_t guess_ahead = 0; // (the frames a guess may run ahead: the rollback's window)
     };
     static constexpr uint64_t kAskAhead = 30; // (frames: the other machine reaching it, its state on its way)
+    // (the calm frames before a hand-back; tests: ONEBOARD_CALM=N, a hand-back put where wanted)
+    static inline const uint64_t kCalm = [] {
+        const char* n = std::getenv("ONEBOARD_CALM");
+        return n ? std::max<uint64_t>(std::strtoull(n, nullptr, 0), 11) : uint64_t{300};
+    }();
 
     // Before the boards run: every board's Board, by index.
     void set_up(std::vector<Board*> boards, Settings settings) {
@@ -168,7 +183,13 @@ public:
         auto held = [this, here = &m](std::size_t seat, uint64_t frame) {
             if (InputTable* table = here->inputs; here->net_inputs && table) {
                 std::optional<InputTable::Inputs> in = table->get(seat, frame);
-                if (!in && frame >= table->next(seat)) in = table->wait(seat, frame);
+                bool guessed = false; // (rollback: a guess where one may be, as a board's own inputs are)
+                if (!in && frame >= table->next(seat)) {
+                    const auto waited = std::chrono::steady_clock::now(); // (held_wait_seconds)
+                    in = rolling() && may_guess(frame) ? table->guess(seat, frame, settings_.guess_ahead, guessed) : table->wait(seat, frame);
+                    held_wait_seconds_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - waited).count();
+                    ++held_waits_;
+                }
                 return in ? remote::held_word(in->bank0, in->controls, in->controls2) : 0u; // (before its first: none)
             }
             const auto in = settings_.buttons ? settings_.buttons(seat, frame) : std::nullopt;
@@ -275,6 +296,13 @@ public:
         }
         std::printf("board %zu: its shadow handed back to board %zu's side runs after count %u (frame %llu)\n", m.index, other.index,
                     count, (unsigned long long)m.timing.frames());
+        if (rolling()) { // (rollback: no part of its own now, in the staying board's; guesses again after the next frame,
+            // nothing gone back to before it: its save the first in the new way)
+            settings_.part_whole(m.index, false, m.timing.frames());
+            if (settings_.pin) settings_.pin(m.timing.frames() + 1);
+            std::lock_guard guard(lock_);
+            no_guess_[m.index] = m.timing.frames() + 1;
+        }
         if (!other.one_board_auto && !other.shadow_from) { // (no shadow of it can be wanted: out of the meetings)
             if (why.empty()) why = "one board: its shadow handed back";
             return false;
@@ -304,6 +332,26 @@ public:
         for (const std::size_t gone : settings_.going)
             if (!whole_here(gone)) return false;
         return true;
+    }
+    // Rollback: whether a board's input for `frame` may be guessed. Not at a switch between side runs and whole (a
+    // hand-back: from the frame it is asked at to the one after it; the window's set-up): those frames' inputs waited
+    // for, as delay-based play does, so that none at or before the switch can turn out wrong (going back across it
+    // would find the other cabinet in the other mode); the frame after it pinned (Settings::pin), nothing gone back
+    // to before it. A shadow waits at its frame for every input up to it (Settings::wait_settled), the frames before
+    // it guessed as any.
+    // (the side runs' buttons not in yet when they were wanted: how many, and the time waiting for them (or guessing))
+    uint64_t held_waits() const { return held_waits_; }
+    double held_wait_seconds() const { return held_wait_seconds_; }
+    bool may_guess(uint64_t frame) const {
+        std::lock_guard guard(lock_);
+        for (const auto& [seat, through] : no_guess_)
+            if (frame <= through) return false;
+        return true;
+    }
+    // (and none through `frame`: the window's set-up, at a meeting, as a switch)
+    void hold_guesses(uint64_t frame) {
+        std::lock_guard guard(lock_);
+        no_guess_[~std::size_t{0}] = frame;
     }
     bool can_be_whole() const { // (every board whole here, or each that isn't to be asked of its machine)
         const Board& m = *boards_[settings_.stays];
@@ -381,6 +429,7 @@ public:
     // all (its shadow's, exact in what it sends): a program still keeps its hash and state to itself. True: done.
     bool tear_down() {
         Board& m = *boards_[settings_.stays];
+        if (rolling()) return false; // (rollback: its kept frames hold the module's state: kept to the end)
         if (!m.whole || !m.cabinets) return false;
         for (const std::size_t b : settings_.going)
             if (!boards_[b]->shadowing) return false; // (its shadow not running yet)
@@ -434,8 +483,28 @@ public:
                         if (f > want) remote_frames_.erase(it), want = ~0ull; // (gone by: asked again)
                     }
                 }
+                // (rollback: only where every input up to it is in (waited for: the other machine's for this frame
+                // come with time), none wrong: else asked again at once, a little later (the rules may not ask
+                // again: what wanted it gone by))
+                if (want != ~0ull && f == want && rolling() &&
+                    !(settings_.wait_settled ? settings_.wait_settled(want) : settings_.settled(want))) {
+                    const uint64_t again = want + kAskAhead;
+                    std::printf("board %zu: its shadow's frame %llu guessed wrong: asked again for frame %llu\n", m.index,
+                                (unsigned long long)want, (unsigned long long)again);
+                    {
+                        std::lock_guard guard(lock_);
+                        remote_frames_[m.index] = again;
+                    }
+                    settings_.ask_board(m.index, again);
+                    want = ~0ull;
+                }
                 if (want != ~0ull && f == want) {
                     const bool loaded = load_remote_shadow(m, want);
+                    if (loaded && rolling()) { // (a part of its own again, from here; nothing gone back to before it: every
+                        // frame up to it settled)
+                        settings_.part_whole(m.index, true, want);
+                        if (settings_.pin) settings_.pin(want);
+                    }
                     {
                         std::lock_guard guard(lock_);
                         // (used; or none came: asked again, while wanted; unless set again meanwhile: its player gone,
@@ -468,12 +537,18 @@ public:
             // shadow's, those before it starts: the other cabinet's link of the count may come in them, where the staying
             // board finished it late in its frame (its work light), as the power-on game's master does)
             const uint64_t now = m.c.cycles(), start = m.timing.frame_start(f) + m.timing.line_cycles() * recomp::FrameTiming::kVBlankLines;
+            uint64_t rewound = 0; // (rollback: the boards gone back to the end of this frame where they met: on from the next)
             for (uint32_t line = slice - 1; line < recomp::FrameTiming::kDisplayLines; line += slice)
                 if (const uint64_t at = start + line * m.timing.line_cycles(); at >= now) {
                     if (at >= begin) break;
                     turns.pass(m.index);
+                    if (settings_.rewound && (rewound = settings_.rewound(m.index)) != 0) break;
                     if (load_master_shadow(m)) return true; // (the master's: as soon as it is there, mid-frame)
                 }
+            if (rewound) {
+                f = rewound; // (++f: the frame after it, from its first meeting)
+                continue;
+            }
             if (begin != ~0ull) {
                 std::scoped_lock guard(lock_, other.cabinets_lock);
                 if (other.cabinets->shadow_state(m.index, shadow_count_, own)) break;
@@ -637,8 +712,8 @@ private:
                           other.bus.read32(0x140128) == mask && std::popcount(mask) >= 2 && !joining;
         m.calm_frames = calm ? m.calm_frames + 1 : 0;
         if (other.held) // (a board still held: both RAMs wanted from 10 frames before the hand-back is asked)
-            if (const bool want = m.calm_frames >= 290; want != m.keeping) m.keeping = other.keeping = want;
-        if (m.calm_frames >= 300) {
+            if (const bool want = m.calm_frames + 10 >= kCalm; want != m.keeping) m.keeping = other.keeping = want;
+        if (m.calm_frames >= kCalm) {
             other.held = false; // (asked: kept from here, until the hand-back)
             cab.ask_hand_back(gone);
             m.calm_frames = 0;
@@ -654,6 +729,11 @@ private:
     void rules_each(Board& m) {
         remote::Cabinets& cab = *m.cabinets;
         const uint64_t frame = m.timing.frames();
+        if (rolling()) { // (switches done: their windows gone by)
+            std::lock_guard guard(lock_);
+            for (auto it = no_guess_.begin(); it != no_guess_.end();)
+                it = it->second != ~0ull && it->second + 2 < frame ? no_guess_.erase(it) : std::next(it);
+        }
         const uint32_t mask = m.bus.read32(0x140128);
         if (mask != m.last_mask) m.mask_since = m.last_mask ? frame : 0, m.last_mask = mask; // (the first seen: no change)
         uint32_t least = 0xFFFF; // (the least time of the players in the game)
@@ -698,9 +778,14 @@ private:
                               other.bus.read32(0x140128) == mask && std::popcount(mask) >= 2 && !joining;
             uint64_t& calm_frames = calm_[gone];
             calm_frames = calm ? calm_frames + 1 : 0;
-            if (other.held) other.keeping = calm_frames >= 290; // (still held: its seeds wanted from 10 frames before)
+            if (other.held) other.keeping = calm_frames + 10 >= kCalm; // (still held: its seeds wanted from 10 frames before)
             any_keeping = any_keeping || other.keeping;
-            if (calm_frames >= 300) {
+            if (calm_frames >= kCalm && rolling()) { // (rollback: no guesses from here; asked once every frame up to here is in)
+                std::lock_guard guard(lock_);
+                if (!no_guess_.count(gone)) no_guess_[gone] = ~0ull;
+                if (!settings_.settled(frame)) continue;
+            }
+            if (calm_frames >= kCalm) {
                 other.held = false; // (asked: its seeds kept from here, until the hand-back)
                 cab.ask_hand_back(gone);
                 calm_frames = 0;
@@ -892,6 +977,10 @@ private:
     // (network play: by board, the frame whose end its state was asked for of its machine; and its calm frames in a row;
     // the seats whose player left with a parting (kept whole), or went without one (never asked for))
     std::map<std::size_t, uint64_t> remote_frames_, calm_;
+    std::map<std::size_t, uint64_t> no_guess_; // (rollback: by board being switched, the frame through which no guesses)
+    uint64_t held_waits_ = 0;          // (held_waits: the staying board's thread only)
+    double held_wait_seconds_ = 0;
+    bool rolling() const { return static_cast<bool>(settings_.settled); }
     std::set<std::size_t> departed_, lost_;
     // (a board whose player went, run on here from its backup: by board, the run's state when done)
     struct Replaying {

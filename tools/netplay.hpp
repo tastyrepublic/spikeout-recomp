@@ -240,7 +240,20 @@ public:
             } else {
                 ++it;
             }
+        for (auto it = boards_again_.begin(); it != boards_again_.end();) // (kept while that frame may be run again)
+            if (it->second == frame || it->second + kAgainFrames < frame) {
+                if (it->second == frame) seats.push_back(it->first);
+                it = boards_again_.erase(it);
+            } else {
+                ++it;
+            }
         return seats;
+    }
+    // (rollback: one taken for a frame run on a wrong guess: asked again, for when that frame is run again: kept that
+    // long, not dropped as gone by at the next frame)
+    void board_request_again(uint8_t seat, uint64_t frame) {
+        std::lock_guard guard(lock_);
+        boards_again_.push_back({seat, frame});
     }
     // The seats leaving, each after a frame, their boards' states at its end to come (Session::announce_parting); and
     // those whose player has gone (left or dropped), since the last asked.
@@ -330,6 +343,8 @@ private:
     std::condition_variable changed_;
     std::optional<net::StartInfo> start_, resync_;
     std::vector<std::pair<uint8_t, uint64_t>> boards_wanted_, partings_;     // (seat, frame)
+    std::vector<std::pair<uint8_t, uint64_t>> boards_again_;                 // (seat, frame: rollback's, board_request_again)
+    static constexpr uint64_t kAgainFrames = 256;                             // (longer than rollback's window)
     std::vector<uint8_t> gone_, taken_, whole_wanted_, backup_missing_;
     std::array<bool, net::kMaxSeats> absent_{}; // (by seat: its player gone, nobody's since)
     std::map<std::pair<uint8_t, uint64_t>, std::vector<uint8_t>> boards_; // (seat, frame): a board's state, compressed

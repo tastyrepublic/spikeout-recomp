@@ -258,7 +258,9 @@ struct Session::Impl {
     // A game joined in progress (or a machine put back in step): its start
     // (and then every board's state) from the host; our cabinet ours from
     // `mine_from`, our inputs before then kept until they can go out.
-    uint64_t send_hold = 0; // (tests: our inputs sent this many frames late, Session::hold_inputs)
+    uint64_t send_hold = 0; // (tests: our inputs sent this many frames' time late, Session::hold_inputs)
+    std::vector<Clock::time_point> set_at; // (then: when each of our frames was set, from our stream's first)
+    uint64_t send_failures = 0, datagrams_in = 0; // (told with a peer not answering)
     bool late = false, want_state = false;
     std::optional<StartInfo> late_start;
     std::optional<uint64_t> mine_from;
@@ -299,7 +301,7 @@ struct Session::Impl {
     void send(const Address& to, const Writer& w) { send_raw(to, w.out); }
     void send_raw(const Address& to, std::span<const uint8_t> data) {
         if (to.relayed && turn) turn->send_to(Address{to.ip, to.port}, data, turn_send());
-        else socket.send_to(to, data);
+        else if (!socket.send_to(to, data)) ++send_failures;
     }
     TurnClient::Send turn_send() {
         return [this](const Address& a, std::span<const uint8_t> d) { socket.send_to(a, d); };
@@ -387,7 +389,16 @@ struct Session::Impl {
                                                  : cabinets[s].open ? st.next() : 0;
         return s == my_seat ? held_back(end) : end;
     }
-    uint64_t held_back(uint64_t end) const { return send_hold && end > streams[my_seat].first + send_hold ? end - send_hold : end; }
+    // (by time, as a network's latency is: a count of frames would make the others wait on our own frames going on,
+    // and where every machine waits for the others' real inputs (one board a PC's switches), none would go on)
+    uint64_t held_back(uint64_t end) const {
+        if (!send_hold) return end;
+        const Stream& st = streams[my_seat];
+        const auto due = Clock::now() - std::chrono::microseconds(send_hold * 16667);
+        uint64_t f = std::min<uint64_t>(end, st.first + set_at.size());
+        while (f > st.first && set_at[static_cast<std::size_t>(f - 1 - st.first)] > due) --f;
+        return f;
+    }
 
     static void put_addresses(Writer& w, const std::vector<Address>& list) {
         const std::size_t n = std::min<std::size_t>(list.size(), 16);
@@ -590,6 +601,7 @@ struct Session::Impl {
             if (cb.input) cb.input(my_seat, f, held);
         }
         st.frames.push_back(in);
+        if (send_hold) set_at.resize(st.frames.size(), Clock::now());
         if (cb.input) cb.input(my_seat, frame, in);
     }
 
@@ -929,7 +941,11 @@ struct Session::Impl {
             if (s == my_seat || !p.present || p.dropped) continue;
             if (now - p.heard > kDropAfter && !drops[s].suspected) {
                 drops[s].suspected = true; // (its inputs frozen here)
-                log((p.name.empty() ? "seat " + std::to_string(s + 1) : p.name) + " isn't answering");
+                const auto ms = [&](Clock::time_point t) { return std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(now - t).count()); };
+                log((p.name.empty() ? "seat " + std::to_string(s + 1) : p.name) + " isn't answering (heard " + ms(p.heard) +
+                    " ms ago; our inputs to it " + ms(p.inputs_sent) + " ms ago, " + std::to_string(p.rel.out.size()) +
+                    " reliable pieces waiting; " + std::to_string(datagrams_in) + " datagrams in, " + std::to_string(send_failures) +
+                    " sends failed, in all)");
             }
         }
         if (authority() != my_seat) return;
@@ -982,7 +998,7 @@ struct Session::Impl {
                 targets_asked = Clock::now();
             }
             std::lock_guard guard(lock);
-            while (auto d = socket.receive()) received(*d);
+            while (auto d = socket.receive()) ++datagrams_in, received(*d);
             const auto now = Clock::now();
             if (is_host && now - last_beacon > kBeaconEvery) beacon(now);
             if (joining && my_seat == kNoSeat && !leaving && now - last_join > kJoinRetry) {

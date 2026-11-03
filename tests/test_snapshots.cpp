@@ -95,3 +95,38 @@ TEST_CASE("snapshots: back to any frame kept, exactly (each way this system has 
 }
 
 TEST_CASE("snapshots: back to any frame kept, exactly (comparing pages)") { run(m3::watched::Method::none); }
+
+TEST_CASE("snapshots: kept sparsely further back, every kept frame exactly as it was") {
+    Board b;
+    m3::Snapshots snaps(60); // (60 frames back: the newest 8 each, then every 4th)
+    snaps.set_sparse(8, 4);
+    const auto walk = [&](m3::State& s) { b.walk(s); };
+    std::mt19937 rng(11);
+    std::map<uint64_t, Board::Copy> was;
+    uint64_t frame = 0;
+    for (int round = 0; round < 30; ++round) {
+        for (int k = 0; k < 20; ++k) {
+            ++frame;
+            b.frame(rng);
+            snaps.save(frame, walk);
+            was[frame] = b.copy();
+        }
+        // (the newest 8 each kept; beyond, multiples of 4 only, the oldest kept aside (the start, until gone by))
+        uint64_t oldest = 0;
+        for (uint64_t f = frame > 70 ? frame - 70 : 1; f <= frame && !oldest; ++f)
+            if (snaps.has(f)) oldest = f;
+        for (uint64_t f = oldest; f <= frame; ++f) {
+            if (frame - f <= 8) CHECK(snaps.has(f));
+            else if (snaps.has(f)) CHECK(f % 4 == 0 || f == oldest);
+        }
+        CHECK(snaps.kept() < 8 + 60 / 4 + 3);
+        b.frame(rng);
+        // (back somewhere: to the nearest kept at or before it, exactly)
+        const uint64_t want = frame - rng() % std::min<uint64_t>(55, frame);
+        const uint64_t back = snaps.kept_at_or_before(want);
+        CHECK(back <= want);
+        snaps.restore(back, walk);
+        CHECK(b.copy() == was[back]);
+        frame = back;
+    }
+}
