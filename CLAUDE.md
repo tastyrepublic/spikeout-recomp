@@ -45,6 +45,26 @@ Read this first; the older hand-off below is history.
 - Build lesson: PowerShell Copy-Item keeps file times; copying a header
   back left objects built against an old struct (sound broke). Touch files
   after copying.
+- Speed work, where each idea stands (all done ones in 7d3b090, proved):
+  DONE: decrementer check fix; idle skip (all boards); find_region table;
+  program ROM 32-bit reads straight; tile generator colour tables; side
+  runs' set-up compared 64 bytes at a time and buffers reused; sound DSP
+  decoded once per program (~6% of a sound run).
+  TRIED, DROPPED (no gain): a 4 KB page journal for side runs (slower);
+  not recording the recent-blocks list in tick().
+  NOT STARTED, ideas only: FPSCR's FPRF worked out lazily (the game does
+  read FPSCR: ~40 mcrfs, mffs; set_fprf is already cheap, small gain);
+  an idle skip for the network board's 68000 (Moira; guessed < 0.5 ms a
+  frame); the sound's voice rendering (Scsp slots, most of the sound's
+  ~2 ms, on the window's audio thread: battery on tablets); skipping
+  wholly transparent tiles in draw_line; side runs on a second core (the
+  big one, owner wants it).
+  Measured now (two boards, 1,500 frames of a fight, gamerun): game logic
+  ~3.3 ms a frame a board, 2D ~1.3 ms (the shown board only in the
+  window), sound ~2.3 ms (audio thread in the window); one board's side
+  runs ~3-4 ms a frame per other cabinet; the profile has no single hot
+  spot left (tick(), the 68000 network board, then the game's own code).
+  The machine varies 6-8% run to run: compare A/B back to back.
 - Next, owner's order: more single-board speed is mostly spread over the
   game code now (sound voices on the audio thread ~2 ms; 68000 network
   board idle skip maybe); then side runs on a second core (owner: one
