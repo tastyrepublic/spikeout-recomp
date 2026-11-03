@@ -26,6 +26,16 @@ Read this first; the older hand-off below is history.
   300 frames but the shadow never hands back (stays whole: correct, just
   costlier); one "rollback: the boards saved different frames (board 0
   6129, board 1 6130)" at the shadow's load (benign, once).
+  OWNER REPORTS (2026-11-03, the w2w run, build 7d3b090): after the coin,
+  one of the two windows HANGS. Not yet explained: both logs
+  (build/onepc/window/w2w-host.txt, w2w-join.txt; SPIKEOUT_NET_DEBUG's
+  "frames run, shown a second" lines) show 57.5 run and shown after the
+  coin but for ~1 s at 11-13 fps at the shadow's load (~6120), and both
+  ran to 7500. So the hang may be the picture/presentation, the window's
+  message loop, or the hand-back loop above, not the boards. FIRST TASK:
+  reproduce with the owner watching, note which window, and look at the
+  window's present/menu threads (gdb the frozen window: only safe once it
+  is already stuck; pausing a live one makes the other drop it).
 - Proof tools: gamerun GAMERUN_2D_HASH=1 (2D layers each frame),
   GAMERUN_STATE_PARTS=1, GAMERUN_NETBOARD_DUMP=DIR (network board state
   files at whole-state frames), GAMERUN_FLUSH=1, ONEBOARD_CALM=N,
