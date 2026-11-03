@@ -21,11 +21,11 @@ Read this first; the older hand-off below is history.
 - Window, two windows on one board (scratchpad-style test: host + joiner
   with SPIKEOUT_MENU_KEYS, --net-one-board --net-rollback 210,
   SPIKEOUT_NET_DEBUG=1 for per-300-frame timings): now full speed, music
-  fine. OPEN, window only (gamerun's coin test is fine): after a shadow
-  (a coin at 6100) the host logs "board 1 handed back to side runs" every
-  300 frames but the shadow never hands back (stays whole: correct, just
-  costlier); one "rollback: the boards saved different frames (board 0
-  6129, board 1 6130)" at the shadow's load (benign, once).
+  fine. (Was open: after a shadow the host logged "board 1 handed back to
+  side runs" every 300 frames, the shadow never handing back, and "the
+  boards saved different frames (6129, 6130)": both the freeze below, the
+  shadow's count stopped so never reaching its stop. Since its fix the
+  hand-back happens two frames after it is asked, in both windows.)
   FIXED (2026-11-03): the host's window froze after the joiner's coin
   (its game logic +0 and its link's packets stopped, frames still run).
   With rollback, a board on side runs waiting for a shadow (shadow_wait)
@@ -50,9 +50,17 @@ Read this first; the older hand-off below is history.
   ONEBOARD_WAIT_SHADOWS=1 (the old wait), ONEBOARD_WHOLE_STATES=1 (gamerun:
   whole states); the scratchpad's late-load checks were obrb.ps1 (2
   seats) and obrbn.ps1 (3-4) from the previous session, against a
-  reference. OPEN: onepc-net-tests "leave" fails now and then in a full
-  back-to-back run (the leaver's whole state never reaching the host;
-  passes alone; that path unchanged).
+  reference. Then FIXED (2026-11-03): onepc-net-tests "leave" failing
+  now and then in a full run. The parting's announcement (reliable, 35
+  frames ahead: 0.1-0.3 s in gamerun) can wait behind a big transfer
+  while the inputs go on; taken after its frame it was dropped and still
+  marked the seat departed, so the path for a player gone without one
+  (its board from its backup) was skipped: nobody had that board whole,
+  the joiner waited for ever. Now a parting come too late is ignored and
+  the board run on from its backup once the player has gone
+  (Game::parting). Tests: NET_PARTINGS_LATE=1 (gamerun: each parting
+  taken only once its frame has passed), NET_PARTING_AHEAD=N (the
+  leaver's lead).
 - Proof tools: gamerun GAMERUN_2D_HASH=1 (2D layers each frame),
   GAMERUN_STATE_PARTS=1, GAMERUN_NETBOARD_DUMP=DIR (network board state
   files at whole-state frames), GAMERUN_FLUSH=1, ONEBOARD_CALM=N,

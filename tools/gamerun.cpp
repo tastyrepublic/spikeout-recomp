@@ -2101,14 +2101,27 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         if (one_board_here && m.whole_until && frame >= m.whole_until) g_one_board.want_whole(false), m.whole_until = 0;
         // (--net-one-board: players leaving after a frame, their boards' states to come; players gone)
         if (one_board_here) {
-            for (const auto& [seat, at] : o.netplay->take_partings()) g_one_board.parting(seat, at);
+            // (tests: NET_PARTINGS_LATE=1, each taken only once its frame has passed: as one held up on the way)
+            static const bool late = std::getenv("NET_PARTINGS_LATE") != nullptr;
+            static std::vector<std::pair<uint8_t, uint64_t>> held;
+            for (const auto& p : o.netplay->take_partings()) held.push_back(p);
+            for (auto it = held.begin(); it != held.end();)
+                if (!late || frame > it->second) {
+                    g_one_board.parting(it->first, it->second);
+                    it = held.erase(it);
+                } else {
+                    ++it;
+                }
             for (const uint8_t seat : o.netplay->take_gone()) g_one_board.seat_gone(seat);
             for (const uint8_t seat : o.netplay->take_taken()) g_one_board.seat_taken(seat);
         }
         // --net-leave-at FRAME: this player leaving after a frame a little ahead, the others told; its board's state then
         // sent to all of them; the goodbye once they have it
         if (o.netplay && m.index == o.local_seat && o.net_leave_at && frame == o.net_leave_at) {
-            m.parting_frame = frame + tools::one_board::Game::kAskAhead;
+            // (tests: NET_PARTING_AHEAD=N, told only N frames ahead: too late for the others, as a slow network might)
+            static const uint64_t ahead = std::getenv("NET_PARTING_AHEAD") ? std::strtoull(std::getenv("NET_PARTING_AHEAD"), nullptr, 0)
+                                                                           : tools::one_board::Game::kAskAhead;
+            m.parting_frame = frame + ahead;
             o.netplay->session().announce_parting(m.parting_frame);
             std::printf("net: leaving after frame %llu\n", (unsigned long long)m.parting_frame);
         }

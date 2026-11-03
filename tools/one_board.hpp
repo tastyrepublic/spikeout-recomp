@@ -410,6 +410,15 @@ public:
         const Board& m = *boards_[settings_.stays];
         if (!m.cabinets || !goes(seat)) return;
         std::lock_guard guard(lock_);
+        // (come too late: that frame passed here, or about to (the waiting board a frame off this one); its board run on
+        // from its backup once its player is gone, as one gone without a parting (seat_gone). Its announcement comes a
+        // little ahead (kAskAhead: 0.5 s in real time), but gamerun runs faster, and a slow network may take longer)
+        if (!whole_here(seat) && m.timing.frames() + 2 > frame) {
+            std::printf("board %zu: board %zu's player leaving after frame %llu, told at frame %llu: too late; its board from its "
+                        "backup once it has gone\n",
+                        m.index, seat, (unsigned long long)frame, (unsigned long long)m.timing.frames());
+            return;
+        }
         departed_.insert(seat);
         if (whole_here(seat)) return; // (whole here already: on as it is)
         remote_frames_[seat] = frame;
