@@ -566,7 +566,11 @@ public:
                     if (load_master_shadow(m)) return true; // (the master's: as soon as it is there, mid-frame)
                 }
             if (rewound) {
-                f = rewound; // (++f: the frame after it, from its first meeting)
+                // (++f: the frame after it, from its first meeting. `f` is the frame being run, its count of frames
+                // during it: the boards back at the end of frame `rewound`, their count then `rewound`, run on as frame
+                // `rewound` here (f = rewound had this board a frame ahead from then on: a shadow taken after it was
+                // loaded a frame early, its link two packets ahead of the staying board's, both waiting for ever)
+                f = rewound - 1;
                 continue;
             }
             if (begin != ~0ull) {
@@ -934,8 +938,9 @@ private:
         if (settings_.rewind_link) settings_.rewind_link(m.index, *state);
         shadow_inputs(m);
         m.shadowing = true;
-        std::printf("board %zu: its shadow from its machine's state at frame %llu (waited %.0f ms)\n", m.index, (unsigned long long)frame,
-                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
+        std::printf("board %zu: its shadow from its machine's state at frame %llu (waited %.0f ms; board %zu at frame %llu)\n", m.index,
+                    (unsigned long long)frame, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count(),
+                    other.index, (unsigned long long)other.timing.frames());
         return true;
     }
 

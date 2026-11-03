@@ -994,15 +994,21 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
                             for (const uint8_t seat : seats) shared.netplay->board_request_again(seat, frame);
                             return;
                         }
+                        const auto t0 = std::chrono::steady_clock::now();
                         m3::State s;
                         tools::board_state(s, c, timing, {});
                         m3::LinkRing* r = shared.ring;
                         const uint64_t taken = r ? r->taken(index) : 0, sent = r ? r->sent(index) : 0;
                         if (r) r->abandon_cut(index); // (one board's state alone: no cut under way)
+                        const auto t1 = std::chrono::steady_clock::now();
                         const std::vector<uint8_t> packed = tools::one_board::pack_remote(taken, sent, net::compress(s.data()));
+                        const auto t2 = std::chrono::steady_clock::now();
                         for (const uint8_t seat : seats) {
-                            std::printf("spikeout: this board's state at frame %llu to seat %u (%zu KB packed)\n",
-                                        static_cast<unsigned long long>(frame), seat + 1u, packed.size() / 1024);
+                            std::printf("spikeout: this board's state at frame %llu to seat %u (%zu KB packed, %zu KB; saved in "
+                                        "%.1f ms, compressed in %.1f ms)\n",
+                                        static_cast<unsigned long long>(frame), seat + 1u, packed.size() / 1024, s.data().size() / 1024,
+                                        std::chrono::duration<double, std::milli>(t1 - t0).count(),
+                                        std::chrono::duration<double, std::milli>(t2 - t1).count());
                             shared.netplay->session().send_board(seat, frame, packed);
                         }
                         if (parting) shared.parted = true;
@@ -1276,11 +1282,22 @@ void set_up_one_board(Shared& shared) {
     tools::NetPlay* net = shared.netplay;
     s.ask_board = [net](std::size_t seat, uint64_t frame) { net->session().want_board(static_cast<uint8_t>(seat), frame); };
     s.wait_board = [net](std::size_t seat, uint64_t frame) -> std::optional<tools::one_board::RemoteBoard> {
+        const auto t0 = std::chrono::steady_clock::now();
         auto packed = net->wait_board(static_cast<uint8_t>(seat), frame, std::chrono::seconds(30));
         if (!packed) return std::nullopt;
-        return tools::one_board::unpack_remote(*packed, [](std::span<const uint8_t> d) { return net::decompress(d); });
+        const auto t1 = std::chrono::steady_clock::now();
+        auto board = tools::one_board::unpack_remote(*packed, [](std::span<const uint8_t> d) { return net::decompress(d); });
+        std::printf("spikeout: board %zu's state for frame %llu: waited %.1f ms for it, unpacked in %.1f ms\n", seat,
+                    (unsigned long long)frame, std::chrono::duration<double, std::milli>(t1 - t0).count(),
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count());
+        return board;
     };
     s.rewind_link = [ring = shared.ring](std::size_t seat, const tools::one_board::RemoteBoard& b) {
+        if (ring)
+            std::printf("one board: board %zu's port there: taken %llu, sent %llu; here: taken %llu, sent %llu (board 0 here: "
+                        "taken %llu, sent %llu)\n",
+                        seat, (unsigned long long)b.taken, (unsigned long long)b.sent, (unsigned long long)ring->taken(seat),
+                        (unsigned long long)ring->sent(seat), (unsigned long long)ring->taken(0), (unsigned long long)ring->sent(0));
         if (!ring || (ring->taken(seat) == b.taken && ring->sent(seat) == b.sent)) return;
         ring->rewind(seat, b.taken);
         ring->unsend(seat, b.sent);

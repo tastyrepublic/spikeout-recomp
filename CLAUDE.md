@@ -26,16 +26,22 @@ Read this first; the older hand-off below is history.
   300 frames but the shadow never hands back (stays whole: correct, just
   costlier); one "rollback: the boards saved different frames (board 0
   6129, board 1 6130)" at the shadow's load (benign, once).
-  OWNER REPORTS (2026-11-03, the w2w run, build 7d3b090): after the coin,
-  one of the two windows HANGS. Not yet explained: both logs
-  (build/onepc/window/w2w-host.txt, w2w-join.txt; SPIKEOUT_NET_DEBUG's
-  "frames run, shown a second" lines) show 57.5 run and shown after the
-  coin but for ~1 s at 11-13 fps at the shadow's load (~6120), and both
-  ran to 7500. So the hang may be the picture/presentation, the window's
-  message loop, or the hand-back loop above, not the boards. FIRST TASK:
-  reproduce with the owner watching, note which window, and look at the
-  window's present/menu threads (gdb the frozen window: only safe once it
-  is already stuck; pausing a live one makes the other drop it).
+  FIXED (2026-11-03): the host's window froze after the joiner's coin
+  (its game logic +0 and its link's packets stopped, frames still run).
+  With rollback, a board on side runs waiting for a shadow (shadow_wait)
+  took a rollback's frame as the last one run (f = rewound, then ++f): a
+  frame ahead of the staying board from then on, so the shadow taken after
+  it was loaded a frame early, its link two packets past the staying
+  board's, both waiting for ever. Now f = rewound - 1. Delay-based (no
+  rollback) never took that path; gamerun's tests don't use rollback. The
+  window now logs the ports' counts and the staying board's frame at a
+  shadow's load, and the state's save/compress/wait/unpack times.
+  NEXT (owner's order): the ~1 s stutter at a coin in one board mode (the
+  shadow's state: saved 35 ms + compressed 110 ms on the sender's game
+  thread, ~500 ms waited here on localhost, 5.3 MB: seconds online):
+  1. don't wait: keep on side runs, and when the state comes, roll back to
+  its frame, load it and run on quietly; 2. send changes against the last
+  backup; 3. compress off the game thread.
 - Proof tools: gamerun GAMERUN_2D_HASH=1 (2D layers each frame),
   GAMERUN_STATE_PARTS=1, GAMERUN_NETBOARD_DUMP=DIR (network board state
   files at whole-state frames), GAMERUN_FLUSH=1, ONEBOARD_CALM=N,
