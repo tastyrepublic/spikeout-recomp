@@ -8,6 +8,41 @@
 - Build and test: `cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on-failure`.
   CI builds with warnings as errors on Linux and macOS.
 
+## Latest (2026-11-03, main 7d3b090, pushed)
+
+Read this first; the older hand-off below is history.
+- Done and pushed: rollback for one board a PC (340b46f, docs/netplay.md
+  "Rollback in play" end: module state kept, switches pinned
+  (Snapshots::pin), settled waits, 2-4 players exact); a board ~2.3x faster
+  (7d3b090, docs/recompiler.md "Clock and interrupts" and "Bus": the
+  decrementer check fix, the idle skip, region table, 2D colour tables,
+  DSP decode once, side-run set-up chunked; all proved the same output;
+  the hand-back race fixed: one_board::Game::wait_hand_backs).
+- Window, two windows on one board (scratchpad-style test: host + joiner
+  with SPIKEOUT_MENU_KEYS, --net-one-board --net-rollback 210,
+  SPIKEOUT_NET_DEBUG=1 for per-300-frame timings): now full speed, music
+  fine. OPEN, window only (gamerun's coin test is fine): after a shadow
+  (a coin at 6100) the host logs "board 1 handed back to side runs" every
+  300 frames but the shadow never hands back (stays whole: correct, just
+  costlier); one "rollback: the boards saved different frames (board 0
+  6129, board 1 6130)" at the shadow's load (benign, once).
+- Proof tools: gamerun GAMERUN_2D_HASH=1 (2D layers each frame),
+  GAMERUN_STATE_PARTS=1, GAMERUN_NETBOARD_DUMP=DIR (network board state
+  files at whole-state frames), GAMERUN_FLUSH=1, ONEBOARD_CALM=N,
+  ROLLBACK_FREE_MB=N; SPIKEOUT_TEST_HOLD_INPUTS=N (window), gamerun
+  --net-hold-inputs N (both now by time); tools/onepc-tests.ps1 and
+  tools/onepc-net-tests.ps1 (all pass; leave's host margin 10,000 frames).
+- Build lesson: PowerShell Copy-Item keeps file times; copying a header
+  back left objects built against an old struct (sound broke). Touch files
+  after copying.
+- Next, owner's order: more single-board speed is mostly spread over the
+  game code now (sound voices on the audio thread ~2 ms; 68000 network
+  board idle skip maybe); then side runs on a second core (owner: one
+  board must use 2+ cores; a worker needs its own Context and a Bus copy;
+  Bus::held_reads counts the devices side runs read); then the window's
+  hand-back issue above; the owner's internet test; stage/scene/ending
+  tests with 2-4 players (owner asked).
+
 ## Hand-off (state as of 2026-10-24)
 
 How the owner works: asks for each commit and push explicitly ("commit and
