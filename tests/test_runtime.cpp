@@ -54,6 +54,23 @@ TEST_CASE("memory map: regions never overlap") {
     }
 }
 
+TEST_CASE("memory map: the block table finds what a search does") {
+    // (find_region's table of 64 KB blocks: every 16th address, and both ends of every region and mirror)
+    auto search = [](uint32_t addr) -> const Region* {
+        for (const Region& r : step21_regions())
+            if (r.contains(addr)) return &r;
+        return nullptr;
+    };
+    uint64_t differ = 0;
+    for (uint64_t a = 0; a <= 0xFFFFFFFFull; a += 16)
+        differ += find_region(static_cast<uint32_t>(a)) != search(static_cast<uint32_t>(a));
+    for (const Region& r : step21_regions())
+        for (uint32_t m = 0; m <= 7; ++m)
+            for (uint32_t addr : {r.start, r.end, r.start - 1, r.end + 1})
+                differ += find_region(addr | (r.mirror & (m << 25))) != search(addr | (r.mirror & (m << 25)));
+    CHECK_EQ(differ, 0u);
+}
+
 TEST_CASE("crc32: reference value") {
     const char* s = "123456789";
     CHECK_EQ(crc32({reinterpret_cast<const uint8_t*>(s), 9}), 0xCBF43926u);

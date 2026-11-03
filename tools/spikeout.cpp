@@ -1504,6 +1504,7 @@ int main(int argc, char** argv) {
         else if (arg == "--net-every-board") net_one_board = Shared::OneBoard::never;
         else if (arg == "--net-auto-board") net_one_board = Shared::OneBoard::automatic;
         else if (arg == "--net-rollback" && i + 1 < argc) net_rollback = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--no-idle-skip") m3::games::set_idle_skip(false); // (the vblank wait spun, as before)
         else if (arg == "--fog-over-nothing") fog_over_nothing = true;
         else if (arg == "--frames" && i + 1 < argc) max_frames = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--boards" && i + 1 < argc)
@@ -1845,6 +1846,7 @@ int main(int argc, char** argv) {
         shared.backup_bases.clear(); // (every machine sent its whole first again)
         if (shared.netplay && shared.one_board != Shared::OneBoard::never && boards >= 2) {
             shared.one_board_game = std::make_unique<tools::one_board::Game>();
+            shared.one_board_game->set_turns(turns.get()); // (a shadow's hand-back waited for at the meetings)
             shared.one_board_wanted = shared.one_board == Shared::OneBoard::always;
         }
         for (std::size_t i = 0; i < boards; ++i)

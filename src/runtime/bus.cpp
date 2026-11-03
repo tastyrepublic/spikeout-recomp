@@ -349,6 +349,7 @@ void Bus::dma_write32(uint32_t reg, uint32_t value) {
 uint8_t Bus::read_byte(uint32_t addr) {
     if (addr < kWorkRamSize) return ram_[addr];
     const Region* region = find_region(addr);
+    if (hold_devices_ && region) ++held_reads_[static_cast<std::size_t>(region->device)];
     if (!region || !emulated(*region, addr)) {
         count(region, addr, false);
         return 0xFF;
@@ -359,7 +360,10 @@ uint8_t Bus::read_byte(uint32_t addr) {
 uint16_t Bus::read_slow16(uint32_t addr) {
     if (addr >= kWorkRamSize) {
         const Region* region = find_region(addr);
-        if (region && region->device == Device::NetBoard) return net()->read16(addr);
+        if (region && region->device == Device::NetBoard) {
+            if (hold_devices_) ++held_reads_[static_cast<std::size_t>(region->device)];
+            return net()->read16(addr);
+        }
     }
     return static_cast<uint16_t>(read_byte(addr) << 8 | read_byte(addr + 1));
 }
@@ -371,6 +375,7 @@ uint32_t Bus::read_slow32(uint32_t addr) {
         return v;
     }
     const Region* region = find_region(addr);
+    if (hold_devices_ && region) ++held_reads_[static_cast<std::size_t>(region->device)];
     if (!region || !emulated(*region, addr)) {
         count(region, addr, false);
         return 0xFFFFFFFF;
@@ -380,6 +385,14 @@ uint32_t Bus::read_slow32(uint32_t addr) {
     if (region->device == Device::Real3dDma) return bswap32(dma_read32(addr & 0xFF));
     if (region->device == Device::SecurityCrypt) return security_read32(region->offset(addr));
     if (region->device == Device::Real3dStatus) return bswap32(real3d_register(addr & 0x3F));
+    if (region->device == Device::FixedCrom || region->device == Device::BankedCrom) { // (the program ROMs: as device_read's
+                                                                                       // four bytes, read straight)
+        const bool fixed = region->device == Device::FixedCrom;
+        const auto& rom = roms_.region(fixed ? RomRegionId::Crom : RomRegionId::BankedCrom);
+        const std::size_t off = fixed ? std::size_t{addr - kFixedCromBase}
+                                      : std::size_t{crom_bank_} * kCromWindowSize + (addr - kBankedCromBase);
+        if (off + 3 < rom.size()) return uint32_t{rom[off]} << 24 | uint32_t{rom[off + 1]} << 16 | uint32_t{rom[off + 2]} << 8 | rom[off + 3];
+    }
     uint32_t v = 0;
     for (uint32_t i = 0; i < 4; ++i) v = v << 8 | device_read(*region, addr + i);
     return v;

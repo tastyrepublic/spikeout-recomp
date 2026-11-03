@@ -40,12 +40,21 @@
 #include "runtime/tile_sides.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
 
 namespace m3::games {
 
 namespace {
 
 constexpr uint32_t kDrawHook = 0x9628, kFillHook = 0x7E34, kCopyHook = 0x8230, kClearHook = 0x795C;
+// The vblank wait's loop (0x36E04 reads the vblank count, -32712(r13), into r3; 0x36E08 reads it again into r4 until
+// it differs): set_idle_skip.
+constexpr uint32_t kVblankLoop = 0x36E08;
+// And the main loop's waits: a word becoming non-zero (0x36EF8, -32620(r13)), the decrementer no longer negative
+// (0x36F24), the vblank's other byte changing (0x36F44: -32709(r13), read into r3 at 0x36F40).
+constexpr uint32_t kWordLoop = 0x36EF8, kDecLoop = 0x36F24, kIdleLoop = 0x36F44;
+std::atomic<bool> idle_skip{std::getenv("SPIKEOUT_NO_IDLE_SKIP") == nullptr}; // (tests: SPIKEOUT_NO_IDLE_SKIP=1 off)
 constexpr uint32_t kNameTables = 0xF10F8000, kNameTableSize = 0x2000;
 constexpr uint16_t kBlank = 0x20; // the tile the clear flag fills with
 // The staff credits' set-up fills their names' column (layer 0, 28 x 64
@@ -200,12 +209,30 @@ void clear(recomp::Context& c) {
 
 } // namespace
 
-void spikeout_hook(recomp::Context& c, uint32_t pc, void*) {
+namespace {
+void hook(recomp::Context& c, uint32_t pc) {
     if (pc == kDrawHook) draw(c);
     else if (pc == kFillHook) fill(c);
     else if (pc == kCopyHook) copy(c);
     else if (pc == kClearHook) clear(c);
+    else if (!idle_skip.load(std::memory_order_relaxed))
+        return;
+    // (each a loop of one block that reads and compares, gone round again while what it waits for hasn't come: only
+    // an interrupt changes it, and the next is where skip_loop stops)
+    else if (pc == kVblankLoop && c.read8(c.cpu.gpr[13] + 0xFFFF8038u) == static_cast<uint8_t>(c.cpu.gpr[3]))
+        c.skip_loop(4); // (lbz r4, -32712(r13); cmpw r4, r3; beq)
+    else if (pc == kIdleLoop && c.read8(c.cpu.gpr[13] + 0xFFFF803Bu) == static_cast<uint8_t>(c.cpu.gpr[3]))
+        c.skip_loop(4); // (lbz r4, -32709(r13); cmpw r4, r3; beq)
+    else if (pc == kWordLoop && c.read32(c.cpu.gpr[13] + 0xFFFF8094u) == 0)
+        c.skip_loop(4); // (lwz r3, -32620(r13); cmplwi r3, 0; beq)
+    else if (pc == kDecLoop && static_cast<int32_t>(c.read_dec()) < 0)
+        c.skip_loop(5); // (mfspr r4, dec; cmpwi r4, 0; blt: the decrementer only counts on down until an interrupt)
 }
+} // namespace
+
+void spikeout_hook(recomp::Context& c, uint32_t pc, void*) { hook(c, pc); }
+
+void set_idle_skip(bool on) { idle_skip.store(on, std::memory_order_relaxed); }
 
 void install_spikeout_hooks(recomp::Context& c) { c.set_hook(spikeout_hook, nullptr); }
 

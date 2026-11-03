@@ -145,11 +145,14 @@ constexpr std::array kCodeEntries = {
 // And, for the master's run on the side through its drawing (its shadow made
 // from it): the vblank wait's loop (0x36E08), the OS's wait for a transfer
 // (0x4DD8), passed at once there, and the main loop before its idle wait
-// (0x36F24), where that run ends.
+// (0x36F24), where that run ends. And the main loop's other waits (0x36EF8, a
+// word becoming non-zero; 0x36F44, the vblank's byte changing), as the vblank
+// wait's loop (0x36E08), gone round at once (m3::games::set_idle_skip).
 constexpr std::array kHooks = {0x00009628u, 0x00007E34u, 0x00008230u, 0x0000795Cu, 0x0002C4DCu,
                                0x00033A6Cu, 0x00032578u, 0x0000C670u, 0x0005AB18u, 0x0005A874u,
                                0x0006DA90u, 0x00021C88u, 0x00022750u, 0x00026070u, 0x000492ACu, 0x00036E94u,
-                               0x00036E04u, 0x00062AF4u, 0x00036E08u, 0x00004DD8u, 0x00036F24u};
+                               0x00036E04u, 0x00062AF4u, 0x00036E08u, 0x00004DD8u, 0x00036F24u,
+                               0x00036EF8u, 0x00036F44u};
 
 } // namespace
 

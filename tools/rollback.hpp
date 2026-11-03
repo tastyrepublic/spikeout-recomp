@@ -147,12 +147,16 @@ public:
             if (p.active && !p.fresh && !first) first = &p;
         if (!first) return 0;
         const uint64_t frame = first->saved;
-        for (const Part& p : parts_)
-            if (p.active && !p.fresh && p.saved != frame) {
-                std::fprintf(stderr, "rollback: the boards saved different frames (%llu, %llu)\n", (unsigned long long)frame,
-                             (unsigned long long)p.saved);
+        for (std::size_t b = 0; b < parts_.size(); ++b)
+            if (const Part& p = parts_[b]; p.active && !p.fresh && p.saved != frame) {
+                if (!mismatched_) // (once a stretch of them: every meeting else)
+                    std::fprintf(stderr, "rollback: the boards saved different frames (board %zu %llu, board %zu %llu)\n",
+                                 static_cast<std::size_t>(first - parts_.data()), (unsigned long long)frame, b,
+                                 (unsigned long long)p.saved);
+                mismatched_ = true;
                 return 0;
             }
+        mismatched_ = false;
         m3::State s;
         ring_->cut_state(s);
         if (cut) *cut = s.data();
@@ -232,6 +236,7 @@ private:
     std::map<uint64_t, std::vector<uint8_t>> cuts_; // the ring's part, by frame
     std::mutex pins_lock_;
     std::vector<uint64_t> pins_; // (pin: every one asked, in order)
+    bool mismatched_ = false;    // (between: the boards' saved frames differed at the last meeting)
     uint64_t backs_ = 0, frames_again_ = 0;
     double back_ms_ = 0;
 };

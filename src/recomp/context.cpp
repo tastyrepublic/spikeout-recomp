@@ -43,19 +43,23 @@ uint64_t Context::time_base() {
     return cpu.tb;
 }
 
+// (the time base moved: the decrementer's next pass of 0 at another cycle; tick() looks again at the next block)
 uint32_t Context::read_tbl() {
     tb_offset_ += tb_step;
+    recheck();
     return static_cast<uint32_t>(time_base());
 }
 
 void Context::write_tbl(uint32_t v) {
     const uint64_t now = time_base();
     tb_offset_ += ((now & 0xFFFFFFFF00000000u) | v) - now;
+    recheck();
 }
 
 void Context::write_tbu(uint32_t v) {
     const uint64_t now = time_base();
     tb_offset_ += ((now & 0xFFFFFFFFu) | uint64_t{v} << 32) - now;
+    recheck();
 }
 
 uint32_t Context::read_dec() { return dec_ - static_cast<uint32_t>(time_base() - dec_tb_); }
@@ -74,8 +78,12 @@ void Context::write_dec(uint32_t v) {
 }
 
 uint64_t Context::cycle_of_tb(uint64_t tb) const {
-    if (tb <= tb_offset_) return 0;
-    return ((tb - tb_offset_) * kTbDen + kTbNum - 1) / kTbNum;
+    // (as a difference: the offset is below zero, wrapped, once the game sets the time base lower than the time run
+    // (it does); compared as is, every time looked "past" and tick() looked again at every block, the same
+    // interrupts taken at the same blocks, a fifth of the time spent there)
+    const uint64_t since = tb - tb_offset_;
+    if (static_cast<int64_t>(since) <= 0) return 0;
+    return (since * kTbDen + kTbNum - 1) / kTbNum;
 }
 
 // ---- Events and interrupts ----

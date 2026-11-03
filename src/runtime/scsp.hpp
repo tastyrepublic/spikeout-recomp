@@ -92,6 +92,13 @@ private:
         std::array<int16_t, 16> efreg{};
         bool stopped = true;
         int last_step = 0;
+        // (each step's fields, taken out of mpro once it is written, not at every sample: not saved, made again)
+        struct Step {
+            uint8_t tra, twt, twa, xsel, ysel, ira, iwt, iwa, table, mwt, mrd, ewt, ewa, adrl, frcl, shift, yrl, negb,
+                zero, bsel, nofl, coef, masa, adreb, nxadr;
+        };
+        std::array<Step, 128> steps{};
+        bool steps_made = false;
     };
 
     void update_slot_reg(int s, uint32_t reg);

@@ -1852,6 +1852,16 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
 #endif
         if (o.probe_frame && frame == o.probe_frame && m.index == 0) print_probe(m.real3d, o.probe_x, o.probe_y, frame);
         if (!o.no_2d && !quiet) m.tilegen.composite(m.screen, o.renderer == R::Gpu ? std::span<const uint32_t>(m.gpu_image) : m.real3d.image());
+        // (tests: GAMERUN_2D_HASH=1, each frame's 2D layers hashed, their sides and marks too: the tile generator's work)
+        if (static const bool hash_2d = std::getenv("GAMERUN_2D_HASH") != nullptr; hash_2d && !o.no_2d && !quiet) {
+            uint64_t h = 0xCBF29CE484222325ull;
+            for (const auto layer : {m.tilegen.bottom(), m.tilegen.top(), m.tilegen.bottom_side(), m.tilegen.top_side(),
+                                     m.tilegen.bottom_own(), m.tilegen.top_own()})
+                for (uint32_t p : layer) h = (h ^ p) * 0x100000001B3ull;
+            for (const auto marks : {m.tilegen.bottom_real(), m.tilegen.top_real()})
+                for (uint8_t b : marks) h = (h ^ b) * 0x100000001B3ull;
+            std::printf("board %zu frame %llu: 2D %016llx\n", m.index, static_cast<unsigned long long>(frame), static_cast<unsigned long long>(h));
+        }
         if (const int e = m.tilegen.extend(); e > 0 && !o.no_2d && !quiet) { // --wide: the sides made every frame, as the window does
             const auto start = std::chrono::steady_clock::now();
             m.wide_bottom.build(m.tilegen.bottom(), m.tilegen.bottom_side(), e, m.bottom_wide, false, m.tilegen.bottom_own(),
@@ -2007,6 +2017,18 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
                                     static_cast<unsigned long long>(state_hash([&](m3::State& s) { m.c.state(s); })),
                                     static_cast<unsigned long long>(state_hash([&](m3::State& s) { m.timing.state(s); })),
                                     static_cast<unsigned long long>(state_hash([&](m3::State& s) { m.bus.netboard().state(s); })));
+                    // (tests: GAMERUN_NETBOARD_DUMP=DIR, the network board's state at each of these frames written to
+                    // DIR/netboard-<process>-<board>-<frame>.bin, to see which of its bytes two runs differ in)
+                    if (const char* dir = std::getenv("GAMERUN_NETBOARD_DUMP")) {
+                        static const unsigned long run_id = static_cast<unsigned long>( // (this process's, its start's clock)
+                            std::chrono::steady_clock::now().time_since_epoch().count() % 1000000007);
+                        m3::State s;
+                        m.bus.netboard().state(s);
+                        char path[600];
+                        std::snprintf(path, sizeof path, "%s/netboard-%lu-%zu-%llu.bin", dir, run_id,
+                                      m.index, static_cast<unsigned long long>(frame));
+                        tools::write_file(path, s.data());
+                    }
                 });
         }
         {
@@ -2840,6 +2862,9 @@ void report(Machine& m, const Options& o) {
     std::printf("Ran %lld blocks in %.2f s (%.0f million blocks/s), %.2f 603e cycles a block; its thread's CPU time %.2f s\n", ran,
                 m.seconds, static_cast<double>(ran) / m.seconds / 1e6,
                 ran > 0 ? static_cast<double>(c.cycles()) / static_cast<double>(ran) : 0.0, m.cpu_seconds);
+    if (c.skipped_blocks) // (the vblank wait gone round at once: counted in the blocks, not run)
+        std::printf("Idle: %llu of those blocks the vblank wait's, not run (--no-idle-skip runs them)\n",
+                    (unsigned long long)c.skipped_blocks);
     if (m.ob.cabinets) { // --one-board: the other cabinets' side runs
         std::printf("Other cabinets: %llu side runs, %.2f s in them (%.2f s with their set-ups; %llu RAM bytes written and put back), "
                     "their network boards %.2f s, %llu blocks made%s%s\n",
@@ -2848,6 +2873,10 @@ void report(Machine& m, const Options& o) {
                     m.ob.cabinets->failed().empty() ? "" : "; first failure: ", m.ob.cabinets->failed().c_str());
         std::printf("Other cabinets' side runs by kind (their buttons waited for %llu times, %.2f s):\n%s",
                     (unsigned long long)g_one_board.held_waits(), g_one_board.held_wait_seconds(), m.ob.cabinets->profile().c_str());
+        std::printf("Devices read in them (by m3::Device):");
+        for (std::size_t d = 0; d < m.bus.held_reads().size(); ++d)
+            if (m.bus.held_reads()[d]) std::printf(" %zu: %llu", d, (unsigned long long)m.bus.held_reads()[d]);
+        std::printf("\n");
         if (m.ob.cabinets->heavy_frames())
             std::printf("Other cabinets: %llu heavy frames on side runs (first at %llu): a frame they may have lost, no shadow running\n",
                         (unsigned long long)m.ob.cabinets->heavy_frames(), (unsigned long long)m.ob.cabinets->first_heavy());
@@ -3314,6 +3343,7 @@ int main(int argc_given, char** argv_given) {
         else if (arg == "--net-rollback" && i + 1 < argc) o.net_rollback = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--net-hold-inputs" && i + 1 < argc) o.net_hold_inputs = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--no-frame-hashes") o.no_frame_hashes = true;
+        else if (arg == "--no-idle-skip") m3::games::set_idle_skip(false); // (the vblank wait spun, as before)
         else if (arg == "--frame-hashes") o.frame_hashes = true;
         else if (arg == "--frames" && i + 1 < argc) o.max_frames = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--seats" && i + 1 < argc)
@@ -3894,6 +3924,7 @@ int main(int argc_given, char** argv_given) {
         }) : std::function<void()>());
     };
     std::unique_ptr<tools::Turns> turns_ptr = make_turns();
+    g_one_board.set_turns(turns_ptr.get()); // (one board: a shadow's hand-back waited for at the meetings)
     // The GPU (--renderer gpu or compare), without a window; the boards take
     // turns, so they share it.
 #ifdef SPIKEOUT_GPU
@@ -4082,6 +4113,7 @@ int main(int argc_given, char** argv_given) {
     inputs.reset();
     netplay->session().feed_inputs(*resync->state_frame);
     turns_ptr = make_turns();
+    g_one_board.set_turns(turns_ptr.get());
     std::printf("net: running on from the host's frame %llu again\n", static_cast<unsigned long long>(*resync->state_frame));
   }
 

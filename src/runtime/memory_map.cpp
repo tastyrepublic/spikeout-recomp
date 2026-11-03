@@ -44,10 +44,40 @@ constexpr std::array kRegions = {
 
 std::span<const Region> step21_regions() { return kRegions; }
 
-const Region* find_region(uint32_t addr) {
+namespace {
+const Region* search(uint32_t addr) {
     for (const Region& r : kRegions)
         if (r.contains(addr)) return &r;
     return nullptr;
+}
+// Each 64 KB block of the address space: the one region that covers it whole (its index + 1), none that touches it
+// (kNone), or some only part of it (kMixed: searched). The regions don't overlap, so the same as searching; every
+// mirror's bits are above the block's.
+constexpr uint8_t kNone = 0xFE, kMixed = 0xFF;
+const std::array<uint8_t, 0x10000> kBlocks = [] {
+    static_assert(kRegions.size() < kNone);
+    std::array<uint8_t, 0x10000> blocks{};
+    for (uint32_t b = 0; b < 0x10000; ++b) {
+        const uint32_t lo = b << 16, hi = lo | 0xFFFF;
+        uint8_t at = kNone;
+        for (std::size_t i = 0; i < kRegions.size(); ++i) {
+            const Region& r = kRegions[i];
+            const uint32_t a = lo & ~r.mirror, z = hi & ~r.mirror;
+            if (z < r.start || a > r.end) continue; // (not touched)
+            at = a >= r.start && z <= r.end && at == kNone ? static_cast<uint8_t>(i + 1) : kMixed;
+            if (at == kMixed) break;
+        }
+        blocks[b] = at;
+    }
+    return blocks;
+}();
+} // namespace
+
+const Region* find_region(uint32_t addr) {
+    const uint8_t at = kBlocks[addr >> 16];
+    if (at == kNone) return nullptr;
+    if (at != kMixed) return &kRegions[at - 1u];
+    return search(addr);
 }
 
 } // namespace m3

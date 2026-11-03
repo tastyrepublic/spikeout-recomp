@@ -316,6 +316,11 @@ public:
         const Remote* r = find(seat);
         return r && r->shadowed ? r->stop_after : 0;
     }
+    // Its shadow to be handed back, where it stops (known): any time now, from its own board's thread.
+    bool hand_back_pending(std::size_t seat) {
+        const Remote* r = find(seat);
+        return r && r->shadowed && r->hand_back_asked && r->stop_after != 0;
+    }
     // Its shadow stopped where it finished count `seed.own_logic` (0x36E94): `seed` its own variables, camera
     // and regions there, `ram` its RAM (its link memory and variables), `last` the frame of its last link.
     void hand_back(std::size_t seat, const Seed& seed, std::span<const uint8_t> ram, uint64_t last);
@@ -497,8 +502,20 @@ private:
         std::size_t n = 0, i = 0;
         for (const auto& [lo, hi] : kOwnRegions) {
             if (region_own(i++, mask))
-                for (uint32_t a = lo; a < hi; ++a)
-                    if (ram[a] != regions[n + a - lo]) bus_.write8(a, regions[n + a - lo]);
+                for (uint32_t at = lo; at < hi; at += 64) { // (64 bytes at a time compared first: most are the same)
+                    const uint32_t end = std::min<uint32_t>(at + 64, hi);
+                    if (std::memcmp(&ram[at], &regions[n + at - lo], end - at) == 0) continue;
+                    for (uint32_t a = at; a < end; ++a)
+                        if (ram[a] != regions[n + a - lo]) bus_.write8(a, regions[n + a - lo]);
+                }
+            n += hi - lo;
+        }
+    }
+    // (its own areas back from RAM: gather_regions, into the buffer it has)
+    static void regather(std::vector<uint8_t>& regions, std::span<const uint8_t> ram) {
+        std::size_t n = 0;
+        for (const auto& [lo, hi] : kOwnRegions) {
+            std::memcpy(regions.data() + n, ram.data() + lo, hi - lo);
             n += hi - lo;
         }
     }
@@ -696,7 +713,7 @@ inline void Cabinets::side_run(Remote& r, uint32_t pc, uint32_t* flags, bool kee
     if (keep_camera)
         for (uint32_t i = 0; i < kCameraBytes; ++i) r.camera[i] = bus_.read8(kCamera + i);
     for (std::size_t k = 0; k < own_.size(); ++k) r.own[k] = bus_.read8(own_[k]);
-    if ((pc == kAnimationStep || tasks) && r.regions.size() == kRegionBytes) r.regions = gather_regions(bus_.ram());
+    if ((pc == kAnimationStep || tasks) && r.regions.size() == kRegionBytes) regather(r.regions, bus_.ram());
     if (flags) *flags = bus_.read32(character ? character : aside.cpu.gpr[14]);
     if (pc == kModeDispatch) {
         ahead_record_.resize(0x80);
@@ -985,8 +1002,11 @@ inline void Cabinets::link_run(Remote& r, uint64_t frame) {
     bus_.journal(true);
     // (its link memory, its own variables as its last link left them, its flows since)
     const auto ram = bus_.ram();
-    for (uint32_t i = 0; i < kLinkBytes; ++i)
-        if (ram[kLinkMemory + i] != r.link[i]) bus_.write8(kLinkMemory + i, r.link[i]);
+    for (uint32_t at = 0; at < kLinkBytes; at += 64) { // (64 bytes at a time compared first, as put_regions)
+        if (std::memcmp(&ram[kLinkMemory + at], &r.link[at], 64) == 0) continue;
+        for (uint32_t i = at; i < at + 64; ++i)
+            if (ram[kLinkMemory + i] != r.link[i]) bus_.write8(kLinkMemory + i, r.link[i]);
+    }
     merge_own(r.state_own);
     if (r.regions.size() == kRegionBytes) put_regions(r.regions); // (its own areas: the entries it processes read its unused players' objects)
     for (auto d = r.flow_delta.upper_bound(r.flow_applied); d != r.flow_delta.end() && d->first <= r.logic; ++d)
@@ -1071,7 +1091,7 @@ inline void Cabinets::link_run(Remote& r, uint64_t frame) {
         if (r.state_own[k] != was_own[k] && !r.own.empty() && own_[k] >= kLinkMemory && own_[k] < kLinkMemory + kLinkBytes)
             r.own[k] = r.state_own[k];
     }
-    if (r.regions.size() == kRegionBytes) r.regions = gather_regions(ram);
+    if (r.regions.size() == kRegionBytes) regather(r.regions, ram);
     for (uint32_t i = 0; i < kBlockWords; ++i) r.block[i] = bus_.read32(kBlock + 4 * i);
     const uint32_t now_logic = bus_.read32(kLogicCounter);
     journal_bytes_ += bus_.journal_size();

@@ -4,7 +4,9 @@
 #include "runtime/tile_sides.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cstdlib>
+#include <cstring>
 
 namespace m3 {
 
@@ -66,8 +68,20 @@ void TilegenRenderer::draw_line(std::span<const uint8_t> ram, const std::array<u
 
     // Layers 2/3 first, then 0/1 over them; in each pair the line mask picks
     // the primary (even) or alternate (odd) layer per 32 pixels.
+    // (a palette word's colour, with the pair's offset: each 5-bit channel's 8 bits from a table made once a pair,
+    // the same as channel() each time; the palette read straight, the tile RAM holding it whole)
+    const uint8_t* palette = ram.size() >= kPalette + 0x8000 * 4 ? ram.data() + kPalette : nullptr;
     for (int pair = 1; pair >= 0; --pair) {
         const Offset offset = colour_offset(regs[(0x40 + 4 * static_cast<uint32_t>(pair)) / 4]);
+        uint32_t to_r[32], to_g[32], to_b[32];
+        for (uint32_t c = 0; c < 32; ++c)
+            to_r[c] = channel(c, offset.r) << 16, to_g[c] = channel(c, offset.g) << 8, to_b[c] = channel(c, offset.b);
+        auto colour_of = [&](uint32_t index) -> uint32_t { // (a palette entry: 15 bits)
+            if (!palette || std::endian::native != std::endian::little) return word(kPalette / 4 + index);
+            uint32_t w;
+            std::memcpy(&w, palette + std::size_t{index} * 4, 4);
+            return w; // (the tile generator's words little-endian, as word() reads them)
+        };
         const uint32_t mask = (word(kLineMask / 4 + y) >> (pair == 0 ? 16 : 0)) & 0xFFFF;
 
         struct Layer {
@@ -242,10 +256,9 @@ void TilegenRenderer::draw_line(std::span<const uint8_t> ram, const std::array<u
                       static_cast<std::size_t>(2 * extend_) * y + (sx < 0 ? sx + extend_ : sx - kWidth + extend_);
             const uint32_t n = end - x;
             for (uint32_t i = 0, fx = px & 7; i < n; ++i, ++fx) {
-                const uint32_t colour = word(kPalette / 4 + (base | pixels[fx]));
+                const uint32_t colour = colour_of(base | pixels[fx]);
                 if (colour & 0x8000) continue; // transparent
-                out[i] = 0xFF000000u | channel(colour & 0x1F, offset.r) << 16 | channel((colour >> 5) & 0x1F, offset.g) << 8 |
-                         channel((colour >> 10) & 0x1F, offset.b);
+                out[i] = 0xFF000000u | to_r[colour & 0x1F] | to_g[(colour >> 5) & 0x1F] | to_b[(colour >> 10) & 0x1F];
             }
             sx += static_cast<int>(n);
         }

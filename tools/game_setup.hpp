@@ -183,6 +183,13 @@ public:
         std::lock_guard lock(mutex_);
         return done_[i];
     }
+    // Parallel: whether board i has come to the barrier the others are on their way to (or stopped): its part
+    // before it done.
+    bool waiting(std::size_t i) {
+        if (!parallel_) return true; // (taking turns: only the board whose turn it is runs)
+        std::lock_guard lock(mutex_);
+        return done_[i] || at_barrier_[i];
+    }
 
     void wait(std::size_t i) {
         if (parallel_) return; // (all start together)
@@ -198,6 +205,7 @@ public:
                 lock.unlock();
                 changed_.notify_all();
             } else {
+                at_barrier_[i] = true;
                 changed_.wait(lock, [&] { return round_ != round; });
             }
             return;
@@ -227,6 +235,7 @@ private:
     void release() { // (the lock held)
         if (between_) between_();
         arrived_ = 0;
+        std::fill(at_barrier_.begin(), at_barrier_.end(), false);
         ++round_;
     }
     void advance(std::size_t i) {
@@ -243,6 +252,7 @@ private:
     std::condition_variable changed_;
     std::size_t turn_ = 0;
     std::vector<bool> done_;
+    std::vector<bool> at_barrier_ = std::vector<bool>(done_.size(), false); // (waiting)
     bool parallel_ = false;
     std::function<void()> between_;
     std::size_t arrived_ = 0; // parallel: at the barrier this round

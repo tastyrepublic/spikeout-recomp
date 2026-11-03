@@ -675,7 +675,7 @@ void Scsp::write16(uint32_t addr, uint16_t v) {
     } else if (addr >= 0x700 && addr < 0xC00) {
         if (addr < 0x780) dsp_.coef[(addr - 0x700) / 2] = static_cast<int16_t>(v);
         else if (addr < 0x800) dsp_.madrs[((addr - 0x780) / 2) & 0x1F] = v; // mirrored twice
-        else dsp_.mpro[(addr - 0x800) / 2] = v;
+        else dsp_.mpro[(addr - 0x800) / 2] = v, dsp_.steps_made = false;
         if (addr == 0xBF0) dsp_start();
     }
 }
@@ -718,17 +718,24 @@ void Scsp::dsp_step() {
     int32_t acc = 0, shifted = 0, x = 0, y = 0, b = 0, inputs = 0, memval = 0, frc_reg = 0, y_reg = 0;
     uint32_t adrs_reg = 0;
     d.efreg.fill(0);
+    if (!d.steps_made) { // (the program's fields, once it is written)
+        for (std::size_t step = 0; step < d.steps.size(); ++step) {
+            const uint16_t* ip = &d.mpro[step * 4];
+            auto f = [](uint32_t word, int at, uint32_t mask) { return static_cast<uint8_t>((word >> at) & mask); };
+            d.steps[step] = {f(ip[0], 8, 0x7F), f(ip[0], 7, 1),  f(ip[0], 0, 0x7F),  f(ip[1], 15, 1), f(ip[1], 13, 3),
+                             f(ip[1], 6, 0x3F), f(ip[1], 5, 1),  f(ip[1], 0, 0x1F),  f(ip[2], 15, 1), f(ip[2], 14, 1),
+                             f(ip[2], 13, 1),   f(ip[2], 12, 1), f(ip[2], 8, 0xF),   f(ip[2], 7, 1),  f(ip[2], 6, 1),
+                             f(ip[2], 4, 3),    f(ip[2], 3, 1),  f(ip[2], 2, 1),     f(ip[2], 1, 1),  f(ip[2], 0, 1),
+                             f(ip[3], 15, 1),   f(ip[3], 9, 0x3F), f(ip[3], 2, 0x1F), f(ip[3], 1, 1),  f(ip[3], 0, 1)};
+        }
+        d.steps_made = true;
+    }
     for (int step = 0; step < d.last_step; ++step) {
-        const uint16_t* ip = &d.mpro[static_cast<std::size_t>(step) * 4];
-        const uint32_t tra = (ip[0] >> 8) & 0x7F, twt = (ip[0] >> 7) & 1, twa = ip[0] & 0x7F;
-        const uint32_t xsel = (ip[1] >> 15) & 1, ysel = (ip[1] >> 13) & 3, ira = (ip[1] >> 6) & 0x3F;
-        const uint32_t iwt = (ip[1] >> 5) & 1, iwa = ip[1] & 0x1F;
-        const uint32_t table = (ip[2] >> 15) & 1, mwt = (ip[2] >> 14) & 1, mrd = (ip[2] >> 13) & 1;
-        const uint32_t ewt = (ip[2] >> 12) & 1, ewa = (ip[2] >> 8) & 0xF, adrl = (ip[2] >> 7) & 1;
-        const uint32_t frcl = (ip[2] >> 6) & 1, shift = (ip[2] >> 4) & 3, yrl = (ip[2] >> 3) & 1;
-        const uint32_t negb = (ip[2] >> 2) & 1, zero = (ip[2] >> 1) & 1, bsel = ip[2] & 1;
-        const uint32_t nofl = (ip[3] >> 15) & 1, coef = (ip[3] >> 9) & 0x3F, masa = (ip[3] >> 2) & 0x1F;
-        const uint32_t adreb = (ip[3] >> 1) & 1, nxadr = ip[3] & 1;
+        const Dsp::Step& o = d.steps[static_cast<std::size_t>(step)];
+        const uint32_t tra = o.tra, twt = o.twt, twa = o.twa, xsel = o.xsel, ysel = o.ysel, ira = o.ira, iwt = o.iwt, iwa = o.iwa;
+        const uint32_t table = o.table, mwt = o.mwt, mrd = o.mrd, ewt = o.ewt, ewa = o.ewa, adrl = o.adrl, frcl = o.frcl;
+        const uint32_t shift = o.shift, yrl = o.yrl, negb = o.negb, zero = o.zero, bsel = o.bsel, nofl = o.nofl;
+        const uint32_t coef = o.coef, masa = o.masa, adreb = o.adreb, nxadr = o.nxadr;
 
         if (ira <= 0x1F) inputs = d.mems[ira];
         else if (ira <= 0x2F) inputs = d.mixs[ira - 0x20] * 16; // MIXS is 20 bits
@@ -808,6 +815,7 @@ void Scsp::state(State& s) {
     Dsp& d = dsp_;
     s.io(d.rbp), s.io(d.rbl), s.io(d.coef), s.io(d.madrs), s.io(d.mpro), s.io(d.temp), s.io(d.mems), s.io(d.dec);
     s.io(d.mixs), s.io(d.exts), s.io(d.efreg), s.io(d.stopped), s.io(d.last_step);
+    if (s.loading()) d.steps_made = false;
     s.io(ring_), s.io(bufptr_), s.io(noise_), s.io(timer_), s.io(mcieb_), s.io(mcipd_);
     s.io(midi_), s.io(midi_w_), s.io(midi_r_);
 }

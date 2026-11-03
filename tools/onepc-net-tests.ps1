@@ -109,7 +109,9 @@ foreach ($t in $tests) {
 # takes the seat. leave3: the three game, player 3 leaving after 7,030; the new player's join then finds player 2's
 # board on side runs on the host, which asks player 2's machine for it first (every board whole for the state). Each
 # machine's hashes (its own board and any it runs whole) are compared with the host's, and the joiner's (every board
-# run there, Mode B) with every other machine's, frame by frame and the whole states every 100 frames.
+# run there, Mode B) with every other machine's, frame by frame and the whole states every 100 frames. (The host and
+# the others run 10,000 frames past the end: alone, gamerun runs far faster than the game, and a join takes a second or
+# two to arrive.)
 # vanish, vanish3: the same, the player gone without a word instead (--net-vanish-at: as a crash): each other machine
 # runs its board on from its last backup (tools::backup); its RAM each frame there (replay board N) compared with the
 # board's own up to where it went.
@@ -126,10 +128,10 @@ foreach ($t in $leaves) {
     $game = "onepc-$name-$PID"
     $common = @('build/roms/spikeofe', '--no-sound', '--no-2d', '--input-delay', '2', '--blocks', '30000000000') + $presses
     $net = $auto + @('--one-board-held', '--net-one-board', '100')
-    $stay = @(Start-Process $exe -ArgumentList ($common + $net + @('--frames', "$($end + 300)", '--net-host', $game, '--seats', "$seats")) -RedirectStandardOutput "$out/$name-0.txt" -RedirectStandardError "$out/$name-0.err" -NoNewWindow -PassThru)
+    $stay = @(Start-Process $exe -ArgumentList ($common + $net + @('--frames', "$($end + 10000)", '--net-host', $game, '--seats', "$seats")) -RedirectStandardOutput "$out/$name-0.txt" -RedirectStandardError "$out/$name-0.err" -NoNewWindow -PassThru)
     Start-Sleep -Milliseconds 500
     for ($k = 1; $k -lt $seats - 1; $k++) {
-        $stay += Start-Process $exe -ArgumentList ($common + $net + @('--frames', "$($end + 300)", '--net-join', $game)) -RedirectStandardOutput "$out/$name-$k.txt" -RedirectStandardError "$out/$name-$k.err" -NoNewWindow -PassThru
+        $stay += Start-Process $exe -ArgumentList ($common + $net + @('--frames', "$($end + 10000)", '--net-join', $game)) -RedirectStandardOutput "$out/$name-$k.txt" -RedirectStandardError "$out/$name-$k.err" -NoNewWindow -PassThru
         Start-Sleep -Milliseconds 500
     }
     $leaver = $seats - 1

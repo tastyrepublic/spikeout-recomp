@@ -250,6 +250,7 @@ public:
     // The staying board's meeting after `line`: the other cabinets' blocks due, their network boards brought up to it.
     static void meet(Board& m, uint32_t line) {
         if (!m.cabinets) return;
+        if (m.game) m.game->wait_hand_backs(m);
         std::lock_guard guard(m.cabinets_lock);
         const uint64_t f = m.timing.frames();
         m.cabinets->meet(f, m.timing.frame_start(f) + m.timing.line_cycles() * (recomp::FrameTiming::kVBlankLines + line));
@@ -339,6 +340,25 @@ public:
     // would find the other cabinet in the other mode); the frame after it pinned (Settings::pin), nothing gone back
     // to before it. A shadow waits at its frame for every input up to it (Settings::wait_settled), the frames before
     // it guessed as any.
+    // The boards' turns (Turns), for wait_hand_backs: set where they are made.
+    void set_turns(Turns* turns) { turns_ = turns; }
+    // At a meeting of the staying board, before what the module does there: a shadow to be handed back any time now
+    // (its own thread stopping it where its count ends, between meetings) waited for until it has come to this
+    // meeting too, or been handed back. Its hand-back then always before the module's work at this meeting, as the
+    // boards' speeds have it or not (the staying board run faster, the idle wait skipped: else now and then after,
+    // its network board then synced and its link written another time).
+    void wait_hand_backs(Board& stays) {
+        if (!turns_ || !stays.cabinets) return;
+        for (const std::size_t gone : settings_.going)
+            for (;;) {
+                {
+                    std::lock_guard guard(stays.cabinets_lock);
+                    if (!stays.cabinets->hand_back_pending(gone)) break;
+                }
+                if (turns_->waiting(gone)) break;
+                std::this_thread::yield(); // (its part of this stretch still running, a few microseconds)
+            }
+    }
     // (the side runs' buttons not in yet when they were wanted: how many, and the time waiting for them (or guessing))
     uint64_t held_waits() const { return held_waits_; }
     double held_wait_seconds() const { return held_wait_seconds_; }
@@ -978,6 +998,7 @@ private:
     // the seats whose player left with a parting (kept whole), or went without one (never asked for))
     std::map<std::size_t, uint64_t> remote_frames_, calm_;
     std::map<std::size_t, uint64_t> no_guess_; // (rollback: by board being switched, the frame through which no guesses)
+    Turns* turns_ = nullptr; // (set_turns)
     uint64_t held_waits_ = 0;          // (held_waits: the staying board's thread only)
     double held_wait_seconds_ = 0;
     bool rolling() const { return static_cast<bool>(settings_.settled); }

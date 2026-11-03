@@ -144,6 +144,19 @@ public:
         cycles_ += block_cycles;
     }
 
+    // A wait loop of one block of `block_cycles`, at its hook (its cycles for this time round counted), that will go
+    // round unchanged until something is due (an event, an interrupt, a limit): gone round at once as many times as
+    // it would before tick() next looks, its cycles and blocks counted as if run. The same state as spinning (the
+    // loop reads, and changes nothing); its time not spent.
+    void skip_loop(uint32_t block_cycles) {
+        if (cycles_ >= next_check_) return;
+        const uint64_t times = (next_check_ - cycles_ + block_cycles - 1) / block_cycles;
+        cycles_ += times * block_cycles;
+        blocks += times;
+        skipped_blocks += times;
+    }
+    uint64_t skipped_blocks = 0; // (skip_loop's, in all)
+
     // The last blocks run, oldest first: where a stopped run came from.
     std::array<uint32_t, 16> recent{};
     uint32_t recent_pos = 0;

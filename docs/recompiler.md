@@ -101,6 +101,41 @@ MSR (`mtmsr`, `rfi`) or the decrementer changed. External interrupts
 (`0x500`) are taken at a block start when the IRQ controller's line is up
 and MSR[EE] is set.
 
+Found 2026-11-03 (uncommitted when written): `cycle_of_tb` compared the
+decrementer's due time with the time base's offset unsigned. The game sets
+the time base lower than the time already run, the offset went below zero
+(wrapped), every due time looked past, and `tick()` took the slow path at
+every block from then on: about a fifth of a board's time. Now taken as a
+difference; and a TBL read (which moves the time base on by `tb_step`) or a
+TBL/TBU write looks again at the next block (the decrementer then due at
+another cycle). The same interrupts at the same blocks: every frame's RAM,
+whole states every 100 frames, the GPU's pictures and the sound byte for
+byte the same as before over 1,500 frames of two linked boards
+(mash-5990.state), and every one-board test; a board about 40% faster with
+sound and 2D (24.0 s to 14.2 s for those frames, with the idle skip).
+
+The idle skip (`Context::skip_loop`, `m3::games::set_idle_skip`; gamerun
+and spikeout `--no-idle-skip`, `SPIKEOUT_NO_IDLE_SKIP=1` turn it off): the
+game's waits (the main loop's at 0x36EF8, 0x36F24 and 0x36F44, the
+drawing's vblank wait at 0x36E08) are each one block that reads and
+compares until an interrupt changes what it waits for; at its hook, while
+it still waits, it is gone round at once up to where `tick()` next looks,
+its cycles and blocks counted as if run. The same state (the same tests).
+Found with it: with one board a PC (`tools/onepc-net-tests.ps1` vanish and
+leave), the staying board's network board differed now and then (one run
+in three) from the joiner's plain run of the same board, in one field only
+(`CommBoard::send_done_`, about 2,000 of its cycles; never RAM, the CPU or
+the frame timing). A shadow's own thread hands it back where its count ends,
+between two meetings, while the staying board runs on beside it: when the
+staying board came to the next meeting first, the module made that
+cabinet's link from a meeting later. Spinning, the staying board was always
+the slower; skipping the waits, now and then not. Now the staying board
+waits at each meeting, while a hand-back is to come, until the shadow has
+come to that meeting too or been handed back
+(`one_board::Game::wait_hand_backs`, `Turns::waiting`): the hand-back always
+first, as the boards' speeds have it or not (ten runs of ten the same, with
+the skip on everywhere).
+
 `recomp::FrameTiming` is the board's `Scheduler`: Supermodel's frame at
 57.524 Hz, 424 lines, with 40 lines of VBlank ending in IRQ `0x0D` and
 IRQ `0x02` at display line 383. Not modelled yet: running VBlank until
@@ -154,6 +189,21 @@ scan chain of the Real3D chips (`m3::Jtag`), and the Real3D's DMA device
 and status registers (with the per-frame ping-pong bit). Everything else is
 open bus (reads all ones, writes dropped) and counted per region, so a run
 reports which devices the game used that aren't emulated yet.
+
+Speed (2026-11-03, uncommitted when written; each proved the same output:
+every frame's RAM and whole states, the sound, every frame's 2D layers
+(gamerun `GAMERUN_2D_HASH=1`), the one-board tests): `find_region` looks a
+64 KB block up in a table made once (the one region covering it whole, none,
+or else searched as before: a unit test checks it against the search at
+every 16th address), not searching the 27 regions for every access outside
+RAM (the program ROMs last); a 32-bit program ROM read takes its four bytes
+straight from the ROM; the tile generator's colours from three 32-entry
+tables made once a layer pair (the offset added and clamped already), the
+palette read straight. Two linked boards over 1,500 frames of a fight,
+gamerun with sound and 2D: 24.0 s before the decrementer fix (above), 14.2
+s after it with the idle skip, 10.4 s with these (the 2D 44% less, the game
+logic 11%). Tried and left: a 4 KB page journal for side runs (slower than
+the byte journal), the recent-blocks list's store in `tick()` (no gain).
 
 The JTAG chain and Real3D DMA/status registers are adapted from Supermodel
 (`JTAG.cpp`, `Real3D.cpp`, and the matching cases of `Model3.cpp`),

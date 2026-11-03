@@ -279,6 +279,9 @@ public:
         journal_.clear();
     }
     std::size_t journal_size() const { return journal_.size(); }
+    // The devices read while their writes were held (side runs), by Device: what a side run takes from the board
+    // besides its RAM.
+    const std::array<uint64_t, 32>& held_reads() const { return held_reads_; }
 
     // Real-time clock (0xF0140000), on the emulated time. It starts at
     // 1970-01-01 00:00; a frontend sets it (rtc().set_time) from the host's
@@ -353,6 +356,7 @@ private:
     std::array<uint32_t, 2> held_crom_{}; // (the CROM bank and its register as the hold began)
     bool journaling_ = false;   // (journal)
     std::vector<std::pair<uint32_t, uint8_t>> journal_;
+    std::array<uint64_t, 32> held_reads_{}; // (held_reads)
     void update_fast_limit() {
         const bool slow = journaling_ || (on_watch_ && watch_lo_ < kWorkRamSize);
         fast_limit_ = slow ? std::array<uint32_t, 3>{} : std::array<uint32_t, 3>{kWorkRamSize, kWorkRamSize - 1, kWorkRamSize - 3};
