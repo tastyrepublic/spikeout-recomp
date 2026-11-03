@@ -119,6 +119,15 @@ public:
         return !closed_;
     }
 
+    // Rollback, for the overlay: how often a board's inputs were guessed wrong (runs of frames one after another
+    // counted once: each run, most likely, once gone back for) since `frame` (kept 20 s).
+    std::size_t wrongs_since(std::size_t board, uint64_t frame) const {
+        std::lock_guard guard(lock_);
+        if (board >= boards_.size()) return 0;
+        std::size_t n = 0;
+        for (const Board::Wrong& w : boards_[board].wrong) n += w.last >= frame;
+        return n;
+    }
     // The first frame not yet set (0: none).
     uint64_t next(std::size_t board) const {
         std::lock_guard guard(lock_);
@@ -182,7 +191,12 @@ private:
         std::optional<uint64_t> hold_from, hold_until;
         Inputs held;
         std::map<uint64_t, Inputs> guesses; // (rollback: frames read before they were set, as guessed)
+        struct Wrong {
+            uint64_t first, last; // (a run of frames guessed wrong, one after another: one going back, most likely)
+        };
+        std::deque<Wrong> wrong; // (wrongs_since)
     };
+    static constexpr uint64_t kWrongKept = 1200; // (frames: 20 s)
     static bool same(const Inputs& a, const Inputs& b) {
         return a.bank0 == b.bank0 && a.bank1 == b.bank1 && a.controls == b.controls && a.controls2 == b.controls2;
     }
@@ -190,7 +204,12 @@ private:
     void settle(Board& b, const Inputs& in) {
         if (const auto it = b.guesses.find(b.next); it != b.guesses.end()) {
             const bool held = b.hold_from && b.next >= *b.hold_from && (!b.hold_until || b.next < *b.hold_until);
-            if (!held && !same(it->second, in)) wrong_ = std::min(wrong_, b.next);
+            if (!held && !same(it->second, in)) {
+                wrong_ = std::min(wrong_, b.next);
+                if (b.wrong.empty() || b.wrong.back().last + 1 != b.next) b.wrong.push_back({b.next, b.next});
+                else b.wrong.back().last = b.next;
+                while (b.wrong.size() > 1 && b.wrong.front().last + kWrongKept < b.next) b.wrong.pop_front();
+            }
             b.guesses.erase(it);
         }
         push(b, in);

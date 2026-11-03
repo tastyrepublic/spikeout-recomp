@@ -20,7 +20,7 @@ constexpr uint8_t kNoSeat = 0xFF;
 // Control messages, on the reliable channel.
 enum Message : uint8_t { kWelcome = 1, kRoster = 2, kStart = 3, kSuspect = 4, kHave = 5, kIdle = 6, kHash = 7, kBye = 8, kCabinet = 9,
                         kState = 10, kWantState = 11, kTake = 12, kTaken = 13, kWantBoard = 14, kBoard = 15, kParting = 16, kBackup = 17,
-                        kWantBackup = 18 };
+                        kWantBackup = 18, kStatus = 19 };
 
 constexpr std::size_t kFragment = 1000;    // reliable payload a datagram
 constexpr std::size_t kWindow = 256;       // reliable fragments in flight (a save state: some MB)
@@ -190,6 +190,16 @@ struct Session::Impl {
     uint64_t session = 0;
     std::string game_name, my_name;
     std::string my_country; // (the lobby's two letters for this player, Session::set_country; "" none)
+    Session::Status my_status;            // (set_status: sent as it changes and every kStatusEvery)
+    Clock::time_point status_sent{};
+    static constexpr auto kStatusEvery = std::chrono::seconds(2);
+    void send_status() {
+        Writer w;
+        w.u8(kStatus), w.u8(static_cast<uint8_t>(my_status.platform)), w.u8(static_cast<uint8_t>(my_status.boards)),
+            w.u8(static_cast<uint8_t>(my_status.net)), w.u16(static_cast<uint16_t>(my_status.delay)), w.u8(my_status.auto_delay ? 1 : 0);
+        send_all(w.out);
+        status_sent = Clock::now();
+    }
     std::vector<uint8_t> my_eeprom, my_backup; // this player's cabinet (Session::set_cabinet)
     uint8_t seats = 0, my_seat = kNoSeat;
     bool started = false, leaving = false, joining = false;
@@ -239,6 +249,7 @@ struct Session::Impl {
         bool reached = false;
         Clock::time_point direct_heard{}; // (last heard not through our relay)
         bool wants_state = false;         // (the host: it waits for every board's state)
+        Session::Status status;           // (as it last said: kStatus)
     };
     std::array<Peer, kMaxSeats> peers;
     std::array<Stream, kMaxSeats> streams;
@@ -711,6 +722,16 @@ struct Session::Impl {
             if (r.ok() && from < seats && cb.board_wanted) cb.board_wanted(from, frame);
             break;
         }
+        case kStatus: { // (its machine and how it plays: the overlay's)
+            Session::Status s;
+            s.platform = static_cast<Session::Status::Platform>(std::min<uint8_t>(r.u8(), 4));
+            s.boards = static_cast<Session::Status::Boards>(std::min<uint8_t>(r.u8(), 2));
+            s.net = static_cast<Session::Status::Net>(std::min<uint8_t>(r.u8(), 2));
+            s.delay = static_cast<int16_t>(r.u16());
+            s.auto_delay = r.u8() != 0;
+            if (r.ok() && from < seats) peers[from].status = s;
+            break;
+        }
         case kParting: { // (it leaves after this frame, its board's state at its end to come: a shadow of it from it)
             const uint64_t frame = r.u64();
             if (r.ok() && from < seats && cb.parting) cb.parting(from, frame);
@@ -1026,6 +1047,7 @@ struct Session::Impl {
             }
             if (turn) turn->tick(turn_send());
             if (started && !leaving) check_drops();
+            if (my_seat != kNoSeat && !leaving && my_status != Session::Status{} && now - status_sent > kStatusEvery) send_status();
             if (take_wanted && !mine_from && !leaving && (authority() != take_asked || now - take_sent > kTakeRetry))
                 ask_take(now);
             if (!started && !is_host && my_seat != kNoSeat && !room_closed && peers[host_seat].present &&
@@ -1231,6 +1253,14 @@ void Session::set_cabinet(std::vector<uint8_t> eeprom, std::vector<uint8_t> back
 void Session::set_country(const std::string& country) {
     std::lock_guard guard(impl_->lock);
     impl_->my_country = two_letters(country);
+}
+
+void Session::set_status(const Status& status) {
+    Impl& m = *impl_;
+    std::lock_guard guard(m.lock);
+    if (status == m.my_status) return;
+    m.my_status = status;
+    if (m.my_seat != kNoSeat && !m.leaving) m.send_status(); // (changed: at once; else with the next repeat)
 }
 
 std::string Session::game_name() const {
@@ -1522,9 +1552,9 @@ std::array<Session::SeatView, kMaxSeats> Session::seats() const {
         const auto& p = m.peers[s];
         const auto& cab = m.cabinets[s];
         if (s == m.my_seat) {
-            v.state = State::me, v.name = m.my_name, v.country = m.my_country;
+            v.state = State::me, v.name = m.my_name, v.country = m.my_country, v.status = m.my_status;
         } else if (p.present && !p.dropped) {
-            v.name = p.name, v.country = p.country, v.round_trip = p.rtt;
+            v.name = p.name, v.country = p.country, v.round_trip = p.rtt, v.status = p.status;
             v.state = cab.open && !cab.until ? State::joining : State::playing;
         } else if (!m.gone_name[s].empty() || m.said_bye[s]) {
             v.state = State::gone, v.name = m.gone_name[s], v.country = m.gone_country[s], v.left = m.said_bye[s];
@@ -1540,6 +1570,12 @@ bool Session::hosting() const {
     const Impl& m = *impl_;
     std::lock_guard guard(m.lock);
     return m.is_host;
+}
+
+uint8_t Session::host_seat() const {
+    const Impl& m = *impl_;
+    std::lock_guard guard(m.lock);
+    return m.is_host ? m.my_seat : m.host_seat;
 }
 
 bool Session::room_closed() const {

@@ -51,6 +51,7 @@ struct AssetFiles : Rml::FileInterface {
     Rml::FileHandle Open(const Rml::String& path) override {
         auto* f = new struct Open;
         if (path.size() >= 9 && path.compare(path.size() - 9, 9, "flags.png") == 0) f->asset = &assets::flags_png;
+        else if (path.size() >= 13 && path.compare(path.size() - 13, 13, "platforms.png") == 0) f->asset = &assets::platforms_png;
         else if (!(f->file = std::fopen(path.c_str(), "rb"))) return delete f, 0;
         return reinterpret_cast<Rml::FileHandle>(f);
     }
@@ -194,28 +195,34 @@ bool Menu::init(SDL_GPUDevice* device, SDL_Window* window) {
     // game's seats under it in the same style (each player's flag from
     // flags.rcss's sprite sheet).
     impl_->fps = impl_->ctx->LoadDocumentFromMemory(
-        "<rml><head><style>" + std::string(assets::flags_rcss.text()) +
+        "<rml><head><style>" + std::string(assets::flags_rcss.text()) + std::string(assets::platforms_rcss.text()) +
         "body { width: 100%; height: 100%; font-family: \"Barlow Condensed\"; font-weight: 600; } "
         "#corner { position: absolute; right: 16dp; top: 10dp; } "
         "#fps { display: block; text-align: right; font-size: 26dp; color: #ffd34a; font-effect: outline(2dp #000000); } "
-        "#net { display: block; margin-top: 4dp; } "
-        ".head { display: block; text-align: right; height: 24dp; font-size: 20dp; color: #ffd34a; font-effect: outline(2dp #000000); } "
+        "#net { position: absolute; right: 16dp; top: 35%; } " // (the seats down at the side, a little above the middle: the owner's choice)
+        ".head { display: block; text-align: right; height: 24dp; margin-bottom: 8dp; font-size: 20dp; color: #ffd34a; font-effect: outline(2dp #000000); } "
         ".seat { display: flex; justify-content: flex-end; align-items: flex-end; height: 24dp; font-size: 20dp; "
         "color: #ffd34a; font-effect: outline(2dp #000000); } "
         ".seat.player { color: #ffffff; } .seat.fresh { color: #7fe07f; } .seat.dim { color: #9a9a9a; } "
-        ".seat .p { width: 26dp; } .seat .name { width: 96dp; white-space: nowrap; overflow: hidden; } "
-        ".seat .st { width: 92dp; text-align: right; white-space: nowrap; } "
-        ".conn { display: flex; justify-content: flex-end; align-items: flex-end; width: 92dp; } "
+        ".seat .p { margin-right: 6dp; } .seat .name { white-space: nowrap; } " // (right-aligned, each as wide as it is: a long name the row out to the left)
+        ".seat .st { margin-left: 8dp; white-space: nowrap; } "
+        ".conn { display: flex; justify-content: flex-end; align-items: flex-end; margin-left: 4dp; } "
         ".bars { display: flex; align-items: flex-end; height: 16dp; margin-bottom: 3dp; margin-left: 5dp; } "
         ".bar { width: 3dp; margin-left: 1dp; background-color: #4a4a4a; border: 1dp #000000; } "
         ".g .on { background-color: #5fd35f; } .y .on { background-color: #ffd34a; } .r .on { background-color: #e05555; } "
-        ".ms { text-align: right; white-space: nowrap; } "
+        ".ms { width: 48dp; text-align: right; white-space: nowrap; } " // (as wide as "999 ms": the name stays put as it changes)
         ".flag { width: 19dp; height: 14dp; margin: 0 6dp 4dp 0; border: 1dp #000000; } " // (as tall as the 20dp text's capitals)
         ".noflag { width: 21dp; height: 14dp; margin: 0 6dp 4dp 0; } "
+        ".plat { width: 14dp; height: 14dp; margin: 0 6dp 4dp 0; } .noplat { width: 14dp; height: 14dp; margin: 0 6dp 4dp 0; } " // (as the flag: the capitals' height, on their line)
+        ".badges { display: flex; justify-content: flex-end; height: 19dp; margin-bottom: 3dp; } " // (a seat's badges, under it)
+        ".badge { font-size: 13dp; line-height: 16dp; height: 16dp; padding: 0 6dp; margin-left: 4dp; border-radius: 8dp; "
+        "border: 1dp #000000; font-effect: none; } .badge.mode { background-color: #3a3f4a; color: #ffffff; } "
+        ".badge.g { background-color: #5fd35f; color: #0d2a0d; } .badge.y { background-color: #ffd34a; color: #2a2000; } "
+        ".badge.r { background-color: #e05555; color: #ffffff; } "
         ".pills { display: flex; justify-content: flex-end; height: 22dp; margin: 2dp 0 4dp 0; } "
         ".pill { font-size: 15dp; line-height: 18dp; height: 18dp; padding: 0 8dp; margin-left: 5dp; border-radius: 9dp; "
         "border: 1dp #000000; } "
-        ".pill.delay { background-color: #3a3f4a; color: #ffffff; } .pill.rb { background-color: #ffd34a; color: #2a2000; }"
+        ".pill.delay { background-color: #3a3f4a; color: #ffffff; } "
         "#loading { display: none; position: absolute; left: 0; top: 0; width: 100%; height: 100%; background-color: #0b0d12; } "
         "#loading .box { position: absolute; left: 0; width: 100%; top: 42%; text-align: center; } "
         "#loading .title { display: block; font-size: 44dp; color: #ffd34a; font-effect: outline(2dp #000000); } "
@@ -227,7 +234,7 @@ bool Menu::init(SDL_GPUDevice* device, SDL_Window* window) {
         "</style></head><body><div id=\"loading\"><div class=\"box\"><span class=\"title\" id=\"ltitle\"></span>"
         "<div id=\"lbar\"><div id=\"lfill\"></div></div><span id=\"lpct\"></span>"
         "<span class=\"detail\" id=\"ldetail\"></span></div></div>"
-        "<div id=\"corner\"><div id=\"fps\"></div><div id=\"net\"></div></div></body></rml>");
+        "<div id=\"corner\"><div id=\"fps\"></div></div><div id=\"net\"></div></body></rml>");
     return true;
 }
 
@@ -240,24 +247,22 @@ void Menu::show_corner() {
 void Menu::set_net(const std::vector<NetRow>& rows, const std::string& header, const NetPills& pills) {
     if (!impl_->fps) return;
     std::string rml = header.empty() ? std::string() : "<div class=\"head\">" + escape(header) + "</div>";
-    if (pills.delay >= 0 || pills.rollbacks >= 0) {
-        rml += "<div class=\"pills\">";
-        if (pills.delay >= 0) rml += "<span class=\"pill delay\">DELAY " + std::to_string(pills.delay) + "F</span>";
-        if (pills.rollbacks >= 0) rml += "<span class=\"pill rb\">ROLLBACK " + std::to_string(pills.rollbacks) + "</span>";
-        rml += "</div>";
-    }
-    // (a flag between the seat and the name; when any seat has one, the others keep its room, so the names line up)
+    (void)pills; // (the input delay: each player's own now, in their badges)
+    // (a platform's icon, then a flag, between the seat and the name; the icon in the row's colour, as its text; each
+    // row right-aligned, its parts as wide as they are)
     auto has_flag = [&](const NetRow& r) { return impl_->flags.count(r.country) != 0; };
-    const bool flags = std::any_of(rows.begin(), rows.end(), has_flag);
     for (const NetRow& r : rows) {
         static const char* const kLooks[] = {"you", "player", "fresh", "dim"};
+        static const char* const kTints[] = {"#ffd34a", "#ffffff", "#7fe07f", "#9a9a9a"};
         rml += "<div class=\"seat " + std::string(kLooks[static_cast<int>(r.look)]) + "\"><span class=\"p\">" + escape(r.seat) + "</span>";
+        if (!r.platform.empty())
+            rml += "<img class=\"plat\" sprite=\"platform-" + escape(r.platform) + "\" style=\"image-color: " +
+                   kTints[static_cast<int>(r.look)] + ";\"/>";
         if (has_flag(r)) rml += "<img class=\"flag\" sprite=\"flag-" + r.country + "\"/>";
-        else if (flags) rml += "<span class=\"noflag\"></span>";
         rml += "<span class=\"name\">" + escape(r.name) + "</span>";
-        if (!r.status.empty() || r.bars < 0) {
+        if (!r.status.empty()) { // (our own row: none, its name at the right edge as the others' bars)
             rml += "<span class=\"st\">" + escape(r.status) + "</span>";
-        } else {
+        } else if (r.bars >= 0) {
             rml += "<div class=\"conn\"><span class=\"ms\">" + (r.ms >= 0 ? std::to_string(r.ms) + " ms" : std::string()) +
                    "</span><div class=\"bars " + (r.bars >= 3 ? "g" : r.bars == 2 ? "y" : "r") + "\">";
             for (int b = 0; b < 4; ++b)
@@ -266,6 +271,16 @@ void Menu::set_net(const std::vector<NetRow>& rows, const std::string& header, c
             rml += "</div></div>";
         }
         rml += "</div>";
+        // (its badges on a line of their own under it: how its machine plays, and how often it was gone back for lately
+        // (few green, some yellow, many red: the bands to be tuned with real networks))
+        if (!r.mode.empty() || r.rollbacks >= 0) {
+            rml += "<div class=\"badges\">";
+            if (!r.mode.empty()) rml += "<span class=\"badge mode\">" + escape(r.mode) + "</span>";
+            if (r.rollbacks >= 0)
+                rml += "<span class=\"badge " + std::string(r.rollbacks <= 2 ? "g" : r.rollbacks <= 15 ? "y" : "r") + "\">RB " +
+                       std::to_string(r.rollbacks) + "</span>";
+            rml += "</div>";
+        }
     }
     net_shown_ = !rows.empty() || !header.empty();
     if (rml != net_rml_) {

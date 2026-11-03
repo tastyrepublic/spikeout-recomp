@@ -48,12 +48,15 @@ struct NetRow {
     int bars = -1;      // 0-4 (-1: none)
     int ms = -1;        // the round trip (-1: none)
     Look look = Look::player;
+    std::string platform; // its icon before the flag: "windows", "macos", "linux", "android" ("": none)
+    std::string mode;     // a tag after the name: how its machine plays ("1 BOARD · RB"; "": none)
+    int rollbacks = -1;   // a pill after it: times gone back for its inputs lately, coloured by how many (-1: none)
 };
 
-// The pills above the seats: the input delay (frames) and the rollbacks so far (-1: that pill not shown).
+// The pills above the seats: the input delay (frames; -1: not shown), chosen by Auto or set.
 struct NetPills {
     int delay = -1;
-    int rollbacks = -1;
+    bool auto_delay = false;
 };
 
 // A page for typing a short code (a game's): a box of its letters and an

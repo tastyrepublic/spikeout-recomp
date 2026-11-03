@@ -1,0 +1,10 @@
+/* Players' platforms, one colour (white: tinted as their row, image-color), 36 x 36 each in platforms.png:
+   <img sprite="platform-windows"/>. Made by tools/platform_icons.cpp (macOS and Android: Simple Icons, CC0; the
+   brands' marks their owners'). */
+@spritesheet platforms {
+	src: platforms.png;
+	platform-windows: 1px 1px 36px 36px;
+	platform-macos: 39px 1px 36px 36px;
+	platform-linux: 77px 1px 36px 36px;
+	platform-android: 115px 1px 36px 36px;
+}

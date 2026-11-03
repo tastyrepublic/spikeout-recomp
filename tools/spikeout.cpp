@@ -3057,8 +3057,42 @@ int main(int argc, char** argv) {
             net_status_at = now;
             std::vector<ui::NetRow> net_rows;
             std::string net_header = !netgame && now < net_notice_until ? net_notice : std::string();
-            ui::NetPills net_pills; // (no rollback in network play yet: its pill not shown)
+            ui::NetPills net_pills;
             using State = net::Session::SeatView::State;
+            using Status = net::Session::Status;
+            // (each machine's platform and how it plays, for the others' lists: sent only as it changes, and repeated)
+            if (netgame && netgame->running) {
+                Status me;
+#if defined(__ANDROID__)
+                me.platform = Status::Platform::android;
+#elif defined(_WIN32)
+                me.platform = Status::Platform::windows;
+#elif defined(__APPLE__)
+                me.platform = Status::Platform::macos;
+#elif defined(__linux__)
+                me.platform = Status::Platform::linux_os;
+#endif
+                me.boards = shared.one_board_frame != ~0ull ? Status::Boards::one : Status::Boards::every;
+                me.net = shared.rollback ? Status::Net::rollback : Status::Net::delay;
+                me.delay = static_cast<int16_t>(shared.input_delay), me.auto_delay = net_delay < 0;
+                netgame->session().set_status(me);
+            }
+            const auto platform_icon = [](const Status& s) -> std::string {
+                static const char* const kNames[] = {"", "windows", "macos", "linux", "android"};
+                return kNames[static_cast<int>(s.platform)];
+            };
+            const auto mode_tag = [](const Status& s) -> std::string {
+                if (s.boards == Status::Boards::unknown) return {};
+                // ("1 BOARD · RB · AUTO 2": its boards, rollback or waiting for inputs, its input delay (frames) and
+                // whether Auto chose it)
+                std::string t = s.boards == Status::Boards::one ? "1 BOARD" : "ALL BOARDS";
+                if (s.net != Status::Net::unknown) t += s.net == Status::Net::rollback ? " \xC2\xB7 RB" : " \xC2\xB7 WAIT";
+                if (s.delay >= 0) t += std::string(s.auto_delay ? " \xC2\xB7 AUTO " : " \xC2\xB7 DELAY ") + std::to_string(s.delay);
+                return t;
+            };
+            // (rollback: how often each other player's inputs were guessed wrong here in the last 10 s)
+            const uint64_t frame_now = shared.inputs ? shared.inputs->next(shared.local) : 0;
+            const uint64_t lately = frame_now > 600 ? frame_now - 600 : 0;
             if (netgame) {
                 const auto seats = netgame->session().seats();
                 if (!netgame->running) {
@@ -3070,14 +3104,19 @@ int main(int argc, char** argv) {
                     const bool in = std::any_of(seats.begin(), seats.end(), [&](const auto& v) { return v.state == State::me; });
                     net_header = "ROOM " + (code.empty() ? std::string() : code + "  ") +
                                  (netgame->host ? "(HOSTING)" : in ? "(JOINED)" : "(JOINING...)");
-                } else if (settings.show_net) { // (playing: the game's name and its room, the input delay)
+                } else if (settings.show_net) { // (playing: the game's name and its room; each player's delay in its badges)
                     std::string code;
                     {
                         std::lock_guard guard(netgame->lock);
                         code = netgame->code;
                     }
-                    net_header = tools::clean_name(netgame->session().game_name()) + (code.empty() ? std::string() : " \xC2\xB7 ROOM " + code);
-                    net_pills.delay = static_cast<int>(shared.input_delay);
+                    // ("HOST DON · ROOM ABCD": who hosts now (host migration: not the game's own name then), YOU if
+                    // this machine; a game on the LAN has no room code)
+                    const uint8_t host = netgame->session().host_seat();
+                    const std::string host_name = netgame->session().hosting() ? std::string("YOU")
+                                                  : host < seats.size() && !seats[host].name.empty() ? tools::clean_name(seats[host].name)
+                                                  : tools::clean_name(netgame->session().game_name());
+                    net_header = "HOST " + host_name + (code.empty() ? std::string(" \xC2\xB7 LAN") : " \xC2\xB7 ROOM " + code);
                 }
                 const bool hosting = netgame->session().hosting();
                 for (std::size_t s = 0; s < seats.size(); ++s) {
@@ -3093,6 +3132,10 @@ int main(int argc, char** argv) {
                     r.seat = std::to_string(s + 1) + "P";
                     r.name = tools::clean_name(v.name); // (as ours: what the menu's font has)
                     r.country = v.country;
+                    if (v.state == State::me || v.state == State::playing || v.state == State::joining)
+                        r.platform = platform_icon(v.status), r.mode = mode_tag(v.status);
+                    if (v.state == State::playing && shared.rollback && shared.inputs && netgame->running)
+                        r.rollbacks = static_cast<int>(shared.inputs->wrongs_since(s, lately));
                     switch (v.state) {
                     case State::me: r.name = "YOU", r.look = ui::NetRow::Look::you; break;
                     case State::open: r.status = hosting ? "WAITING" : "OPEN", r.look = ui::NetRow::Look::dim; break;

@@ -226,6 +226,20 @@ public:
     std::array<PeerTiming, kMaxSeats> timing() const;
     // How it goes, for an overlay: round trip to each seat (ms, -1: none).
     std::array<int, kMaxSeats> round_trips() const;
+    // What a player's machine is and how it plays, for the overlay (the network status list): sent to the others as
+    // it changes (set_status) and every 2 seconds (a player who joins later has it soon).
+    struct Status {
+        enum class Platform : uint8_t { unknown, windows, macos, linux_os, android };
+        enum class Boards : uint8_t { unknown, every, one };  // every board run here, or only its own (one board a PC)
+        enum class Net : uint8_t { unknown, delay, rollback }; // inputs waited for, or guessed and gone back for
+        Platform platform = Platform::unknown;
+        Boards boards = Boards::unknown;
+        Net net = Net::unknown;
+        int16_t delay = -1;       // input delay, frames (-1: unknown)
+        bool auto_delay = false;  // chosen by Auto
+        bool operator==(const Status&) const = default;
+    };
+    void set_status(const Status& status);
     // Each seat of a game in progress, for an overlay.
     struct SeatView {
         enum class State : uint8_t {
@@ -241,11 +255,14 @@ public:
         std::string country; // theirs, two lower-case letters ("" unknown)
         bool left = false; // gone after saying goodbye
         int round_trip = -1; // ms (-1: not measured yet)
+        Status status;       // as its machine last said (ours: set_status's)
     };
     std::array<SeatView, kMaxSeats> seats() const;
     // This machine hosts the room: from the start, or since the host left a
     // game in progress (host migration: the lowest seat still connected).
     bool hosting() const;
+    // The seat whose machine hosts the room now (host migration changes it; 0xFF: not known yet).
+    uint8_t host_seat() const;
     // A player in a room whose game hadn't started: the host closed it (or
     // went quiet). The frontend leaves it.
     bool room_closed() const;

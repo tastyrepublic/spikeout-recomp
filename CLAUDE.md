@@ -61,6 +61,20 @@ Read this first; the older hand-off below is history.
   (Game::parting). Tests: NET_PARTINGS_LATE=1 (gamerun: each parting
   taken only once its frame has passed), NET_PARTING_AHEAD=N (the
   leaver's lead).
+- Network status list redesigned (2026-11-03, the owner's choices): the
+  seats moved down the right side a little above the middle (the FPS alone
+  at the top); a line above them "HOST <name> · ROOM <code>" ("· LAN" with
+  no code; the current host, Session::host_seat); each row right-aligned
+  (seat, platform icon tinted as the row, flag, name, then a fixed-width
+  ms and bars; our own row flush right, no RB), a badge line under each:
+  "1 BOARD · RB · DELAY 0" (that machine's status: Session::set_status /
+  kStatus, sent as it changes and every 2 s) and, for the others with
+  rollback, "RB n" (their wrong guesses here in 10 s, InputTable::
+  wrongs_since; green 0-2, yellow 3-15, red more: bands to tune). Icons:
+  tools/platform_icons.cpp -> assets/ui/platforms.png (Windows' squares;
+  macOS and Android from Simple Icons, CC0; Linux a flat penguin, belly and
+  beak cut out: the owner's pick). Kept as is for now: explaining the
+  badges (menu description, or badges only with the menu open: offered).
 - Proof tools: gamerun GAMERUN_2D_HASH=1 (2D layers each frame),
   GAMERUN_STATE_PARTS=1, GAMERUN_NETBOARD_DUMP=DIR (network board state
   files at whole-state frames), GAMERUN_FLUSH=1, ONEBOARD_CALM=N,

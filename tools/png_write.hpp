@@ -1,5 +1,6 @@
 // Minimal PNG writer for screenshots: 8-bit RGB, stored (uncompressed)
-// deflate blocks. Pixels are 0xAARRGGBB; alpha is dropped.
+// deflate blocks. Pixels are 0xAARRGGBB; alpha is dropped (`alpha`: kept,
+// RGBA: the UI's pictures).
 #pragma once
 
 #include <algorithm>
@@ -11,7 +12,8 @@
 
 namespace tools {
 
-inline bool write_png(const std::string& path, std::span<const uint32_t> pixels, uint32_t width, uint32_t height) {
+inline bool write_png(const std::string& path, std::span<const uint32_t> pixels, uint32_t width, uint32_t height,
+                      bool alpha = false) {
     auto crc = [](const uint8_t* p, std::size_t n, uint32_t c = 0xFFFFFFFFu) {
         for (std::size_t i = 0; i < n; ++i) {
             c ^= p[i];
@@ -25,7 +27,7 @@ inline bool write_png(const std::string& path, std::span<const uint32_t> pixels,
 
     // Raw scanlines: filter byte 0, then RGB.
     std::vector<uint8_t> raw;
-    raw.reserve(std::size_t{height} * (1 + std::size_t{width} * 3));
+    raw.reserve(std::size_t{height} * (1 + std::size_t{width} * (alpha ? 4 : 3)));
     for (uint32_t y = 0; y < height; ++y) {
         raw.push_back(0);
         for (uint32_t x = 0; x < width; ++x) {
@@ -33,6 +35,7 @@ inline bool write_png(const std::string& path, std::span<const uint32_t> pixels,
             raw.push_back(static_cast<uint8_t>(p >> 16));
             raw.push_back(static_cast<uint8_t>(p >> 8));
             raw.push_back(static_cast<uint8_t>(p));
+            if (alpha) raw.push_back(static_cast<uint8_t>(p >> 24));
         }
     }
     // zlib stream of stored blocks.
@@ -67,7 +70,7 @@ inline bool write_png(const std::string& path, std::span<const uint32_t> pixels,
     std::vector<uint8_t> ihdr;
     be32(ihdr, width);
     be32(ihdr, height);
-    ihdr.insert(ihdr.end(), {8, 2, 0, 0, 0}); // 8-bit RGB
+    ihdr.insert(ihdr.end(), {8, static_cast<uint8_t>(alpha ? 6 : 2), 0, 0, 0}); // 8-bit RGB (RGBA)
     chunk("IHDR", ihdr);
     chunk("IDAT", z);
     chunk("IEND", {});

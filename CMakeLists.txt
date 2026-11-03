@@ -364,7 +364,7 @@ if(SPIKEOUT_GPU)
     set(ui_sources)
     foreach(entry menu_rml:ui/menu.rml menu_rcss:ui/menu.rcss font_medium:fonts/BarlowCondensed-Medium.ttf
                   font_semibold:fonts/BarlowCondensed-SemiBold.ttf font_bold_italic:fonts/BarlowCondensed-BoldItalic.ttf
-                  flags_png:ui/flags.png flags_rcss:ui/flags.rcss)
+                  flags_png:ui/flags.png flags_rcss:ui/flags.rcss platforms_png:ui/platforms.png platforms_rcss:ui/platforms.rcss)
         string(REPLACE ":" ";" parts ${entry})
         list(GET parts 0 name)
         list(GET parts 1 file)

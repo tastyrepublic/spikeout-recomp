@@ -19,6 +19,8 @@ extern const Asset font_medium, font_semibold, font_bold_italic; // Barlow Conde
 // Every country's flag (the network seat list) and its RmlUi sprite sheet ("flag-au" and so on), as vf3-recomp has
 // them (its tools/flags/make_flags.py: flag-icons by Panayiotis Lipiridis, MIT, assets/ui/flags-LICENSE.txt)
 extern const Asset flags_png, flags_rcss;
+// The players' platforms (the network seat list): "platform-windows", -macos, -linux, -android (tools/platform_icons.cpp)
+extern const Asset platforms_png, platforms_rcss;
 } // namespace assets
 
 } // namespace ui
