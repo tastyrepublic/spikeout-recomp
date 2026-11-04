@@ -2918,6 +2918,11 @@ void report(Machine& m, const Options& o) {
                     (unsigned long long)m.ob.cabinets->side_runs(), m.ob.cabinets->side_seconds(), m.ob.cabinets->whole_seconds(),
                     (unsigned long long)m.ob.cabinets->journal_bytes(), m.ob.cabinets->netboard_seconds(), (unsigned long long)m.ob.cabinets->made(),
                     m.ob.cabinets->failed().empty() ? "" : "; first failure: ", m.ob.cabinets->failed().c_str());
+        if (m.ob.cabinets->workers())
+            std::printf("Other cabinets: their tasks' side runs on %zu other thread(s), %.2f s there with their set-ups; this "
+                        "board waited %.2f s for them, %.2f s handing them over\n",
+                        m.ob.cabinets->workers(), m.ob.cabinets->worker_seconds(), m.ob.cabinets->worker_wait(),
+                        m.ob.cabinets->worker_hand());
         std::printf("Other cabinets' side runs by kind (their buttons waited for %llu times, %.2f s):\n%s",
                     (unsigned long long)g_one_board.held_waits(), g_one_board.held_wait_seconds(), m.ob.cabinets->profile().c_str());
         std::printf("Devices read in them (by m3::Device):");
@@ -3390,7 +3395,8 @@ int main(int argc_given, char** argv_given) {
         else if (arg == "--net-rollback" && i + 1 < argc) o.net_rollback = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--net-hold-inputs" && i + 1 < argc) o.net_hold_inputs = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--no-frame-hashes") o.no_frame_hashes = true;
-        else if (arg == "--no-idle-skip") m3::games::set_idle_skip(false); // (the vblank wait spun, as before)
+        else if (arg == "--no-idle-skip") m3::games::set_idle_skip(false), m3::CommBoard::set_wait_skip(false); // (the vblank wait and the network board's waits spun, as before)
+        else if (arg == "--no-net-idle-skip") m3::CommBoard::set_wait_skip(false); // (the network board's only)
         else if (arg == "--frame-hashes") o.frame_hashes = true;
         else if (arg == "--frames" && i + 1 < argc) o.max_frames = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--seats" && i + 1 < argc)

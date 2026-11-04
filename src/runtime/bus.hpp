@@ -94,6 +94,7 @@ public:
     bool line() const { return (state_ & enable_ & 0xFF) != 0 || state_ > 0xFF; }
     // (Loading doesn't call on_change: the runtime looks again after a load.)
     void state(State& s) { s.io(state_), s.io(enable_); }
+    void copy_state(const Irq& o) { state_ = o.state_, enable_ = o.enable_; } // (the lines only, not who is told)
 
     // Called whenever the line may have changed (the runtime rechecks it).
     void (*on_change)(void* user) = nullptr;
@@ -128,21 +129,35 @@ public:
     uint64_t read64(uint32_t addr) { return uint64_t{read32(addr)} << 32 | read32(addr + 4); }
 
     void write8(uint32_t addr, uint8_t value) {
-        if (addr < fast_limit_[0]) ram_[addr] = value;
-        else write_slow(addr, value, 1);
+        if (addr < fast_limit_[0]) {
+            ram_[addr] = value;
+            if (marks_) marks_[addr >> kMarkShift] = 1;
+        } else {
+            write_slow(addr, value, 1);
+        }
     }
     void write16(uint32_t addr, uint16_t value) {
         if (addr < fast_limit_[1]) {
             ram_[addr] = static_cast<uint8_t>(value >> 8);
             ram_[addr + 1] = static_cast<uint8_t>(value);
+            if (marks_) marks_[addr >> kMarkShift] = marks_[(addr + 1) >> kMarkShift] = 1;
         } else {
             write_slow(addr, value, 2);
         }
     }
     void write32(uint32_t addr, uint32_t value) {
-        if (addr < fast_limit_[2]) store_be32(&ram_[addr], value);
-        else write_slow(addr, value, 4);
+        if (addr < fast_limit_[2]) {
+            store_be32(&ram_[addr], value);
+            if (marks_) marks_[addr >> kMarkShift] = marks_[(addr + 3) >> kMarkShift] = 1;
+        } else {
+            write_slow(addr, value, 4);
+        }
     }
+    // Work RAM's pages written through this bus marked (a byte a 4 KB page, kWorkRamSize >> kMarkShift of them, set
+    // to 1), or null: none. A side-run worker's bus (tools/remote_cabinet.hpp), whose RAM only it writes: its pages put
+    // back after each run from these, on every system alike. Writes from outside the bus (ram()) aren't marked.
+    static constexpr uint32_t kMarkShift = 12;
+    void mark_pages(uint8_t* marks) { marks_ = marks; }
     void write64(uint32_t addr, uint64_t value) {
         write32(addr, static_cast<uint32_t>(value >> 32));
         write32(addr + 4, static_cast<uint32_t>(value));
@@ -283,6 +298,17 @@ public:
     // besides its RAM.
     const std::array<uint64_t, 32>& held_reads() const { return held_reads_; }
 
+    // A side-run worker's bus (another thread's): what the game's code reads of this one's devices taken from it
+    // (backup RAM, the DMA's and system registers, the CROM bank, the inputs), as they are now. Its work RAM and
+    // network board are the caller's to fill.
+    const RomSet& roms() const { return roms_; }
+    void mirror_devices(const Bus& o) {
+        std::copy(o.backup_ram_.begin(), o.backup_ram_.end(), backup_ram_.begin());
+        dma_ = o.dma_, crom_bank_ = o.crom_bank_, crom_bank_reg_ = o.crom_bank_reg_, io_bank_ = o.io_bank_;
+        tile_regs_ = o.tile_regs_, inputs = o.inputs, ping_pong_ = o.ping_pong_, midi_ctrl_ = o.midi_ctrl_;
+        irq_.copy_state(o.irq_);
+    }
+
     // Real-time clock (0xF0140000), on the emulated time. It starts at
     // 1970-01-01 00:00; a frontend sets it (rtc().set_time) from the host's
     // clock or a fixed time for reproducible runs.
@@ -356,6 +382,7 @@ private:
     std::array<uint32_t, 2> held_crom_{}; // (the CROM bank and its register as the hold began)
     bool journaling_ = false;   // (journal)
     std::vector<std::pair<uint32_t, uint8_t>> journal_;
+    uint8_t* marks_ = nullptr; // (mark_pages)
     std::array<uint64_t, 32> held_reads_{}; // (held_reads)
     void update_fast_limit() {
         const bool slow = journaling_ || (on_watch_ && watch_lo_ < kWorkRamSize);

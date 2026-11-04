@@ -8,9 +8,29 @@
 - Build and test: `cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on-failure`.
   CI builds with warnings as errors on Linux and macOS.
 
-## Latest (2026-11-03, main 7d3b090, pushed)
+## Latest (2026-11-04)
 
 Read this first; the older hand-off below is history.
+- Done (2026-11-04, docs/netplay.md "Side runs on other cores"): one
+  board's side runs on worker threads (min(other cabinets, cores - 2, at
+  least 1); SPIKEOUT_SIDE_WORKERS=N, SPIKEOUT_SIDE_THREAD=0 for none,
+  SPIKEOUT_SIDE_CHECK=1 compares each job with a serial copy); a worker's
+  writes marked by its bus (Bus::mark_pages) and put back from a clean
+  copy (no journal, no OS record on its RAM; the same on every OS); the
+  OS write record with several readers (watched::new_reader). Mash fight
+  1,490 frames: 10.4 s -> 7.3 s. The network board's 68000 wait-loop skip
+  (exact, ~0.03 ms; --no-net-idle-skip). All tests the same.
+- Sound measured again (corrects the note below): effects DSP ~1.4 ms a
+  frame, sound 68000 ~0.6, music ~0.25, voices ~0.1. Tried and dropped: a
+  DSP with each step sorted into templates (exact, slower). The sound
+  68000 can't skip its idle exactly (a polling loop repeating only every
+  ~3,800 cycles, run 256 at a time). Idea left: the DSP program turned
+  into C++ at build time (ROM-derived: build/generated/ only).
+- gamerun's RTC comes from the host clock: fresh runs' states differ in
+  "rtc".
+
+## Earlier (2026-11-03, main 7d3b090)
+
 - Done and pushed: rollback for one board a PC (340b46f, docs/netplay.md
   "Rollback in play" end: module state kept, switches pinned
   (Snapshots::pin), settled waits, 2-4 players exact); a board ~2.3x faster

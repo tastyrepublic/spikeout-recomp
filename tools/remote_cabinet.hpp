@@ -29,18 +29,24 @@
 #include "recomp/frame_timing.hpp"
 #include "runtime/bus.hpp"
 #include "runtime/netboard.hpp"
+#include "runtime/watched_memory.hpp"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <functional>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <span>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -194,6 +200,10 @@ struct Seed {
     uint32_t own_logic = 0;
 };
 
+struct LinkSkipped {};  // (a link run on the side holding its frame back: done)
+struct TasksDrawing {}; // (a frame's tasks run on the side reaching the drawing: done)
+struct DrawingDone {};  // (the master's capture through its drawing reaching its main loop's 0x36E94)
+
 class Cabinets {
 public:
     // `held(seat, frame)`: that seat's held buttons word for its frame (each
@@ -216,11 +226,16 @@ public:
                 if (own_[k] == character_object(ch) + 3) own_mask_[k] = 0x18;
     }
 
+    ~Cabinets() { stop_workers(); }
+    Cabinets(const Cabinets&) = delete;
+    Cabinets& operator=(const Cabinets&) = delete;
+
     // Another cabinet: its seat, its logic count less this board's at the
     // same time (+1 the master seen from a slave, -1 a slave from the
     // master, 0 one slave from another), and how its side runs start (asked
     // at this board's flows until it can; false: not yet).
     void add(std::size_t seat, int ahead, Seeder seeder) {
+        settle();
         Remote r;
         r.seat = seat, r.ahead = ahead, r.seeder = std::move(seeder);
         remotes_.push_back(std::move(r));
@@ -230,6 +245,7 @@ public:
     // memory, link variables and own variables taken from it), after its
     // frame `last` (its link run there already).
     void start_making(std::size_t seat, m3::NetBoardDevice& netboard, std::span<const uint8_t> ram, uint64_t last) {
+        settle();
         Remote* r = find(seat);
         if (!r) return;
         auto word = [&](uint32_t a) { return uint32_t(ram[a]) << 24 | uint32_t(ram[a + 1]) << 16 | uint32_t(ram[a + 2]) << 8 | ram[a + 3]; };
@@ -248,6 +264,7 @@ public:
     // wake-up): no block written that frame, so its network board sends
     // the older bank again.
     void miss(std::size_t seat, uint64_t frame) {
+        settle();
         if (Remote* r = find(seat)) r->missed.push_back(frame);
     }
     // What a shadow of it (a whole board run as it, from this board's state
@@ -278,11 +295,12 @@ public:
     // its RAM and CPU there, for a board to go on from as it (its drawing of L, its link of L+1 at once, its count
     // L+1, all before its next wake-up).
     bool shadow_master(std::size_t seat, std::vector<uint8_t>& ram, ppc::CpuState& cpu) {
+        settle();
         Remote* r = find(seat);
         const uint32_t logic = bus_.read32(kLogicCounter);
         if (!r || r->ahead <= 0 || !r->making || r->camera.empty() || r->own_logic + 1 != logic) return false;
         capture_ = true;
-        side_run(*r, kModeDispatch, nullptr, true, logic, 0, true);
+        side_run(main_, *r, kModeDispatch, nullptr, true, logic, 0, true);
         capture_ = false;
         r->own_logic = logic;
         if (captured_.empty()) return false;
@@ -294,12 +312,14 @@ public:
     }
     // From now its blocks come from its shadow (its link's own): none made here, no side runs.
     void stop_making(std::size_t seat) {
+        settle();
         if (Remote* r = find(seat))
             r->making = false, r->shadowed = true, r->pending = ~0ull, r->camera.clear(), r->hand_back_asked = false, r->stop_after = 0;
     }
     // Its main board still running, about to go (its network board `netboard`): taken as its shadow, so that
     // ask_hand_back hands it over as a shadow's (where it stops, a slave's next count caught up here).
     void running(std::size_t seat, m3::NetBoardDevice& netboard) {
+        settle();
         if (Remote* r = find(seat)) r->netboard = &netboard, r->making = false, r->shadowed = true, r->camera.clear();
     }
     bool shadowed(std::size_t seat) {
@@ -310,6 +330,7 @@ public:
     // is to stop after is set (L-1 for a slave, a frame behind; L+1 for the master, ahead), and for a slave this
     // board's world kept, to run its count L on once handed back. 0: not set yet.
     void ask_hand_back(std::size_t seat) {
+        settle();
         if (Remote* r = find(seat); r && r->shadowed && !r->hand_back_asked) r->hand_back_asked = true, r->stop_after = 0;
     }
     uint32_t stop_after(std::size_t seat) {
@@ -356,7 +377,7 @@ public:
     void use_tasks(bool on) { tasks_mode_ = on; }
 
     // In a side run (the board's other hooks are skipped then too).
-    bool inside() const { return inside_; }
+    bool inside() const { return main_.inside; }
     uint64_t made() const { return made_; }
     // Another cabinet's frames on side runs whose tasks (its 2D's with them) took over kHeavyWork cycles (a
     // banner's: TIME OVER's tiles unpacked in one go; usually about 0.3M): a frame it may have lost (its drawing,
@@ -370,10 +391,22 @@ public:
     // time its network boards took, brought up to this board's meetings)
     double whole_seconds() const { return whole_seconds_; }
     double netboard_seconds() const { return netboard_seconds_; }
+    // (side runs on the workers: how many, their seconds in them with their set-ups, all of them; this board's
+    // waiting for them and handing jobs to them)
+    std::size_t workers() const { return workers_.size(); }
+    double worker_seconds() const {
+        settle();
+        double s = 0;
+        for (const auto& w : workers_) s += w->whole;
+        return s;
+    }
+    double worker_wait() const { return worker_wait_; }
+    double worker_hand() const { return worker_hand_; }
     uint64_t journal_bytes() const { return journal_bytes_; } // (RAM bytes its side runs wrote, put back after)
     uint64_t side_runs() const { return side_runs_; }
     // (where the side runs' time went, by kind: runs, ms set up, ms in the game code, ms put back)
     std::string profile() const {
+        settle();
         std::string out;
         char line[160];
         for (const auto& [pc, p] : profile_) {
@@ -383,9 +416,13 @@ public:
         }
         return out;
     }
-    std::string failed() const { return failed_; }
+    std::string failed() const {
+        settle();
+        return failed_;
+    }
     // (measuring: the bytes its own state holds, what a copy of it every frame would cost)
     std::size_t state_bytes() const {
+        settle();
         std::size_t n = 0;
         for (const Remote& r : remotes_) {
             n += r.camera.size() + r.own.size() + r.link.size() + r.link_vars.size() + r.state_own.size() + r.saved_world.size() +
@@ -456,8 +493,11 @@ public:
         ppc::CpuState captured_cpu{};
         uint32_t idle_msr = 0;
     };
-    Kept keep() const { return {remotes_, players_at_, ahead_record_, view_chars_, captured_, captured_cpu_, idle_msr_}; }
+    Kept keep() const {
+        settle();
+        return {remotes_, players_at_, ahead_record_, view_chars_, captured_, captured_cpu_, idle_msr_}; }
     void put_back(const Kept& k) {
+        settle();
         remotes_ = k.remotes, players_at_ = k.players_at, ahead_record_ = k.ahead_record, view_chars_ = k.view_chars;
         captured_ = k.captured, captured_cpu_ = k.captured_cpu, idle_msr_ = k.idle_msr;
     }
@@ -475,7 +515,8 @@ private:
     // after it kept (`keep`).
     // `count`: a flow's, the count it runs as; `tasks`: its frame's tasks after it too, up to the drawing.
     // `character`: a view test's (r14), else the hook's.
-    void side_run(Remote& r, uint32_t pc, uint32_t* flags, bool keep, uint32_t count = 0, uint32_t character = 0, bool tasks = false);
+    struct Exec;
+    void side_run(Exec& e, Remote& r, uint32_t pc, uint32_t* flags, bool keep, uint32_t count = 0, uint32_t character = 0, bool tasks = false);
     void shake(Remote& r, uint32_t kind);
     // A byte as cabinet `r` has it: its own variables' where it is one of them, else this board's.
     uint8_t own_byte(const Remote& r, uint32_t addr) const {
@@ -496,9 +537,10 @@ private:
     bool ready(const Remote& r) const;
     void merge_own(const std::vector<uint8_t>& own);
     // (a cabinet's own areas written in, through the bus (journalled), those of the link's players left as they are)
-    void put_regions(const std::vector<uint8_t>& regions) {
-        const auto ram = bus_.ram();
-        const uint32_t mask = bus_.read32(kLinkPlayers);
+    void put_regions(const std::vector<uint8_t>& regions) { put_regions(bus_, regions); }
+    void put_regions(m3::Bus& bus, const std::vector<uint8_t>& regions) {
+        const auto ram = bus.ram();
+        const uint32_t mask = bus.read32(kLinkPlayers);
         std::size_t n = 0, i = 0;
         for (const auto& [lo, hi] : kOwnRegions) {
             if (region_own(i++, mask))
@@ -506,7 +548,7 @@ private:
                     const uint32_t end = std::min<uint32_t>(at + 64, hi);
                     if (std::memcmp(&ram[at], &regions[n + at - lo], end - at) == 0) continue;
                     for (uint32_t a = at; a < end; ++a)
-                        if (ram[a] != regions[n + a - lo]) bus_.write8(a, regions[n + a - lo]);
+                        if (ram[a] != regions[n + a - lo]) bus.write8(a, regions[n + a - lo]);
                 }
             n += hi - lo;
         }
@@ -547,30 +589,32 @@ private:
     std::vector<uint8_t> own_mask_; // (the bits of each that are a cabinet's own)
     std::vector<Remote> remotes_;
     std::map<uint32_t, Players> players_at_; // (by count)
-    bool inside_ = false, in_view_ = false, in_update_ = false, in_link_ = false, in_tasks_ = false;
-    std::vector<uint32_t> ahead_record_; // (the working record after a flow run on the side)
+    bool in_view_ = false, in_update_ = false, in_link_ = false;
+    mutable std::vector<uint32_t> ahead_record_; // (the working record after a flow run on the side)
     std::map<uint32_t, std::vector<ppc::CpuState>> view_chars_; // (this board's view tests, by count: each as called, r14 the character)
     const std::vector<uint8_t>* world_ = nullptr;          // (a side run's world instead of this board's: a catch-up's)
     bool capture_ = false;                                 // (the master's side run: its RAM kept, for its shadow)
-    bool in_drawing_ = false;                              // (that run going through its drawing)
     uint32_t drawing_r1_ = 0;                              // (its stack pointer as its tasks were called)
     std::vector<uint8_t> captured_;
     ppc::CpuState captured_cpu_{};
     uint32_t idle_msr_ = 0; // (this board's MSR at its last 0x36F24)
     bool tasks_mode_ = false;
-    uint64_t made_ = 0, side_runs_ = 0;
+    uint64_t made_ = 0;
+    mutable uint64_t side_runs_ = 0; // (the workers' added in as they settle)
     uint64_t journal_bytes_ = 0;
-    uint64_t heavy_frames_ = 0, first_heavy_ = 0;
-    double side_seconds_ = 0, whole_seconds_ = 0, netboard_seconds_ = 0;
+    mutable uint64_t heavy_frames_ = 0, first_heavy_ = 0;
+    mutable double side_seconds_ = 0;
+    double whole_seconds_ = 0, netboard_seconds_ = 0;
     int timer_depth_ = 0;
     struct Prof {
         uint64_t runs = 0;
         double setup = 0, game = 0, after = 0; // (seconds: set up, its game code, put back)
     };
-    std::map<uint32_t, Prof> profile_; // (by the side run's PC, +1 with its tasks; kLink the link's)
-    void profiled(uint32_t key, std::chrono::steady_clock::time_point begun, std::chrono::steady_clock::time_point ran_from,
+    mutable std::map<uint32_t, Prof> profile_; // (by the side run's PC, +1 with its tasks; kLink the link's)
+    void profiled(std::map<uint32_t, Prof>& profile, uint32_t key, std::chrono::steady_clock::time_point begun,
+                  std::chrono::steady_clock::time_point ran_from,
                   std::chrono::steady_clock::time_point ran_to) {
-        Prof& p = profile_[key];
+        Prof& p = profile[key];
         ++p.runs;
         p.setup += std::chrono::duration<double>(ran_from - begun).count();
         p.game += std::chrono::duration<double>(ran_to - ran_from).count();
@@ -587,14 +631,305 @@ private:
         Timer(const Timer&) = delete;
         Timer& operator=(const Timer&) = delete;
     };
-    std::string failed_;
+    mutable std::string failed_;
+
+    // ---- Side runs on other cores ----
+    // Who runs a side run: this board's CPU and bus, or a worker's (another thread's: a context and bus of its own
+    // on the same ROMs, its work RAM a copy of this board's kept up from the pages it wrote, its devices' registers
+    // and network board's memory copied as the job starts). Each its own flags, and its own timer and counts.
+    // Several workers (one a cabinet, as the cores allow): the cabinets' jobs handed out in turn, each from the
+    // same world (this board's at its dispatcher), so the same as one after another.
+    struct Worker;
+    // (a worker's own counts of its side runs, added to this board's as it settles, in the workers' order)
+    struct Stats {
+        double side_seconds = 0;
+        uint64_t side_runs = 0, heavy = 0, first_heavy = 0;
+        std::map<uint32_t, Prof> profile;
+        std::string failed;
+        std::vector<uint32_t> ahead;
+    };
+    struct Exec {
+        recomp::Context& c;
+        m3::Bus& bus;
+        double& whole;
+        int& depth;
+        bool inside = false, in_tasks = false, in_drawing = false;
+        bool given = false; // (a worker's: its buttons and frames given it, worked out on this board's thread)
+        Worker* paged = nullptr; // (a worker's: its RAM put back as the pages it marked, no journal)
+        Stats* stats = nullptr;  // (a worker's: its counts, not this board's)
+        uint32_t now = 0, was = 0;
+        uint64_t frame = 0, at_frame = 0;
+    };
+    // A cabinet's flows and tasks of a count, and its view of its own player after (tasks mode, at this board's
+    // dispatcher): its buttons, frame and this board's frame then, worked out here.
+    struct Job {
+        Remote* r;
+        uint32_t logic, runs;
+        uint64_t frame;
+        uint32_t now, was;
+        uint64_t at_frame;
+    };
+    // (its view of its own player after its tasks of `logic`, its camera's heading)
+    void own_view(Exec& e, Remote& r, uint32_t logic) {
+        uint32_t flags = 0;
+        side_run(e, r, kViewTest, &flags, false, 0, player_object(r.seat));
+        r.view_at[{logic, player_object(r.seat)}] = flags;
+        r.heading_at[logic] = static_cast<uint16_t>(r.camera[kCameraHeading] << 8 | r.camera[kCameraHeading + 1]);
+        while (!r.heading_at.empty() && r.heading_at.begin()->first + 16 < logic) r.heading_at.erase(r.heading_at.begin());
+        while (!r.view_at.empty() && r.view_at.begin()->first.first + 16 < logic) r.view_at.erase(r.view_at.begin());
+    }
+    // The network board as a worker reads it: this board's, its comm RAM's first part and I/O registers copied
+    // (what side runs read: 0xC0000004, 0xC0000D00-0xC00021FC, 0xC0010114); anything else counted, read as 0.
+    class FrozenNetBoard : public m3::NetBoardDevice {
+    public:
+        static constexpr uint32_t kComm = 0x4000, kIo = 0x200;
+        void take(m3::NetBoardDevice& b) {
+            if (!b.host_comm_view(comm_.data(), kComm))
+                for (uint32_t i = 0; i < kComm; ++i) comm_[i] = b.read8(0xC0000000u + i);
+            for (uint32_t i = 0; i < kIo; ++i) io_[i] = b.read8(0xC0010000u + i);
+        }
+        uint8_t read8(uint32_t addr) override {
+            const uint32_t a = addr & 0x3FFFF;
+            if (a < kComm) return comm_[a];
+            if (a >= 0x10000 && a < 0x10000 + kIo) return io_[a - 0x10000];
+            ++misses;
+            return 0;
+        }
+        uint16_t read16(uint32_t addr) override { return static_cast<uint16_t>(read8(addr) << 8 | read8(addr + 1)); }
+        uint32_t read32(uint32_t addr) override { return uint32_t{read16(addr)} << 16 | read16(addr + 2); }
+        void write8(uint32_t, uint8_t) override {} // (held: never come)
+        void write16(uint32_t, uint16_t) override {}
+        void write32(uint32_t, uint32_t) override {}
+        std::string describe() const override { return "a side-run worker's copy"; }
+        uint64_t misses = 0;
+
+    private:
+        std::array<uint8_t, kComm> comm_{};
+        std::array<uint8_t, kIo> io_{};
+    };
+    struct Worker {
+        Worker(const m3::Bus& from, std::span<const recomp::FunctionEntry> functions) : bus(from.roms()), c(bus, functions) {
+            auto board = std::make_unique<FrozenNetBoard>();
+            net = board.get();
+            bus.use_netboard(std::move(board));
+            exec = std::make_unique<Exec>(Exec{c, bus, whole, depth});
+            exec->given = true, exec->paged = this, exec->stats = &stats;
+            bus.mark_pages(marks.data());
+            c.set_hook(&Cabinets::worker_hook, exec.get());
+        }
+        m3::Bus bus;
+        recomp::Context c;
+        FrozenNetBoard* net = nullptr;
+        std::unique_ptr<Exec> exec;
+        double whole = 0;
+        int depth = 0;
+        Stats stats;
+        std::vector<Job> jobs;
+        bool has_jobs = false, quit = false;
+        bool synced = false; // (its RAM a copy of the clean one: from then on the pages written brought over)
+        std::mutex m;
+        std::condition_variable wake, done;
+        std::thread thread;
+        // (no journal: a run's RAM put back as the pages its bus marked, from the clean copy; its writes on the fast
+        // path, on every system alike. Its RAM has no system record kept: on Windows each page's first write after
+        // one is reset costs a fault)
+        std::vector<uint8_t> marks = std::vector<uint8_t>(m3::kWorkRamSize >> m3::Bus::kMarkShift, 0);
+        const std::vector<uint8_t>* clean = nullptr;
+        // A side run's RAM put back: the pages it wrote, from the clean copy.
+        void put_back_pages() {
+            const auto ram = bus.ram();
+            constexpr std::size_t page = std::size_t{1} << m3::Bus::kMarkShift;
+            for (std::size_t p = 0; p < marks.size(); ++p)
+                if (marks[p]) {
+                    std::memcpy(ram.data() + p * page, clean->data() + p * page, page);
+                    marks[p] = 0;
+                }
+        }
+    };
+    static void worker_hook(recomp::Context&, uint32_t pc, void* user) {
+        Exec& e = *static_cast<Exec*>(user);
+        if (e.in_tasks && pc == kVblankWait) throw TasksDrawing{};
+        if (e.inside && pc == kTransferLoop) e.bus.write8(kTransferBusy, 0);
+    }
+    // How many workers: SPIKEOUT_SIDE_WORKERS=N (SPIKEOUT_SIDE_THREAD=0: none, side runs on this board's thread); else
+    // the system's threads less two (this board's and one for the rest: the window's sound and 2D), at least one,
+    // no more than the other cabinets; none with a single thread.
+    static std::size_t worker_count(std::size_t cabinets) {
+        if (const char* v = std::getenv("SPIKEOUT_SIDE_THREAD"); v && v[0] == '0') return 0;
+        if (const char* v = std::getenv("SPIKEOUT_SIDE_WORKERS")) return std::min<std::size_t>(std::strtoul(v, nullptr, 10), cabinets);
+        const std::size_t threads = std::thread::hardware_concurrency();
+        if (threads <= 1) return 0;
+        return std::min(cabinets, std::max<std::size_t>(1, threads - 2));
+    }
+    bool workers_wanted() {
+        if (worker_target_ < 0) worker_target_ = static_cast<int>(worker_count(remotes_.size()));
+        return worker_target_ > 0;
+    }
+    // The jobs handed to the workers, in turn, with this board's RAM (its pages written since, into the clean copy
+    // the workers bring theirs up from), devices and CPU as they are now.
+    void start_workers(std::vector<Job> jobs) {
+        settle(); // (one round of jobs at a time)
+        const auto handing = std::chrono::steady_clock::now();
+        if (workers_.empty())
+            for (int k = 0; k < worker_target_; ++k) {
+                workers_.push_back(std::make_unique<Worker>(bus_, c_.functions()));
+                Worker* w = workers_.back().get();
+                w->clean = &clean_;
+                w->thread = std::thread([this, w] { worker_loop(*w); });
+            }
+        const auto ram = bus_.ram();
+        if (mirrored_ && m3::watched::take_written(reader_, ram.data(), ram.size(), pages_)) {
+            for (std::size_t p : pages_) {
+                const std::size_t at = p * m3::watched::kPage, n = std::min(m3::watched::kPage, ram.size() - at);
+                std::memcpy(clean_.data() + at, ram.data() + at, n);
+            }
+        } else { // (the first, or the record not there: all of it)
+            m3::watched::forget_written(reader_, ram.data(), ram.size());
+            clean_.assign(ram.begin(), ram.end());
+            for (auto& w : workers_) w->synced = false;
+            mirrored_ = true;
+        }
+        bus_.netboard().sync(bus_.now()); // (as a read of it by this board now would)
+        last_job_worker_ = jobs.empty() ? -1 : static_cast<int>((jobs.size() - 1) % workers_.size());
+        for (std::size_t k = 0; k < workers_.size(); ++k) {
+            Worker& w = *workers_[k];
+            w.bus.mirror_devices(bus_);
+            w.net->take(bus_.netboard());
+            w.c.follow(c_);
+            w.jobs.clear();
+            for (std::size_t j = k; j < jobs.size(); j += workers_.size()) w.jobs.push_back(jobs[j]);
+        }
+        workers_busy_ = true;
+        if (std::getenv("SPIKEOUT_SIDE_INLINE")) { // (debugging: the workers' contexts and buses, on this thread)
+            for (auto& w : workers_) run_jobs(*w);
+            return;
+        }
+        for (auto& w : workers_) {
+            {
+                std::lock_guard l(w->m);
+                w->has_jobs = true;
+            }
+            w->wake.notify_one();
+        }
+        worker_hand_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - handing).count();
+    }
+    void worker_loop(Worker& w) {
+        std::unique_lock l(w.m);
+        for (;;) {
+            w.wake.wait(l, [&] { return w.has_jobs || w.quit; });
+            if (w.quit) return;
+            l.unlock();
+            run_jobs(w);
+            l.lock();
+            w.has_jobs = false;
+            w.done.notify_all();
+        }
+    }
+    void run_jobs(Worker& w) {
+        // (its RAM brought up from the clean copy: the pages this board wrote since, or all of it)
+        const auto ram = w.bus.ram();
+        if (!w.synced) {
+            std::memcpy(ram.data(), clean_.data(), ram.size());
+            w.synced = true;
+        } else {
+            for (std::size_t p : pages_) {
+                const std::size_t at = p * m3::watched::kPage, n = std::min(m3::watched::kPage, ram.size() - at);
+                std::memcpy(ram.data() + at, clean_.data() + at, n);
+            }
+        }
+        if (worker_check_ && std::memcmp(ram.data(), clean_.data(), ram.size()) != 0)
+            std::printf("side check: a worker's RAM differs from this board's\n");
+        Exec& e = *w.exec;
+        for (const Job& j : w.jobs) {
+            e.frame = j.frame, e.now = j.now, e.was = j.was, e.at_frame = j.at_frame;
+            try {
+                for (uint32_t k = 0; k < j.runs; ++k)
+                    side_run(e, *j.r, kModeDispatch, nullptr, true, j.logic - j.runs + k + 1, 0, k + 1 == j.runs);
+                own_view(e, *j.r, j.logic);
+            } catch (...) {
+                if (w.stats.failed.empty()) w.stats.failed = "seat " + std::to_string(j.r->seat + 1) + ": a side-run worker stopped";
+            }
+        }
+    }
+    // This board waits here for the workers' jobs (their results are used from here on), their counts taken in.
+    void settle() const {
+        if (!workers_busy_) return;
+        const auto from = std::chrono::steady_clock::now();
+        for (const auto& w : workers_) {
+            std::unique_lock l(w->m);
+            w->done.wait(l, [&] { return !w->has_jobs; });
+        }
+        workers_busy_ = false;
+        worker_wait_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - from).count();
+        for (const auto& w : workers_) { // (in the workers' order: the first failure and heavy frame as one after another)
+            Stats& s = w->stats;
+            side_seconds_ += s.side_seconds, side_runs_ += s.side_runs;
+            for (const auto& [key, p] : s.profile) {
+                Prof& to = profile_[key];
+                to.runs += p.runs, to.setup += p.setup, to.game += p.game, to.after += p.after;
+            }
+            if (s.heavy) {
+                if (!heavy_frames_ || s.first_heavy < first_heavy_) first_heavy_ = s.first_heavy;
+                heavy_frames_ += s.heavy;
+            }
+            if (failed_.empty() && !s.failed.empty()) failed_ = s.failed;
+            if (w->net->misses && failed_.empty())
+                failed_ = "a side run on a worker read the network board outside its copy (" + std::to_string(w->net->misses) + " reads)";
+            s.side_seconds = 0, s.side_runs = 0, s.heavy = 0, s.profile.clear(), s.failed.clear();
+        }
+        if (last_job_worker_ >= 0) ahead_record_ = workers_[static_cast<std::size_t>(last_job_worker_)]->stats.ahead; // (the last job's)
+        for (std::size_t i = 0; i < checks_.size(); ++i) {
+            const Check& k = checks_[i];
+            auto first = [](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) -> long {
+                if (a.size() != b.size()) return -2;
+                for (std::size_t n = 0; n < a.size(); ++n)
+                    if (a[n] != b[n]) return static_cast<long>(n);
+                return -1;
+            };
+            const long cam = first(k.r->camera, k.serial.camera), own = first(k.r->own, k.serial.own), reg = first(k.r->regions, k.serial.regions);
+            const bool views = k.r->view_at != k.serial.view_at, heads = k.r->heading_at != k.serial.heading_at;
+            const bool ahead = i + 1 == checks_.size() && ahead_record_ != k.ahead; // (the last job's is the one kept)
+            if (cam != -1 || own != -1 || reg != -1 || views || heads || ahead)
+                std::printf("side check: seat %zu count %u differs: camera %ld, own %ld (%08x), regions %ld, views %d, headings %d, record %d\n",
+                            k.r->seat + 1, k.logic, cam, own, own >= 0 ? own_[static_cast<std::size_t>(own)] : 0u, reg, views, heads, ahead);
+        }
+        checks_.clear();
+    }
+    void stop_workers() {
+        if (workers_.empty()) return;
+        settle();
+        for (auto& w : workers_) {
+            {
+                std::lock_guard l(w->m);
+                w->quit = true;
+            }
+            w->wake.notify_one();
+            w->thread.join();
+        }
+        workers_.clear();
+    }
+    int worker_target_ = -1; // (worker_count's, once asked)
+    std::vector<std::unique_ptr<Worker>> workers_;
+    std::vector<uint8_t> clean_;      // (this board's RAM at the last hand-over, the workers' to bring theirs up from)
+    std::vector<std::size_t> pages_;  // (the pages written before it)
+    int reader_ = m3::watched::new_reader();
+    bool mirrored_ = false;
+    int last_job_worker_ = -1;
+    mutable bool workers_busy_ = false;
+    struct Check { // (SPIKEOUT_SIDE_CHECK: a job's cabinet as run here, to compare with the worker's)
+        Remote* r;
+        Remote serial;
+        std::vector<uint32_t> ahead;
+        uint32_t logic;
+    };
+    mutable std::vector<Check> checks_;
+    bool worker_check_ = std::getenv("SPIKEOUT_SIDE_CHECK") != nullptr;
+    mutable double worker_wait_ = 0, worker_hand_ = 0; // (seconds: this board waiting for them, handing jobs to them)
+    Exec main_{c_, bus_, whole_seconds_, timer_depth_};
 };
 
 // ---- the implementation ----
 
-struct LinkSkipped {};  // (a link run on the side holding its frame back: done)
-struct TasksDrawing {}; // (a frame's tasks run on the side reaching the drawing: done)
-struct DrawingDone {};  // (the master's capture through its drawing reaching its main loop's 0x36E94)
 
 inline bool Cabinets::started(Remote& r, uint32_t logic) {
     if (r.shadowed) return false;
@@ -607,128 +942,137 @@ inline bool Cabinets::started(Remote& r, uint32_t logic) {
     return true;
 }
 
-inline void Cabinets::side_run(Remote& r, uint32_t pc, uint32_t* flags, bool keep_camera, uint32_t count, uint32_t character, bool tasks) {
-    const Timer whole{whole_seconds_, timer_depth_};
+inline void Cabinets::side_run(Exec& e, Remote& r, uint32_t pc, uint32_t* flags, bool keep_camera, uint32_t count, uint32_t character, bool tasks) {
+    if (&e == &main_) settle(); // (on this board: the worker's runs done first, its results in)
+    const Timer whole{e.whole, e.depth};
     const auto begun = std::chrono::steady_clock::now(); // (profile_)
-    const uint32_t logic = bus_.read32(kLogicCounter);
-    const recomp::Context::Aside aside = c_.set_aside();
-    bus_.journal(true);
+    const uint32_t logic = e.bus.read32(kLogicCounter);
+    const recomp::Context::Aside aside = e.c.set_aside();
+    if (!e.paged) e.bus.journal(true);
     if (world_) { // (a catch-up's: this board's world as it was then)
-        const auto ram = bus_.ram();
+        const auto ram = e.bus.ram();
         for (uint32_t i = 0; i < world_->size(); ++i)
-            if (ram[i] != (*world_)[i]) bus_.write8(i, (*world_)[i]);
+            if (ram[i] != (*world_)[i]) e.bus.write8(i, (*world_)[i]);
     }
     if (capture_ && r.link.size() == kLinkBytes) { // (the master's shadow: its link memory and variables, as its last link left them)
-        const auto ram = bus_.ram();
+        const auto ram = e.bus.ram();
         for (uint32_t i = 0; i < kLinkBytes; ++i)
-            if (ram[kLinkMemory + i] != r.link[i]) bus_.write8(kLinkMemory + i, r.link[i]);
+            if (ram[kLinkMemory + i] != r.link[i]) e.bus.write8(kLinkMemory + i, r.link[i]);
         std::size_t n = 0;
         for (const auto& [lo, hi] : kLinkVars)
-            for (uint32_t a = lo; a < hi; ++a) bus_.write8(a, r.link_vars[n++]);
+            for (uint32_t a = lo; a < hi; ++a) e.bus.write8(a, r.link_vars[n++]);
     }
     for (uint32_t i = 0; i < kCameraBytes; ++i)
-        if (bus_.read8(kCamera + i) != r.camera[i]) bus_.write8(kCamera + i, r.camera[i]);
+        if (e.bus.read8(kCamera + i) != r.camera[i]) e.bus.write8(kCamera + i, r.camera[i]);
     for (std::size_t k = 0; k < own_.size(); ++k) {
-        const uint8_t here = bus_.read8(own_[k]), v = static_cast<uint8_t>((here & ~own_mask_[k]) | (r.own[k] & own_mask_[k]));
-        if (v != here) bus_.write8(own_[k], v);
+        const uint8_t here = e.bus.read8(own_[k]), v = static_cast<uint8_t>((here & ~own_mask_[k]) | (r.own[k] & own_mask_[k]));
+        if (v != here) e.bus.write8(own_[k], v);
     }
     // (its buttons, 0x5094's words, for its frame of this count; its toggles flipped once a frame)
-    const uint64_t frame = frame_for(r, logic);
-    const uint32_t now = held_(r.seat, frame), was = held_(r.seat, frame - 1);
-    bus_.write32(0x100100, now), bus_.write32(0x100104, now & ~was), bus_.write32(0x100108, was & ~now);
-    if (r.toggled_at != frame) bus_.write32(0x10010C, bus_.read32(0x10010C) ^ (now & ~was)), r.toggled_at = frame;
+    const uint64_t frame = e.given ? e.frame : frame_for(r, logic); // (a worker's: given it, worked out on this board's thread)
+    const uint32_t now = e.given ? e.now : held_(r.seat, frame), was = e.given ? e.was : held_(r.seat, frame - 1);
+    e.bus.write32(0x100100, now), e.bus.write32(0x100104, now & ~was), e.bus.write32(0x100108, was & ~now);
+    if (r.toggled_at != frame) e.bus.write32(0x10010C, e.bus.read32(0x10010C) ^ (now & ~was)), r.toggled_at = frame;
     // (its local player, its number, its time's entry: as 0x11C3C sets them)
-    bus_.write32(0x104024, player_object(r.seat));
-    bus_.write8(0x10065B, static_cast<uint8_t>(r.seat + 1));
-    bus_.write32(0x106008, 0x1062AE + 2 * static_cast<uint32_t>(r.seat + 1));
-    c_.set_scheduler(nullptr);
-    c_.cpu.msr &= ~recomp::Context::kMsrEE;
-    c_.limit_aside(30'000'000);
-    inside_ = true;
-    bus_.hold_device_writes(true);
+    e.bus.write32(0x104024, player_object(r.seat));
+    e.bus.write8(0x10065B, static_cast<uint8_t>(r.seat + 1));
+    e.bus.write32(0x106008, 0x1062AE + 2 * static_cast<uint32_t>(r.seat + 1));
+    e.c.set_scheduler(nullptr);
+    e.c.cpu.msr &= ~recomp::Context::kMsrEE;
+    e.c.limit_aside(30'000'000);
+    e.inside = true;
+    e.bus.hold_device_writes(true);
     std::vector<uint8_t> before; // (its flow's: its own bytes before, for what it changed)
     if (pc == kModeDispatch)
-        for (uint32_t a : own_) before.push_back(bus_.read8(a));
-    if ((pc == kAnimationStep || tasks) && r.regions.size() == kRegionBytes) put_regions(r.regions); // (its own areas: its 2D, its poses)
+        for (uint32_t a : own_) before.push_back(e.bus.read8(a));
+    if ((pc == kAnimationStep || tasks) && r.regions.size() == kRegionBytes) put_regions(e.bus, r.regions); // (its own areas: its 2D, its poses)
     const auto started_at = std::chrono::steady_clock::now();
     try {
         if (pc == kViewTest) { // (with this camera's view matrix, as the game has it in f20-f31 then)
-            if (character) c_.cpu.gpr[14] = character;
+            if (character) e.c.cpu.gpr[14] = character;
             for (int k = 0; k < 12; ++k) {
-                const uint32_t bits = bus_.read32(kCamera + kViewMatrix + 4 * static_cast<uint32_t>(k));
+                const uint32_t bits = e.bus.read32(kCamera + kViewMatrix + 4 * static_cast<uint32_t>(k));
                 float f;
                 std::memcpy(&f, &bits, 4);
                 const double d = f;
-                std::memcpy(&c_.cpu.fpr[static_cast<std::size_t>(20 + k)], &d, 8);
+                std::memcpy(&e.c.cpu.fpr[static_cast<std::size_t>(20 + k)], &d, 8);
             }
-            c_.call(pc);
+            e.c.call(pc);
         } else if (pc == kCameraUpdate) { // (the update, then what makes its view)
-            c_.call(pc);
-            c_.cpu = aside.cpu;
-            c_.cpu.msr &= ~recomp::Context::kMsrEE;
-            c_.cpu.gpr[12] = kCamera;
-            c_.call(kCameraView);
+            e.c.call(pc);
+            e.c.cpu = aside.cpu;
+            e.c.cpu.msr &= ~recomp::Context::kMsrEE;
+            e.c.cpu.gpr[12] = kCamera;
+            e.c.call(kCameraView);
         } else {
-            c_.call(pc);
+            e.c.call(pc);
             if (pc == kModeDispatch && tasks) { // (and its frame's tasks, up to the drawing: the world's step)
-                c_.cpu = aside.cpu;
-                c_.cpu.msr &= ~recomp::Context::kMsrEE;
+                e.c.cpu = aside.cpu;
+                e.c.cpu.msr &= ~recomp::Context::kMsrEE;
                 // (its 2D task too, on its own 2D area: a banner's unpacking shows in its work)
                 if (capture_) { // (the master's shadow: on through its drawing and the main loop to its 0x36E94, kept
                                 // there to go on from: its 2D task as it was)
-                    in_drawing_ = true, drawing_r1_ = aside.cpu.gpr[1];
+                    e.in_drawing = true, drawing_r1_ = aside.cpu.gpr[1];
                     try {
-                        c_.call(kTasks);
-                        c_.call(kTasksReturn); // (the main loop on after its tasks: 0xCB84, then 0x36E94)
+                        e.c.call(kTasks);
+                        e.c.call(kTasksReturn); // (the main loop on after its tasks: 0xCB84, then 0x36E94)
                     } catch (const DrawingDone&) {
-                        captured_cpu_ = c_.cpu, captured_cpu_.pc = kBeforeIdle;
-                        captured_.assign(bus_.ram().begin(), bus_.ram().end());
+                        captured_cpu_ = e.c.cpu, captured_cpu_.pc = kBeforeIdle;
+                        captured_.assign(e.bus.ram().begin(), e.bus.ram().end());
                     }
-                    in_drawing_ = false;
+                    e.in_drawing = false;
                 } else {
-                    in_tasks_ = true;
-                    const uint64_t t0 = c_.cycles();
+                    e.in_tasks = true;
+                    const uint64_t t0 = e.c.cycles();
                     try {
-                        c_.call(kTasks);
+                        e.c.call(kTasks);
                     } catch (const TasksDrawing&) {
                     }
-                    in_tasks_ = false;
-                    if (c_.cycles() - t0 > kHeavyWork && !heavy_frames_++) first_heavy_ = timing_.frames();
+                    e.in_tasks = false;
+                    if (e.c.cycles() - t0 > kHeavyWork) {
+                        if (e.stats) { if (!e.stats->heavy++) e.stats->first_heavy = e.at_frame; }
+                        else if (!heavy_frames_++) first_heavy_ = timing_.frames();
+                    }
                 }
-                c_.cpu = aside.cpu; // (and what makes its camera's view, which the drawing does)
-                c_.cpu.msr &= ~recomp::Context::kMsrEE;
-                c_.cpu.gpr[12] = kCamera;
-                c_.call(kCameraView);
+                e.c.cpu = aside.cpu; // (and what makes its camera's view, which the drawing does)
+                e.c.cpu.msr &= ~recomp::Context::kMsrEE;
+                e.c.cpu.gpr[12] = kCamera;
+                e.c.call(kCameraView);
             }
         }
-    } catch (const std::exception& e) {
-        in_tasks_ = in_drawing_ = false;
-        if (failed_.empty()) failed_ = "seat " + std::to_string(r.seat + 1) + ", side run at " + std::to_string(pc) + ": " + e.what();
+    } catch (const std::exception& ex) {
+        e.in_tasks = e.in_drawing = false;
+        if (std::string& failed = e.stats ? e.stats->failed : failed_; failed.empty()) failed = "seat " + std::to_string(r.seat + 1) + ", side run at " + std::to_string(pc) + ": " + ex.what();
     }
     const auto ran_to = std::chrono::steady_clock::now();
-    side_seconds_ += std::chrono::duration<double>(ran_to - started_at).count();
-    ++side_runs_;
-    inside_ = false;
-    bus_.hold_device_writes(false);
+    (e.stats ? e.stats->side_seconds : side_seconds_) += std::chrono::duration<double>(ran_to - started_at).count();
+    ++(e.stats ? e.stats->side_runs : side_runs_);
+    e.inside = false;
+    e.bus.hold_device_writes(false);
     if (keep_camera)
-        for (uint32_t i = 0; i < kCameraBytes; ++i) r.camera[i] = bus_.read8(kCamera + i);
-    for (std::size_t k = 0; k < own_.size(); ++k) r.own[k] = bus_.read8(own_[k]);
-    if ((pc == kAnimationStep || tasks) && r.regions.size() == kRegionBytes) regather(r.regions, bus_.ram());
-    if (flags) *flags = bus_.read32(character ? character : aside.cpu.gpr[14]);
+        for (uint32_t i = 0; i < kCameraBytes; ++i) r.camera[i] = e.bus.read8(kCamera + i);
+    for (std::size_t k = 0; k < own_.size(); ++k) r.own[k] = e.bus.read8(own_[k]);
+    if ((pc == kAnimationStep || tasks) && r.regions.size() == kRegionBytes) regather(r.regions, e.bus.ram());
+    if (flags) *flags = e.bus.read32(character ? character : aside.cpu.gpr[14]);
     if (pc == kModeDispatch) {
-        ahead_record_.resize(0x80);
-        for (uint32_t i = 0; i < 0x80; ++i) ahead_record_[i] = bus_.read32(kWorkingRecord + 4 * i);
+        std::vector<uint32_t>& ahead = e.stats ? e.stats->ahead : ahead_record_;
+        ahead.resize(0x80);
+        for (uint32_t i = 0; i < 0x80; ++i) ahead[i] = e.bus.read32(kWorkingRecord + 4 * i);
         auto& d = r.flow_delta[count];
         d.clear();
         for (std::size_t k = 0; k < own_.size(); ++k)
             if (r.own[k] != before[k]) d.emplace_back(static_cast<uint32_t>(k), r.own[k]);
         while (!r.flow_delta.empty() && r.flow_delta.begin()->first + 16 < count) r.flow_delta.erase(r.flow_delta.begin());
     }
-    journal_bytes_ += bus_.journal_size();
-    bus_.undo_journal();
-    bus_.journal(false);
-    c_.put_back(aside);
-    profiled(pc | (tasks ? 1u : 0u), begun, started_at, ran_to);
+    if (e.paged) { // (a worker's: the pages it wrote from its clean copy)
+        e.paged->put_back_pages();
+    } else {
+        journal_bytes_ += e.bus.journal_size();
+        e.bus.undo_journal();
+        e.bus.journal(false);
+    }
+    e.c.put_back(aside);
+    profiled(e.stats ? e.stats->profile : profile_, pc | (tasks ? 1u : 0u), begun, started_at, ran_to);
 }
 
 inline void Cabinets::shake(Remote& r, uint32_t kind) {
@@ -738,15 +1082,15 @@ inline void Cabinets::shake(Remote& r, uint32_t kind) {
 }
 
 inline bool Cabinets::hook(uint32_t pc) {
-    if (in_drawing_) { // (the master's capture: on through its drawing to its main loop's 0x36E94)
+    if (main_.in_drawing) { // (the master's capture: on through its drawing to its main loop's 0x36E94)
         if (pc == kVblankLoop) bus_.write8(kVblankCount, static_cast<uint8_t>(bus_.read8(kVblankCount) + 1));
         if (pc == kTransferLoop) bus_.write8(kTransferBusy, 0);
         if (pc == kBeforeIdle) throw DrawingDone{};
         return true;
     }
     if (in_link_ && pc == kLinkSkipped) throw LinkSkipped{};
-    if (in_tasks_ && pc == kVblankWait) throw TasksDrawing{};
-    if (inside_) { // (a transfer its tasks wait for (a banner's tiles): done at once, its device writes held)
+    if (main_.in_tasks && pc == kVblankWait) throw TasksDrawing{};
+    if (main_.inside) { // (a transfer its tasks wait for (a banner's tiles): done at once, its device writes held)
         if (pc == kTransferLoop) bus_.write8(kTransferBusy, 0);
         return true;
     }
@@ -754,6 +1098,7 @@ inline bool Cabinets::hook(uint32_t pc) {
         idle_msr_ = c_.cpu.msr;
         return true;
     }
+    if (pc == kModeDispatch || pc == kViewTest || pc == kLinkSkipped) settle(); // (the worker's runs' results wanted here)
     if (pc == kLinkSkipped) // (a slave handed back: this board's world after the count it is to catch up, for its view tests)
         for (Remote& r : remotes_)
             if (!r.saved_world.empty() && r.saved_count == bus_.read32(kLogicCounter)) r.view_world.assign(bus_.ram().begin(), bus_.ram().end());
@@ -777,7 +1122,8 @@ inline bool Cabinets::hook(uint32_t pc) {
         while (!players_at_.empty() && players_at_.begin()->first + 16 < logic) players_at_.erase(players_at_.begin());
         return true;
     }
-    case kModeDispatch:
+    case kModeDispatch: {
+        std::vector<Job> jobs;
         for (Remote& r : remotes_) {
             if (r.hand_back_asked && r.shadowed && r.stop_after == 0) { // (a hand-back: where its shadow stops; a slave's world)
                 r.stop_after = logic + static_cast<uint32_t>(r.ahead);
@@ -787,7 +1133,7 @@ inline bool Cabinets::hook(uint32_t pc) {
                 r.catch_up = false;
                 if (r.saved_count == r.own_logic + 1) {
                     world_ = &r.saved_world;
-                    side_run(r, pc, nullptr, true, r.saved_count, 0, true);
+                    side_run(main_, r, pc, nullptr, true, r.saved_count, 0, true);
                     world_ = nullptr;
                     r.own_logic = r.saved_count;
                     // (its view tests of that count, of what this board's took, on this board's world after it (before
@@ -800,7 +1146,7 @@ inline bool Cabinets::hook(uint32_t pc) {
                             c_.cpu = called;
                             c_.cpu.msr = here.msr;
                             uint32_t flags = 0;
-                            side_run(r, kViewTest, &flags, false, 0, ch);
+                            side_run(main_, r, kViewTest, &flags, false, 0, ch);
                             c_.cpu = here;
                             r.view_at[{r.saved_count, ch}] = flags;
                         }
@@ -814,29 +1160,38 @@ inline bool Cabinets::hook(uint32_t pc) {
             while (r.own_snap.size() > 4) r.own_snap.erase(r.own_snap.begin());
             const uint32_t runs = std::min<uint32_t>(logic - r.own_logic, 8);
             if (tasks_mode_ && on_camera) on_camera(r.seat, logic, r.camera);
-            for (uint32_t k = 0; k < runs; ++k) side_run(r, pc, nullptr, true, logic - runs + k + 1, 0, tasks_mode_ && k + 1 == runs);
             r.own_logic = logic;
-            if (tasks_mode_) { // (its camera's update was in its tasks: its view of its own player now, its heading)
-                uint32_t flags = 0;
-                side_run(r, kViewTest, &flags, false, 0, player_object(r.seat));
-                r.view_at[{logic, player_object(r.seat)}] = flags;
-                r.heading_at[logic] = static_cast<uint16_t>(r.camera[kCameraHeading] << 8 | r.camera[kCameraHeading + 1]);
-                while (!r.heading_at.empty() && r.heading_at.begin()->first + 16 < logic) r.heading_at.erase(r.heading_at.begin());
-                while (!r.view_at.empty() && r.view_at.begin()->first.first + 16 < logic) r.view_at.erase(r.view_at.begin());
+            if (tasks_mode_ && workers_wanted()) { // (on a worker, while this board goes on with its own count)
+                const uint64_t frame = frame_for(r, logic);
+                jobs.push_back({&r, logic, runs, frame, held_(r.seat, frame), held_(r.seat, frame - 1), timing_.frames()});
+                continue;
+            }
+            for (uint32_t k = 0; k < runs; ++k) side_run(main_, r, pc, nullptr, true, logic - runs + k + 1, 0, tasks_mode_ && k + 1 == runs);
+            if (tasks_mode_) own_view(main_, r, logic);
+        }
+        if (!jobs.empty() && worker_check_) { // (SPIKEOUT_SIDE_CHECK: each run here too, on a copy, compared once settled)
+            checks_.clear();
+            for (const Job& j : jobs) {
+                Remote copy = *j.r;
+                for (uint32_t k = 0; k < j.runs; ++k) side_run(main_, copy, pc, nullptr, true, j.logic - j.runs + k + 1, 0, k + 1 == j.runs);
+                own_view(main_, copy, j.logic);
+                checks_.push_back({j.r, std::move(copy), ahead_record_, j.logic});
             }
         }
+        if (!jobs.empty()) start_workers(std::move(jobs));
         return true;
+    }
     case kCameraUpdate:
         in_update_ = true, in_view_ = false;
         if (tasks_mode_) return true; // (run in its tasks)
         for (Remote& r : remotes_) {
             if (r.camera.empty()) continue;
             if (on_camera) on_camera(r.seat, logic, r.camera);
-            side_run(r, pc, nullptr, true);
+            side_run(main_, r, pc, nullptr, true);
             { // (its view of its own player too, now: its next link carries it, and this board's own test of it can
               // come late, after the frame's end)
                 uint32_t flags = 0;
-                side_run(r, kViewTest, &flags, false, 0, player_object(r.seat));
+                side_run(main_, r, kViewTest, &flags, false, 0, player_object(r.seat));
                 r.view_at[{logic, player_object(r.seat)}] = flags;
             }
             r.heading_at[logic] = static_cast<uint16_t>(r.camera[kCameraHeading] << 8 | r.camera[kCameraHeading + 1]);
@@ -847,7 +1202,7 @@ inline bool Cabinets::hook(uint32_t pc) {
     case kAnimationStep: // (a character's: as each of the others too, into its regions)
         if (tasks_mode_) return true;
         for (Remote& r : remotes_)
-            if (!r.camera.empty() && r.regions.size() == kRegionBytes) side_run(r, pc, nullptr, false);
+            if (!r.camera.empty() && r.regions.size() == kRegionBytes) side_run(main_, r, pc, nullptr, false);
         return true;
     case kViewTest:
         in_view_ = false;
@@ -857,7 +1212,7 @@ inline bool Cabinets::hook(uint32_t pc) {
         for (Remote& r : remotes_) {
             if (r.camera.empty()) continue;
             uint32_t flags = 0;
-            side_run(r, pc, &flags, false);
+            side_run(main_, r, pc, &flags, false);
             r.view_at[{logic, c_.cpu.gpr[14]}] = flags;
             if (r.pending != ~0ull && ready(r)) link_run(r, r.pending), r.pending = ~0ull; // (its link, waiting for this)
         }
@@ -903,7 +1258,7 @@ inline bool Cabinets::hook(uint32_t pc) {
 
 inline void Cabinets::camera_written(void* user, uint32_t addr, uint32_t value, uint32_t size) {
     Cabinets& self = *static_cast<Cabinets*>(user);
-    if (self.inside_ || self.in_view_ || self.in_update_ || self.tasks_mode_) return; // (tasks mode: its own tasks make them)
+    if (self.main_.inside || self.in_view_ || self.in_update_ || self.tasks_mode_) return; // (tasks mode: its own tasks make them)
     const uint32_t pc = self.c_.cpu.pc;
     if (pc == kShakeWrite) return; // (decided again for each, at its hooks)
     for (uint32_t w : kOwnCameraWriters)
@@ -983,6 +1338,7 @@ inline void Cabinets::merge_own(const std::vector<uint8_t>& own) {
 }
 
 inline void Cabinets::link_run(Remote& r, uint64_t frame) {
+    settle();
     const Timer whole{whole_seconds_, timer_depth_};
     const auto begun = std::chrono::steady_clock::now(); // (profile_)
     const uint32_t logic = r.logic + 1; // (the count it goes on to, unless held back)
@@ -990,7 +1346,7 @@ inline void Cabinets::link_run(Remote& r, uint64_t frame) {
     // board's world after the count before that, its working record from it)
     ahead_record_.clear();
     if (logic == bus_.read32(kLogicCounter) + 2 && r.own_logic < logic - 1 && !r.camera.empty()) {
-        side_run(r, kModeDispatch, nullptr, false, logic - 1, 0, true); // (its camera's update for it comes at its hook)
+        side_run(main_, r, kModeDispatch, nullptr, false, logic - 1, 0, true); // (its camera's update for it comes at its hook)
         r.own_logic = logic - 1;
     }
     // (its next record, made from this board's before its memory goes in)
@@ -1057,7 +1413,7 @@ inline void Cabinets::link_run(Remote& r, uint64_t frame) {
     c_.set_scheduler(nullptr);
     c_.cpu.msr &= ~recomp::Context::kMsrEE;
     c_.limit_aside(30'000'000);
-    inside_ = in_link_ = true;
+    main_.inside = in_link_ = true;
     bus_.hold_device_writes(true);
     bus_.borrow_netboard(r.netboard);
     const auto started_at = std::chrono::steady_clock::now();
@@ -1076,7 +1432,7 @@ inline void Cabinets::link_run(Remote& r, uint64_t frame) {
     ++side_runs_;
     bus_.borrow_netboard(nullptr);
     bus_.hold_device_writes(false);
-    inside_ = in_link_ = false;
+    main_.inside = in_link_ = false;
     // (kept: its link memory, variables, own variables; what the link changed of its link memory, into its
     // flows' too (not the characters' view bits: the received entries put the other cabinet's there, which its
     // own view tests write over))
@@ -1097,7 +1453,7 @@ inline void Cabinets::link_run(Remote& r, uint64_t frame) {
     journal_bytes_ += bus_.journal_size();
     bus_.undo_journal();
     bus_.journal(false);
-    profiled(kLink, begun, started_at, ran_to);
+    profiled(profile_, kLink, begun, started_at, ran_to);
     c_.put_back(aside);
     if (now_logic != r.logic) {
         r.logic = now_logic, r.logic_frame = frame, r.frame_at[now_logic] = frame;
@@ -1109,6 +1465,7 @@ inline void Cabinets::link_run(Remote& r, uint64_t frame) {
 }
 
 inline void Cabinets::hand_back(std::size_t seat, const Seed& seed, std::span<const uint8_t> ram, uint64_t last) {
+    settle();
     Remote* r = find(seat);
     if (!r || !r->netboard) return;
     m3::NetBoardDevice& netboard = *r->netboard;
@@ -1130,6 +1487,7 @@ inline void Cabinets::hand_back(std::size_t seat, const Seed& seed, std::span<co
 }
 
 inline bool Cabinets::shadow_state(std::size_t seat, uint32_t count, Shadow& out) {
+    settle();
     Remote* r = find(seat);
     if (!r) return false;
     const auto own = r->own_snap.find(count + 1);
@@ -1173,6 +1531,7 @@ inline void Cabinets::meet(uint64_t frame, uint64_t t) {
                 r.netboard->sync(std::min(at, t));
             }
             r.written_frame = frame;
+            settle(); // (its link run wants its side runs' results)
             if (!missed(r, frame)) {
                 if (ready(r)) link_run(r, frame);
                 else r.pending = frame;
@@ -1184,6 +1543,7 @@ inline void Cabinets::meet(uint64_t frame, uint64_t t) {
 }
 
 inline void Cabinets::end_frame(uint64_t frame) {
+    settle();
     const uint64_t end = timing_.frame_start(frame) + timing_.frame_cycles();
     meet(frame, end);
     for (Remote& r : remotes_) {

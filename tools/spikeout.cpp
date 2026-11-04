@@ -1549,7 +1549,8 @@ int main(int argc, char** argv) {
         else if (arg == "--net-every-board") net_one_board = Shared::OneBoard::never;
         else if (arg == "--net-auto-board") net_one_board = Shared::OneBoard::automatic;
         else if (arg == "--net-rollback" && i + 1 < argc) net_rollback = std::strtoull(argv[++i], nullptr, 0);
-        else if (arg == "--no-idle-skip") m3::games::set_idle_skip(false); // (the vblank wait spun, as before)
+        else if (arg == "--no-idle-skip") m3::games::set_idle_skip(false), m3::CommBoard::set_wait_skip(false); // (the vblank wait and the network board's waits spun, as before)
+        else if (arg == "--no-net-idle-skip") m3::CommBoard::set_wait_skip(false); // (the network board's only)
         else if (arg == "--fog-over-nothing") fog_over_nothing = true;
         else if (arg == "--frames" && i + 1 < argc) max_frames = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--boards" && i + 1 < argc)

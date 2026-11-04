@@ -2,8 +2,15 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <map>
+#include <mutex>
 
 namespace m3::watched {
+
+// Each system's own record (below), read once: its pages, the record started again.
+bool os_take_written(void* base, std::size_t bytes, std::vector<std::size_t>& pages);
+void os_forget_written(void* base, std::size_t bytes);
+void drop_records(void* base); // (memory released: its readers' records gone)
 
 const char* name(Method m) {
     switch (m) {
@@ -46,10 +53,11 @@ void* allocate(std::size_t bytes) {
 }
 
 void release(void* p, std::size_t) {
+    drop_records(p);
     if (p) VirtualFree(p, 0, MEM_RELEASE);
 }
 
-bool take_written(void* base, std::size_t bytes, std::vector<std::size_t>& pages) {
+bool os_take_written(void* base, std::size_t bytes, std::vector<std::size_t>& pages) {
     pages.clear();
     if (!bytes) return true;
     const std::size_t total = (bytes + kPage - 1) / kPage;
@@ -63,7 +71,7 @@ bool take_written(void* base, std::size_t bytes, std::vector<std::size_t>& pages
     return true;
 }
 
-void forget_written(void* base, std::size_t bytes) {
+void os_forget_written(void* base, std::size_t bytes) {
     if (bytes) ResetWriteWatch(base, bytes);
 }
 
@@ -295,6 +303,7 @@ void* allocate(std::size_t bytes) {
 }
 
 void release(void* p, std::size_t bytes) {
+    drop_records(p);
     if (!p) return;
     const std::size_t n = (std::max<std::size_t>(bytes, 1) + os_page() - 1) / os_page() * os_page();
     {
@@ -311,7 +320,7 @@ void release(void* p, std::size_t bytes) {
     munmap(p, n);
 }
 
-bool take_written(void* base, std::size_t bytes, std::vector<std::size_t>& pages) {
+bool os_take_written(void* base, std::size_t bytes, std::vector<std::size_t>& pages) {
     pages.clear();
     Slot* s = find(base);
     if (!s || !s->watching || s->how == Method::none || bytes > s->bytes) return false;
@@ -342,7 +351,7 @@ bool take_written(void* base, std::size_t bytes, std::vector<std::size_t>& pages
     return true;
 }
 
-void forget_written(void* base, std::size_t) {
+void os_forget_written(void* base, std::size_t) {
     Slot* s = find(base);
     if (!s || s->how == Method::none) return;
 #ifdef M3_PAGEMAP_SCAN
@@ -358,3 +367,65 @@ void forget_written(void* base, std::size_t) {
 } // namespace m3::watched
 
 #endif
+
+// ---------------------------------------------------------------- Several readers, each its own record
+// The system's record starts again as it is read, so two readers of the same memory (rollback's snapshots and a
+// side-run worker's copy of RAM) would each miss what the other took. Each read passes what the system noted on to
+// every reader's own record (pages marked), then gives the asker its own and clears it.
+
+namespace m3::watched {
+
+namespace {
+struct Records {
+    std::map<int, std::vector<uint8_t>> marks; // by reader: a byte a page, 1 written since it last asked
+};
+std::mutex g_records_lock;
+std::map<void*, Records> g_records; // by memory block
+std::vector<std::size_t> g_noted;    // (scratch, under the lock)
+
+// What the system has noted since, onto every reader's record (false: it couldn't say).
+bool pass_on(void* base, std::size_t bytes, Records& r) {
+    if (!os_take_written(base, bytes, g_noted)) return false;
+    for (auto& [reader, marks] : r.marks)
+        for (const std::size_t p : g_noted)
+            if (p < marks.size()) marks[p] = 1;
+    return true;
+}
+} // namespace
+
+int new_reader() {
+    static std::mutex lock;
+    static int next = 1; // (0: the first, readers that name none)
+    std::lock_guard guard(lock);
+    return next++;
+}
+
+bool take_written(int reader, void* base, std::size_t bytes, std::vector<std::size_t>& pages) {
+    pages.clear();
+    std::lock_guard guard(g_records_lock);
+    Records& r = g_records[base];
+    const auto it = r.marks.find(reader);
+    if (it == r.marks.end() || !pass_on(base, bytes, r)) return false; // (not watched by it yet; or not listable)
+    std::vector<uint8_t>& marks = it->second;
+    for (std::size_t p = 0; p < marks.size(); ++p)
+        if (marks[p]) pages.push_back(p), marks[p] = 0;
+    return true;
+}
+
+void forget_written(int reader, void* base, std::size_t bytes) {
+    std::lock_guard guard(g_records_lock);
+    Records& r = g_records[base];
+    if (r.marks.empty()) os_forget_written(base, bytes); // (the first: watching starts)
+    else pass_on(base, bytes, r);                        // (the others keep what was noted)
+    r.marks[reader].assign((bytes + kPage - 1) / kPage, 0);
+}
+
+bool take_written(void* base, std::size_t bytes, std::vector<std::size_t>& pages) { return take_written(0, base, bytes, pages); }
+void forget_written(void* base, std::size_t bytes) { forget_written(0, base, bytes); }
+
+void drop_records(void* base) {
+    std::lock_guard guard(g_records_lock);
+    g_records.erase(base);
+}
+
+} // namespace m3::watched

@@ -123,7 +123,13 @@ public:
     void sync(uint64_t main_cycles) override;
     void end_frame() override;
     std::string describe() const override;
+    bool host_comm_view(uint8_t* out, uint32_t bytes) override;
     void state(State& s) override; // save states (runtime/state.hpp)
+
+    // The firmware's wait loops gone round at once (exact: the same state and timing, their time not spent). On by
+    // default, every board of a process alike; off with --no-idle-skip or SPIKEOUT_NO_IDLE_SKIP=1.
+    static void set_wait_skip(bool on);
+    uint64_t waits_skipped() const; // (times round them not run)
 
     // ---- Inspection (reports, tests, tracing the firmware) ----
     bool in_reset() const { return in_reset_; }

@@ -12,6 +12,7 @@
 #include "ppc/cpu_state.hpp"
 #include "runtime/bus.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -221,6 +222,15 @@ public:
         block_limit_ = a.block_limit, cycle_limit_ = a.cycle_limit;
         recheck();
     }
+    // Another context on another bus (a side-run worker's): this one's CPU, clock and return stack taken as they
+    // are now, to run code from here as this one would.
+    void follow(const Context& o) {
+        put_back(o.set_aside());
+        tb_step = o.tb_step;
+        std::copy_n(o.return_stack_.begin(), std::min(o.return_depth_, return_stack_.size()), return_stack_.begin());
+        resume_ = o.resume_;
+    }
+    std::span<const FunctionEntry> functions() const { return functions_; }
     // For code run aside (between set_aside and put_back): the run's own limits instead of its caller's.
     void limit_aside(uint64_t cycles) {
         block_limit_ = UINT64_MAX - 1;

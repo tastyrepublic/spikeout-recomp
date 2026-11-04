@@ -8,8 +8,14 @@
 #include "runtime/moira_state.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+
+namespace {
+std::atomic<bool> g_wait_skip{!std::getenv("SPIKEOUT_NO_IDLE_SKIP")}; // (CommBoard::set_wait_skip)
+} // namespace
 
 namespace m3 {
 
@@ -45,6 +51,63 @@ public:
     void write16(moira::u32 a, moira::u16 v) const override { board_.cpu_write16(a, v); }
     void willInterrupt(moira::u8 level) override { ++board_.irqs_taken[level & 7]; }
 
+    // The firmware's waits (the 68000's own RAM, where it spends most of its time): gone round at once as many
+    // times as they would before `stop`, their cycles (and a counted wait's counters) as if run. Each is a loop
+    // that reads a byte only an interrupt sets; inside a run nothing else can (the main board's accesses come
+    // between runs, the IRQ lines are set between slices), and with nothing pending (Moira's fast path, flags 0)
+    // no interrupt is taken. One time round is run first, so the CPU is as every time round leaves it (flags,
+    // prefetch); the rest the same state, its clock on. Moira runs what is left of the slice.
+    //   wait:     tst.b $a.w; beq.s wait                 (0x0E8C, 0x1198, 0x11A0)
+    //   counted:  addq.w #1,Dc; addq.w #1,Dn; tst.b $a.w; bne.w out; cmpi.w #n,Dn; blt.s counted   (0x0C52)
+    void skip_waits(moira::i64 stop) {
+        if (flags || clock >= stop) return;
+        const auto& ram = board_.ram_;
+        const uint32_t pc = reg.pc;
+        if (pc >= 0xFFF0) return;
+        auto word = [&](uint32_t a) { return static_cast<uint16_t>(ram[a] << 8 | ram[a + 1]); };
+        int instructions = 0, counter = -1, count = -1;
+        uint32_t watched = 0, limit = 0;
+        if (word(pc) == 0x4A38 && word(pc + 4) == 0x67FA) {
+            instructions = 2, watched = word(pc + 2);
+        } else if ((word(pc) & 0xFFF8) == 0x5240 && (word(pc + 2) & 0xFFF8) == 0x5240 && word(pc + 4) == 0x4A38 &&
+                   word(pc + 8) == 0x6600 && (word(pc + 12) & 0xFFF8) == 0x0C40 && (word(pc + 12) & 7) == (word(pc + 2) & 7) &&
+                   word(pc + 16) == 0x6DEE) {
+            instructions = 6, watched = word(pc + 6), counter = word(pc) & 7, count = word(pc + 2) & 7, limit = word(pc + 14);
+            if (counter == count) return;
+        } else {
+            return;
+        }
+        if (watched >= 0x8000 || ram[watched] != 0) return; // (abs.w: below 0x8000 the 68000's own RAM)
+        auto counting = [&] { // (its count, a word, at or above 0 and under the limit once more: the flags after its cmpi then
+                              // N, C set, Z, V clear, X clear from its addq)
+            const auto n = static_cast<int16_t>(reg.r[count] & 0xFFFF);
+            return n >= 0 && n < static_cast<int16_t>(limit) - 1 && static_cast<int16_t>(limit) > 0;
+        };
+        if (count >= 0 && !counting()) return;
+        const moira::i64 from = clock;
+        for (int i = 0; i < instructions; ++i) { // (one time round, as executeUntil would)
+            if (clock >= stop) return;
+            execute();
+            if (flags) return;
+        }
+        if (reg.pc != pc || ram[watched] != 0) return;
+        const moira::i64 round = clock - from;
+        if (round <= 0 || clock >= stop) return;
+        if (count >= 0 && (!counting() || !reg.sr.n || reg.sr.z || reg.sr.v || !reg.sr.c || reg.sr.x)) return;
+        moira::i64 times = (stop - clock - 1) / round; // (each still started before stop)
+        if (count >= 0) {
+            const auto n = static_cast<int16_t>(reg.r[count] & 0xFFFF);
+            times = std::min<moira::i64>(times, static_cast<int16_t>(limit) - 1 - n); // (its count still under the limit after)
+            const auto add = [&](int r) {
+                reg.r[r] = (reg.r[r] & 0xFFFF0000u) | ((reg.r[r] + static_cast<uint32_t>(times)) & 0xFFFFu);
+            };
+            add(counter), add(count);
+        }
+        clock += times * round;
+        skipped += static_cast<uint64_t>(times);
+    }
+    uint64_t skipped = 0; // (times round the waits not run)
+
 private:
     CommBoard& board_;
 };
@@ -55,6 +118,8 @@ CommBoard::CommBoard(std::unique_ptr<NetLink> link, const Options& options)
 
 CommBoard::~CommBoard() = default;
 
+void CommBoard::set_wait_skip(bool on) { g_wait_skip.store(on, std::memory_order_relaxed); }
+uint64_t CommBoard::waits_skipped() const { return cpu_->skipped; }
 uint32_t CommBoard::pc() const { return cpu_->getPC(); }
 uint64_t CommBoard::cpu_cycles() const { return static_cast<uint64_t>(cpu_->getClock()); }
 
@@ -109,6 +174,7 @@ void CommBoard::run_until(uint64_t target) {
         // the receiver) and what comes in over the link are timely.
         const uint64_t stop =
             std::min({target, timed ? next_irq5_ : UINT64_MAX, frame_irq5_next_, cpu_cycles() + kSlice});
+        if (g_wait_skip.load(std::memory_order_relaxed)) cpu_->skip_waits(static_cast<moira::i64>(stop));
         cpu_->executeUntil(static_cast<moira::i64>(stop));
         if (send_irq_armed_ && send_complete()) set_irq(4, true);
         if (timed && cpu_cycles() >= next_irq5_) {
@@ -394,6 +460,14 @@ void CommBoard::host_note(uint32_t addr, bool write, uint32_t value) {
         }
     }
     host_trace.push_back({now, now, a, a, value, 1, write, region, which});
+}
+
+// (read8 of each, without its trace)
+bool CommBoard::host_comm_view(uint8_t* out, uint32_t bytes) {
+    if (host_tracing || bytes > 0x10000) return false;
+    const uint8_t* comm = bank(true);
+    for (uint32_t i = 0; i < bytes; ++i) out[i] = comm[(i ^ options_.comm_ram_xor) & 0xFFFF];
+    return true;
 }
 
 uint8_t CommBoard::read8(uint32_t addr) {

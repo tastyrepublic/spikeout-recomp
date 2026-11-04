@@ -194,6 +194,9 @@ public:
 
     // One line for run reports.
     virtual std::string describe() const = 0;
+    // The comm RAM's first `bytes` as the main board reads them (read8 of 0xC0000000 on), at once: false if the board
+    // has no faster way than read8 (a side-run worker's copy, tools/remote_cabinet.hpp).
+    virtual bool host_comm_view(uint8_t* /*out*/, uint32_t /*bytes*/) { return false; }
     // Save states (runtime/state.hpp); throws for a board that can't be saved.
     virtual void state(State& s);
 };

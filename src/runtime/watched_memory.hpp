@@ -52,6 +52,12 @@ void release(void* p, std::size_t bytes);
 bool take_written(void* base, std::size_t bytes, std::vector<std::size_t>& pages);
 // Watching starts (or starts again) here: nothing written so far.
 void forget_written(void* base, std::size_t bytes);
+// Another reader of the same memory's record (a side-run worker's copy of RAM, beside rollback's snapshots): each
+// reader has its own, as the two above (reader 0's), neither missing what the other has taken. Its watching starts
+// at its first forget_written.
+int new_reader();
+bool take_written(int reader, void* base, std::size_t bytes, std::vector<std::size_t>& pages);
+void forget_written(int reader, void* base, std::size_t bytes);
 } // namespace watched
 
 template <class T> struct WatchedAllocator {

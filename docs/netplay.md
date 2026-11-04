@@ -2910,6 +2910,47 @@ The window: ~51 fps for a second at the coin (was ~0.5 s frozen). The
 old ways for comparison: ONEBOARD_WAIT_SHADOWS=1, ONEBOARD_WHOLE_STATES=1
 (gamerun).
 
+### Side runs on other cores (2026-11-04)
+
+A board on its own runs the other cabinets' tasks (side runs) on worker
+threads: at the mode dispatch (0x492AC) each other cabinet's flow, tasks
+and own-view test become a job, handed out in turn to the workers; the
+main board goes on and waits for them (settle) only where it needs their
+results: its own view test, a skipped link, the next dispatch, the link's
+run in meet(), the end of the frame and every public call. Each worker
+has its own m3::Bus (the same ROMs) and recomp::Context (Context::follow
+copies the CPU, clock and return stack). Its RAM is brought up on its own
+thread from a shared clean copy, kept from the pages the main board wrote
+(watched::take_written with a reader of its own: the OS record now has
+several readers). The worker's devices are copied (Bus::mirror_devices)
+and its network board is a frozen copy of the comm RAM and I/O
+(NetBoard::host_comm_view). A side run's writes are marked by the
+worker's bus (Bus::mark_pages, a byte per 4 KB page in write8/16/32) and
+put back from the clean copy: no journal and no OS record on a worker's
+RAM (that record's page faults made it slow on Windows). The counts each
+worker keeps are merged at settle in worker order, so reports match.
+
+Workers: min(other cabinets, cores - 2, at least 1); none on one core.
+SPIKEOUT_SIDE_WORKERS=N forces a count, SPIKEOUT_SIDE_THREAD=0 runs side
+runs on the board's thread as before; SPIKEOUT_SIDE_CHECK=1 also runs
+each job serially on a copy and compares, SPIKEOUT_SIDE_INLINE=1 runs the
+workers' jobs on the main thread (debugging). gamerun reports the
+workers' time, the board's wait and the hand-over.
+
+Measured (mash fight, 1,490 frames, the board's thread): 9.7-10.4 s with
+serial side runs, 7.3 s with a worker (wait 0.19 s, hand-over 0.28 s);
+four players on one PC (four processes), each board's wait for side runs
+5.5 s with one worker, 1.1 s with three. Proved: onepc-tests 18/18,
+onepc-net-tests 14/14, the rollback test, every-board runs with 2 and 3
+players: the same, every frame.
+
+The network board's 68000 also skips its wait loops (CommBoard::Cpu::
+skip_waits: `tst.b $a.w; beq.s` at 0xE8C, 0x1198, 0x11A0 and the counted
+loop at 0xC52; one round run, then whole rounds up to the slice's stop
+added to the clock and counters). Exact (two-board states and sound the
+same), small (~0.03 ms a frame). Off: --no-net-idle-skip (or
+--no-idle-skip, which turns off both).
+
 ## Plan
 
 1. Single board, single player (milestones 1–4).
