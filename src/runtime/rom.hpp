@@ -116,10 +116,16 @@ struct RomSet {
 };
 
 // Load every region of `game` from a directory holding the extracted ROM
-// files (e.g. the contents of MAME's spikeofe.zip). File name matching is
-// case-insensitive. After loading, the program ROM word order is detected
-// from the reset vector and normalized.
+// files, or from the zip itself (MAME's spikeofe.zip; files in its folders
+// found by name too). File name matching is case-insensitive. After
+// loading, the program ROM word order is detected from the reset vector and
+// normalized. Throws std::runtime_error for a zip that can't be read.
 RomSet load_rom_set(const GameSpec& game, const std::filesystem::path& dir);
+
+// Quickly, without reading the files: which of `game`'s files a folder or
+// zip has, with the right sizes (Ok, Missing or WrongSize) and, in a zip,
+// the right CRCs as the zip records them (WrongChecksum).
+std::vector<RomFileReport> survey_rom_set(const GameSpec& game, const std::filesystem::path& path);
 
 // Pick the word order under which the code at the reset vector looks most
 // like valid PowerPC code. Exposed for testing.

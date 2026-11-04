@@ -54,6 +54,9 @@ struct Settings {
     int volume = 100, sound_volume = 100, music_volume = 100;
     // Network play: the name the others see (clean_name's; empty: this computer's user name)
     std::string player_name;
+    // The ROM set: its zip (spikeofe.zip) or the folder of its files, in UTF-8 (empty: not chosen yet; chosen at the
+    // first start and in the menu; a folder on the command line goes over it)
+    std::string rom_path;
     // Controls: two players' keys (SDL scancodes, 0: none)
     std::array<std::array<int, kActions>, 2> keys{{
         {SDL_SCANCODE_5, SDL_SCANCODE_1, SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT,
@@ -100,6 +103,7 @@ inline Settings load_settings(const std::string& path) {
     std::ifstream in(path);
     std::map<std::string, std::string> v;
     for (std::string line; std::getline(in, line);) {
+        if (line.starts_with("\xEF\xBB\xBF")) line.erase(0, 3); // (a byte order mark: a file saved by an editor that adds one)
         const size_t eq = line.find('=');
         if (line.empty() || line[0] == '#' || eq == std::string::npos) continue;
         auto trim = [](std::string t) {
@@ -128,6 +132,7 @@ inline Settings load_settings(const std::string& path) {
     if (auto it = v.find("front_output"); it != v.end()) s.front_output = it->second;
     if (auto it = v.find("rear_output"); it != v.end()) s.rear_output = it->second;
     if (auto it = v.find("player_name"); it != v.end()) s.player_name = clean_name(it->second);
+    if (auto it = v.find("rom_path"); it != v.end()) s.rom_path = it->second;
     get("screen_filter", s.screen_filter, 0, 2);
     get("volume", s.volume, 0, 100);
     get("sound_volume", s.sound_volume, 0, 200);
@@ -153,6 +158,7 @@ inline bool save_settings(const std::string& path, const Settings& s) {
     o << "front_output = " << s.front_output << "\n";
     o << "rear_output = " << s.rear_output << "\n";
     o << "player_name = " << s.player_name << "\n";
+    o << "rom_path = " << s.rom_path << "\n";
     o << "crt_colours = " << s.crt_colours << "\n";
     o << "screen_filter = " << s.screen_filter << "\n";
     o << "volume = " << s.volume << "\n";

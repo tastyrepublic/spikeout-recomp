@@ -2,12 +2,14 @@
 
 #include "ppc/instruction.hpp"
 #include "runtime/memory_map.hpp"
+#include "runtime/zip.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <stdexcept>
 
 namespace m3 {
@@ -174,22 +176,88 @@ uint32_t RomSet::read_program32(uint32_t addr, uint32_t bank) const {
     return 0;
 }
 
+namespace {
+
+bool is_zip(const std::filesystem::path& path) {
+    std::error_code ec;
+    return std::filesystem::is_regular_file(path, ec) && lower(path.extension().string()) == ".zip";
+}
+
+// The files of a folder or a zip, by lower-case name: each one's size, and its bytes when asked.
+class RomSource {
+public:
+    explicit RomSource(const std::filesystem::path& path) {
+        if (is_zip(path)) {
+            zip_.emplace(path);
+            return;
+        }
+        files_ = index_directory(path);
+    }
+    // A zip's own record of a file's CRC (a folder: none, without reading the file).
+    std::optional<uint32_t> recorded_crc(const std::string& name) const {
+        if (!zip_) return std::nullopt;
+        const auto it = zip_->entries().find(name);
+        return it == zip_->entries().end() ? std::nullopt : std::optional<uint32_t>(it->second.crc);
+    }
+    std::optional<uint64_t> size(const std::string& name) const {
+        if (zip_) {
+            const auto it = zip_->entries().find(name);
+            return it == zip_->entries().end() ? std::nullopt : std::optional<uint64_t>(it->second.size);
+        }
+        const auto it = files_.find(name);
+        if (it == files_.end()) return std::nullopt;
+        std::error_code ec;
+        const auto n = std::filesystem::file_size(it->second, ec);
+        return ec ? std::nullopt : std::optional<uint64_t>(n);
+    }
+    std::vector<uint8_t> read(const std::string& name) {
+        if (zip_) return zip_->read(zip_->entries().at(name));
+        return read_file(files_.at(name));
+    }
+
+private:
+    std::optional<ZipReader> zip_;
+    std::map<std::string, std::filesystem::path> files_;
+};
+
+} // namespace
+
+std::vector<RomFileReport> survey_rom_set(const GameSpec& game, const std::filesystem::path& path) {
+    std::vector<RomFileReport> report;
+    std::optional<RomSource> source;
+    try {
+        source.emplace(path);
+    } catch (const std::exception&) {
+    }
+    for (const RomRegionSpec& spec : game.regions)
+        for (const RomFile& file : spec.files) {
+            RomFileReport rep{spec.id, std::string(file.name), RomFileStatus::Ok, 0, 0, file.crc32};
+            const auto size = source ? source->size(lower(file.name)) : std::nullopt;
+            if (!size) rep.status = RomFileStatus::Missing;
+            else if ((rep.actual_size = *size) != file.size) rep.status = RomFileStatus::WrongSize;
+            else if (const auto crc = source->recorded_crc(lower(file.name)); crc && (rep.actual_crc = *crc) != file.crc32)
+                rep.status = RomFileStatus::WrongChecksum;
+            report.push_back(rep);
+        }
+    return report;
+}
+
 RomSet load_rom_set(const GameSpec& game, const std::filesystem::path& dir) {
     RomSet set;
-    const auto files = index_directory(dir);
+    RomSource files(dir);
 
     for (const RomRegionSpec& spec : game.regions) {
         auto& buffer = set.region(spec.id);
         buffer.assign(spec.size, 0);
         for (const RomFile& file : spec.files) {
             RomFileReport rep{spec.id, std::string(file.name), RomFileStatus::Ok, 0, 0, file.crc32};
-            const auto it = files.find(lower(file.name));
-            if (it == files.end()) {
+            const std::string name = lower(file.name);
+            if (!files.size(name)) {
                 rep.status = RomFileStatus::Missing;
                 set.report.push_back(rep);
                 continue;
             }
-            const std::vector<uint8_t> data = read_file(it->second);
+            const std::vector<uint8_t> data = files.read(name);
             rep.actual_size = data.size();
             rep.actual_crc = crc32(data);
             if (data.size() != file.size) {

@@ -59,6 +59,7 @@ add_library(m3runtime
     src/runtime/crypt315_5881.cpp
     src/runtime/memory_map.cpp
     src/runtime/rom.cpp
+    src/runtime/zip.cpp
     src/runtime/usart8251.cpp
     src/runtime/watched_memory.cpp
     src/runtime/snapshots.cpp

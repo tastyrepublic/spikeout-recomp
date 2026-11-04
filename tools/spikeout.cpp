@@ -124,6 +124,8 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
 #include <set>
@@ -1431,6 +1433,188 @@ void show_no_gpu(SDL_Window* window) {
     SDL_DestroyRenderer(r);
 }
 
+// Paths from and to UTF-8 (settings.ini, SDL's dialogs).
+std::filesystem::path utf8_path(const std::string& s) {
+    return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(s.data()), s.size()));
+}
+std::string path_utf8(const std::filesystem::path& p) {
+    const std::u8string u = p.u8string();
+    return std::string(reinterpret_cast<const char*>(u.data()), u.size());
+}
+
+// What's wrong with a ROM set's zip (or a folder of its files, given on the command line), in plain words ("": it
+// has every file, the right sizes; checksums aren't read).
+std::string rom_problem(const std::filesystem::path& path) {
+    const auto& game = m3::games::kSpikeoutFinalEdition;
+    auto count = [&](const std::filesystem::path& p, std::size_t& missing, std::size_t& wrong) {
+        missing = wrong = 0;
+        for (const m3::RomFileReport& r : m3::survey_rom_set(game, p)) {
+            missing += r.status == m3::RomFileStatus::Missing;
+            wrong += r.status == m3::RomFileStatus::WrongSize || r.status == m3::RomFileStatus::WrongChecksum;
+        }
+    };
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) return "That file isn't there any more.";
+    std::size_t missing = 0, wrong = 0;
+    count(path, missing, wrong);
+    std::size_t files = 0;
+    for (const m3::RomRegionSpec& r : game.regions) files += r.files.size();
+    if (missing == files) return "That isn't Spikeout: Final Edition's set.";
+    if (missing != 0)
+        return std::to_string(missing) + " of the set's " + std::to_string(files) + " files aren't in it.";
+    if (wrong != 0) return std::to_string(wrong) + (wrong == 1 ? " file differs" : " files differ") + " from the real set (a bad dump?).";
+    return {};
+}
+
+// The ROM set chosen in the window (no location set yet, or the one set can't be used), drawn as the no-GPU screen is:
+// SDL's 2D renderer, its 8x8 font, the menu's colours. The keys, a pad or the mouse choose the zip with the
+// system's own dialog; checked at once. The renderer is let go before the GPU takes the window.
+class RomScreen {
+public:
+    explicit RomScreen(SDL_Window* window) : window_(window) {}
+    ~RomScreen() { close(); }
+    void close() {
+        if (r_) SDL_DestroyRenderer(r_);
+        r_ = nullptr;
+    }
+
+    // A location chosen and found good (nothing: the player quit); `why`: the last one's problem ("": none set).
+    std::optional<std::filesystem::path> choose(std::string why) {
+        if (!open()) {
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Spikeout", "Spikeout needs its ROM set, spikeofe.zip.", window_);
+            return std::nullopt;
+        }
+        int selected = 0;
+        for (;;) {
+            if (auto picked = take_picked(); picked && !picked->empty()) { // (empty: cancelled)
+                std::filesystem::path p = utf8_path(*picked);
+                why = rom_problem(p);
+                if (why.empty()) return p;
+            }
+            for (SDL_Event e; SDL_PollEvent(&e);) {
+                if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) return std::nullopt;
+                if (dialog_open_) continue;
+                int act = -1;
+                if (e.type == SDL_EVENT_KEY_DOWN) {
+                    const SDL_Scancode k = e.key.scancode;
+                    if (k == SDL_SCANCODE_UP || k == SDL_SCANCODE_LEFT) selected = (selected + kButtons - 1) % kButtons;
+                    if (k == SDL_SCANCODE_DOWN || k == SDL_SCANCODE_RIGHT || k == SDL_SCANCODE_TAB) selected = (selected + 1) % kButtons;
+                    if (k == SDL_SCANCODE_RETURN || k == SDL_SCANCODE_KP_ENTER || k == SDL_SCANCODE_SPACE) act = selected;
+                    if (k == SDL_SCANCODE_ESCAPE) return std::nullopt;
+                } else if (e.type == SDL_EVENT_GAMEPAD_ADDED) {
+                    SDL_OpenGamepad(e.gdevice.which);
+                } else if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+                    const auto b = static_cast<SDL_GamepadButton>(e.gbutton.button);
+                    if (b == SDL_GAMEPAD_BUTTON_DPAD_UP) selected = (selected + kButtons - 1) % kButtons;
+                    if (b == SDL_GAMEPAD_BUTTON_DPAD_DOWN) selected = (selected + 1) % kButtons;
+                    if (b == SDL_GAMEPAD_BUTTON_SOUTH || b == SDL_GAMEPAD_BUTTON_START) act = selected;
+                } else if (e.type == SDL_EVENT_MOUSE_MOTION || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+                    float x = e.type == SDL_EVENT_MOUSE_MOTION ? e.motion.x : e.button.x;
+                    float y = e.type == SDL_EVENT_MOUSE_MOTION ? e.motion.y : e.button.y;
+                    SDL_RenderCoordinatesFromWindow(r_, x, y, &x, &y);
+                    const SDL_FPoint at{x, y};
+                    for (int i = 0; i < kButtons; ++i)
+                        if (SDL_PointInRectFloat(&at, &boxes_[static_cast<std::size_t>(i)])) {
+                            selected = i;
+                            if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) act = i;
+                        }
+                }
+                if (act == 0) pick();
+                if (act == 1) return std::nullopt;
+            }
+            draw(why, selected);
+            SDL_Delay(16);
+        }
+    }
+
+    // "Loading" over the window while the set is read (a few seconds from a zip).
+    void loading() {
+        if (!r_) return;
+        clear();
+        line("LOADING", 0.42f, 4, kTitle);
+        line("Reading the ROM set...", 0.56f, 2, kText);
+        SDL_RenderPresent(r_);
+    }
+
+private:
+    static constexpr int kButtons = 2;
+    static constexpr SDL_Color kTitle{0xff, 0xd3, 0x4a, 255}, kText{0xc8, 0xcc, 0xd4, 255}, kWhite{0xff, 0xff, 0xff, 255},
+        kProblem{0xff, 0x7a, 0x6a, 255};
+
+    bool open() {
+        if (!r_) r_ = SDL_CreateRenderer(window_, nullptr);
+        if (r_) SDL_SetRenderVSync(r_, 1);
+        SDL_ShowWindow(window_);
+        return r_ != nullptr;
+    }
+    void clear() {
+        SDL_SetRenderDrawColor(r_, 0x0b, 0x0d, 0x12, 255);
+        SDL_RenderClear(r_);
+    }
+    // A centred line at a height (a share of the window's), `scale` times the 8x8 font; its box in render pixels.
+    SDL_FRect line(const std::string& text, float y, float scale, SDL_Color c) {
+        int w = 0, h = 0;
+        SDL_GetRenderOutputSize(r_, &w, &h);
+        const float tw = static_cast<float>(text.size()) * SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE;
+        while (scale > 1 && tw * scale > static_cast<float>(w) * 0.95f) scale -= 1; // (a line wider than the window: smaller)
+        SDL_SetRenderScale(r_, scale, scale);
+        SDL_SetRenderDrawColor(r_, c.r, c.g, c.b, 255);
+        const float x = (static_cast<float>(w) / scale - tw) / 2, ty = static_cast<float>(h) * y / scale;
+        SDL_RenderDebugText(r_, x, ty, text.c_str());
+        SDL_SetRenderScale(r_, 1, 1);
+        return {x * scale, ty * scale, tw * scale, SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * scale};
+    }
+    void draw(const std::string& why, int selected) {
+        clear();
+        int w = 0, h = 0;
+        SDL_GetRenderOutputSize(r_, &w, &h);
+        const float small = h < 600 ? 1.0f : 2.0f;
+        line("CHOOSE THE ROM SET", 0.22f, small * 2, kTitle);
+        line("Spikeout needs the arcade's ROM set,", 0.36f, small, kText);
+        line("spikeofe.zip, as MAME and Supermodel have it.", 0.41f, small, kText);
+        if (!why.empty()) line(why, 0.48f, small, kProblem);
+        static const char* kLabels[kButtons] = {"Choose the zip file", "Quit"};
+        for (int i = 0; i < kButtons; ++i) {
+            const SDL_FRect t = line(kLabels[i], 0.58f + 0.08f * static_cast<float>(i), small, i == selected ? kWhite : kText);
+            const float pad = 8 * small;
+            SDL_FRect box{t.x - 2 * pad, t.y - pad, t.w + 4 * pad, t.h + 2 * pad};
+            boxes_[static_cast<std::size_t>(i)] = box;
+            if (i == selected) {
+                SDL_SetRenderDrawColor(r_, kTitle.r, kTitle.g, kTitle.b, 255);
+                SDL_RenderRect(r_, &box);
+            }
+        }
+        if (dialog_open_) line("Choose it in the window that opened.", 0.86f, small, kText);
+        else line("Arrows and Enter, a pad, or the mouse", 0.86f, small, kText);
+        SDL_RenderPresent(r_);
+    }
+    // The system's dialog (its answer comes on another thread: take_picked).
+    void pick() {
+        dialog_open_ = true;
+        static const SDL_DialogFileFilter kZip[] = {{"Zip files", "zip"}, {"All files", "*"}};
+        SDL_ShowOpenFileDialog(&RomScreen::picked, this, window_, kZip, 2, nullptr, false);
+    }
+    static void SDLCALL picked(void* self, const char* const* files, int) {
+        auto* s = static_cast<RomScreen*>(self);
+        std::lock_guard guard(s->lock_);
+        s->picked_ = files && files[0] ? std::string(files[0]) : std::string();
+    }
+    std::optional<std::string> take_picked() {
+        std::lock_guard guard(lock_);
+        auto p = std::move(picked_);
+        picked_.reset();
+        if (p) dialog_open_ = false;
+        return p;
+    }
+
+    SDL_Window* window_;
+    SDL_Renderer* r_ = nullptr;
+    std::array<SDL_FRect, kButtons> boxes_{};
+    std::mutex lock_;
+    std::optional<std::string> picked_; // (empty: cancelled)
+    bool dialog_open_ = false;
+};
+
 // The boards' screens side by side (2) or 2 x 2 (3, 4).
 int grid_columns(std::size_t boards) { return boards == 1 ? 1 : 2; }
 int grid_rows(std::size_t boards) { return boards <= 2 ? 1 : 2; }
@@ -1591,20 +1775,11 @@ int main(int argc, char** argv) {
         SDL_Quit();
         return 0;
     }
-    if (!dir) {
-        std::fprintf(stderr, "usage: spikeout <rom_dir> [--scale N] [--netboard sim|real] [--frames N] [--mute] [--quads]\n"
-                             "                [--midi-burst] [--dma-instant] [--sound-volume N] [--music-volume N]\n"
-                             "                [--boards N] [--no-gpu] [--soft-3d] [--render-scale N] [--fifo]\n"
-                             "                [--sleep-pacing]\n"
-                             "       spikeout --list-audio\n");
-        return 2;
-    }
+    // (usage: spikeout [<rom zip or folder>] [--scale N] [--netboard sim|real] [--frames N] [--mute] [--quads]
+    //   [--midi-burst] [--dma-instant] [--sound-volume N] [--music-volume N] [--boards N] [--no-gpu] [--soft-3d]
+    //   [--render-scale N] [--fifo] [--sleep-pacing]; spikeout --list-audio. No ROM given: the one chosen before, in
+    //   settings.ini, else chosen in the window)
     if (scale == 0) scale = boards == 1 ? 2 : 1;
-    const m3::RomSet roms = m3::load_rom_set(m3::games::kSpikeoutFinalEdition, dir);
-    if (!roms.complete()) {
-        std::fprintf(stderr, "spikeout: ROM set incomplete; run romcheck for details\n");
-        return 1;
-    }
 
     const int cols = grid_columns(boards), rows = grid_rows(boards);
     const int width = kWidth * cols, height = kHeight * rows;
@@ -1624,12 +1799,73 @@ int main(int argc, char** argv) {
     if (cli_music >= 0) settings.music_volume = cli_music;
     const bool test_run = max_frames != 0; // (writes no settings)
 
-    SDL_Window* window = SDL_CreateWindow("Spikeout: Final Edition", width * scale, height * scale, SDL_WINDOW_RESIZABLE);
+    // (hidden until the ROM set is read, as before it was made after; shown at once if one must be chosen)
+    SDL_Window* window =
+        SDL_CreateWindow("Spikeout: Final Edition", width * scale, height * scale, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
     if (!window) {
         std::fprintf(stderr, "spikeout: %s\n", SDL_GetError());
         return 1;
     }
     if (settings.fullscreen && !test_run) SDL_SetWindowFullscreen(window, true);
+
+    // The ROM set: the command line's, else the one chosen before (settings.ini), else chosen here (the release
+    // checklist's picker: a zip or a folder, remembered). One that can't be used: chosen again, said why.
+    m3::RomSet roms;
+    std::string rom_in_use; // (its location, UTF-8: the menu shows it)
+    {
+        const bool given = dir != nullptr;
+        std::filesystem::path rom_path = given ? std::filesystem::path(dir) : utf8_path(settings.rom_path);
+        RomScreen screen(window);
+        std::string why;
+        for (bool chosen = false;; chosen = true) {
+            if (!rom_path.empty()) {
+                why = rom_problem(rom_path);
+                if (why.empty()) {
+                    screen.loading();
+                    try {
+                        roms = m3::load_rom_set(m3::games::kSpikeoutFinalEdition, rom_path);
+                        // (refused unless every file is the known set's, by CRC: the game's code is compiled from
+                        // that program ROM, and a different one would run the wrong code, unnoticed; the owner's
+                        // choice, 2026-11-04. gamerun and romcheck still load such sets, as before)
+                        std::size_t differ = 0;
+                        for (const m3::RomFileReport& r : roms.report) {
+                            differ += r.status == m3::RomFileStatus::WrongChecksum;
+                            if (r.status == m3::RomFileStatus::WrongChecksum)
+                                std::printf("spikeout: %s's CRC is %08x, not %08x\n", r.name.c_str(), r.actual_crc, r.expected_crc);
+                        }
+                        if (roms.complete() && differ == 0) break;
+                        why = differ != 0 ? std::to_string(differ) + (differ == 1 ? " file differs" : " files differ") +
+                                                " from the real set (a bad dump?)."
+                                          : "Some of its files can't be read.";
+                    } catch (const std::exception& e) {
+                        std::printf("spikeout: %s\n", e.what());
+                        why = "It can't be read (a damaged zip?).";
+                    }
+                }
+                std::printf("spikeout: the ROM set at %s: %s\n", path_utf8(rom_path).c_str(), why.c_str());
+            }
+            if (given && !chosen) { // (a script's or a shortcut's: said, not asked)
+                std::fprintf(stderr, "spikeout: ROM set incomplete; run romcheck for details\n");
+                return 1;
+            }
+            const auto picked = screen.choose(why);
+            if (!picked) {
+                SDL_DestroyWindow(window);
+                SDL_Quit();
+                return 0;
+            }
+            rom_path = *picked;
+        }
+        const std::string chosen = path_utf8(rom_path);
+        if (!given && chosen != settings.rom_path) { // (one chosen here kept; the command line's never written)
+            settings.rom_path = chosen;
+            if (!test_run) tools::save_settings(settings_path, settings);
+        }
+        std::printf("spikeout: ROM set %s\n", chosen.c_str());
+        rom_in_use = chosen;
+        screen.close(); // (the window given to the GPU)
+    }
+    SDL_ShowWindow(window);
     // Shown through the GPU (Vulkan, Metal) when there is one SDL can use,
     // otherwise through SDL's 2D renderer.
 #ifdef SPIKEOUT_GPU
@@ -2500,6 +2736,34 @@ int main(int argc, char** argv) {
         }
         if (!test_run) save_nvram(data_folder, shared, boards);
     };
+    // The ROM set's location, changed from the menu: the system's dialog (its answer comes on another thread, taken
+    // in the loop below: checked, kept in the settings, used from the next start).
+    struct RomPick {
+        std::mutex lock;
+        std::optional<std::string> path; // (empty: cancelled)
+        std::string status;
+    } rom_pick;
+    auto rom_dialog = [&] {
+        auto answer = +[](void* u, const char* const* files, int) {
+            auto* pick = static_cast<RomPick*>(u);
+            std::lock_guard guard(pick->lock);
+            pick->path = files && files[0] ? std::string(files[0]) : std::string();
+        };
+        static const SDL_DialogFileFilter kZip[] = {{"Zip files", "zip"}, {"All files", "*"}};
+        SDL_ShowOpenFileDialog(answer, &rom_pick, window, kZip, 2, nullptr, false);
+    };
+    auto rom_page = [&] {
+        ui::MenuPage p{"ROM set", "", {}};
+        p.items.push_back({"In use", "", [&] {
+                               if (!rom_pick.status.empty()) return rom_pick.status;
+                               return path_utf8(utf8_path(rom_in_use).filename());
+                           },
+                           {}, {}, true});
+        p.items.push_back({"Choose the zip file", "spikeofe.zip, as MAME and Supermodel have it. Used from the next start.", {},
+                           {}, [&] { rom_dialog(); }});
+        p.items.push_back(back_item());
+        return p;
+    };
     auto game_page = [&] {
         ui::MenuPage p{"Game", "", {}};
         p.items.push_back({"Reset game", "Restarts the game, as switching the arcade off and on.", {}, {}, [&] {
@@ -2521,6 +2785,8 @@ int main(int argc, char** argv) {
                                menu.close();
                                service_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
                            }});
+        p.items.push_back({"ROM set", "The game's ROM set, spikeofe.zip: which one is used.", {}, {},
+                           [&] { menu.push(rom_page()); }});
         p.items.push_back(back_item());
         return p;
     };
@@ -2951,6 +3217,26 @@ int main(int argc, char** argv) {
 #ifdef SPIKEOUT_GPU
         // The menu pauses the game (not a network game: the others play on);
         // closing it keeps the settings.
+        {
+            std::optional<std::string> picked;
+            {
+                std::lock_guard guard(rom_pick.lock);
+                picked.swap(rom_pick.path);
+            }
+            if (picked && !picked->empty()) {
+                std::filesystem::path p = utf8_path(*picked);
+                const std::string why = rom_problem(p);
+                if (why.empty()) {
+                    settings.rom_path = path_utf8(p);
+                    changed();
+                    rom_pick.status = path_utf8(p.filename()) + ", from the next start";
+                } else {
+                    rom_pick.status = why;
+                }
+                std::printf("spikeout: ROM set chosen: %s (%s)\n", path_utf8(p).c_str(), why.empty() ? "good" : why.c_str());
+                if (menu_ready && menu.is_open()) menu.refresh();
+            }
+        }
         const bool menu_open = menu_ready && menu.is_open();
         if (menu_open != menu_was_open) {
             {

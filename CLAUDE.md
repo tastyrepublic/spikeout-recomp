@@ -24,10 +24,25 @@ Read this first; the older hand-off below is history.
   frame, sound 68000 ~0.6, music ~0.25, voices ~0.1. Tried and dropped: a
   DSP with each step sorted into templates (exact, slower). The sound
   68000 can't skip its idle exactly (a polling loop repeating only every
-  ~3,800 cycles, run 256 at a time). Idea left: the DSP program turned
-  into C++ at build time (ROM-derived: build/generated/ only).
+  ~3,800 cycles, run 256 at a time). Dropped (owner, 2026-11-04): turning
+  the other boards' programs (the DSP, the 68000s) into C++; only the
+  main PowerPC is recompiled.
+- The camera events are all sorted (docs/netplay.md, 2026-10-30), and one
+  board's side runs run the other cabinet's own code; the hand-off's
+  "camera events still to sort" below is done.
 - gamerun's RTC comes from the host clock: fresh runs' states differ in
   "rtc".
+- ROM picker (2026-11-04, owner's choices): the window reads spikeofe.zip
+  itself (src/runtime/zip.cpp: our own reader and inflate, no new
+  dependency; a zip's files CRC-checked) or a folder (command line only).
+  No set chosen, or one that can't be used: a screen like the no-GPU one
+  (CHOOSE THE ROM SET, the reason in red, the system's file dialog; zip
+  only, no folder option), kept as settings.ini's rom_path; Game > ROM set
+  in the menu changes it from the next start (not yet tried by hand). A
+  set whose CRCs differ from the known set's is refused in the window
+  (the code is compiled from that program ROM); gamerun and romcheck
+  still load it. A command-line set that can't be used: an error, no
+  picker (scripts). settings.ini read past a byte order mark.
 
 ## Earlier (2026-11-03, main 7d3b090)
 
