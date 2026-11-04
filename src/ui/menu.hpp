@@ -109,6 +109,8 @@ public:
     // LB RB  another player"; the owner's choice of the mockups); empty: none.
     // (`note`: that message instead, plain: "switching needs a faster device")
     void set_watch_banner(const std::string& who, const std::string& note = {});
+    // A spectator's switch taking a while: the game dimmed under it (still running), this in the middle; empty: none.
+    void set_switch_cover(const std::string& text);
 
     bool is_open() const { return open_; }
     void open(MenuPage root);
@@ -150,7 +152,7 @@ private:
     std::unique_ptr<Impl> impl_;
     std::string error_;
     bool open_ = false;
-    bool fps_shown_ = false, net_shown_ = false, loading_shown_ = false, banner_shown_ = false;
+    bool fps_shown_ = false, net_shown_ = false, loading_shown_ = false, banner_shown_ = false, cover_shown_ = false;
     std::string net_rml_; // (what the seat list shows: not set again unchanged)
     void show_corner();   // the corner page shown while either is
     std::vector<MenuPage> stack_;

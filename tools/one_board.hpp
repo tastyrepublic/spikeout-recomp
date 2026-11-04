@@ -480,6 +480,25 @@ public:
     // running, nothing of the module is needed: the game's own hooks back, the side runs' machinery gone (every
     // board as plain network play, for what it costs). Its RAM isn't the other machine's copy of that board in
     // all (its shadow's, exact in what it sends): a program still keeps its hash and state to itself. True: done.
+    // Torn down (tear_down), to be set up again with another board staying (a spectator watching another player: its
+    // board, whole now, stays; the one that stayed goes): what each board and the module kept of the last set-up let go.
+    void again() {
+        for (Board* b : boards_) {
+            std::lock_guard guard(b->cabinets_lock);
+            b->own_seed.clear(), b->done_seed.clear(), b->ram_at.clear();
+            b->shadowing = false, b->last_link_frame = 0;
+            b->calm_frames = 0, b->mask_since = 0, b->last_mask = 0;
+            b->whole = false, b->whole_for_state = false, b->shadow_taken = false;
+            b->keeping = true, b->held = false;
+            b->shadow_base.clear(), b->shadow_own.clear();
+        }
+        std::lock_guard guard(lock_);
+        shadow_frame_ = ~0ull;
+        late_.clear();
+        no_guess_.clear();
+        master_ready_ = false;
+    }
+
     bool tear_down() {
         Board& m = *boards_[settings_.stays];
         if (rolling()) return false; // (rollback: its kept frames hold the module's state: kept to the end)

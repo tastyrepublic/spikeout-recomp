@@ -20,7 +20,9 @@ Read this first; the older hand-off below is history.
   board (Auto by power), shadows from the players' backups (sent only to
   spectators on one board, last, under an adaptive cap that halves when a
   player's round trip rises; three kept, Keeper::copy_for). Switching on
-  one board is step 2 (not built: Left/Right show a note). Lobby deployed
+  one board too (step 2: every cabinet made whole from backups, then one
+  board again around the new player; a dimmed cover if it takes over 0.5 s;
+  SPIKEOUT_TEST_SWITCH_MS). Lobby deployed
   (full games listed, watch by code). Tests: tools/spectate-tests.ps1 (6),
   tools/spectate-window-test.ps1 [-Mode switch|oneboard]; gamerun
   --net-spectate [--net-spectate-seat N], --pace (arcade speed). Fixed on
@@ -113,11 +115,11 @@ Read this first; the older hand-off below is history.
   leaver's lead).
 - Network status list redesigned (2026-11-03, the owner's choices): the
   seats moved down the right side a little above the middle (the FPS alone
-  at the top); a line above them "HOST <name> · ROOM <code>" ("· LAN" with
+  at the top); a line above them "HOST <name> 繚 ROOM <code>" ("繚 LAN" with
   no code; the current host, Session::host_seat); each row right-aligned
   (seat, platform icon tinted as the row, flag, name, then a fixed-width
   ms and bars; our own row flush right, no RB), a badge line under each:
-  "1 BOARD · RB · DELAY 0" (that machine's status: Session::set_status /
+  "1 BOARD 繚 RB 繚 DELAY 0" (that machine's status: Session::set_status /
   kStatus, sent as it changes and every 2 s) and, for the others with
   rollback, "RB n" (their wrong guesses here in 10 s, InputTable::
   wrongs_since; green 0-2, yellow 3-15, red more: bands to tune). Icons:

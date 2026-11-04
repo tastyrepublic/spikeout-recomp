@@ -3040,9 +3040,23 @@ rules:
   the newest at or before the frame (`Keeper::copy_for`); none: said, the
   shadow not had (the module goes on as when a state doesn't come).
 
-Switching players on one board needs the new cabinet rebuilt from its
-backup: the next step; meanwhile Left / Right say "SWITCHING PLAYERS NEEDS A
-FASTER DEVICE FOR NOW", and the banner shows no keys.
+Switching players on one board (step 2, the owner's choice: built after
+one board itself). Left / Right ask for it (`Shared::switch_to`; one at a
+time); the banner says "SWITCHING TO KENJI (2P)...". The watched board's
+thread then takes the module's "every board again" path
+(`Game::keep_whole`, `one_board_back`): every other cabinet run whole, as a
+shadow from its player's backup run on here; at the meeting where the
+module is torn down, the new player's board, whole now, is shown, the
+module's last set-up let go (`Game::again`: each board's seeds, flags and
+the module's shadow state) and one board set up again around it
+(`one_board_wanted`: the one watched before goes, held whole until calm,
+then on side runs). Three windows (tools/spectate-window-test.ps1 -Mode
+oneboard): Right while the other cabinet was on side runs (frame 5,880):
+its backup of 5,880 run on to 5,893 in 0.1 s (131 ms waited), one board
+around player 2 from 5,893; player 1's cabinet handed to side runs at
+6,405, its backup run on at the host's coin (6,720 to 6,771), handed back
+at 7,105. Right before the first hand-over (every cabinet still whole):
+the same at once.
 
 Proved (`tools/spectate-tests.ps1 -Only oneboard,oneboard2`; gamerun
 `--pace`, new: the players at the arcade's speed, as windows, else they run

@@ -247,6 +247,12 @@ struct Shared {
     // shoulders. `watched`: the board threads' copy, each taking it at its next frame's start.
     bool spectating = false;
     std::atomic<std::size_t> watched{0};
+    // On one board, another player chosen (docs/netplay.md, "Switching on one board"): every other cabinet made whole
+    // (its player's backup run on here: the module's "every board again"), then the module set up again with that
+    // player's board staying. ~0: none under way.
+    std::atomic<std::size_t> switch_to{~std::size_t{0}};
+    std::atomic<bool> switch_started{false};
+    std::chrono::steady_clock::time_point switch_started_at{};
     // One board a PC (docs/netplay.md, "One board a PC in the window"): only this player's board
     // run whole here, the other cabinets made from their players' buttons (tools/one_board.hpp),
     // each run whole as a shadow where that can't follow it (held whole until every player is in
@@ -837,6 +843,16 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
         // every board was, else the other cabinet run whole again (a shadow never handed back) for the rest of the
         // game (a PC with cores to spare runs every board faster; one busy with something else, neither helps).
         // (Not while running free (Tab) or catching up, nor in the first 600 frames: the boot's loads.)
+        // (a spectator on one board switching players: every other cabinet whole first, from their backups; set up
+        // again around the new one once the module is gone, in the turns' meeting)
+        if (one_board && index == shown && shared.switch_to != ~std::size_t{0} && !shared.switch_started &&
+            shared.one_board_frame != ~0ull) {
+            shared.switch_started = true;
+            shared.switch_started_at = std::chrono::steady_clock::now();
+            std::printf("spikeout: switching to seat %zu: every cabinet whole here first (from their backups)\n",
+                        shared.switch_to.load() + 1);
+            tools::one_board::Game::keep_whole(part), shared.one_board_back = true;
+        }
         if (one_board && index == shown && shared.one_board == Shared::OneBoard::automatic && !auto_decided) {
             const bool switched = shared.one_board_frame != ~0ull;
             const bool timed = switched ? tools::one_board::Game::on_side_runs(part) : !shared.one_board_wanted;
@@ -2146,11 +2162,25 @@ int main(int argc, char** argv) {
                 if (shared.one_board_game && shared.one_board_wanted && shared.linked.capture_frame == 0 && settled())
                     set_up_one_board(shared);
                 // (every board again: once the other's shadow runs, the module gone)
-                if (shared.one_board_game && shared.one_board_back && shared.one_board_game->tear_down()) {
+                // (tests: SPIKEOUT_TEST_SWITCH_MS=N, a spectator's switch held that long, as a slow device's: its cover seen)
+                static const long test_switch_ms = std::getenv("SPIKEOUT_TEST_SWITCH_MS") ? std::atol(std::getenv("SPIKEOUT_TEST_SWITCH_MS")) : 0;
+                const bool switch_held = test_switch_ms > 0 && shared.switch_started &&
+                                         std::chrono::steady_clock::now() - shared.switch_started_at < std::chrono::milliseconds(test_switch_ms);
+                if (shared.one_board_game && shared.one_board_back && !switch_held && shared.one_board_game->tear_down()) {
                     shared.one_board_back = false;
-                    std::printf("spikeout: every board here again (the other cabinet run whole), as plain network play\n");
-                    if (shared.spectating) shared.netplay->session().set_watch_one_board(false); // (no backups wanted now)
                     shared.one_board_frame = ~0ull; // (every board here: the status list's, a spectator's switching)
+                    if (const std::size_t to = shared.switch_to; to != ~std::size_t{0}) {
+                        // (a spectator's switch: the new player's board whole now: shown, and staying from the next
+                        // meeting, the one shown before going (Game::again: the module's last set-up let go))
+                        shared.one_board_game->again();
+                        shared.local = to, shared.watched = to;
+                        shared.one_board_wanted = true;
+                        shared.switch_to = ~std::size_t{0}, shared.switch_started = false;
+                        std::printf("spikeout: watching seat %zu, every cabinet whole: one board again around it\n", to + 1);
+                    } else {
+                        std::printf("spikeout: every board here again (the other cabinet run whole), as plain network play\n");
+                        if (shared.spectating) shared.netplay->session().set_watch_one_board(false); // (no backups wanted now)
+                    }
                 }
             });
         } else {
@@ -2247,7 +2277,6 @@ int main(int argc, char** argv) {
     std::string net_notice; // (a line where the room's was, for a while: the host closed it)
     std::chrono::steady_clock::time_point net_notice_until{};
     std::chrono::steady_clock::time_point watch_banner_until{}; // (a spectator's banner: whom it watches, the keys)
-    std::chrono::steady_clock::time_point watch_note_until{}; // (a spectator on one board: "switching needs a faster device")
     int net_seats = 2;      // a game offered: its players
     bool net_listed = true; // on the internet: in the lobby's list, or by its code only
     int net_where = 0;      // a game offered: 0 this network, 1 the internet (listed), 2 the internet (private)
@@ -3330,11 +3359,13 @@ int main(int argc, char** argv) {
                 }
                 if (step > 0) to = (shared.local + 1) % boards;
                 if (step < 0) to = (shared.local + boards - 1) % boards;
-                // (on one board, this device too slow for every board: only the cabinet it watches runs whole here; switching
-                // to another needs it rebuilt from its backup: the next step, docs/netplay.md)
-                if (to != shared.local && shared.one_board_frame != ~0ull) {
-                    watch_note_until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-                    std::printf("spikeout: seat %zu not watched: on one board here, switching needs every board for now\n", to + 1);
+                // (on one board, this device too slow for every board: only the cabinet it watches runs whole here; the
+                // other made whole first from its player's backup, a second or so: Shared::switch_to; one at a time)
+                if (to != shared.local && (shared.one_board_frame != ~0ull || shared.switch_to != ~std::size_t{0})) {
+                    if (shared.switch_to == ~std::size_t{0}) {
+                        shared.switch_to = to;
+                        std::printf("spikeout: watching seat %zu asked for: on one board here, its board made whole first\n", to + 1);
+                    }
                     to = shared.local;
                 }
                 if (to != shared.local) {
@@ -3593,21 +3624,34 @@ int main(int argc, char** argv) {
                 if (!shared.spectating || !netgame->running) banner_started = false;
                 else if (!shared.catching_up && !banner_started && shown_number[shared.local] >= 600) // (past the boot's screens)
                     banner_started = true, watch_banner_until = now + std::chrono::seconds(5);
-                const bool one_board_here = shared.one_board_frame != ~0ull; // (only the watched cabinet whole: no switching yet)
-                if (shared.spectating && netgame->running && now < watch_note_until) {
-                    menu.set_watch_banner({}, "SWITCHING PLAYERS NEEDS A FASTER DEVICE FOR NOW");
+                const auto who_at = [&](std::size_t s) {
+                    const std::string seat = std::to_string(s + 1) + "P";
+                    return seats[s].name.empty() ? seat : tools::clean_name(seats[s].name) + " (" + seat + ")";
+                };
+                // (on one board, a switch under way: its board made whole from its backup first; then the banner again)
+                static bool was_switching = false;
+                static std::chrono::steady_clock::time_point switch_asked{};
+                const std::size_t switching = shared.switch_to;
+                if (was_switching && switching == ~std::size_t{0}) watch_banner_until = now + std::chrono::seconds(5);
+                if (!was_switching && switching != ~std::size_t{0}) switch_asked = now;
+                was_switching = switching != ~std::size_t{0};
+                // (one taking over half a second: the game dimmed under the new player's name, still running behind it:
+                // the owner's choice)
+                const bool covered = shared.spectating && was_switching && switching < seats.size() &&
+                                     now - switch_asked > std::chrono::milliseconds(500);
+                menu.set_switch_cover(covered ? "SWITCHING TO " + who_at(switching) : std::string());
+                if (covered) {
+                    menu.set_watch_banner(""); // (the cover says it)
+                } else if (shared.spectating && netgame->running && was_switching && switching < seats.size()) {
+                    menu.set_watch_banner({}, "SWITCHING TO " + who_at(switching) + "...");
                 } else if (shared.spectating && netgame->running && !shared.catching_up && now < watch_banner_until) {
-                    const auto& v = seats[shared.local];
-                    const std::string seat = std::to_string(shared.local + 1) + "P";
-                    const std::string who = v.name.empty() ? seat : tools::clean_name(v.name) + " (" + seat + ")";
-                    if (one_board_here) menu.set_watch_banner({}, "WATCHING " + who);
-                    else menu.set_watch_banner(who);
+                    menu.set_watch_banner(who_at(shared.local));
                 } else {
                     menu.set_watch_banner("");
                 }
             } else {
                 seat_was.fill(State::none);
-            menu.set_watch_banner("");
+                menu.set_watch_banner(""), menu.set_switch_cover("");
                 seat_news.fill({});
             }
             // (a game joined in progress, catching up with the others: a loading screen, the game's picture not real yet)

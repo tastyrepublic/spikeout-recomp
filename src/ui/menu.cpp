@@ -236,6 +236,10 @@ bool Menu::init(SDL_GPUDevice* device, SDL_Window* window) {
         ".pill { font-size: 15dp; line-height: 18dp; height: 18dp; padding: 0 8dp; margin-left: 5dp; border-radius: 9dp; "
         "border: 1dp #000000; } "
         ".pill.delay { background-color: #3a3f4a; color: #ffffff; } "
+        // (a spectator's switch taking a while: the game dimmed, still running, the new player named over it)
+        "#swcover { display: none; position: absolute; left: 0; top: 0; width: 100%; height: 100%; background-color: #000000cc; } "
+        "#swcover .t { position: absolute; left: 0; width: 100%; top: 44%; text-align: center; font-size: 40dp; color: #ffd34a; "
+        "font-effect: outline(2dp #000000); } "
         "#loading { display: none; position: absolute; left: 0; top: 0; width: 100%; height: 100%; background-color: #0b0d12; } "
         "#loading .box { position: absolute; left: 0; width: 100%; top: 42%; text-align: center; } "
         "#loading .title { display: block; font-size: 44dp; color: #ffd34a; font-effect: outline(2dp #000000); } "
@@ -247,13 +251,13 @@ bool Menu::init(SDL_GPUDevice* device, SDL_Window* window) {
         "</style></head><body><div id=\"loading\"><div class=\"box\"><span class=\"title\" id=\"ltitle\"></span>"
         "<div id=\"lbar\"><div id=\"lfill\"></div></div><span id=\"lpct\"></span>"
         "<span class=\"detail\" id=\"ldetail\"></span></div></div>"
-        "<div id=\"corner\"><div id=\"fps\"></div></div><div id=\"net\"></div><div id=\"watchb\"></div></body></rml>");
+        "<div id=\"swcover\"><span class=\"t\" id=\"swtext\"></span></div><div id=\"corner\"><div id=\"fps\"></div></div><div id=\"net\"></div><div id=\"watchb\"></div></body></rml>");
     return true;
 }
 
 void Menu::show_corner() {
     if (!impl_->fps) return;
-    if (fps_shown_ || net_shown_ || loading_shown_ || banner_shown_) impl_->fps->Show();
+    if (fps_shown_ || net_shown_ || loading_shown_ || banner_shown_ || cover_shown_) impl_->fps->Show();
     else impl_->fps->Hide();
 }
 
@@ -324,6 +328,14 @@ void Menu::set_loading(const std::string& title, int percent, const std::string&
         if (Rml::Element* e = impl_->fps->GetElementById("ldetail")) e->SetInnerRML(escape(detail));
     }
     loading_shown_ = shown;
+    show_corner();
+}
+
+void Menu::set_switch_cover(const std::string& text) {
+    if (!impl_->fps) return;
+    if (Rml::Element* e = impl_->fps->GetElementById("swtext")) e->SetInnerRML(escape(text));
+    if (Rml::Element* e = impl_->fps->GetElementById("swcover")) e->SetProperty("display", text.empty() ? "none" : "block");
+    cover_shown_ = !text.empty();
     show_corner();
 }
 
@@ -795,7 +807,7 @@ bool Menu::handle_event(const SDL_Event& e) {
 }
 
 void Menu::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* swapchain, uint32_t width, uint32_t height) {
-    if ((!open_ && !fps_shown_ && !net_shown_ && !loading_shown_ && !banner_shown_) || !impl_->ctx) return;
+    if ((!open_ && !fps_shown_ && !net_shown_ && !loading_shown_ && !banner_shown_ && !cover_shown_) || !impl_->ctx) return;
     impl_->ctx->SetDimensions(Rml::Vector2i(static_cast<int>(width), static_cast<int>(height)));
     impl_->ratio = static_cast<float>(height) / 720.0f;
     impl_->ctx->SetDensityIndependentPixelRatio(static_cast<float>(height) / 720.0f);
