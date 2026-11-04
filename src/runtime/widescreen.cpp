@@ -372,10 +372,16 @@ void WideLayer::fade(std::span<const uint32_t> layer, std::span<const uint8_t> r
     };
     for (int d = -kFadeRows; d <= kFadeRows; ++d) // nearer rows count more
         add(y + d, static_cast<float>(kFadeRows + 1 - std::abs(d)));
-    for (int d = kFadeRows + 1; d < kHeight && weights == 0; ++d) {
-        add(y - d, 1);
-        if (weights == 0) add(y + d, 1);
-    }
+    // None near (a figure across the edge: the linking screen's joining fighter's boot): the nearest such row
+    // above and below, the nearer counting more, so the rows between go from one to the other (the nearest
+    // alone, below the boot near black at the edge and 12 pixels in alike, had left a flat grey band).
+    if (weights == 0)
+        for (const int dir : {-1, 1})
+            for (int d = kFadeRows + 1; d < kHeight; ++d) {
+                const float before = weights;
+                add(y + dir * d, 1.0f / static_cast<float>(d));
+                if (weights > before) break;
+            }
     // Out from the edge the fade starts at the picture's rate and eases into
     // black kFadeEase times as far out as that rate would reach it: with t
     // the distance over that, at * (1 - 1.5 t + 0.5 t^3), which leaves the

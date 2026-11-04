@@ -36,8 +36,10 @@ class State;
 
 class TileSides {
 public:
-    // The buffer's columns, those on the screen (496 pixels), and those kept past each side.
-    static constexpr int kLayers = 4, kRows = 64, kColumns = 64, kScreen = 62, kSide = 12, kScreenRows = 48;
+    // The buffer's columns, those on the screen (496 pixels), and those kept past each side: 26, the
+    // window's widest picture shape's (21:9, 64:27: 207 pixels a side); 12 before (16:9's 93).
+    static constexpr int kLayers = 4, kRows = 64, kColumns = 64, kScreen = 62, kSide = 26, kScreenRows = 48;
+    static constexpr int kOldSide = 12; // (save states from before: loaded into the first 12)
     static constexpr uint32_t kEmpty = 0xFFFFFFFFu;
     // A cell past the edge of a picture whose edge is a fade (the linking
     // screen's spotlight): no tile, the fade continued there (m3::WideLayer).
@@ -64,8 +66,8 @@ public:
     // The name-table entry at (row, column) as last copied, column -kSide..-1
     // or kScreen..kScreen+kSide-1; kEmpty if none, kFade for a fade.
     uint32_t entry(int layer, int row, int column) const;
-    // Whether `row` has any entry on the left (right) side.
-    bool any(int layer, int row, bool right) const;
+    // Whether `row` has any entry on the left (right) side, within `columns` of the edge (those shown).
+    bool any(int layer, int row, bool right, int columns = kSide) const;
 
     // ---- Full-screen pictures ----
     // A map drawn over the whole screen as a still picture, with nothing of

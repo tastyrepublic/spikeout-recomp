@@ -103,6 +103,14 @@ public:
     };
     void set_regions(Regions* r) { regions_ = r; }
 
+    // Loading: whether the next fields are tagged `name` (a device's older layout); if so, past the tag.
+    bool tagged(const char* name) {
+        const std::size_t n = std::strlen(name);
+        if (!loading_ || n + 1 > in_size_ - pos_ || std::memcmp(in_ + pos_, name, n + 1) != 0) return false;
+        pos_ += n + 1;
+        return true;
+    }
+
     // The start of a device's fields.
     void tag(const char* name) {
         const std::size_t n = std::strlen(name);

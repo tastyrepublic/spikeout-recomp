@@ -161,8 +161,9 @@ void TilegenRenderer::draw_line(std::span<const uint8_t> ram, const std::array<u
             bool own[2] = {false, false};
             if (extend_ > 0 && sides && !(scroll & 0x8000) && (sx & 511) == 0) {
                 const int map_row = static_cast<int>(((y + ((scroll >> 16) & 0x1FF)) & 511) / 8);
-                own[0] = sides->any(static_cast<int>(n), map_row, false);
-                own[1] = sides->any(static_cast<int>(n), map_row, true);
+                const int shown = (extend_ + 7) / 8; // (the columns this width shows: a narrower one's rows as they were)
+                own[0] = sides->any(static_cast<int>(n), map_row, false, shown);
+                own[1] = sides->any(static_cast<int>(n), map_row, true, shown);
             }
             // A still full-screen picture (m3::TileSides::picture; not scrolled: then none of its rows
             // is a panorama, though some rows of a card look like one): WideLayer makes its sides from it, blurred.

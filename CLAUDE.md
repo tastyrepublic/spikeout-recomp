@@ -320,7 +320,8 @@ a frame at scale 4), the settings menu and widescreen all work.
   is a part of it drawn at the screen's edge, never clipped). Hooks in the
   recompiled code (m3::GameSpec::hooks, lifter emits c.hook(pc);
   games/spikeofe_hooks.cpp: draw 0x9628, fill 0x7e34, copy 0x8230) keep
-  m3::TileSides (12 columns each side, in save states); the tile
+  m3::TileSides (26 columns each side since 2026-11-04 for 21:9, 12
+  before; in save states, kStateFormat 2: format 1 states still load); the tile
   generator draws those rows into bottom_own/top_own, and WideLayer puts
   them over its usual sides. Only rows whose edge tile is the row's
   background (band, logo, black bar) carry their edge tile; the riveted

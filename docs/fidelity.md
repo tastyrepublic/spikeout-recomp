@@ -331,7 +331,10 @@ map instead (`m3::TileSides`): observers in the recompiled code
 (`m3::GameSpec::hooks`, `games/spikeofe_hooks.cpp`; the lifter emits a call
 at those blocks) watch the routine that draws tile maps (0x948c), the fill
 (0x7e34) and the copy to the name tables (0x8200), and keep what a map would
-have put past the screen's edges, 12 columns each side, entries remapped as
+have put past the screen's edges, 26 columns each side (21:9's 207
+pixels; 12, 16:9's, until 2026-11-04: at 21:9 the title, its doors, the
+intro's "TEAM SPIKEOUT PRESENTS" and the linking screen's right side ran out
+of them 96 pixels out, the 3D showing past that), entries remapped as
 the game does, shown when the game copies that layer. Past the map's own
 edge a row's edge tile is carried on where it is the row's background (the
 band, as when the title is still). The title's riveted wall is a photo of

@@ -2438,6 +2438,11 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
                     for (std::size_t i = 0; i < below.size(); ++i) below[i] = 0xFF000000u | m.bottom_wide[i];
                     tools::write_png(path.substr(0, dot) + "-" + std::to_string(frame) + "-wide2d" + path.substr(dot), below,
                                      m3::TilegenRenderer::kWidth + 2 * e, m3::TilegenRenderer::kHeight);
+                    // and those above it (nothing: magenta)
+                    std::vector<uint32_t> above(m.top_wide.size());
+                    for (std::size_t i = 0; i < above.size(); ++i) above[i] = m.top_wide[i] >> 24 ? m.top_wide[i] : 0xFFFF00FFu;
+                    tools::write_png(path.substr(0, dot) + "-" + std::to_string(frame) + "-wideabove" + path.substr(dot), above,
+                                     m3::TilegenRenderer::kWidth + 2 * e, m3::TilegenRenderer::kHeight);
                     std::vector<uint32_t> alpha(m.gpu_wide.size());
                     for (std::size_t i = 0; i < alpha.size(); ++i) {
                         const uint32_t a = m.gpu_wide[i] >> 24;

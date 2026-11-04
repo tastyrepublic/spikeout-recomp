@@ -96,18 +96,32 @@ uint32_t TileSides::entry(int layer, int row, int column) const {
     return shown_[static_cast<std::size_t>(index(layer, row, right, i))];
 }
 
-bool TileSides::any(int layer, int row, bool right) const {
+bool TileSides::any(int layer, int row, bool right, int columns) const {
     if (!valid(layer, row)) return false;
-    for (int i = 0; i < kSide; ++i)
+    for (int i = 0; i < std::min(columns, kSide); ++i)
         if (shown_[static_cast<std::size_t>(index(layer, row, right, i))] != kEmpty) return true;
     return false;
 }
 
 void TileSides::state(State& s) {
-    s.tag("tile sides");
+    if (s.loading()) picture_ = {}, black_ = false;
+    // A state from before 21:9 (kOldSide columns a side, its own tag): those, the rest empty (until next drawn).
+    if (s.tagged("tile sides")) {
+        std::array<Cell, kCells / kSide * kOldSide> pending{};
+        std::array<uint32_t, kCells / kSide * kOldSide> shown{};
+        s.io(pending);
+        s.io(shown);
+        pending_ = {}, shown_ = filled();
+        for (std::size_t line = 0; line < kCells / kSide; ++line)
+            for (std::size_t i = 0; i < kOldSide; ++i) {
+                pending_[line * kSide + i] = pending[line * kOldSide + i];
+                shown_[line * kSide + i] = shown[line * kOldSide + i];
+            }
+        return;
+    }
+    s.tag("tile sides 26");
     s.io(pending_);
     s.io(shown_);
-    if (s.loading()) picture_ = {}, black_ = false;
 }
 
 } // namespace m3
