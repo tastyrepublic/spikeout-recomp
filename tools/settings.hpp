@@ -27,6 +27,21 @@ constexpr std::array<const char*, kActions> kActionNames = {"Coin", "Start", "Up
 constexpr std::array<const char*, kActions> kActionKeys = {"coin", "start", "up", "down", "left",
                                                            "right", "beat", "charge", "jump", "shift"};
 
+// A pad input an action is set to, as one number: 0 none, 1 + an SDL gamepad
+// button, or kPadAxis + an axis * 2 (+ 1: its positive half; a trigger's only half).
+constexpr int kPadAxis = 1000;
+constexpr int pad_button(SDL_GamepadButton b) { return 1 + static_cast<int>(b); }
+constexpr int pad_axis(SDL_GamepadAxis a, bool positive) { return kPadAxis + static_cast<int>(a) * 2 + (positive ? 1 : 0); }
+constexpr std::array<int, kActions> kDefaultPad = {
+    pad_button(SDL_GAMEPAD_BUTTON_BACK),      pad_button(SDL_GAMEPAD_BUTTON_START),
+    pad_button(SDL_GAMEPAD_BUTTON_DPAD_UP),   pad_button(SDL_GAMEPAD_BUTTON_DPAD_DOWN),
+    pad_button(SDL_GAMEPAD_BUTTON_DPAD_LEFT), pad_button(SDL_GAMEPAD_BUTTON_DPAD_RIGHT),
+    pad_button(SDL_GAMEPAD_BUTTON_SOUTH),     pad_button(SDL_GAMEPAD_BUTTON_WEST),
+    pad_button(SDL_GAMEPAD_BUTTON_EAST),      pad_button(SDL_GAMEPAD_BUTTON_NORTH)};
+constexpr bool valid_pad_input(int code) {
+    return (code >= 0 && code <= SDL_GAMEPAD_BUTTON_COUNT) || (code >= kPadAxis && code < kPadAxis + SDL_GAMEPAD_AXIS_COUNT * 2);
+}
+
 struct Settings {
     // Display
     int render_scale = 0;  // the 3D's size: 0 Auto (fits the window), else 1-6 times the arcade's 384 lines
@@ -64,6 +79,10 @@ struct Settings {
         {SDL_SCANCODE_6, SDL_SCANCODE_2, SDL_SCANCODE_I, SDL_SCANCODE_K, SDL_SCANCODE_J, SDL_SCANCODE_L,
          SDL_SCANCODE_A, SDL_SCANCODE_S, SDL_SCANCODE_D, SDL_SCANCODE_F},
     }};
+    // Their pads' buttons (pad_input codes, 0: none; the left stick also moves unless an action has one of its axes)
+    std::array<std::array<int, kActions>, 2> pad_buttons{{kDefaultPad, kDefaultPad}};
+    // Which pad each player has (SDL's GUID as text; empty or not connected: the first connected not taken)
+    std::array<std::string, 2> pads;
     static Settings defaults() { return {}; }
 };
 
@@ -140,6 +159,15 @@ inline Settings load_settings(const std::string& path) {
     for (std::size_t p = 0; p < 2; ++p)
         for (std::size_t a = 0; a < kActions; ++a)
             get(("p" + std::to_string(p + 1) + "_" + kActionKeys[a]).c_str(), s.keys[p][a], 0, SDL_SCANCODE_COUNT - 1);
+    for (std::size_t p = 0; p < 2; ++p) {
+        const std::string pre = "p" + std::to_string(p + 1) + "_pad";
+        if (auto it = v.find(pre); it != v.end()) s.pads[p] = it->second;
+        for (std::size_t a = 0; a < kActions; ++a)
+            if (auto it = v.find(pre + "_" + kActionKeys[a]); it != v.end()) {
+                const int code = std::atoi(it->second.c_str());
+                if (valid_pad_input(code)) s.pad_buttons[p][a] = code;
+            }
+    }
     return s;
 }
 
@@ -166,6 +194,11 @@ inline bool save_settings(const std::string& path, const Settings& s) {
     o << "music_volume = " << s.music_volume << "\n";
     for (std::size_t p = 0; p < 2; ++p)
         for (std::size_t a = 0; a < kActions; ++a) o << "p" << p + 1 << "_" << kActionKeys[a] << " = " << s.keys[p][a] << "\n";
+    for (std::size_t p = 0; p < 2; ++p) {
+        o << "p" << p + 1 << "_pad = " << s.pads[p] << "\n";
+        for (std::size_t a = 0; a < kActions; ++a)
+            o << "p" << p + 1 << "_pad_" << kActionKeys[a] << " = " << s.pad_buttons[p][a] << "\n";
+    }
     std::ofstream out(path, std::ios::trunc);
     out << o.str();
     return static_cast<bool>(out);

@@ -15,7 +15,7 @@
 // Esc (or a pad's Guide, its touchpad, or Back + Start) opens the menu, which
 // pauses the game: Display (render scale, antialiasing, quads, the 3D
 // renderer, fullscreen), Sound (the effects' and the music's volumes),
-// Controls (each player's keys; the pads), Game (reset, the arcade's test
+// Controls (player 1's keys or pad buttons), Game (reset, the arcade's test
 // menu, a service credit) and Quit. Its choices are kept in settings.ini
 // (tools/settings.hpp), written when the menu closes; options on the command
 // line win over them for that run. Without a GPU (--no-gpu) there is no menu
@@ -25,8 +25,10 @@
 // X charge, C jump, V shift;  player 2: 6 coin, 2 start, I J K L, A beat,
 // S charge, D jump, F shift. F2 test, F1 service, Tab (held) as fast as it
 // goes, F12 a screenshot (spikeout-<frame>.png).
-// Pads (the first for player 1, the second for player 2): d-pad or left
-// stick, A beat, X charge, B jump, Y shift, Start, Back coin.
+// Pads (as set in Controls; player 1 the one chosen there, else the first,
+// player 2 the next): d-pad or left stick, A beat, X charge, B jump, Y shift,
+// Start, Back coin. (The menu shows player 1's controls only; player 2's
+// stay in settings.ini, for --boards 2.)
 //
 // --boards N (2-4) runs N cabinets linked in a ring, as in an arcade: each
 // is a complete board with its own player, the window split between them
@@ -309,25 +311,72 @@ constexpr std::array<InputBit, tools::kActions> kActionBits = {{
     {true, 0}, {true, 4}, {false, 5}, {false, 4}, {false, 7}, {false, 6}, {false, 0}, {false, 1}, {false, 3}, {false, 2},
 }};
 
-// A player's pad: which of the actions it holds.
-std::array<bool, tools::kActions> pad_actions(SDL_Gamepad* pad) {
+// An axis past this counts as pressed (a stick's direction, a trigger).
+constexpr int kAxisPressed = 16000;
+
+// A player's pad: which of the actions it holds, by their buttons (tools::Settings::pad_buttons).
+// The left stick moves too, unless one of the actions is set to one of its axes.
+std::array<bool, tools::kActions> pad_actions(SDL_Gamepad* pad, const std::array<int, tools::kActions>& buttons) {
     std::array<bool, tools::kActions> held{};
     if (!pad) return held;
-    auto button = [&](SDL_GamepadButton b) { return SDL_GetGamepadButton(pad, b); };
-    const int x = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX), y = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
-    using A = tools::Action;
-    auto set = [&](A a, bool on) { held[static_cast<std::size_t>(a)] = held[static_cast<std::size_t>(a)] || on; };
-    set(A::Coin, button(SDL_GAMEPAD_BUTTON_BACK));
-    set(A::Start, button(SDL_GAMEPAD_BUTTON_START));
-    set(A::Up, button(SDL_GAMEPAD_BUTTON_DPAD_UP) || y < -16000);
-    set(A::Down, button(SDL_GAMEPAD_BUTTON_DPAD_DOWN) || y > 16000);
-    set(A::Left, button(SDL_GAMEPAD_BUTTON_DPAD_LEFT) || x < -16000);
-    set(A::Right, button(SDL_GAMEPAD_BUTTON_DPAD_RIGHT) || x > 16000);
-    set(A::Beat, button(SDL_GAMEPAD_BUTTON_SOUTH));
-    set(A::Charge, button(SDL_GAMEPAD_BUTTON_WEST));
-    set(A::Jump, button(SDL_GAMEPAD_BUTTON_EAST));
-    set(A::Shift, button(SDL_GAMEPAD_BUTTON_NORTH));
+    bool stick_used = false;
+    for (std::size_t a = 0; a < tools::kActions; ++a) {
+        const int code = buttons[a];
+        if (code >= tools::kPadAxis) {
+            const auto axis = static_cast<SDL_GamepadAxis>((code - tools::kPadAxis) / 2);
+            const int v = SDL_GetGamepadAxis(pad, axis);
+            held[a] = (code - tools::kPadAxis) % 2 ? v > kAxisPressed : v < -kAxisPressed;
+            stick_used = stick_used || axis == SDL_GAMEPAD_AXIS_LEFTX || axis == SDL_GAMEPAD_AXIS_LEFTY;
+        } else if (code > 0) {
+            held[a] = SDL_GetGamepadButton(pad, static_cast<SDL_GamepadButton>(code - 1));
+        }
+    }
+    if (!stick_used) {
+        const int x = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX), y = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
+        using A = tools::Action;
+        auto set = [&](A a, bool on) { held[static_cast<std::size_t>(a)] = held[static_cast<std::size_t>(a)] || on; };
+        set(A::Up, y < -kAxisPressed);
+        set(A::Down, y > kAxisPressed);
+        set(A::Left, x < -kAxisPressed);
+        set(A::Right, x > kAxisPressed);
+    }
     return held;
+}
+
+// A pad input's name in the menu (a pad given: its face buttons as that pad labels them, A or Cross, ...).
+std::string pad_input_name(int code, SDL_Gamepad* pad) {
+    if (code <= 0) return "None";
+    if (code >= tools::kPadAxis) {
+        const int axis = (code - tools::kPadAxis) / 2;
+        const bool positive = (code - tools::kPadAxis) % 2;
+        static constexpr const char* kAxes[] = {"Left stick", "Left stick", "Right stick", "Right stick", "LT", "RT"};
+        static constexpr const char* kDirs[] = {"left", "right", "up", "down", "left", "right", "up", "down"};
+        if (axis >= SDL_GAMEPAD_AXIS_LEFT_TRIGGER) return axis < 6 ? kAxes[axis] : "Axis " + std::to_string(axis);
+        return std::string(kAxes[axis]) + " " + kDirs[axis * 2 + (positive ? 1 : 0)];
+    }
+    const auto b = static_cast<SDL_GamepadButton>(code - 1);
+    if (b <= SDL_GAMEPAD_BUTTON_NORTH) {
+        const SDL_GamepadButtonLabel label =
+            pad ? SDL_GetGamepadButtonLabel(pad, b) : SDL_GetGamepadButtonLabelForType(SDL_GAMEPAD_TYPE_XBOX360, b);
+        switch (label) {
+        case SDL_GAMEPAD_BUTTON_LABEL_A: return "A";
+        case SDL_GAMEPAD_BUTTON_LABEL_B: return "B";
+        case SDL_GAMEPAD_BUTTON_LABEL_X: return "X";
+        case SDL_GAMEPAD_BUTTON_LABEL_Y: return "Y";
+        case SDL_GAMEPAD_BUTTON_LABEL_CROSS: return "Cross";
+        case SDL_GAMEPAD_BUTTON_LABEL_CIRCLE: return "Circle";
+        case SDL_GAMEPAD_BUTTON_LABEL_SQUARE: return "Square";
+        case SDL_GAMEPAD_BUTTON_LABEL_TRIANGLE: return "Triangle";
+        default: break;
+        }
+    }
+    static constexpr const char* kNames[] = {"South",       "East",     "West",      "North",        "Back",
+                                             "Guide",       "Start",    "Left stick press", "Right stick press", "LB",
+                                             "RB",          "D-pad up", "D-pad down", "D-pad left",  "D-pad right",
+                                             "Misc",        "Right paddle 1", "Left paddle 1", "Right paddle 2", "Left paddle 2",
+                                             "Touchpad"};
+    const auto i = static_cast<std::size_t>(b);
+    return i < std::size(kNames) ? kNames[i] : "Button " + std::to_string(i);
 }
 
 // Keys and pads to the I/O boards' input bytes (bits clear while pressed):
@@ -341,7 +390,7 @@ void read_inputs(Shared& shared, std::size_t focus, const tools::Settings& setti
         s.controls = 0xFF;
     }
     auto apply = [&](Screen& s, std::size_t player) {
-        const auto held = pad_actions(pads[player]);
+        const auto held = pad_actions(pads[player], settings.pad_buttons[player]);
         uint8_t bank0 = s.bank0, controls = s.controls;
         for (std::size_t a = 0; a < tools::kActions; ++a) {
             const int key = settings.keys[player][a];
@@ -1870,6 +1919,17 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "spikeout: SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
+    // Tests: SPIKEOUT_TEST_VIRTUAL_PAD=1 connects a pad that isn't there (SDL's virtual joystick: no buttons
+    // pressed), for the menu's pad pages on a computer with none.
+    if (std::getenv("SPIKEOUT_TEST_VIRTUAL_PAD")) {
+        SDL_VirtualJoystickDesc desc;
+        SDL_INIT_INTERFACE(&desc);
+        desc.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+        desc.naxes = SDL_GAMEPAD_AXIS_COUNT;
+        desc.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+        desc.name = "Virtual pad (test)";
+        if (!SDL_AttachVirtualJoystick(&desc)) std::fprintf(stderr, "spikeout: virtual pad: %s\n", SDL_GetError());
+    }
 
     // The settings, and the command line over them.
     const std::string settings_path = tools::data_folder() + "settings.ini";
@@ -2245,11 +2305,30 @@ int main(int argc, char** argv) {
     if (!test_run) load_nvram(data_folder, shared, boards);
     start_games();
 
-    // Pads: the first two connected, for players 1 and 2.
+    // Pads: players 1 and 2 each the one chosen in Controls (settings.pads, by GUID) when it's connected, else the
+    // first connected that no player has.
     std::vector<SDL_Gamepad*> gamepads;
+    auto pad_guid = [](SDL_Gamepad* pad) {
+        char text[64] = {};
+        SDL_GUIDToString(SDL_GetJoystickGUID(SDL_GetGamepadJoystick(pad)), text, sizeof text);
+        return std::string(text);
+    };
     auto player_pads = [&] {
         std::array<SDL_Gamepad*, 2> p{};
-        for (std::size_t i = 0; i < 2 && i < gamepads.size(); ++i) p[i] = gamepads[i];
+        std::vector<bool> taken(gamepads.size());
+        for (std::size_t i = 0; i < 2; ++i)
+            for (std::size_t g = 0; g < gamepads.size() && !settings.pads[i].empty(); ++g)
+                if (!taken[g] && pad_guid(gamepads[g]) == settings.pads[i]) {
+                    p[i] = gamepads[g];
+                    taken[g] = true;
+                    break;
+                }
+        for (std::size_t i = 0; i < 2; ++i)
+            for (std::size_t g = 0; g < gamepads.size() && !p[i]; ++g)
+                if (!taken[g]) {
+                    p[i] = gamepads[g];
+                    taken[g] = true;
+                }
         return p;
     };
 
@@ -2795,52 +2874,95 @@ int main(int argc, char** argv) {
         p.items.push_back(back_item());
         return p;
     };
-    auto keys_page = [&](std::size_t player) {
-        ui::MenuPage p{"Player " + std::to_string(player + 1) + " keys", "Enter: change a key. Delete: none.", {}};
-        for (std::size_t a = 0; a < tools::kActions; ++a) {
-            p.items.push_back({tools::kActionNames[a], "",
-                               [&, player, a] {
-                                   const int key = settings.keys[player][a];
-                                   return key > 0 ? std::string(SDL_GetScancodeName(static_cast<SDL_Scancode>(key))) : std::string("None");
-                               },
-                               {},
-                               [&, player, a] {
-                                   menu.capture("Press a key for " + std::string(tools::kActionNames[a]) + " (Esc: cancel)",
-                                                [&, player, a](const SDL_Event& e) {
-                                                    if (e.type != SDL_EVENT_KEY_DOWN) return false;
-                                                    settings.keys[player][a] = e.key.scancode;
-                                                    changed();
-                                                    return true;
-                                                });
-                               },
-                               false,
-                               [&, player, a] {
-                                   settings.keys[player][a] = 0;
-                                   changed();
-                               }});
-        }
-        p.items.push_back({"Reset to defaults", "This player's keys as they were.", {}, {}, [&, player] {
-                               settings.keys[player] = tools::Settings::defaults().keys[player];
-                               changed();
-                           }});
-        p.items.push_back(back_item());
-        return p;
+    // Controls: one page for a player (the menu shows player 1's only; player 2's settings stay, for a second cabinet
+    // with --boards 2 or several pads on one computer later). The device at the top picks whose buttons the rows
+    // show and set: the keyboard or a connected pad (choosing a pad makes it the player's). Both always play.
+    SDL_JoystickID controls_device = 0; // (0: the keyboard)
+    auto device_pad = [&]() -> SDL_Gamepad* {
+        for (SDL_Gamepad* pad : gamepads)
+            if (SDL_GetGamepadID(pad) == controls_device) return pad;
+        controls_device = 0; // (unplugged: back to the keyboard)
+        return nullptr;
     };
-    auto controls_page = [&] {
-        ui::MenuPage p{"Controls", "", {}};
-        p.items.push_back({"Player 1 keys", "Change player 1's keys.", {}, {}, [&] { menu.push(keys_page(0)); }});
-        p.items.push_back({"Player 2 keys", "Change player 2's keys (a second cabinet: --boards 2).", {}, {},
-                           [&] { menu.push(keys_page(1)); }});
-        for (std::size_t i = 0; i < 2; ++i) {
-            const auto pads = player_pads();
-            const char* name = pads[i] ? SDL_GetGamepadName(pads[i]) : nullptr;
-            ui::MenuItem info{"Player " + std::to_string(i + 1) + " pad", "", [name] { return std::string(name ? name : "None"); }};
-            info.info = true;
-            p.items.push_back(info);
+    auto controls_page = [&](std::size_t player) {
+        ui::MenuPage p{"Controls", "Enter: change. Delete: none.", {}};
+        p.items.push_back(
+            {"Device",
+             "The keyboard or a pad: whose buttons to set below. Both play; the pad chosen here is this player's. A pad's "
+             "left stick moves too, and Guide (or Back + Start) opens the menu.",
+             [&] {
+                 SDL_Gamepad* pad = device_pad();
+                 if (pad) {
+                     const char* name = SDL_GetGamepadName(pad);
+                     return std::string(name ? name : "Pad");
+                 }
+                 return std::string(gamepads.empty() ? "Keyboard (no pad connected)" : "Keyboard");
+             },
+             [&, player](int d) {
+                 device_pad();
+                 // The keyboard, then each connected pad, round.
+                 const auto n = static_cast<int>(gamepads.size()) + 1;
+                 int at = 0;
+                 for (std::size_t g = 0; g < gamepads.size(); ++g)
+                     if (SDL_GetGamepadID(gamepads[g]) == controls_device) at = static_cast<int>(g) + 1;
+                 at = (at + d + n) % n;
+                 controls_device = at == 0 ? 0 : SDL_GetGamepadID(gamepads[static_cast<std::size_t>(at - 1)]);
+                 if (at > 0) {
+                     settings.pads[player] = pad_guid(gamepads[static_cast<std::size_t>(at - 1)]);
+                     changed();
+                 }
+                 menu.refresh();
+             }});
+        for (std::size_t a = 0; a < tools::kActions; ++a) {
+            p.items.push_back(
+                {tools::kActionNames[a], "",
+                 [&, player, a] {
+                     if (SDL_Gamepad* pad = device_pad()) return pad_input_name(settings.pad_buttons[player][a], pad);
+                     const int key = settings.keys[player][a];
+                     return key > 0 ? std::string(SDL_GetScancodeName(static_cast<SDL_Scancode>(key))) : std::string("None");
+                 },
+                 {},
+                 [&, player, a] {
+                     const std::string action = tools::kActionNames[a];
+                     if (!device_pad()) {
+                         menu.capture("Press a key for " + action + " (Esc: cancel)", [&, player, a](const SDL_Event& e) {
+                             if (e.type != SDL_EVENT_KEY_DOWN) return false;
+                             settings.keys[player][a] = e.key.scancode;
+                             changed();
+                             return true;
+                         });
+                         return;
+                     }
+                     const SDL_JoystickID id = controls_device;
+                     menu.capture("Press a button for " + action + " (Guide or Esc: cancel)",
+                                  [&, player, a, id](const SDL_Event& e) {
+                                      int code = 0;
+                                      if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && e.gbutton.which == id) {
+                                          if (e.gbutton.button == SDL_GAMEPAD_BUTTON_GUIDE) return true; // (cancelled)
+                                          code = tools::pad_button(static_cast<SDL_GamepadButton>(e.gbutton.button));
+                                      } else if (e.type == SDL_EVENT_GAMEPAD_AXIS_MOTION && e.gaxis.which == id &&
+                                                 (e.gaxis.value > 24000 || e.gaxis.value < -24000)) {
+                                          code = tools::pad_axis(static_cast<SDL_GamepadAxis>(e.gaxis.axis), e.gaxis.value > 0);
+                                      }
+                                      if (code == 0) return false;
+                                      settings.pad_buttons[player][a] = code;
+                                      changed();
+                                      return true;
+                                  });
+                 },
+                 false,
+                 [&, player, a] {
+                     if (device_pad()) settings.pad_buttons[player][a] = 0;
+                     else settings.keys[player][a] = 0;
+                     changed();
+                 }});
         }
-        ui::MenuItem layout{"Pad buttons: A beat, X charge, B jump, Y shift, Back coin, Start; Guide or Back + Start: the menu", ""};
-        layout.info = true;
-        p.items.push_back(layout);
+        p.items.push_back({"Reset to defaults", "This device's buttons as they were.", {}, {}, [&, player] {
+                               if (device_pad()) settings.pad_buttons[player] = tools::Settings::defaults().pad_buttons[player];
+                               else settings.keys[player] = tools::Settings::defaults().keys[player];
+                               changed();
+                               menu.refresh();
+                           }});
         p.items.push_back(back_item());
         return p;
     };
@@ -3297,7 +3419,7 @@ int main(int argc, char** argv) {
         p.items.push_back({"Display", "Render scale, antialiasing, quads, the 3D renderer, CRT colours, screen filter, fullscreen.", {}, {},
                            [&] { menu.push(display_page()); }});
         p.items.push_back({"Sound", "The volumes, and the speakers: stereo, or the cabinet's front and rear apart.", {}, {}, [&] { menu.push(sound_page()); }});
-        p.items.push_back({"Controls", "Each player's keys, and the pads.", {}, {}, [&] { menu.push(controls_page()); }});
+        p.items.push_back({"Controls", "Your keys or pad buttons.", {}, {}, [&] { menu.push(controls_page(0)); }});
         if (!(netgame && netgame->running)) // (not in a network game: the same for everyone)
             p.items.push_back({"Game", "Reset, the arcade's test menu, a service credit.", {}, {}, [&] { menu.push(game_page()); }});
         p.items.push_back({"Quit", "Saves the settings and closes the game.", {}, {}, [&] {
