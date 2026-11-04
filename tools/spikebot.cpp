@@ -123,7 +123,7 @@ class Game {
 public:
     virtual ~Game() = default;
     virtual bool start_from(std::vector<uint8_t> data, const std::string& name = "a save state") = 0;
-    bool start(const std::string& path) { return start_from(tools::read_file(path), path); }
+    bool start(const std::string& path) { return start_from(tools::read_state_file(tools::read_file(path)).state, path); }
     // Runs `frames` frames with `in` held by the controlled player; screenshot: the last one's picture.
     virtual void step(Inputs in, int frames = 1, const std::string& screenshot = {}) = 0;
     virtual std::shared_ptr<Snapshot> save() = 0;

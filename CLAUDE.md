@@ -26,8 +26,19 @@ Read this first; the older hand-off below is history.
   (full games listed, watch by code). Tests: tools/spectate-tests.ps1 (6),
   tools/spectate-window-test.ps1 [-Mode switch|oneboard]; gamerun
   --net-spectate [--net-spectate-seat N], --pace (arcade speed). Fixed on
-  the way: --net-leave-at hung in every-board runs. Next after step 2:
-  save-state safeguards, all-auto network settings, then 21:9 (memory notes).
+  the way: --net-leave-at hung in every-board runs.
+- Save states' safeguards (owner's choices, 2026-11-04): each file a header
+  (tools::state_file_bytes: SPKSTATE, version 2, the state format
+  kStateFormat (raise it when what board_state writes changes shape), the
+  game code's fingerprint (code_id), frame, checksum). Same format and code:
+  loads as is; another version's (or a headerless old file): offered with a
+  warning and tried (saves kept across updates); damaged: refused. F10
+  pressed twice, the file checked first (read, checksum, loaded into a spare
+  board with its sound and music boards),
+  the game kept in spikeout-undo.state, F9 within 5 s goes back; F10 not in
+  network play; notices at the bottom (STATE SAVED, CAN'T LOAD: why);
+  network F9 only with --net-save-key. Next: all-auto network settings,
+  then 21:9 (memory notes).
 - Done (2026-11-04, docs/netplay.md "Side runs on other cores"): one
   board's side runs on worker threads (min(other cabinets, cores - 2, at
   least 1); SPIKEOUT_SIDE_WORKERS=N, SPIKEOUT_SIDE_THREAD=0 for none,
@@ -193,7 +204,7 @@ This machine (Windows):
 - A lifter change regenerates build/generated/ only once ppcrecomp is rebuilt
   (`cmake --build build` does it; a full rebuild takes ~2 min).
 - Window: `build\spikeout.exe build\roms\spikeofe` (Esc menu; GPU 3D;
-  `--record FILE`, `--load-state FILE`, F9 save state, F10 load the last,
+  `--record FILE`, `--load-state FILE`, F9 save state, F10 twice loads the last (F9 then undoes it),
   F12 screenshot, `--frames N` quits after N). Owner's PC: GTX 1080,
   2560x1440 at 99.9 Hz, render scale 4, picture shape = window's (16:9).
   Driving it from a script: keybd_event with KEYEVENTF_SCANCODE (flags 8/10)

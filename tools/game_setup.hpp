@@ -23,7 +23,9 @@
 #include <string>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
+#include <cstring>
 #include <vector>
 
 namespace generated {
@@ -134,6 +136,80 @@ private:
 // and loaded before the run, which then starts with
 // Context::resume_block(cpu.pc). Throws if a state doesn't fit (another
 // build, or another board set-up).
+// A save state file (one board's, the window's F9): a header, then the state (board_state's). The header (the owner's
+// choice, 2026-11-04: saves kept across updates where they can be): "SPKSTATE", its version (2), the state's format
+// (kStateFormat) and the recompiled game code's fingerprint (code_id), its frame. Same format and code: it loads as is.
+// Either different (an update that changed a state's layout or the game's code), or none known (a file from before the
+// header): it may still load, offered with a warning, tried on a spare board first (a resume point that moved can't be
+// seen there: the undo then). The rest of an update (the window, network play, the menu) keeps saves as they are.
+// kStateFormat: raised whenever what board_state writes changes shape (a device's state, a section).
+inline constexpr uint64_t kStateFormat = 1;
+inline uint64_t code_id() {
+    static const uint64_t id = [] {
+        uint64_t h = 0xCBF29CE484222325ull;
+        auto mix = [&](uint64_t v) { h = (h ^ v) * 0x100000001B3ull; };
+        for (const auto& table : {game_functions(), game_blocks()}) {
+            mix(table.size());
+            for (const recomp::FunctionEntry& e : table) mix(e.addr), mix(e.resume);
+        }
+        return h;
+    }();
+    return id;
+}
+struct StateFile {
+    std::optional<uint64_t> format, code; // (none: made before the header, or its first version's)
+    uint64_t frame = 0;
+    std::vector<uint8_t> state;
+    bool matches() const { return format == kStateFormat && code == code_id(); } // (loads as it is)
+};
+inline constexpr char kStateMagic[8] = {'S', 'P', 'K', 'S', 'T', 'A', 'T', 'E'};
+// (the state's checksum, in the header: damage anywhere in it found, its RAM's too, where any bytes would load)
+inline uint64_t state_checksum(std::span<const uint8_t> state) {
+    uint64_t a = 0x9E3779B97F4A7C15ull, b = 0;
+    std::size_t i = 0;
+    for (; i + 8 <= state.size(); i += 8) {
+        uint64_t v = 0;
+        std::memcpy(&v, state.data() + i, 8);
+        a = (a ^ v) * 0x100000001B3ull, b += a;
+    }
+    for (; i < state.size(); ++i) a = (a ^ state[i]) * 0x100000001B3ull, b += a;
+    return a ^ (b * 0xC2B2AE3D27D4EB4Full) ^ state.size();
+}
+inline std::vector<uint8_t> state_file_bytes(uint64_t frame, const std::vector<uint8_t>& state) {
+    std::vector<uint8_t> out(kStateMagic, kStateMagic + 8);
+    auto u64 = [&](uint64_t v) {
+        for (int i = 0; i < 8; ++i) out.push_back(static_cast<uint8_t>(v >> (8 * i)));
+    };
+    u64(2), u64(kStateFormat), u64(code_id()), u64(frame), u64(state_checksum(state));
+    out.insert(out.end(), state.begin(), state.end());
+    return out;
+}
+inline StateFile read_state_file(std::vector<uint8_t> bytes) {
+    StateFile f;
+    if (bytes.size() < 32 || !std::equal(kStateMagic, kStateMagic + 8, bytes.begin())) {
+        f.state = std::move(bytes);
+        return f;
+    }
+    auto u64 = [&](std::size_t at) {
+        uint64_t v = 0;
+        for (int i = 0; i < 8; ++i) v |= uint64_t{bytes[at + static_cast<std::size_t>(i)]} << (8 * i);
+        return v;
+    };
+    const uint64_t version = u64(8);
+    std::size_t at = 0;
+    if (version == 1) { // (the first: its build, then its frame: neither format nor code known)
+        f.frame = u64(24), at = 32;
+    } else if (version == 2 && bytes.size() >= 48) {
+        f.format = u64(16), f.code = u64(24), f.frame = u64(32), at = 48;
+        if (state_checksum(std::span<const uint8_t>(bytes).subspan(at)) != u64(40))
+            throw std::runtime_error("the save state is damaged (its checksum differs)");
+    } else {
+        throw std::runtime_error("a save state of a newer version");
+    }
+    f.state.assign(bytes.begin() + static_cast<std::ptrdiff_t>(at), bytes.end());
+    return f;
+}
+
 inline void board_state(m3::State& s, recomp::Context& c, recomp::FrameTiming& timing,
                         const std::function<void(m3::State&)>& sound) {
     s.tag("spikeout save state 1");

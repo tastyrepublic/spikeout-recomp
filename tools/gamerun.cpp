@@ -1480,7 +1480,7 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
     m.c.set_scheduler(&m.timing);
     if (o.load_state || (m.linked && !m.linked->loaded.empty())) { // everything above that the game sees, as it was saved
         try {
-            m3::State s(m.linked ? std::move(m.linked->loaded[m.index]) : tools::read_file(o.load_state));
+            m3::State s(m.linked ? std::move(m.linked->loaded[m.index]) : tools::read_state_file(tools::read_file(o.load_state)).state);
             tools::board_state(s, m.c, m.timing, sound_state(m, o));
         } catch (const std::exception& e) {
             std::fprintf(stderr, "gamerun: %s: %s\n", o.load_state ? o.load_state : "the host's state", e.what());
@@ -3989,7 +3989,7 @@ int main(int argc_given, char** argv_given) {
         linked.boards.resize(o.boards);
         if (o.load_state || !join_state.empty()) {
             try {
-                m3::State s(o.load_state ? tools::read_file(o.load_state) : std::move(join_state));
+                m3::State s(o.load_state ? tools::read_state_file(tools::read_file(o.load_state)).state : std::move(join_state));
                 linked.io(s);
             } catch (const std::exception& e) {
                 std::fprintf(stderr, "gamerun: %s: %s (a state of %zu linked boards?)\n", o.load_state ? o.load_state : "the host's state",

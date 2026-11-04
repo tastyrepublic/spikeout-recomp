@@ -178,6 +178,19 @@ struct Shared {
     // one saved, or --load-state's).
     std::atomic<bool> save_request{false};
     std::string load_path, last_state; // (under `lock`)
+    // (the owner's safeguards, 2026-11-04: each state's file says its format and the game code it was made by
+    // (tools::state_file_bytes); the next save to `save_to` instead (the undo's, before a load); saves made so far; a short
+    // notice at the bottom of the window (STATE SAVED, CAN'T LOAD: why), under `lock`)
+
+    std::string save_to;
+    std::atomic<uint64_t> saves_done{0};
+    std::string notice;
+    std::chrono::steady_clock::time_point notice_until{};
+    void say(const std::string& text, int seconds = 3) {
+        std::lock_guard<std::mutex> guard(lock);
+        notice = text, notice_until = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+    }
+    bool net_save_key = false; // --net-save-key: F9 in network play saves every cabinet (spikeout-net-<frame>.state), for gamerun
     bool real_netboard = true;
     bool old_link = false; // --net-old-link: the link before the ring model (docs/fidelity.md)
     bool fog_over_nothing = false; // --fog-over-nothing: scroll fog with no 3D too, as Supermodel (docs/fidelity.md)
@@ -657,10 +670,13 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
         }
         if (!path.empty()) {
             try {
-                m3::State s(tools::read_file(path));
+                tools::StateFile f = tools::read_state_file(tools::read_file(path));
+                const bool other = !f.matches(); // (another version's, or from before the header: tried, said)
+                m3::State s(std::move(f.state));
                 tools::board_state(s, c, timing, sound_state);
                 loaded = true;
-                std::printf("spikeout: loaded %s (frame %llu)\n", path.c_str(), static_cast<unsigned long long>(timing.frames()));
+                std::printf("spikeout: loaded %s (frame %llu)%s\n", path.c_str(), static_cast<unsigned long long>(timing.frames()),
+                            other ? " (a save from another version of the game, or from before saves said theirs: tried)" : "");
             } catch (const std::exception& e) {
                 load_error = path + ": " + e.what();
                 std::printf("spikeout: can't load %s\n", load_error.c_str());
@@ -1225,17 +1241,30 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
         }
         if (index == 0 && !networked && shared.save_request.exchange(false))
             c.request_snapshot([&](uint32_t) {
-                const std::string path = "spikeout-" + std::to_string(timing.frames()) + ".state";
+                std::string path = "spikeout-" + std::to_string(timing.frames()) + ".state";
+                bool undo = false; // (the game as it was before a load: F9 goes back to it a few seconds)
+                {
+                    std::lock_guard<std::mutex> guard(shared.lock);
+                    if (!shared.save_to.empty()) path = std::exchange(shared.save_to, {}), undo = true;
+                }
                 try {
                     m3::State s;
                     tools::board_state(s, c, timing, sound_state);
-                    if (!tools::write_file(path, s.data())) throw std::runtime_error("can't write it");
-                    std::lock_guard<std::mutex> guard(shared.lock);
-                    shared.last_state = path;
+                    if (!tools::write_file(path, tools::state_file_bytes(timing.frames(), s.data())))
+                        throw std::runtime_error("can't write it");
+                    if (!undo) {
+                        {
+                            std::lock_guard<std::mutex> guard(shared.lock);
+                            shared.last_state = path;
+                        }
+                        shared.say("STATE SAVED (FRAME " + std::to_string(timing.frames()) + ")");
+                    }
                     std::printf("spikeout: saved %s\n", path.c_str());
                 } catch (const std::exception& e) {
                     std::printf("spikeout: no save state %s: %s\n", path.c_str(), e.what());
+                    if (!undo) shared.say("CAN'T SAVE: " + std::string(e.what()));
                 }
+                ++shared.saves_done;
             });
         if (recording.is_open()) {
             const auto frame = static_cast<uint32_t>(timing.frames());
@@ -1767,6 +1796,7 @@ int main(int argc, char** argv) {
     std::string record_path, load_state;
     int scale = 0, cli_render_scale = 0, cli_sound = -1, cli_music = -1;
     bool real_netboard = true, old_link = false, fog_over_nothing = false;
+    bool net_save_key = false; // --net-save-key
     Shared::OneBoard net_one_board = Shared::OneBoard::automatic; // --net-every-board, --net-one-board (Auto: the default)
     uint64_t net_rollback = 0; // --net-rollback N (tools::rollback; every board here: no one board then)
     uint64_t max_frames = 0;
@@ -1778,6 +1808,7 @@ int main(int argc, char** argv) {
         if (arg == "--scale" && i + 1 < argc) scale = std::max(1, std::atoi(argv[++i]));
         else if (arg == "--netboard" && i + 1 < argc) real_netboard = std::string(argv[++i]) == "real";
         else if (arg == "--net-old-link") old_link = true;
+        else if (arg == "--net-save-key") net_save_key = true; // (F9 in network play: every cabinet in a file, for gamerun)
         else if (arg == "--net-one-board") net_one_board = Shared::OneBoard::always;
         else if (arg == "--net-every-board") net_one_board = Shared::OneBoard::never;
         else if (arg == "--net-auto-board") net_one_board = Shared::OneBoard::automatic;
@@ -1962,6 +1993,7 @@ int main(int argc, char** argv) {
     shared.load_path = shared.last_state = load_state;
     shared.real_netboard = real_netboard;
     shared.old_link = old_link;
+    shared.net_save_key = net_save_key;
     shared.one_board = net_one_board;
     shared.rollback_frames = shared.rollback_wanted = net_rollback;
     shared.fog_over_nothing = fog_over_nothing;
@@ -2277,6 +2309,55 @@ int main(int argc, char** argv) {
     std::string net_notice; // (a line where the room's was, for a while: the host closed it)
     std::chrono::steady_clock::time_point net_notice_until{};
     std::chrono::steady_clock::time_point watch_banner_until{}; // (a spectator's banner: whom it watches, the keys)
+    // Save states' safeguards (F9 / F10 below): F10's first press arms it a few seconds; after a load, F9 goes back to
+    // the game kept just before it (kUndoState) a few seconds. A state checked before anything is reset: read, then
+    // loaded into a spare board, all of it (CPU, frame timing, the bus and its devices, the sound board and its music);
+    // "" if it will load, else why not, in a few words; `other`: from another version of the game (a format or code
+    // that differs, or none said: tools::StateFile::matches), offered with a warning (the owner's choice).
+    static constexpr const char* kUndoState = "spikeout-undo.state";
+    std::chrono::steady_clock::time_point load_armed_until{}, undo_until{};
+    auto check_state = [&](const std::string& path, std::optional<uint64_t>& frame, bool& other) -> std::string {
+        tools::StateFile f;
+        try {
+            f = tools::read_state_file(tools::read_file(path));
+        } catch (const std::exception& e) {
+            const std::string what = e.what();
+            return what.find("damaged") != std::string::npos   ? "THE FILE IS DAMAGED"
+                   : what.find("version") != std::string::npos ? "A SAVE FROM A NEWER VERSION"
+                                                                : "THE FILE CAN'T BE READ";
+        }
+        if (f.state.empty()) return "THE FILE CAN'T BE READ";
+        other = !f.matches();
+        if (f.format) frame = f.frame;
+        try {
+            const std::vector<recomp::FunctionEntry> functions = tools::game_functions();
+            m3::Bus spare(roms);
+            if (shared.real_netboard) { // (its network board as run_game gives the boards: the state has its part)
+                m3::CommBoardOptions options;
+                if (shared.old_link) options.use_old_link();
+                spare.use_netboard(std::make_unique<m3::CommBoard>(nullptr, options));
+            }
+            recomp::Context c(spare, functions);
+            recomp::FrameTiming timing;
+            c.set_scheduler(&timing);
+            // (a spare sound board as the window's (Sound), its music board with it; Sound::state's own part after)
+            m3::SoundBoard spare_sound(roms.region(m3::RomRegionId::SoundProgram), roms.region(m3::RomRegionId::SoundSamples));
+            tools::attach_music(spare_sound, roms);
+            const auto sound_part = [&spare_sound](m3::State& st) {
+                spare_sound.state(st);
+                double due = 0;
+                std::vector<uint8_t> waiting;
+                st.io(due), st.io(waiting);
+            };
+            m3::State s(std::move(f.state));
+            tools::board_state(s, c, timing, sound_part);
+            if (!f.format) frame = timing.frames();
+        } catch (const std::exception& e) {
+            std::printf("spikeout: %s doesn't load: %s\n", path.c_str(), e.what());
+            return "IT'S DAMAGED, OR MADE BY A VERSION THIS ONE CAN'T READ";
+        }
+        return {};
+    };
     int net_seats = 2;      // a game offered: its players
     bool net_listed = true; // on the internet: in the lobby's list, or by its code only
     int net_where = 0;      // a game offered: 0 this network, 1 the internet (listed), 2 the internet (private)
@@ -3317,26 +3398,68 @@ int main(int argc, char** argv) {
 #endif
                 if (tools::write_png(path, shown, width, height)) std::printf("screenshot: %s\n", path.c_str());
             }
+            // Save states (the owner's safeguards, 2026-11-04). F9 saves (a network game's every cabinet only with
+            // --net-save-key: for gamerun, nothing a player can load); a few seconds after a load, F9 goes back to the
+            // game as it was before it instead. F10 loads the last saved: pressed twice (the first says what it would
+            // load), the file checked first (its build, then loaded into a spare board), the game as it is saved first.
+            // Not in network play; the menu takes the keys while open.
+            const auto now_key = std::chrono::steady_clock::now();
             if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_F9 && !e.key.repeat) {
                 if (shared.netplay) {
-                    shared.net_save_request = true;
-                    std::printf("spikeout: saving every cabinet at the end of a frame (spikeout-net-<frame>.state)\n");
+                    if (shared.net_save_key) {
+                        shared.net_save_request = true;
+                        std::printf("spikeout: saving every cabinet at the end of a frame (spikeout-net-<frame>.state)\n");
+                    } else {
+                        shared.say("SAVE STATES ARE FOR SINGLE-PLAYER GAMES");
+                    }
+                } else if (boards == 1 && now_key < undo_until) {
+                    undo_until = {};
+                    reset_game([&] { shared.load_path = kUndoState; });
+                    shared.say("BACK TO THE GAME BEFORE THE LOAD");
+                    std::printf("spikeout: back to the game before the load (%s)\n", kUndoState);
                 } else if (boards == 1) {
                     shared.save_request = true;
                     std::printf("spikeout: saving at the end of the frame\n");
                 } else {
-                    std::printf("spikeout: save states are for one board, or a network game\n");
+                    shared.say("SAVE STATES ARE FOR ONE CABINET");
                 }
                 std::fflush(stdout);
             }
-            if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_F10 && !e.key.repeat && boards == 1) {
+            if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_F10 && !e.key.repeat && boards == 1 && !shared.netplay) {
                 std::string last;
                 {
                     std::lock_guard<std::mutex> guard(shared.lock);
                     last = shared.last_state;
                 }
-                if (last.empty()) std::printf("spikeout: no save state yet (F9 saves one)\n");
-                else reset_game([&] { shared.load_path = last; });
+                std::optional<uint64_t> frame; // (the file's, from its header)
+                bool other = false;            // (from another version of the game: offered, said)
+                const std::string why = last.empty() ? std::string() : check_state(last, frame, other);
+                const std::string which = frame ? "THE STATE FROM FRAME " + std::to_string(*frame) : "THE LAST SAVE STATE";
+                if (last.empty()) {
+                    shared.say("NO SAVE STATE YET: F9 SAVES ONE");
+                } else if (!why.empty()) {
+                    load_armed_until = {};
+                    shared.say("CAN'T LOAD: " + why, 5);
+                    std::printf("spikeout: can't load %s: %s\n", last.c_str(), why.c_str());
+                } else if (now_key >= load_armed_until) { // (the first press: what it would do)
+                    load_armed_until = now_key + std::chrono::seconds(3);
+                    shared.say(other ? "THIS SAVE IS FROM ANOTHER VERSION: PRESS F10 AGAIN TO TRY IT" : "PRESS F10 AGAIN TO LOAD " + which);
+                } else { // (the second: the game as it is kept first, then the load)
+                    load_armed_until = {};
+                    const uint64_t before = shared.saves_done;
+                    {
+                        std::lock_guard<std::mutex> guard(shared.lock);
+                        shared.save_to = kUndoState;
+                    }
+                    shared.save_request = true;
+                    for (int k = 0; k < 200 && shared.saves_done == before; ++k) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    const bool kept = shared.saves_done != before;
+                    reset_game([&] { shared.load_path = last; });
+                    undo_until = kept ? std::chrono::steady_clock::now() + std::chrono::seconds(5) : std::chrono::steady_clock::time_point{};
+                    shared.say(kept ? "LOADED " + which + "  \xC2\xB7  F9 GOES BACK" : "LOADED " + which, 5);
+                    std::printf("spikeout: loading %s%s%s%s\n", last.c_str(), kept ? " (the game before it in " : "", kept ? kUndoState : "",
+                                kept ? ")" : "");
+                }
             }
             if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode >= SDL_SCANCODE_F5 && e.key.scancode <= SDL_SCANCODE_F8) {
                 const auto board = static_cast<std::size_t>(e.key.scancode - SDL_SCANCODE_F5);
@@ -3653,6 +3776,11 @@ int main(int argc, char** argv) {
                 seat_was.fill(State::none);
                 menu.set_watch_banner(""), menu.set_switch_cover("");
                 seat_news.fill({});
+            }
+            { // (a save state's notice, at the bottom a few seconds: over a spectator's banner)
+                std::lock_guard<std::mutex> guard(shared.lock);
+                if (now < shared.notice_until) menu.set_watch_banner({}, shared.notice);
+                else if (!netgame) menu.set_watch_banner("");
             }
             // (a game joined in progress, catching up with the others: a loading screen, the game's picture not real yet)
             if (netgame && netgame->running && shared.catching_up) {
