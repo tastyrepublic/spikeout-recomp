@@ -11,6 +11,7 @@
 #include <RmlUi/Core.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -132,6 +133,10 @@ struct Menu::Impl {
     MenuListener listener;
     AssetFiles files;
     std::set<std::string> flags = flag_codes();
+    float ratio = 1; // (the dp scale, the window's height / 720: set as it's drawn)
+    // A length in whole pixels (the signal bars: at a scale that isn't whole, each bar's dp rounded where it lies
+    // made them differ in width).
+    std::string px(double dp) const { return std::to_string(std::max(1L, std::lround(dp * ratio))) + "px"; }
 };
 
 Menu::Menu() : impl_(std::make_unique<Impl>()) {}
@@ -182,7 +187,8 @@ bool Menu::init(SDL_GPUDevice* device, SDL_Window* window) {
     std::string page(assets::menu_rml.text());
     const size_t head = page.find("</head>");
     if (head != std::string::npos)
-        page.insert(head, "<style>" + std::string(assets::menu_rcss.text()) + std::string(assets::flags_rcss.text()) + "</style>");
+        page.insert(head, "<style>" + std::string(assets::menu_rcss.text()) + std::string(assets::flags_rcss.text()) +
+                              std::string(assets::platforms_rcss.text()) + "</style>");
     impl_->doc = impl_->ctx->LoadDocumentFromMemory(page);
     if (!impl_->doc) {
         error_ = "the menu's page didn't load";
@@ -200,7 +206,7 @@ bool Menu::init(SDL_GPUDevice* device, SDL_Window* window) {
         "#corner { position: absolute; right: 16dp; top: 10dp; } "
         "#fps { display: block; text-align: right; font-size: 26dp; color: #ffd34a; font-effect: outline(2dp #000000); } "
         "#net { position: absolute; right: 16dp; top: 35%; } " // (the seats down at the side, a little above the middle: the owner's choice)
-        ".head { display: block; text-align: right; height: 24dp; margin-bottom: 8dp; font-size: 20dp; color: #ffd34a; font-effect: outline(2dp #000000); } "
+        ".head { display: flex; justify-content: flex-end; align-items: center; height: 24dp; margin-bottom: 8dp; font-size: 20dp; color: #ffd34a; font-effect: outline(2dp #000000); } "
         ".seat { display: flex; justify-content: flex-end; align-items: flex-end; height: 24dp; font-size: 20dp; "
         "color: #ffd34a; font-effect: outline(2dp #000000); } "
         ".seat.player { color: #ffffff; } .seat.fresh { color: #7fe07f; } .seat.dim { color: #9a9a9a; } "
@@ -213,6 +219,13 @@ bool Menu::init(SDL_GPUDevice* device, SDL_Window* window) {
         ".ms { width: 48dp; text-align: right; white-space: nowrap; } " // (as wide as "999 ms": the name stays put as it changes)
         ".flag { width: 19dp; height: 14dp; margin: 0 6dp 4dp 0; border: 1dp #000000; } " // (as tall as the 20dp text's capitals)
         ".noflag { width: 21dp; height: 14dp; margin: 0 6dp 4dp 0; } "
+        ".head .eye { width: 22dp; height: 22dp; margin: 0 3dp 0 10dp; image-color: #ffd34a; } " // (the spectators' count)
+        // (a spectator's banner: bottom middle, over the game, its keys as key caps)
+        "#watchb { display: none; position: absolute; left: 0; width: 100%; bottom: 28dp; text-align: center; } "
+        "#watchb { font-size: 22dp; color: #ffffff; font-effect: outline(2dp #000000); } "
+        "#watchb .key { font-size: 15dp; padding: 0 6dp; margin: 0 2dp; border: 1dp #c8ccd4; border-radius: 4dp; "
+        "background-color: #2a2e38; font-effect: none; } "
+        "#watchb .pill { display: inline-block; padding: 4dp 14dp; background-color: #0b0d12d9; border: 1dp #000000; border-radius: 16dp; } "
         ".plat { width: 14dp; height: 14dp; margin: 0 6dp 4dp 0; } .noplat { width: 14dp; height: 14dp; margin: 0 6dp 4dp 0; } " // (as the flag: the capitals' height, on their line)
         ".badges { display: flex; justify-content: flex-end; height: 19dp; margin-bottom: 3dp; } " // (a seat's badges, under it)
         ".badge { font-size: 13dp; line-height: 16dp; height: 16dp; padding: 0 6dp; margin-left: 4dp; border-radius: 8dp; "
@@ -234,20 +247,27 @@ bool Menu::init(SDL_GPUDevice* device, SDL_Window* window) {
         "</style></head><body><div id=\"loading\"><div class=\"box\"><span class=\"title\" id=\"ltitle\"></span>"
         "<div id=\"lbar\"><div id=\"lfill\"></div></div><span id=\"lpct\"></span>"
         "<span class=\"detail\" id=\"ldetail\"></span></div></div>"
-        "<div id=\"corner\"><div id=\"fps\"></div></div><div id=\"net\"></div></body></rml>");
+        "<div id=\"corner\"><div id=\"fps\"></div></div><div id=\"net\"></div><div id=\"watchb\"></div></body></rml>");
     return true;
 }
 
 void Menu::show_corner() {
     if (!impl_->fps) return;
-    if (fps_shown_ || net_shown_ || loading_shown_) impl_->fps->Show();
+    if (fps_shown_ || net_shown_ || loading_shown_ || banner_shown_) impl_->fps->Show();
     else impl_->fps->Hide();
 }
 
 void Menu::set_net(const std::vector<NetRow>& rows, const std::string& header, const NetPills& pills) {
     if (!impl_->fps) return;
-    std::string rml = header.empty() ? std::string() : "<div class=\"head\">" + escape(header) + "</div>";
-    (void)pills; // (the input delay: each player's own now, in their badges)
+    // (the spectators: an eye and their count after the header, in its colour; the input delay: each player's own now,
+    // in their badges)
+    // (a row centred on the text's middle: the eye on it, not on the baseline; text in spans, as a flex box draws no
+    // loose text)
+    std::string rml = header.empty() ? std::string()
+                                     : "<div class=\"head\"><span>" + escape(header) + "</span>" +
+                                           (pills.watchers > 0 ? "<img class=\"eye\" sprite=\"eye\"/><span>" + std::to_string(pills.watchers) + "</span>"
+                                                               : std::string()) +
+                                           "</div>";
     // (a platform's icon, then a flag, between the seat and the name; the icon in the row's colour, as its text; each
     // row right-aligned, its parts as wide as they are)
     auto has_flag = [&](const NetRow& r) { return impl_->flags.count(r.country) != 0; };
@@ -265,9 +285,9 @@ void Menu::set_net(const std::vector<NetRow>& rows, const std::string& header, c
         } else if (r.bars >= 0) {
             rml += "<div class=\"conn\"><span class=\"ms\">" + (r.ms >= 0 ? std::to_string(r.ms) + " ms" : std::string()) +
                    "</span><div class=\"bars " + (r.bars >= 3 ? "g" : r.bars == 2 ? "y" : "r") + "\">";
-            for (int b = 0; b < 4; ++b)
-                rml += "<div class=\"bar" + std::string(b < r.bars ? " on" : "") + "\" style=\"height: " +
-                       std::to_string(5 + 3 * b) + "dp;\"></div>";
+            for (int b = 0; b < 4; ++b) // (whole pixels: Impl::px)
+                rml += "<div class=\"bar" + std::string(b < r.bars ? " on" : "") + "\" style=\"height: " + impl_->px(5 + 3 * b) +
+                       "; width: " + impl_->px(3) + "; margin-left: " + impl_->px(1) + "; border-width: " + impl_->px(1) + ";\"></div>";
             rml += "</div></div>";
         }
         rml += "</div>";
@@ -304,6 +324,21 @@ void Menu::set_loading(const std::string& title, int percent, const std::string&
         if (Rml::Element* e = impl_->fps->GetElementById("ldetail")) e->SetInnerRML(escape(detail));
     }
     loading_shown_ = shown;
+    show_corner();
+}
+
+void Menu::set_watch_banner(const std::string& who, const std::string& note) {
+    if (!impl_->fps) return;
+    const bool shown = !who.empty() || !note.empty();
+    if (Rml::Element* e = impl_->fps->GetElementById("watchb")) {
+        if (!note.empty())
+            e->SetInnerRML("<span class=\"pill\">" + escape(note) + "</span>");
+        else if (!who.empty())
+            e->SetInnerRML("<span class=\"pill\">WATCHING " + escape(who) + "&nbsp;&nbsp;<span class=\"key\">LEFT</span><span class=\"key\">RIGHT</span>"
+                           " / <span class=\"key\">LB</span><span class=\"key\">RB</span>&nbsp;another player</span>");
+        e->SetProperty("display", shown ? "block" : "none");
+    }
+    banner_shown_ = shown;
     show_corner();
 }
 
@@ -380,12 +415,14 @@ void Menu::build() {
         rml += "<div class=\"row" + std::string(it.info ? " info" : "") + (static_cast<int>(i) == selected_ ? " selected" : "") +
                "\" id=\"r" + std::to_string(i) + "\"><span class=\"label\">" +
                (impl_->flags.count(it.country) ? "<img class=\"flag\" sprite=\"flag-" + it.country + "\"/>" : std::string()) +
-               escape(it.label) + "</span>";
+               escape(it.label) +
+               (it.watchers > 0 ? "<img class=\"eye\" sprite=\"eye\"/>" + std::to_string(it.watchers) : std::string()) + "</span>";
         if (it.estimate_ms >= 0) { // (the same bars as the seat list's, by the same bands)
             const int ms = it.estimate_ms, bars = ms < 40 ? 4 : ms < 80 ? 3 : ms < 140 ? 2 : 1;
             rml += "<span class=\"speed\"><span class=\"bars " + std::string(bars >= 3 ? "g" : bars == 2 ? "y" : "r") + "\">";
             for (int b = 0; b < 4; ++b)
-                rml += "<span class=\"bar" + std::string(b < bars ? " on" : "") + "\" style=\"height: " + std::to_string(4 + 4 * b) + "dp;\"></span>";
+                rml += "<span class=\"bar" + std::string(b < bars ? " on" : "") + "\" style=\"height: " + impl_->px(4 + 4 * b) +
+                       "; width: " + impl_->px(4) + "; margin-left: " + impl_->px(2) + "; border-width: " + impl_->px(1) + ";\"></span>";
             rml += "</span><span>~" + std::to_string(ms) + " ms</span></span>"; // (its own span: loose text in a flex box isn't drawn)
         }
         if (it.value) {
@@ -758,8 +795,9 @@ bool Menu::handle_event(const SDL_Event& e) {
 }
 
 void Menu::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* swapchain, uint32_t width, uint32_t height) {
-    if ((!open_ && !fps_shown_ && !net_shown_ && !loading_shown_) || !impl_->ctx) return;
+    if ((!open_ && !fps_shown_ && !net_shown_ && !loading_shown_ && !banner_shown_) || !impl_->ctx) return;
     impl_->ctx->SetDimensions(Rml::Vector2i(static_cast<int>(width), static_cast<int>(height)));
+    impl_->ratio = static_cast<float>(height) / 720.0f;
     impl_->ctx->SetDensityIndependentPixelRatio(static_cast<float>(height) / 720.0f);
     impl_->ctx->Update();
     impl_->gfx->BeginFrame(cmd, swapchain, width, height);

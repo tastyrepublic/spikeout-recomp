@@ -298,6 +298,9 @@ struct Options {
     std::optional<int64_t> clock;      // --clock SECONDS: the boards' clocks at power-on (else the host's time)
     // --net-host NAME --seats N / --net-join NAME: network play (tools::NetPlay)
     std::string net_host, net_join;
+    bool net_spectate = false; // --net-spectate (with --net-join): a spectator: every board from the host's inputs, no seat
+    uint8_t net_spectate_seat = 0; // --net-spectate-seat N: the seat (0-3) a spectator on one board watches
+    bool pace = false; // --pace: at the arcade's speed (this process's own board held to the refresh)
     uint8_t net_seats = 2;
     // --lobby URL: through an internet lobby (a test's own, `wrangler dev`):
     // --net-host offers it there (--private: by its code only), --net-join CODE
@@ -733,6 +736,7 @@ struct Dropped {
 };
 std::vector<std::unique_ptr<struct Machine>>* g_machines = nullptr; // (--drop: board 0, whose block the made ones start from)
 m3::LinkRing* g_ring = nullptr; // (linked boards' ring: one board a PC's shadows from another machine's board)
+std::atomic<uint64_t> g_parted_after{0}; // (--net-leave-at: this player gone after this frame; every board here stops there)
 const m3::RomSet* g_roms = nullptr; // (one board a PC: a board whose player went run on from its backup)
 std::unique_ptr<tools::rollback::Linked> g_net_rb; // (--net-rollback: every board going back together)
 // --clone-seat B@FRAME: board 0's state at its first block after FRAME's end (no sound), which
@@ -940,7 +944,14 @@ void set_up_one_board(std::vector<std::unique_ptr<Machine>>& machines, const Opt
         // its player's inputs kept since its backup, for that)
         s.backup_frame = [net](std::size_t seat) { return net->keeper().frame(seat); };
         s.replay = [net, &o](std::size_t seat, uint64_t until, std::function<bool(uint64_t)> live) -> std::optional<tools::one_board::RemoteBoard> {
-            const tools::backup::Copy copy = net->keeper().copy(seat);
+            // (a spectator: the newest of the backups kept at or before the frame, its players' taken ahead of it)
+            const tools::backup::Copy copy = o.net_spectate ? net->keeper().copy_for(seat, until) : net->keeper().copy(seat);
+            if (!copy.valid() || copy.frame > until) {
+                const auto newest = net->keeper().frame(seat);
+                std::printf("board %zu: no backup of it at or before frame %llu here (the newest: %s)\n", seat, (unsigned long long)until,
+                            newest ? std::to_string(*newest).c_str() : "none");
+                return std::nullopt;
+            }
             tools::backup::Replay r{*g_roms, m3::games::kSpikeoutFinalEdition, link_options(o),
                                     [&o](m3::Bus& bus) { bus.midi_burst = o.midi_burst, bus.dma_timed = !o.dma_instant; },
                                     [](recomp::Context& c) { m3::games::install_spikeout_hooks(c); }, o.slice, copy,
@@ -962,6 +973,14 @@ void set_up_one_board(std::vector<std::unique_ptr<Machine>>& machines, const Opt
                 return std::nullopt;
             }
         };
+        // (a spectator on one board: no machine to ask; a cabinet's shadow is its player's last backup run on here to
+        // the frame, as a board whose player went: the backups come from each player's machine, Session::set_watch_one_board)
+        if (o.net_spectate) {
+            s.ask_board = [](std::size_t, uint64_t) {};
+            s.wait_board = [replay = s.replay](std::size_t seat, uint64_t frame) -> std::optional<tools::one_board::RemoteBoard> {
+                return replay(seat, frame, [](uint64_t) { return true; }); // (its packets in the log: this board met it there)
+            };
+        }
         if (o.net_rollback) { // (--net-rollback: the switches only on frames that won't be run again; see Game::may_guess)
             s.guess_ahead = o.net_rollback;
             const std::size_t boards = o.boards;
@@ -2132,6 +2151,7 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             std::_Exit(0);
         }
         if (m.leave_next) { // (its state sent: the goodbye once every other machine has it)
+            g_parted_after = m.parting_frame; // (every board here stops there: one board or every board)
             for (int k = 0; k < 3000 && o.netplay->session().sending(); ++k) std::this_thread::sleep_for(std::chrono::milliseconds(10));
             std::printf("net: left after frame %llu\n", (unsigned long long)m.parting_frame);
             throw recomp::OutOfBudget(m.c.cpu.pc);
@@ -2148,8 +2168,10 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
                 m.backups.take(at, [&m](m3::State& s) { tools::board_state(s, m.c, m.timing, {}); }, taken, sent);
                 if (g_ring) g_ring->abandon_cut(m.index); // (one board's state alone: no cut under way)
                 std::vector<uint8_t> to_changes, to_whole;
-                for (uint8_t s = 0; s < o.boards; ++s) {
-                    if (s == m.index) continue;
+                std::vector<uint8_t> to = o.netplay->session().backup_watchers(); // (spectators on one board too)
+                for (uint8_t s = 0; s < o.boards; ++s)
+                    if (s != m.index) to.push_back(s);
+                for (const uint8_t s : to) {
                     (m.backups.changes_possible() && m.backup_bases.count(s) ? to_changes : to_whole).push_back(s);
                     m.backup_bases.insert(s);
                 }
@@ -2229,6 +2251,18 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             o.netplay->session().take_seat();
         }
         if (o.max_frames && frame >= o.max_frames) throw recomp::OutOfBudget(m.c.cpu.pc); // --frames
+        // --pace: at the arcade's speed (this process's own board, or board 0, held to the refresh: the others meet it),
+        // as the window: network tests whose timing matters (a spectator on one board, behind players that run in time)
+        if (o.pace && m.index == (o.netplay ? o.local_seat : 0)) {
+            static const auto started = std::chrono::steady_clock::now();
+            static const uint64_t first = frame;
+            const auto due = started + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                           std::chrono::duration<double>(static_cast<double>(frame - first) / recomp::FrameTiming::kRefreshHz));
+            std::this_thread::sleep_until(due);
+        }
+        // (--net-leave-at, every board here: the others stop with this player's, at its parting frame; else they'd wait
+        // for its inputs for ever, the session never saying goodbye, the other machines waiting on it in turn)
+        if (o.netplay && g_parted_after && frame >= g_parted_after) throw recomp::OutOfBudget(m.c.cpu.pc);
         if (o.netplay && o.netplay->resync_pending()) throw recomp::OutOfBudget(m.c.cpu.pc); // (again from the host's state)
         bool capture = m.linked && m.linked->capture_frame != 0 && frame == m.linked->capture_frame;
         // (--net-rollback: only a frame that won't be run again: every input of it in, none guessed wrong; else when it is)
@@ -3386,6 +3420,9 @@ int main(int argc_given, char** argv_given) {
         else if (arg == "--clock" && i + 1 < argc) o.clock = std::strtoll(argv[++i], nullptr, 0);
         else if (arg == "--net-host" && i + 1 < argc) o.net_host = argv[++i];
         else if (arg == "--net-join" && i + 1 < argc) o.net_join = argv[++i];
+        else if (arg == "--net-spectate") o.net_spectate = true;
+        else if (arg == "--pace") o.pace = true;
+        else if (arg == "--net-spectate-seat" && i + 1 < argc) o.net_spectate_seat = static_cast<uint8_t>(std::atoi(argv[++i]));
         else if (arg == "--lobby" && i + 1 < argc) o.lobby_url = argv[++i];
         else if (arg == "--private") o.net_private = true;
         else if (arg == "--net-start-alone") o.net_start_alone = true;
@@ -3659,6 +3696,7 @@ int main(int argc_given, char** argv_given) {
     }
     tools::InputTable inputs(networked ? net::kMaxSeats : o.boards);
     std::unique_ptr<tools::NetPlay> netplay;
+    std::jthread spectate_end; // (a spectator: its game ended, the input table closed: stopped before netplay goes)
     std::vector<uint8_t> join_state; // (a game joined in progress: every board's state, unpacked)
     const m3::CommBoardOptions link = link_options(o);
     net::LobbyClient lobby_client; // (the whole run: a room taken over is listed again, below)
@@ -3747,7 +3785,7 @@ int main(int argc_given, char** argv_given) {
                 return 1;
             }
             tools::find_addresses(lobby, session, (*welcome)["turn"].as_bool(), log);
-            if (!tools::lobby_join(lobby, session, build, o.net_join, "gamerun", error)) {
+            if (!tools::lobby_join(lobby, session, build, o.net_join, "gamerun", error, o.net_spectate)) {
                 std::fprintf(stderr, "gamerun: can't join %s: %s\n", o.net_join.c_str(), error.c_str());
                 return 1;
             }
@@ -3761,7 +3799,7 @@ int main(int argc_given, char** argv_given) {
             std::optional<net::GameInfo> found;
             while (!found && std::chrono::steady_clock::now() < give_up) {
                 for (const net::GameInfo& g : discovery.poll())
-                    if (g.name == o.net_join && g.taken < g.seats) found = g; // (a game in progress too, a cabinet empty)
+                    if (g.name == o.net_join && (o.net_spectate || g.taken < g.seats)) found = g; // (a game in progress too, a cabinet empty)
                 if (!found) std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
             if (!found) {
@@ -3769,7 +3807,7 @@ int main(int argc_given, char** argv_given) {
                 return 1;
             }
             std::printf("net: found \"%s\" at %s\n", found->name.c_str(), found->host.str().c_str());
-            if (!session.join(*found, "gamerun")) {
+            if (!(o.net_spectate ? session.watch(*found, "gamerun") : session.join(*found, "gamerun"))) {
                 std::fprintf(stderr, "gamerun: can't join: %s\n", session.error().c_str());
                 return 1;
             }
@@ -3790,6 +3828,8 @@ int main(int argc_given, char** argv_given) {
         o.boards = start->seats;
         o.parallel = true;
         o.local_seat = start->my_seat;
+        // (a spectator: the board it watches stands for its own here, never played: Session::local_input takes nothing)
+        if (o.net_spectate) o.local_seat = std::min<uint8_t>(o.net_spectate_seat, static_cast<uint8_t>(start->seats - 1));
         o.clock = start->clock;
         for (std::size_t s = 0; s < start->seats && s < o.board_eeprom.size(); ++s) { // each board from its player's cabinet
             o.board_eeprom[s] = tools::seat_eeprom(*start, s);
@@ -3817,7 +3857,7 @@ int main(int argc_given, char** argv_given) {
         }
         if (o.net_one_board) { // (this machine's board stays; the others are handed over to its module, tasks mode)
             for (std::size_t b = 0; b < start->seats; ++b) {
-                if (b == start->my_seat) continue;
+                if (b == o.local_seat) continue;
                 if (o.one_board < 0) o.one_board = static_cast<int>(b);
                 else o.one_board_also.push_back(b);
             }
@@ -3826,8 +3866,28 @@ int main(int argc_given, char** argv_given) {
             std::printf("net: one board here from frame %llu: the other %u made from their players' inputs\n",
                         static_cast<unsigned long long>(o.net_one_board), start->seats - 1);
         }
-        std::printf("net: playing seat %u of %u (board %u), clock %lld\n", start->my_seat + 1, start->seats,
-                    start->my_seat, static_cast<long long>(start->clock));
+        if (o.net_spectate && o.net_rollback) {
+            std::fprintf(stderr, "gamerun: a spectator runs on inputs all in (no --net-rollback)\n");
+            return 2;
+        }
+        if (o.net_spectate) {
+            // (the board it watches: run whole; with --net-one-board, the others made from their players' buttons and
+            // backups, Session::set_watch_one_board)
+            if (o.net_one_board) {
+                netplay->keeper().set_keep(3); // (its frames behind the backups' (2 s and more): some kept)
+                netplay->session().set_watch_one_board(true);
+            }
+            std::printf("net: watching %u cabinets, clock %lld%s\n", start->seats, static_cast<long long>(start->clock),
+                        o.net_one_board ? (", on one board: seat " + std::to_string(o.local_seat + 1)).c_str() : "");
+            // (its game ended: the host gone, no new one greeting it: the boards waiting for inputs let go)
+            spectate_end = std::jthread([&inputs, &session = netplay->session()](std::stop_token stop) {
+                while (!stop.stop_requested() && !session.room_closed()) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                if (!stop.stop_requested()) inputs.close();
+            });
+        }
+        else
+            std::printf("net: playing seat %u of %u (board %u), clock %lld\n", start->my_seat + 1, start->seats,
+                        start->my_seat, static_cast<long long>(start->clock));
         if (start->state_frame) { // a game joined in progress: every board as the host had them
             auto state = net::decompress(start->state);
             if (!state) {
@@ -3844,7 +3904,7 @@ int main(int argc_given, char** argv_given) {
     // progress and this machine hosts the room then (host migration), the
     // room is listed again under that code, and players joining it let in.
     std::jthread relist;
-    if (netplay && on_lobby && !o.net_join.empty())
+    if (netplay && on_lobby && !o.net_join.empty() && !o.net_spectate)
         relist = std::jthread([&lobby_client, &session = netplay->session(), code = o.net_join](std::stop_token stop) {
             bool listed = false;
             while (!stop.stop_requested()) {

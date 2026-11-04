@@ -20,7 +20,17 @@ constexpr uint8_t kNoSeat = 0xFF;
 // Control messages, on the reliable channel.
 enum Message : uint8_t { kWelcome = 1, kRoster = 2, kStart = 3, kSuspect = 4, kHave = 5, kIdle = 6, kHash = 7, kBye = 8, kCabinet = 9,
                         kState = 10, kWantState = 11, kTake = 12, kTaken = 13, kWantBoard = 14, kBoard = 15, kParting = 16, kBackup = 17,
-                        kWantBackup = 18, kStatus = 19 };
+                        kWantBackup = 18, kStatus = 19,
+                        kWatchWelcome = 20, // (the host to a spectator: its number, the seats, whether the game is on)
+                        kWatchInfo = 21,    // (the host to its spectators: every seat as the host sees it, and their count)
+                        kWatchers = 22,     // (the host to the players: how many watch, and who)
+                        kWatchMode = 23 };  // (a spectator to the host: it runs one board: the players' backups wanted)
+
+// Spectators (docs/netplay.md, "Spectators"): each talks to the room's host only, sending as kWatcherBase + its
+// number; the players never wait for them, nor count them. They take every seat's inputs from the host and run each
+// frame once every seat's are in kWatchLag frames beyond it (about 2 s behind, so a late input never stalls them).
+constexpr uint8_t kWatcherBase = 0x10;
+constexpr auto kWatchInfoEvery = std::chrono::milliseconds(1000);
 
 constexpr std::size_t kFragment = 1000;    // reliable payload a datagram
 constexpr std::size_t kWindow = 256;       // reliable fragments in flight (a save state: some MB)
@@ -250,9 +260,54 @@ struct Session::Impl {
         Clock::time_point direct_heard{}; // (last heard not through our relay)
         bool wants_state = false;         // (the host: it waits for every board's state)
         Session::Status status;           // (as it last said: kStatus)
+        int rtt_floor = -1;               // (its least round trip so far: Cap's guard)
     };
     std::array<Peer, kMaxSeats> peers;
     std::array<Stream, kMaxSeats> streams;
+
+    // ---- Spectators ----
+    // The host: each spectator (none of a seat's: never waited for, never counted by the players).
+    struct Watcher {
+        bool present = false;
+        Address address;
+        std::vector<Address> candidates;
+        bool reached = true;
+        std::string name, country;
+        uint64_t player = 0;
+        Clock::time_point heard{}, inputs_sent{}, info_sent{};
+        Reliable rel;
+        std::array<uint64_t, kMaxSeats> acks{}; // (the next frame of each seat it needs)
+        bool wants_state = false;               // (no inputs until its state has gone: they start after it)
+        bool wants_backups = false;             // (it runs one board: every player's backups to it, kWatchMode)
+        uint32_t their_time = 0;
+        Clock::time_point their_time_at{};
+    };
+    std::array<Watcher, kMaxWatchers> watchers;
+    // A player (not the host): its channel to each spectator on one board, for its own board's backups (the host
+    // sends them on its Watcher channel). Taken from the host's kWatchers list.
+    struct Bulk {
+        bool present = false;
+        uint64_t player = 0;
+        Address address;
+        std::vector<Address> candidates;
+        bool reached = false;
+        Clock::time_point heard{};
+        Reliable rel;
+    };
+    std::array<Bulk, kMaxWatchers> bulk;
+    bool watch_one_board = false; // (a spectator: it runs one board, Session::set_watch_one_board)
+    Clock::time_point watch_punched{};
+    std::size_t watchers_told = 0;    // (the count the players were last told)
+    Clock::time_point watchers_sent{};
+    std::size_t watching_count = 0;   // (a player or a spectator: as the host says)
+    // A spectator: its number (kNoSeat: not one, or not let in yet), the frames run so far (each frame's inputs
+    // given out once every seat's are in kWatchLag beyond it), and every seat as the host sees it.
+    bool watch_mode = false;
+    uint8_t my_watch = kNoSeat;
+    std::optional<uint64_t> watch_next;
+    std::array<Session::SeatView, kMaxSeats> watch_view{};
+    Clock::time_point watch_acked{};
+    uint8_t me() const { return my_watch != kNoSeat ? static_cast<uint8_t>(kWatcherBase + my_watch) : my_seat; }
     StartInfo start_info;
 
     // A cabinet no player has (never taken, or its player dropped): from
@@ -299,6 +354,7 @@ struct Session::Impl {
     std::map<std::pair<uint64_t, uint8_t>, uint64_t> their_hashes;
 
     Impl(Session& s, Callbacks c, uint64_t b) : owner(s), cb(std::move(c)), build(b) {}
+    Session::SeatView view(uint8_t s) const; // (a seat for the overlay, as this machine sees it)
 
     uint32_t now_ms() const {
         return static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - epoch).count());
@@ -318,7 +374,7 @@ struct Session::Impl {
         return [this](const Address& a, std::span<const uint8_t> d) { socket.send_to(a, d); };
     }
     // To a peer: where it answered from, or (not yet) everywhere it may be.
-    void send_peer(const Peer& p, const Writer& w) {
+    template <class P> void send_peer(const P& p, const Writer& w) {
         if (p.reached) return send(p.address, w);
         send(p.address, w);
         for (const Address& a : p.candidates)
@@ -334,14 +390,50 @@ struct Session::Impl {
             if (s != except && s != my_seat && peers[s].present && peers[s].connected) send_reliable(s, message);
     }
 
-    void pump_reliable(uint8_t seat, Peer& p) {
+    // Spectator traffic's speed (the owner's rules, 2026-11-04): never before the players' own, held to a rate shared by
+    // every spectator this machine sends to (its uplink is one), which grows while the players' round trips stay as
+    // they were and halves, pausing a second, as soon as one rises (a full uplink delays the inputs first). The same
+    // for the host's channel to each spectator (its every-board state too) and a player's backups to one.
+    struct Cap {
+        double rate = 256e3, tokens = 0; // bytes a second; bytes allowed now
+        Clock::time_point at{}, paused_until{}, changed{};
+    };
+    Cap spectator_cap;
+    static constexpr double kCapMin = 16e3, kCapMax = 4e6;
+    bool cap_take(Cap& c, std::size_t bytes, Clock::time_point now) {
+        if (now < c.paused_until) return false;
+        if (c.at != Clock::time_point{})
+            c.tokens = std::min(c.rate * 0.1, c.tokens + c.rate * std::chrono::duration<double>(now - c.at).count());
+        c.at = now;
+        if (c.tokens < static_cast<double>(bytes)) return false;
+        c.tokens -= static_cast<double>(bytes);
+        return true;
+    }
+    // (each turn: a player's round trip above its least so far by 40 ms: the uplink is filling)
+    void guard_spectator_cap(Clock::time_point now) {
+        bool rising = false;
+        for (uint8_t s = 0; s < seats && s < kMaxSeats; ++s) {
+            Peer& p = peers[s];
+            if (s == my_seat || !p.present || p.dropped || p.rtt < 0) continue;
+            p.rtt_floor = p.rtt_floor < 0 ? p.rtt : std::min(p.rtt_floor, p.rtt);
+            if (p.rtt > p.rtt_floor + 40) rising = true;
+        }
+        Cap& c = spectator_cap;
+        if (rising && now - c.changed > std::chrono::seconds(1)) {
+            c.rate = std::max(kCapMin, c.rate / 2), c.paused_until = now + std::chrono::seconds(1), c.changed = now, c.tokens = 0;
+        } else if (!rising && now - c.changed > std::chrono::seconds(1)) {
+            c.rate = std::min(kCapMax, c.rate * 1.25), c.changed = now;
+        }
+    }
+    template <class P> void pump_reliable(uint8_t seat, P& p, Cap* cap = nullptr) {
         const auto now = Clock::now();
         bool sent_any = false;
         std::size_t n = 0;
         for (auto& f : p.rel.out) {
             if (n++ >= kWindow) break;
             if (f.ever_sent && now - f.sent < kResend) continue;
-            Writer w = header(kReliable, session, my_seat);
+            if (cap && !cap_take(*cap, f.data.size() + 32, now)) break; // (spectator traffic: its share only)
+            Writer w = header(kReliable, session, me());
             w.u32(p.rel.rx_next), w.u8(1), w.u32(f.seq), w.u8(f.flags);
             w.out.insert(w.out.end(), f.data.begin(), f.data.end());
             send_peer(p, w);
@@ -349,7 +441,7 @@ struct Session::Impl {
             sent_any = true;
         }
         if (p.rel.ack_due && !sent_any) {
-            Writer w = header(kReliable, session, my_seat);
+            Writer w = header(kReliable, session, me());
             w.u32(p.rel.rx_next), w.u8(0);
             send_peer(p, w);
         }
@@ -409,6 +501,336 @@ struct Session::Impl {
         uint64_t f = std::min<uint64_t>(end, st.first + set_at.size());
         while (f > st.first && set_at[static_cast<std::size_t>(f - 1 - st.first)] > due) --f;
         return f;
+    }
+
+    // The host to a spectator: every seat's frames it hasn't acknowledged (as far as the host has them: each seat's
+    // are only those every player has had, since the host's own go out as they're set).
+    void send_watch_inputs(Watcher& v) {
+        Writer w = header(kInput, session, my_seat);
+        const auto now = Clock::now();
+        const uint32_t held = v.their_time_at == Clock::time_point{} ? 0 :
+            static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now - v.their_time_at).count());
+        w.u32(now_ms()), w.u32(v.their_time), w.u16(static_cast<uint16_t>(std::min<uint32_t>(held, 65535)));
+        w.u8(seats);
+        for (uint8_t s = 0; s < seats; ++s) w.u64(watch_end(s));
+        const std::size_t count_at = w.out.size();
+        w.u8(0);
+        uint8_t chunks = 0;
+        if (!v.wants_state)
+            for (uint8_t s = 0; s < seats; ++s) {
+                const Stream& st = streams[s];
+                if (!st.known) continue;
+                const uint64_t from = std::max(v.acks[s], st.first), end = watch_end(s);
+                if (from >= end) continue;
+                const uint64_t n = std::min<uint64_t>(end - from, kChunkFrames);
+                w.u8(s), w.u64(from), w.u8(static_cast<uint8_t>(n));
+                for (uint64_t f = from; f < from + n; ++f)
+                    w.out.insert(w.out.end(), st.frames[static_cast<std::size_t>(f - st.first)].begin(),
+                                 st.frames[static_cast<std::size_t>(f - st.first)].end());
+                ++chunks;
+            }
+        w.out[count_at] = chunks;
+        send_peer(v, w);
+        v.inputs_sent = now;
+    }
+    uint64_t watch_end(uint8_t s) const { return s == my_seat ? held_back(streams[s].next()) : streams[s].next(); }
+    bool watch_pending(const Watcher& v) const {
+        if (v.wants_state) return false;
+        for (uint8_t s = 0; s < seats; ++s)
+            if (streams[s].known && std::max(v.acks[s], streams[s].first) < watch_end(s)) return true;
+        return false;
+    }
+    std::size_t watcher_count() const {
+        return static_cast<std::size_t>(std::count_if(watchers.begin(), watchers.end(), [](const Watcher& v) { return v.present; }));
+    }
+    // Every seat as the host sees it (its own a player's), and how many watch: for the spectators' overlay.
+    std::vector<uint8_t> watch_info() const {
+        Writer w;
+        w.u8(kWatchInfo), w.u8(seats), w.u8(static_cast<uint8_t>(watcher_count()));
+        for (uint8_t s = 0; s < seats; ++s) {
+            Session::SeatView v = view(s);
+            if (v.state == Session::SeatView::State::me) v.state = Session::SeatView::State::playing, v.round_trip = 0;
+            w.u8(static_cast<uint8_t>(v.state)), w.str(v.name), w.str(v.country), w.u16(static_cast<uint16_t>(v.round_trip + 1));
+            w.u8(v.left ? 1 : 0), w.u8(static_cast<uint8_t>(v.status.platform)), w.u8(static_cast<uint8_t>(v.status.boards));
+            w.u8(static_cast<uint8_t>(v.status.net)), w.u16(static_cast<uint16_t>(v.status.delay)), w.u8(v.status.auto_delay ? 1 : 0);
+            // (where each other player may be reached: a spectator on one board takes their backups straight from them)
+            std::vector<Address> where;
+            if (s != my_seat && peers[s].present && !peers[s].dropped) {
+                where.push_back(Address{peers[s].address.ip, peers[s].address.port});
+                for (const Address& a : peers[s].candidates)
+                    if (!a.same_place(where.front())) where.push_back(a);
+            }
+            put_addresses(w, where);
+        }
+        return w.out;
+    }
+    void on_watch_info(Reader& r) {
+        const uint8_t n = r.u8();
+        const uint8_t count = r.u8();
+        std::array<Session::SeatView, kMaxSeats> out{};
+        for (uint8_t s = 0; s < n && r.ok(); ++s) {
+            Session::SeatView v;
+            v.state = static_cast<Session::SeatView::State>(std::min<uint8_t>(r.u8(), 5));
+            v.name = r.str(), v.country = r.str();
+            v.round_trip = static_cast<int>(r.u16()) - 1;
+            v.left = r.u8() != 0;
+            v.status.platform = static_cast<Session::Status::Platform>(std::min<uint8_t>(r.u8(), 4));
+            v.status.boards = static_cast<Session::Status::Boards>(std::min<uint8_t>(r.u8(), 2));
+            v.status.net = static_cast<Session::Status::Net>(std::min<uint8_t>(r.u8(), 2));
+            v.status.delay = static_cast<int16_t>(r.u16());
+            v.status.auto_delay = r.u8() != 0;
+            std::vector<Address> where = get_addresses(r);
+            if (s < kMaxSeats) out[s] = v;
+            // (a player other than the host: reachable for its backups, our router opened to it: watch_punch)
+            if (r.ok() && s < kMaxSeats && s != host_seat && !where.empty()) {
+                Peer& p = peers[s];
+                if (!p.present || !p.reached) p.present = true, p.address = where.front();
+                p.candidates = std::move(where);
+                for (const Address& a : p.candidates) permit(a);
+            }
+        }
+        if (r.ok()) watch_view = out, watching_count = count;
+    }
+    // A spectator on one board: datagrams to every player now and then (our router opened to their backups), and
+    // their channels' acknowledgements (the backups' wants, Session::want_backup, on them too).
+    void watch_punch(Clock::time_point now) {
+        for (uint8_t s = 0; s < seats && s < kMaxSeats; ++s) {
+            Peer& p = peers[s];
+            if (s == host_seat || !p.present) continue;
+            if (now - watch_punched > std::chrono::milliseconds(500)) {
+                const Writer w = header(kPunch, session, me());
+                send_peer(p, w);
+            }
+            pump_reliable(s, p);
+        }
+        if (now - watch_punched > std::chrono::milliseconds(500)) watch_punched = now;
+    }
+
+    // A spectator: each frame's inputs given out (Callbacks::input, every seat) once every seat's are in kWatchLag
+    // frames beyond it.
+    void deliver_watched(bool all = false) {
+        if (!started || seats == 0) return;
+        uint64_t first = 0, end = UINT64_MAX;
+        for (uint8_t s = 0; s < seats; ++s) {
+            if (!streams[s].known) return;
+            first = std::max(first, streams[s].first);
+            end = std::min(end, streams[s].next());
+        }
+        if (!watch_next) watch_next = first;
+        while (*watch_next + (all ? 0 : kWatchLag) < end) {
+            const uint64_t f = (*watch_next)++;
+            for (uint8_t s = 0; s < seats; ++s)
+                if (cb.input && f >= streams[s].first) cb.input(s, f, streams[s].frames[static_cast<std::size_t>(f - streams[s].first)]);
+        }
+    }
+    // A spectator to the host: how far it has each seat (the host sends on from there), and its time (round trips).
+    void send_watch_acks() {
+        Peer& h = peers[host_seat];
+        Writer w = header(kInput, session, me());
+        const auto now = Clock::now();
+        const uint32_t held = h.their_time_at == Clock::time_point{} ? 0 :
+            static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now - h.their_time_at).count());
+        w.u32(now_ms()), w.u32(h.their_time), w.u16(static_cast<uint16_t>(std::min<uint32_t>(held, 65535)));
+        w.u8(seats);
+        for (uint8_t s = 0; s < seats; ++s) w.u64(streams[s].next());
+        w.u8(0);
+        send_peer(h, w);
+        watch_acked = now;
+    }
+
+    // The host: a datagram from a spectator.
+    void on_watcher(uint8_t id, const UdpSocket::Datagram& d, Reader& r, uint8_t type) {
+        Watcher& v = watchers[id];
+        if (!v.present) return;
+        v.address = d.from, v.heard = Clock::now(), v.reached = true;
+        if (type == kReliable) {
+            const uint32_t ack = r.u32();
+            const uint8_t has = r.u8();
+            if (!r.ok()) return;
+            v.rel.acked(ack);
+            if (!has) return;
+            const uint32_t seq = r.u32();
+            const uint8_t flags = r.u8();
+            if (!r.ok()) return;
+            std::vector<uint8_t> data(r.here(), r.here() + r.left());
+            for (auto& m : v.rel.receive(seq, flags, std::move(data))) {
+                if (m.empty()) continue;
+                if (m[0] == kBye) {
+                    log(v.name + " stopped watching");
+                    v = Watcher{};
+                    return;
+                }
+                if (m[0] == kWatchMode && m.size() >= 2) { // (it runs one board, or every board again)
+                    if (v.wants_backups != (m[1] != 0))
+                        log(v.name + (m[1] ? " watches on one board: the backups to it" : " watches on every board again"));
+                    v.wants_backups = m[1] != 0;
+                    watchers_sent = Clock::time_point{}; // (the players told at once)
+                }
+                if (m[0] == kWantBackup && cb.backup_wanted) cb.backup_wanted(static_cast<uint8_t>(kWatcherBase + id));
+            }
+        } else if (type == kInput) {
+            v.their_time = r.u32(), v.their_time_at = Clock::now();
+            r.u32(), r.u16();
+            const uint8_t n = r.u8();
+            for (uint8_t s = 0; s < n && s < kMaxSeats && r.ok(); ++s) {
+                const uint64_t next = r.u64();
+                if (r.ok()) v.acks[s] = v.acks[s] == UINT64_MAX ? next : std::max(v.acks[s], next); // (MAX: taken over, not heard yet)
+            }
+        }
+    }
+    // The host: a spectator asks to watch.
+    void on_watch_join(const Address& from, const uint64_t player, const std::string& name, std::vector<Address> where,
+                       const std::string& country) {
+        for (Watcher& v : watchers)
+            if (v.present && v.player == player) return; // (already in: our welcome is on its way)
+        uint8_t id = kNoSeat;
+        for (uint8_t i = 0; i < kMaxWatchers && id == kNoSeat; ++i)
+            if (!watchers[i].present) id = i;
+        if (id == kNoSeat) {
+            Writer w = header(kRefuse, session, my_seat);
+            w.str(std::to_string(kMaxWatchers) + " are watching already");
+            send(from, w);
+            return;
+        }
+        Watcher& v = watchers[id];
+        v = Watcher{};
+        v.present = true, v.address = from, v.candidates = std::move(where), v.name = name, v.country = country, v.player = player;
+        v.heard = Clock::now();
+        permit(from);
+        for (const Address& a : v.candidates) permit(a);
+        log(name + " is watching" + (started ? " (the game in progress)" : ""));
+        Writer w;
+        w.u8(kWatchWelcome), w.u8(id), w.u8(seats), w.u8(started ? 1 : 0);
+        v.rel.queue(w.out);
+        if (started) { // the start as it was, then every board as it is now (Callbacks::state_wanted)
+            v.rel.queue(start_message(start_info));
+            v.wants_state = true;
+            if (cb.state_wanted) cb.state_wanted();
+        }
+    }
+    // The host, each turn of the loop: the spectators' inputs, overlay and reliable messages; one gone quiet let go;
+    // the players told how many watch.
+    void serve_watchers(Clock::time_point now) {
+        for (Watcher& v : watchers) {
+            if (!v.present) continue;
+            if (now - v.heard > kDropAfter) {
+                log(v.name + " stopped watching (not answering)");
+                v = Watcher{};
+                continue;
+            }
+            if (started && ((watch_pending(v) && now - v.inputs_sent >= kInputResend) || now - v.inputs_sent >= kKeepAlive))
+                send_watch_inputs(v);
+            if (now - v.info_sent >= kWatchInfoEvery) {
+                v.rel.queue(watch_info());
+                v.info_sent = now;
+            }
+        }
+        pump_spectators(now);
+        const std::size_t n = watcher_count();
+        if (n != watchers_told || now - watchers_sent > std::chrono::seconds(2)) {
+            // (the count for the overlay, and each spectator: whoever hosts the room next takes them over)
+            Writer w;
+            w.u8(kWatchers), w.u8(static_cast<uint8_t>(n));
+            for (uint8_t i = 0; i < kMaxWatchers; ++i) {
+                const Watcher& v = watchers[i];
+                if (!v.present) continue;
+                w.u8(i), w.u64(v.player), w.str(v.name), w.str(v.country);
+                std::vector<Address> where{Address{v.address.ip, v.address.port}};
+                for (const Address& a : v.candidates)
+                    if (!a.same_place(where.front())) where.push_back(a);
+                put_addresses(w, where);
+                w.u8(v.wants_backups ? 1 : 0);
+            }
+            send_all(w.out);
+            watchers_told = n, watchers_sent = now, watching_count = n;
+        }
+    }
+    // Every channel to a spectator, after the players' own (the run loop's last), within spectator_cap: the host's to
+    // each spectator, a player's backups to each on one board.
+    void pump_spectators(Clock::time_point now) {
+        guard_spectator_cap(now);
+        if (is_host)
+            for (Watcher& v : watchers)
+                if (v.present) pump_reliable(0, v, &spectator_cap);
+        if (!is_host)
+            for (Bulk& b : bulk)
+                if (b.present) pump_reliable(0, b, &spectator_cap);
+    }
+    // A player: the host's spectators as it last told them (taken over if this machine comes to host the room).
+    struct KnownWatcher {
+        uint8_t id = 0;
+        uint64_t player = 0;
+        std::string name, country;
+        std::vector<Address> where;
+        bool wants_backups = false;
+    };
+    std::vector<KnownWatcher> known_watchers;
+    void on_watchers(Reader& r) {
+        const uint8_t n = r.u8();
+        std::vector<KnownWatcher> list;
+        for (uint8_t k = 0; k < n && r.ok(); ++k) {
+            KnownWatcher v;
+            v.id = r.u8(), v.player = r.u64(), v.name = r.str(), v.country = r.str();
+            v.where = get_addresses(r);
+            v.wants_backups = r.u8() != 0;
+            if (r.ok() && v.id < kMaxWatchers) list.push_back(std::move(v));
+        }
+        if (!r.ok()) return;
+        watching_count = n;
+        known_watchers = std::move(list);
+        // (a channel to each spectator on one board, kept while it's the same one; the others let go)
+        for (uint8_t i = 0; i < kMaxWatchers; ++i) {
+            const auto it = std::find_if(known_watchers.begin(), known_watchers.end(),
+                                         [&](const KnownWatcher& v) { return v.id == i && v.wants_backups; });
+            Bulk& b = bulk[i];
+            if (it == known_watchers.end()) {
+                b = Bulk{};
+                continue;
+            }
+            if (b.present && b.player == it->player) continue;
+            b = Bulk{};
+            b.present = true, b.player = it->player, b.candidates = it->where, b.heard = Clock::now();
+            b.address = it->where.empty() ? Address{} : it->where.front();
+            for (const Address& a : it->where) permit(a);
+        }
+    }
+    // A player (not the host): a datagram from a spectator on one board (its acknowledgements, a whole backup asked for).
+    void on_bulk(uint8_t id, const UdpSocket::Datagram& d, Reader& r, uint8_t type) {
+        Bulk& b = bulk[id];
+        if (!b.present) return;
+        b.address = d.from, b.reached = true, b.heard = Clock::now();
+        if (type != kReliable) return;
+        const uint32_t ack = r.u32();
+        const uint8_t has = r.u8();
+        if (!r.ok()) return;
+        b.rel.acked(ack);
+        if (!has) return;
+        const uint32_t seq = r.u32();
+        const uint8_t flags = r.u8();
+        if (!r.ok()) return;
+        std::vector<uint8_t> data(r.here(), r.here() + r.left());
+        for (auto& m : b.rel.receive(seq, flags, std::move(data)))
+            if (!m.empty() && m[0] == kWantBackup && cb.backup_wanted) cb.backup_wanted(static_cast<uint8_t>(kWatcherBase + id));
+    }
+    // This machine hosts the room now (the host left a game in progress): its spectators are ours, greeted again
+    // (they run on from where they are: inputs from their next acknowledgement).
+    void adopt_watchers() {
+        for (const KnownWatcher& k : known_watchers) {
+            Watcher& v = watchers[k.id];
+            v = Watcher{};
+            v.present = true, v.player = k.player, v.name = k.name, v.country = k.country;
+            v.address = k.where.empty() ? Address{} : k.where.front();
+            v.candidates = k.where;
+            v.reached = false; // (to every address it may be at, until it answers)
+            v.heard = Clock::now();
+            v.acks.fill(UINT64_MAX); // (nothing sent until it says how far it is)
+            for (const Address& a : k.where) permit(a);
+            Writer w;
+            w.u8(kWatchWelcome), w.u8(k.id), w.u8(seats), w.u8(1);
+            v.rel.queue(w.out);
+            log(k.name + " goes on watching, through this machine");
+        }
+        known_watchers.clear();
     }
 
     static void put_addresses(Writer& w, const std::vector<Address>& list) {
@@ -482,7 +904,15 @@ struct Session::Impl {
             }
             return;
         }
+        if (from >= kWatcherBase && from < kWatcherBase + kMaxWatchers) { // (a spectator's: the host's, or a backup channel's)
+            if (sess != session) return;
+            if (is_host) on_watcher(static_cast<uint8_t>(from - kWatcherBase), d, r, type);
+            else on_bulk(static_cast<uint8_t>(from - kWatcherBase), d, r, type);
+            return;
+        }
         if (sess != session || from >= kMaxSeats || from == my_seat) return;
+        // A spectator hears only from the room's host: the first, or one that greets it later (host migration).
+        if (watch_mode && from != host_seat && !(type == kReliable && my_watch != kNoSeat)) return;
         Peer& p = peers[from];
         // A player dropped: what still comes is ignored (first: the host's
         // last goodbyes, coming after it was dropped, would otherwise bring it
@@ -502,7 +932,7 @@ struct Session::Impl {
         if (!p.reached || !d.from.relayed || now - p.direct_heard > std::chrono::seconds(1)) p.address = d.from;
         if (!d.from.relayed) p.direct_heard = now;
         p.reached = true;
-        if (!said_bye[from]) p.heard = now; // (after a goodbye, what still comes isn't a sign of life: dropped at once)
+        if (!said_bye[from] && !(watch_mode && from != host_seat)) p.heard = now; // (after a goodbye, what still comes isn't a sign of life: dropped at once)
         p.connected = true;
         if (type == kReliable) on_reliable(from, p, r);
         else if (type == kInput) on_inputs(from, p, r);
@@ -518,6 +948,7 @@ struct Session::Impl {
         const std::string name = r.str();
         std::vector<Address> where = get_addresses(r);
         if (!r.ok()) return;
+        const bool watch = r.left() > 0 && r.u8() == 1;
         // (its country: as the lobby said, by where it is (from here, or an address it gives); none on a LAN)
         std::string country;
         for (const CountrySaid& c : countries_said)
@@ -527,6 +958,7 @@ struct Session::Impl {
         for (uint8_t s = 0; s < seats; ++s)
             if (s != my_seat && peers[s].present && peers[s].player == player) return; // (already in: our welcome is on its way)
         if (their_build != build) return refuse("a different game or build");
+        if (watch) return on_watch_join(from, player, name, std::move(where), country);
         uint8_t seat = kNoSeat; // (a game in progress: a cabinet no player has)
         for (uint8_t s = 0; s < seats && seat == kNoSeat; ++s) // (the old host's too, once the room has moved on)
             if (s != my_seat && !peers[s].present && (!started || (cabinets[s].open && !cabinets[s].until))) seat = s;
@@ -644,6 +1076,29 @@ struct Session::Impl {
                 send_reliable(host_seat, c.out);
             }
             break;
+        case kWatchWelcome: // (a spectator let in; or greeted by the room's new host, the old one gone)
+            if (watch_mode && !is_host) {
+                const uint8_t id = r.u8(), n = r.u8();
+                const bool on = r.u8() != 0;
+                if (!r.ok() || id >= kMaxWatchers) break;
+                if (my_watch == kNoSeat) {
+                    my_watch = id, seats = n, late = on, host_seat = from;
+                    log("watching " + game_name + (on ? " (the game in progress)" : ""));
+                } else if (from != host_seat) {
+                    log("the host left: watching through " + (peers[from].name.empty() ? "seat " + std::to_string(from + 1) : peers[from].name));
+                    peers[host_seat] = Peer{};
+                    host_seat = from, my_watch = id;
+                }
+                peers[from].present = peers[from].connected = true;
+                watch_acked = Clock::time_point{}; // (how far we are, at once)
+            }
+            break;
+        case kWatchInfo:
+            if (watch_mode && from == host_seat) on_watch_info(r);
+            break;
+        case kWatchers:
+            if (!watch_mode && from == host_seat) on_watchers(r);
+            break;
         case kRoster: // (a game in progress too: a player joining)
             if (from == host_seat && !is_host) {
                 const uint8_t n = r.u8();
@@ -685,6 +1140,8 @@ struct Session::Impl {
                 if (!r.ok()) break;
                 info.my_seat = my_seat;
                 seats = info.seats;
+                for (uint8_t s = 0; s < seats && s < kMaxSeats; ++s) // (a spectator has no roster: the names from here)
+                    if (peers[s].name.empty()) peers[s].name = info.names[s];
                 const auto now = Clock::now();
                 for (uint8_t s = 0; s < seats; ++s)
                     if (s != my_seat && peers[s].present) peers[s].connected = true, peers[s].heard = now;
@@ -818,7 +1275,9 @@ struct Session::Impl {
             }
             break;
         case kBye:
-            peers[from].heard = Clock::time_point{}; // (as if silent for long: dropped next)
+            // (as if silent for long: dropped next; a spectator waits from now for a new host to greet it)
+            peers[from].heard = watch_mode ? Clock::now() : Clock::time_point{};
+            if (watch_mode && from == host_seat) deliver_watched(true); // (every frame complete so far: nothing more may come)
             said_bye[from] = true;
             log(peers[from].name + " left");
             if (!started && !is_host && from == host_seat && !room_closed) { // (before the start: the room goes with it)
@@ -846,6 +1305,17 @@ struct Session::Impl {
             if (!r.ok() || s >= seats || count * 4u > r.left()) return;
             const uint8_t* data = r.here();
             r.skip(count * 4u);
+            if (watch_mode) { // (a spectator: kept, given out kWatchLag frames later: deliver_watched)
+                Stream& st = streams[s];
+                if (!st.known) st.known = true, st.first = first;
+                for (uint8_t k = 0; k < count; ++k)
+                    if (first + k == st.next()) {
+                        InputBytes in;
+                        std::memcpy(in.data(), data + 4 * k, 4);
+                        st.frames.push_back(in);
+                    }
+                continue;
+            }
             // Our own: only a cabinet taken in progress, its frames before it was ours (none).
             if (s == my_seat && !late) continue;
             if (s == from && drops[s].suspected) continue; // (frozen while its drop is settled)
@@ -862,6 +1332,7 @@ struct Session::Impl {
             }
             if (s == my_seat) flush_pending();
         }
+        if (watch_mode) return deliver_watched();
         fill_open_to_mine(); // (a new authority's, catching up)
         // Anything new to pass on goes out soon; our acks too.
         for (uint8_t s = 0; s < kMaxSeats; ++s)
@@ -897,6 +1368,7 @@ struct Session::Impl {
             if (host_seat == my_seat) {
                 is_host = true;
                 targets_asked = Clock::time_point{}; // (the networks to announce it on, at once)
+                adopt_watchers();
                 log("the host left: this machine hosts the room now (port " + std::to_string(socket.port()) + ")");
             } else {
                 log("the host left: " + (peers[host_seat].name.empty() ? "seat " + std::to_string(host_seat + 1) : peers[host_seat].name) +
@@ -1022,11 +1494,12 @@ struct Session::Impl {
             while (auto d = socket.receive()) ++datagrams_in, received(*d);
             const auto now = Clock::now();
             if (is_host && now - last_beacon > kBeaconEvery) beacon(now);
-            if (joining && my_seat == kNoSeat && !leaving && now - last_join > kJoinRetry) {
+            if (joining && my_seat == kNoSeat && my_watch == kNoSeat && !leaving && now - last_join > kJoinRetry) {
                 last_join = now; // (to every address the host may be at: the first to answer is where it is)
                 Writer w = header(kJoin, session, kNoSeat);
                 w.u64(build), w.u64(player_id()), w.str(my_name);
                 put_addresses(w, my_candidates());
+                w.u8(watch_mode ? 1 : 0);
                 send(host_address, w);
                 for (const Address& a : host_candidates)
                     if (!a.same_place(host_address)) send(a, w);
@@ -1046,6 +1519,22 @@ struct Session::Impl {
                 socket.send_to(*stun_server, stun::binding_request(stun_id));
             }
             if (turn) turn->tick(turn_send());
+            if (watch_mode) { // (a spectator: the host only; gone quiet, or gone and no new host greeting us: it ends)
+                if (my_watch != kNoSeat && !leaving) {
+                    Peer& h = peers[host_seat];
+                    if (now - watch_acked >= std::chrono::milliseconds(50)) send_watch_acks();
+                    pump_reliable(host_seat, h);
+                    if (watch_one_board) watch_punch(now);
+                    if (!room_closed && now - h.heard > kDropAfter + std::chrono::seconds(7)) {
+                        room_closed = true;
+                        log("the host isn't answering: watching ended");
+                    }
+                } else if (leaving && my_watch != kNoSeat) {
+                    pump_reliable(host_seat, peers[host_seat]);
+                }
+                continue;
+            }
+            if (is_host && !leaving) serve_watchers(now);
             if (started && !leaving) check_drops();
             if (my_seat != kNoSeat && !leaving && my_status != Session::Status{} && now - status_sent > kStatusEvery) send_status();
             if (take_wanted && !mine_from && !leaving && (authority() != take_asked || now - take_sent > kTakeRetry))
@@ -1073,6 +1562,7 @@ struct Session::Impl {
                 else if (now - p.inputs_sent >= kKeepAlive) send_inputs(s, p);
                 pump_reliable(s, p);
             }
+            if (!is_host && !leaving) pump_spectators(now); // (a player's backups to spectators on one board: last)
             if (!is_host && !started && my_seat == kNoSeat && leaving) break;
         }
     }
@@ -1098,6 +1588,7 @@ struct Session::Impl {
         uint8_t taken = 1; // (ours, and the players present)
         for (uint8_t s = 0; s < seats; ++s) taken = static_cast<uint8_t>(taken + (s != my_seat && peers[s].present ? 1 : 0));
         w.u64(build), w.str(game_name), w.u8(seats), w.u8(taken), w.u8(started ? 1 : 0), w.u16(socket.port());
+        w.u8(static_cast<uint8_t>(watcher_count()));
         for (const Address& a : beacon_targets) send(a, w);
     }
 
@@ -1133,6 +1624,7 @@ std::vector<GameInfo> Discovery::poll() {
         g.seats = r.u8(), g.taken = r.u8(), g.started = r.u8() != 0;
         const uint16_t port = r.u16();
         if (!r.ok()) continue;
+        g.watchers = r.left() ? r.u8() : 0;
         g.host = {d->from.ip, port};
         // The same game heard on several networks (this machine's loopback
         // and its LAN): keep one address, preferring loopback.
@@ -1289,6 +1781,8 @@ void Session::start(StartInfo info) {
     m.start_info = info;
     m.send_all(m.roster_message());
     m.send_all(m.start_message(info));
+    for (Impl::Watcher& v : m.watchers) // (spectators in the room before the start: from power-on with the players)
+        if (v.present) v.rel.queue(m.start_message(info));
     m.begin(info);
 }
 
@@ -1321,6 +1815,14 @@ void Session::send_state(uint64_t frame, std::vector<uint8_t> state) {
         m.send_reliable(s, w.out);
         m.log("every board's state (frame " + std::to_string(frame) + ", " + std::to_string(state.size() / 1024) + " KB) to " +
               (p.name.empty() ? "seat " + std::to_string(s + 1) : p.name));
+    }
+    for (Impl::Watcher& v : m.watchers) { // (a spectator: its inputs from the frame after it)
+        if (!v.present || !v.wants_state) continue;
+        v.wants_state = false;
+        v.acks.fill(frame + 1);
+        v.rel.queue(w.out);
+        m.log("every board's state (frame " + std::to_string(frame) + ", " + std::to_string(state.size() / 1024) + " KB) to " +
+              v.name + ", watching");
     }
 }
 
@@ -1361,9 +1863,15 @@ void Session::send_board(uint8_t seat, uint64_t frame, std::vector<uint8_t> stat
 void Session::send_backup(uint8_t seat, uint64_t frame, std::vector<uint8_t> backup) {
     Impl& m = *impl_;
     std::lock_guard guard(m.lock);
-    if (seat >= kMaxSeats || seat == m.my_seat || !m.peers[seat].present || m.peers[seat].dropped) return;
     Writer w;
     w.u8(kBackup), w.u64(frame), w.bytes(backup);
+    if (seat >= kWatcherBase && seat < kWatcherBase + kMaxWatchers) { // (a spectator on one board: its channel, capped)
+        const uint8_t id = static_cast<uint8_t>(seat - kWatcherBase);
+        if (m.is_host && m.watchers[id].present) m.watchers[id].rel.queue(w.out);
+        else if (!m.is_host && m.bulk[id].present) m.bulk[id].rel.queue(w.out);
+        return;
+    }
+    if (seat >= kMaxSeats || seat == m.my_seat || !m.peers[seat].present || m.peers[seat].dropped) return;
     m.send_reliable(seat, w.out);
 }
 
@@ -1429,6 +1937,7 @@ void Session::report_hash(uint64_t frame, uint64_t hash) {
             ++it;
         }
     }
+    if (m.watch_mode) return; // (a spectator's boards are its own business: nobody waits on them)
     Writer w;
     w.u8(kHash), w.u64(frame), w.u64(hash);
     m.send_all(w.out);
@@ -1449,6 +1958,15 @@ void Session::leave() {
                     for (auto& f : m.peers[s].rel.out) f.ever_sent = false;
                     m.pump_reliable(s, m.peers[s]);
                 }
+        if (m.is_host) // (the spectators: theirs too; with a game in progress they wait for the room's next host)
+            for (Impl::Watcher& v : m.watchers) {
+                if (!v.present) continue;
+                v.rel.queue(w.out);
+                for (int k = 0; k < 3; ++k) {
+                    for (auto& f : v.rel.out) f.ever_sent = false;
+                    m.pump_reliable(0, v);
+                }
+            }
     }
 }
 
@@ -1542,28 +2060,70 @@ std::array<int, kMaxSeats> Session::round_trips() const {
     return out;
 }
 
+Session::SeatView Session::Impl::view(uint8_t s) const {
+    SeatView v;
+    using State = SeatView::State;
+    const auto& p = peers[s];
+    const auto& cab = cabinets[s];
+    if (s == my_seat) {
+        v.state = State::me, v.name = my_name, v.country = my_country, v.status = my_status;
+    } else if (p.present && !p.dropped) {
+        v.name = p.name, v.country = p.country, v.round_trip = p.rtt, v.status = p.status;
+        v.state = cab.open && !cab.until ? State::joining : State::playing;
+    } else if (!gone_name[s].empty() || said_bye[s]) {
+        v.state = State::gone, v.name = gone_name[s], v.country = gone_country[s], v.left = said_bye[s];
+    } else {
+        v.state = State::open;
+        if (s < start_info.names.size() && !cab.open) v.name = start_info.names[s]; // (before the drop is known)
+    }
+    return v;
+}
+
 std::array<Session::SeatView, kMaxSeats> Session::seats() const {
     const Impl& m = *impl_;
     std::lock_guard guard(m.lock);
+    if (m.watch_mode) return m.watch_view; // (a spectator: as the host sees them)
     std::array<SeatView, kMaxSeats> out{};
-    using State = SeatView::State;
-    for (uint8_t s = 0; s < m.seats && s < kMaxSeats; ++s) {
-        SeatView& v = out[s];
-        const auto& p = m.peers[s];
-        const auto& cab = m.cabinets[s];
-        if (s == m.my_seat) {
-            v.state = State::me, v.name = m.my_name, v.country = m.my_country, v.status = m.my_status;
-        } else if (p.present && !p.dropped) {
-            v.name = p.name, v.country = p.country, v.round_trip = p.rtt, v.status = p.status;
-            v.state = cab.open && !cab.until ? State::joining : State::playing;
-        } else if (!m.gone_name[s].empty() || m.said_bye[s]) {
-            v.state = State::gone, v.name = m.gone_name[s], v.country = m.gone_country[s], v.left = m.said_bye[s];
-        } else {
-            v.state = State::open;
-            if (s < m.start_info.names.size() && !cab.open) v.name = m.start_info.names[s]; // (before the drop is known)
-        }
-    }
+    for (uint8_t s = 0; s < m.seats && s < kMaxSeats; ++s) out[s] = m.view(s);
     return out;
+}
+
+std::size_t Session::watching() const {
+    std::lock_guard guard(impl_->lock);
+    return impl_->is_host ? impl_->watcher_count() : impl_->watching_count;
+}
+
+void Session::set_watch_one_board(bool one) {
+    Impl& m = *impl_;
+    std::lock_guard guard(m.lock);
+    if (!m.watch_mode || m.watch_one_board == one || m.my_watch == kNoSeat) return;
+    m.watch_one_board = one;
+    Writer w;
+    w.u8(kWatchMode), w.u8(one ? 1 : 0);
+    m.send_reliable(m.host_seat, w.out);
+}
+
+std::vector<uint8_t> Session::backup_watchers() const {
+    const Impl& m = *impl_;
+    std::lock_guard guard(m.lock);
+    std::vector<uint8_t> out;
+    for (uint8_t i = 0; i < kMaxWatchers; ++i)
+        if (m.is_host ? m.watchers[i].present && m.watchers[i].wants_backups : m.bulk[i].present)
+            out.push_back(static_cast<uint8_t>(kWatcherBase + i));
+    return out;
+}
+
+bool Session::spectator() const {
+    std::lock_guard guard(impl_->lock);
+    return impl_->watch_mode;
+}
+
+bool Session::watch(const GameInfo& game, const std::string& name) {
+    {
+        std::lock_guard guard(impl_->lock); // (before the first join goes out)
+        impl_->watch_mode = true;
+    }
+    return join(game, name);
 }
 
 bool Session::hosting() const {

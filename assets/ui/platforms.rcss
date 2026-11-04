@@ -7,4 +7,5 @@
 	platform-macos: 39px 1px 36px 36px;
 	platform-linux: 77px 1px 36px 36px;
 	platform-android: 115px 1px 36px 36px;
+	eye: 153px 1px 36px 36px;
 }

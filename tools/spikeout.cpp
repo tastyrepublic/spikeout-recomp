@@ -242,6 +242,11 @@ struct Shared {
     std::atomic<bool> catching_up{false};
     std::atomic<uint64_t> catch_up_behind{0}; // (frames still to catch up, the shown board's; 0 not known yet)
     std::atomic<uint64_t> catch_up_start{0};  // (and as many when catching up started: the loading bar)
+    // A spectator (docs/netplay.md, "Spectators"): no seat; every board run here on inputs all in (no one board, no
+    // rollback), net::kWatchLag frames behind the players; the board shown (`local`) changed with the arrows or a pad's
+    // shoulders. `watched`: the board threads' copy, each taking it at its next frame's start.
+    bool spectating = false;
+    std::atomic<std::size_t> watched{0};
     // One board a PC (docs/netplay.md, "One board a PC in the window"): only this player's board
     // run whole here, the other cabinets made from their players' buttons (tools/one_board.hpp),
     // each run whole as a shadow where that can't follow it (held whole until every player is in
@@ -579,8 +584,9 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
     // Network play: every machine's boards the same from power-on (the
     // host's clock, settings and backup RAM); only this player's board drawn and heard.
     const bool networked = shared.netplay != nullptr;
-    const std::size_t shown = networked ? shared.local : 0; // the board the window shows, and plays
-    const bool pictured = !networked || index == shown;
+    std::size_t shown = networked ? shared.local : 0; // the board the window shows, and plays (a spectator: changes)
+    bool pictured = !networked || index == shown;
+    bool came_into_view = false; // (a spectator's: this board shown from this frame: texture RAM taken afresh)
     {
         std::lock_guard<std::mutex> guard(shared.lock);
         if (out.eeprom.size() == 64) std::copy(out.eeprom.begin(), out.eeprom.end(), bus.eeprom().words().begin());
@@ -695,6 +701,12 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
     static const bool meet_timing = std::getenv("SPIKEOUT_NET_DEBUG") != nullptr; // (its reports, below)
     double meet_ms = 0, pass_ms = 0, side_ms_before = 0;
     timing.on_display_line = [&](uint32_t line) {
+        if (line == 0 && shared.spectating && shared.watched != shown) { // (a spectator's view changed: from this frame)
+            shown = shared.watched;
+            const bool now = index == shown;
+            came_into_view = now && !pictured;
+            pictured = now;
+        }
         if (pictured && !shared.catching_up && !(shared.rollback && shared.rollback->quiet(index, timing.frames() + 1))) { // (a board not shown needn't draw its 2D: the game never reads it back)
             if (line == 0) tilegen.begin_frame();
             tilegen.draw_line(bus, static_cast<int>(line));
@@ -887,6 +899,7 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
                 run_ms = input_ms = frame_ms = end_ms = 0;
             }
         }
+        if (came_into_view) textures_whole = true, came_into_view = false; // (a spectator's: another board's textures before)
         if (unseen) {
             textures_whole = true; // (texture RAM put back as it was: the GPU takes it afresh)
         } else if (!pictured) {
@@ -963,8 +976,10 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
                                     r ? r->sent(index) : 0);
                 if (r) r->abandon_cut(index); // (one board's state alone: no cut under way)
                 std::vector<uint8_t> to_changes, to_whole;
-                for (uint8_t s = 0; s < shared.boards; ++s) {
-                    if (s == index) continue;
+                std::vector<uint8_t> to = shared.netplay->session().backup_watchers(); // (spectators on one board too)
+                for (uint8_t s = 0; s < shared.boards; ++s)
+                    if (s != index) to.push_back(s);
+                for (const uint8_t s : to) {
                     (shared.backups.changes_possible() && shared.backup_bases.count(s) ? to_changes : to_whole).push_back(s);
                     shared.backup_bases.insert(s);
                 }
@@ -1113,7 +1128,8 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             if (index == shown && shared.catching_up) {
                 uint64_t front = 0;
                 for (std::size_t s = 0; s < shared.boards; ++s)
-                    if (s != shown) front = std::max(front, shared.netplay->session().inputs_known(static_cast<uint8_t>(s)));
+                    if (s != shown || shared.spectating) front = std::max(front, shared.netplay->session().inputs_known(static_cast<uint8_t>(s)));
+                if (shared.spectating) front = front > net::kWatchLag ? front - net::kWatchLag : 0; // (it runs that far behind them)
                 shared.catch_up_behind = front > frame ? front - frame : 0; // (for the loading screen)
                 // (tests: SPIKEOUT_TEST_CATCHUP_MS=N, each frame caught up N ms longer: a slow PC's join, to see it)
                 static const int test_catchup_ms = std::getenv("SPIKEOUT_TEST_CATCHUP_MS") ? std::atoi(std::getenv("SPIKEOUT_TEST_CATCHUP_MS")) : 0;
@@ -1334,7 +1350,12 @@ void set_up_one_board(Shared& shared) {
         s.backup_frame = [net](std::size_t seat) { return net->keeper().frame(seat); };
         s.replay = [net, &shared](std::size_t seat, uint64_t until,
                                   std::function<bool(uint64_t)> live) -> std::optional<tools::one_board::RemoteBoard> {
-            const tools::backup::Copy copy = net->keeper().copy(seat);
+            // (a spectator: the newest of the backups kept at or before the frame: its players' are taken ahead of it)
+            const tools::backup::Copy copy = shared.spectating ? net->keeper().copy_for(seat, until) : net->keeper().copy(seat);
+            if (!copy.valid() || copy.frame > until) {
+                std::printf("spikeout: board %zu: no backup of it at or before frame %llu here\n", seat, (unsigned long long)until);
+                return std::nullopt;
+            }
             m3::CommBoardOptions options;
             if (shared.old_link) options.use_old_link();
             tools::backup::Replay r{*shared.roms, m3::games::kSpikeoutFinalEdition, options,
@@ -1357,6 +1378,17 @@ void set_up_one_board(Shared& shared) {
             shared.ring->on_departure([net](std::size_t to, uint64_t seq, uint64_t at, const std::vector<uint8_t>& data) {
                 net->keeper().packet(to, seq, at, data);
             });
+        // A spectator on one board (docs/netplay.md, "Spectators on one board"): no machine to ask for a cabinet's state;
+        // its shadow is its player's backup run on here to the frame (the backups sent to it from now on, within the
+        // players' spare upload: Session::set_watch_one_board; a few kept, its frames behind theirs).
+        if (shared.spectating) {
+            net->keeper().set_keep(3);
+            net->session().set_watch_one_board(true);
+            s.ask_board = [](std::size_t, uint64_t) {};
+            s.wait_board = [replay = s.replay](std::size_t seat, uint64_t frame) -> std::optional<tools::one_board::RemoteBoard> {
+                return replay(seat, frame, [](uint64_t) { return true; }); // (its packets in the log: this board met it there)
+            };
+        }
     }
     // (rollback: the switches only on frames that won't be run again, Game::may_guess; a board on side runs no part of
     // its own, its network board in this one's snapshots; the module's state kept and put back with this board's)
@@ -1667,6 +1699,7 @@ struct NetGame {
     net::LobbyClient lobby;
     std::thread worker;
     bool host = false, internet = false, running = false;
+    bool spectator = false; // (watching it: Session::watch)
     std::size_t listed_taken = 1; // (the host, on the internet: the players the lobby last heard of)
     std::atomic<bool> ready{false}, failed{false};
     mutable std::mutex lock;
@@ -2089,7 +2122,7 @@ int main(int argc, char** argv) {
             if (shared.netplay && shared.rollback_frames < shared.rollback_wanted)
                 std::printf("spikeout: rollback over %llu frames, not %llu: what this machine's memory can keep\n",
                             (unsigned long long)shared.rollback_frames, (unsigned long long)shared.rollback_wanted);
-            shared.rollback = shared.netplay && shared.rollback_frames
+            shared.rollback = shared.netplay && shared.rollback_frames && !shared.spectating // (a spectator: inputs all in)
                                   ? std::make_unique<tools::rollback::Linked>(boards, shared.rollback_frames, ring.get(), *shared.inputs)
                                   : nullptr;
             turns = std::make_unique<tools::Turns>(boards, true, [&] {
@@ -2116,6 +2149,8 @@ int main(int argc, char** argv) {
                 if (shared.one_board_game && shared.one_board_back && shared.one_board_game->tear_down()) {
                     shared.one_board_back = false;
                     std::printf("spikeout: every board here again (the other cabinet run whole), as plain network play\n");
+                    if (shared.spectating) shared.netplay->session().set_watch_one_board(false); // (no backups wanted now)
+                    shared.one_board_frame = ~0ull; // (every board here: the status list's, a spectator's switching)
                 }
             });
         } else {
@@ -2126,7 +2161,7 @@ int main(int argc, char** argv) {
         shared.one_board_game.reset();
         shared.one_board_parts = {}, shared.one_board_wanted = false, shared.one_board_back = false, shared.one_board_frame = ~0ull;
         shared.backup_bases.clear(); // (every machine sent its whole first again)
-        if (shared.netplay && shared.one_board != Shared::OneBoard::never && boards >= 2) {
+        if (shared.netplay && shared.one_board != Shared::OneBoard::never && boards >= 2) { // (a spectator's too: by its power)
             shared.one_board_game = std::make_unique<tools::one_board::Game>();
             shared.one_board_game->set_turns(turns.get()); // (a shadow's hand-back waited for at the meetings)
             shared.one_board_wanted = shared.one_board == Shared::OneBoard::always;
@@ -2211,6 +2246,8 @@ int main(int argc, char** argv) {
     std::unique_ptr<NetGame> netgame;
     std::string net_notice; // (a line where the room's was, for a while: the host closed it)
     std::chrono::steady_clock::time_point net_notice_until{};
+    std::chrono::steady_clock::time_point watch_banner_until{}; // (a spectator's banner: whom it watches, the keys)
+    std::chrono::steady_clock::time_point watch_note_until{}; // (a spectator on one board: "switching needs a faster device")
     int net_seats = 2;      // a game offered: its players
     bool net_listed = true; // on the internet: in the lobby's list, or by its code only
     int net_where = 0;      // a game offered: 0 this network, 1 the internet (listed), 2 the internet (private)
@@ -2297,13 +2334,22 @@ int main(int argc, char** argv) {
         else netgame->fail("Can't join: " + netgame->session().error());
         netgame->ready = true;
     };
-    auto net_join_code = [&](const std::string& code) {
+    // Watching (a spectator: docs/netplay.md, "Spectators"): as joining, but no seat.
+    auto net_watch_nearby = [&](const net::GameInfo& game) {
+        new_netgame();
+        netgame->spectator = true;
+        if (netgame->session().watch(game, player_name(settings))) netgame->set_status("Watching " + game.name + "...");
+        else netgame->fail("Can't watch: " + netgame->session().error());
+        netgame->ready = true;
+    };
+    auto net_by_code = [&](const std::string& code, bool watch) {
         new_netgame();
         netgame->internet = true;
+        netgame->spectator = watch;
         netgame->code = code;
         netgame->set_status("Connecting to the lobby...");
         NetGame* g = netgame.get();
-        g->worker = std::thread([g, code, name = player_name(settings), build] {
+        g->worker = std::thread([g, code, watch, name = player_name(settings), build] {
             const auto welcome = tools::lobby_hello(g->lobby, build, name, net::kLobbyUrl);
             if (!welcome) return g->fail("No lobby: " + g->lobby.error());
             g->session().set_country((*welcome)["country"].as_string());
@@ -2311,11 +2357,14 @@ int main(int argc, char** argv) {
             g->set_status("Finding our address on the internet...");
             tools::find_addresses(g->lobby, g->session(), (*welcome)["turn"].as_bool(), {});
             std::string error;
-            if (!tools::lobby_join(g->lobby, g->session(), build, code, name, error)) return g->fail("Can't join " + code + ": " + error);
-            g->set_status("Joining " + code + "...");
+            if (!tools::lobby_join(g->lobby, g->session(), build, code, name, error, watch))
+                return g->fail(std::string(watch ? "Can't watch " : "Can't join ") + code + ": " + error);
+            g->set_status(std::string(watch ? "Watching " : "Joining ") + code + "...");
             g->ready = true;
         });
     };
+    auto net_join_code = [&](const std::string& code) { net_by_code(code, false); };
+    auto net_watch_code = [&](const std::string& code) { net_by_code(code, true); };
     // The host's start: every board from power-on, each from its player's cabinet.
     auto net_start = [&] {
         if (!netgame || !netgame->host || !netgame->ready) return;
@@ -2357,7 +2406,9 @@ int main(int argc, char** argv) {
             if (const char* hold = std::getenv("SPIKEOUT_TEST_HOLD_INPUTS"))
                 shared.netplay->session().hold_inputs(std::strtoull(hold, nullptr, 0));
             shared.inputs = &netgame->table;
-            shared.local = start.my_seat;
+            shared.spectating = start.my_seat >= start.seats; // (a spectator: no seat; the first board shown)
+            shared.local = shared.spectating ? 0 : start.my_seat;
+            shared.watched = shared.local;
             shared.net_start = start;
             shared.input_delay = delay;
             shared.net_state = std::move(state);
@@ -2366,11 +2417,15 @@ int main(int argc, char** argv) {
             shared.rollback_from = start.state_frame ? ~0ull : 0; // (joined in progress: none until caught up)
             boards = start.seats;
             shared.boards = boards;
-            focus = start.my_seat;
+            focus = shared.local;
         });
         netgame->running = true;
-        std::printf("spikeout: network game, seat %u of %u, input delay %llu%s\n", start.my_seat + 1, start.seats,
-                    static_cast<unsigned long long>(delay), start.state_frame ? " (joined in progress)" : "");
+        if (shared.spectating)
+            std::printf("spikeout: watching a network game of %u cabinets%s\n", start.seats,
+                        start.state_frame ? " (in progress)" : "");
+        else
+            std::printf("spikeout: network game, seat %u of %u, input delay %llu%s\n", start.my_seat + 1, start.seats,
+                        static_cast<unsigned long long>(delay), start.state_frame ? " (joined in progress)" : "");
         if (set_up_display) set_up_display();
     };
     // Ours out of step with the host's boards: every board again from its
@@ -2405,7 +2460,8 @@ int main(int argc, char** argv) {
         netgame->session().leave();
         if (netgame->running)
             reset_game([&] {
-                keep_seat(); // (this player's board, as this computer's cabinet: while still in the game)
+                if (!shared.spectating) keep_seat(); // (this player's board, as this computer's cabinet: while still in the game)
+                shared.spectating = false, shared.watched = 0;
                 shared.netplay = nullptr;
                 shared.inputs = nullptr;
                 shared.catching_up = false; // (left before catching up: paced again)
@@ -2795,6 +2851,24 @@ int main(int argc, char** argv) {
     auto lobby_page = [&] {
         ui::MenuPage p{"Network game", "", {}};
         p.items.push_back({"Status", "", [&] { return netgame ? netgame->get_status() : std::string("Left"); }, {}, {}, true});
+        if (netgame && netgame->spectator) { // (watching: who plays, whose screen this is, and stopping)
+            for (std::size_t s = 0; s < net::kMaxSeats; ++s)
+                p.items.push_back({"Seat " + std::to_string(s + 1), "Left / Right (a pad's shoulders) change whose screen you watch.",
+                                   [&, s] {
+                                       if (!netgame) return std::string();
+                                       const auto seats = netgame->session().seats();
+                                       using State = net::Session::SeatView::State;
+                                       if (seats[s].state == State::none) return std::string("-");
+                                       const std::string who = seats[s].name.empty() ? std::string("(free)") : seats[s].name;
+                                       return who + (netgame->running && shared.spectating && shared.local == s ? "  (watching)" : "");
+                                   },
+                                   {}, {}, true});
+            p.items.push_back({"Stop watching", "Leave the game you watch.", {}, {}, [&] {
+                                   net_leave();
+                                   menu.open(make_root());
+                               }});
+            return p;
+        }
         if (netgame && netgame->internet)
             p.items.push_back({"Game code", "The others join with this code (Network play, Join on the internet).",
                                [&] {
@@ -2854,19 +2928,37 @@ int main(int argc, char** argv) {
     // A game's code: typed (or pasted, Ctrl+V), or picked from an on-screen
     // keyboard with a pad or the mouse (ui::CodeInput). The lobby's codes
     // leave out I, O, 0 and 1 (too like each other).
-    auto code_page = [&] {
-        ui::MenuPage p{"Join by code",
-                       "Type the code the host's lobby page shows (Ctrl+V pastes it), or pick its letters below. "
-                       "Backspace / Y: delete. Enter / Start: join.",
+    // (`watch`: to watch it, a spectator)
+    auto code_page = [&](bool watch) {
+        ui::MenuPage p{watch ? "Watch by code" : "Join by code",
+                       std::string("Type the code the host's lobby page shows (Ctrl+V pastes it), or pick its letters below. "
+                                   "Backspace / Y: delete. Enter / Start: ") +
+                           (watch ? "watch." : "join."),
                        {}};
         p.code = std::make_shared<ui::CodeInput>();
         p.code->alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
         p.code->length = 6;
-        p.code->done = [&](const std::string& code) {
-            net_join_code(code);
+        if (watch) p.code->done_label = "WATCH";
+        p.code->done = [&, watch](const std::string& code) {
+            if (watch) net_watch_code(code);
+            else net_join_code(code);
             to_room();
         };
         return p;
+    };
+    // A listed game chosen: join it (a cabinet free), or watch it (fewer than net::kMaxWatchers watching).
+    auto game_choice = [&](const std::string& name, bool can_join, bool can_watch, std::function<void()> join,
+                           std::function<void()> watch) {
+        ui::MenuPage p{name, "", {}};
+        if (can_join) p.items.push_back({"Join", "Play in this game: a free cabinet is yours.", {}, {}, [join] { join(); }});
+        else p.items.push_back({"Join", "", [] { return std::string("Full"); }, {}, {}, true});
+        if (can_watch)
+            p.items.push_back({"Watch", "Watch the players, about 2 seconds behind them, any player's screen (Left / Right "
+                                        "change it). Nobody waits for you.",
+                               {}, {}, [watch] { watch(); }});
+        else p.items.push_back({"Watch", "", [] { return std::to_string(net::kMaxWatchers) + " watching already"; }, {}, {}, true});
+        p.items.push_back(back_item());
+        menu.push(std::move(p));
     };
     // Every game there is to join, in one list (the owner's choice): this
     // network's first (found by its broadcasts, no internet), then the
@@ -2882,14 +2974,18 @@ int main(int argc, char** argv) {
         };
         for (const net::GameInfo& g : nearby_games) {
             const std::string text = label(g.name, g.taken, g.seats, "nearby", g.started);
-            if (g.build != build || g.taken >= g.seats)
-                p.items.push_back({text, g.build != build ? "A different game or build." : "Full.", [] { return std::string(); }, {},
-                                   {}, true});
-            else
-                p.items.push_back({text, g.started ? kInProgress : "Join this game (on this network).", {}, {}, [&, g] {
-                                       net_join_nearby(g);
-                                       to_room();
-                                   }});
+            if (g.build != build) {
+                p.items.push_back({text, "A different game or build.", [] { return std::string(); }, {}, {}, true});
+            } else {
+                ui::MenuItem it{text, g.taken >= g.seats ? "Full: watch it." : g.started ? kInProgress : "Join or watch this game (on this network).",
+                                {}, {}, [&, g] {
+                                    game_choice(g.name, g.taken < g.seats, g.watchers < net::kMaxWatchers,
+                                                [&, g] { net_join_nearby(g), to_room(); },
+                                                [&, g] { net_watch_nearby(g), to_room(); });
+                                }};
+                it.watchers = g.watchers; // (an eye and the count)
+                p.items.push_back(std::move(it));
+            }
         }
         std::string lobby_note;
         if (net::LobbyClient::available()) {
@@ -2918,15 +3014,18 @@ int main(int argc, char** argv) {
                 const bool playing = g["started"].as_bool();
                 std::string country = g["country"].as_string(); // (the host's, as Cloudflare sees it: its flag)
                 for (char& c : country) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                ui::MenuItem it{label(name, static_cast<int>(g["taken"].as_number()), static_cast<int>(g["seats"].as_number()), "internet",
-                                      playing),
-                                std::string(playing ? kInProgress : "Join this game (through the internet).") +
+                const int taken = static_cast<int>(g["taken"].as_number()), seats = static_cast<int>(g["seats"].as_number());
+                const int watchers = static_cast<int>(g["watchers"].as_number(0));
+                ui::MenuItem it{label(name, taken, seats, "internet", playing),
+                                std::string(taken >= seats ? "Full: watch it." : playing ? kInProgress : "Join or watch this game (through the internet).") +
                                     " The speed (~) is an estimate, from how far away its host is; the real one shows in the game.",
-                                {}, {}, [&, code] {
-                                    net_join_code(code);
-                                    to_room();
+                                {}, {}, [&, code, name, taken, seats, watchers] {
+                                    game_choice(name, taken < seats, watchers < static_cast<int>(net::kMaxWatchers),
+                                                [&, code] { net_join_code(code), to_room(); },
+                                                [&, code] { net_watch_code(code), to_room(); });
                                 }};
                 it.country = country;
+                it.watchers = watchers;
                 it.estimate_ms = static_cast<int>(g["ms"].as_number(-1)); // (-1: the lobby doesn't know where one of you is)
                 p.items.push_back(std::move(it));
             }
@@ -2949,9 +3048,12 @@ int main(int argc, char** argv) {
                                    menu.pop();
                                    menu.push(join_page());
                                }});
-        if (net::LobbyClient::available())
+        if (net::LobbyClient::available()) {
             p.items.push_back({"Join by code", "A private internet game, or one you were told the code of.", {}, {},
-                               [&] { menu.push(code_page()); }});
+                               [&] { menu.push(code_page(false)); }});
+            p.items.push_back({"Watch by code", "Watch a private internet game, or one you were told the code of.", {}, {},
+                               [&] { menu.push(code_page(true)); }});
+        }
         p.items.push_back({"Refresh", "Look again (a game nearby shows within a second or two).", {}, {}, [&] {
                                menu.pop();
                                menu.push(join_page());
@@ -3041,6 +3143,9 @@ int main(int argc, char** argv) {
                                "You're still in this network game's room: Enter goes back to it (to start the game, or leave).",
                                [&] {
                                    if (!netgame) return std::string();
+                                   if (netgame->spectator)
+                                       return netgame->running && shared.spectating ? "Watching " + std::to_string(shared.local + 1) + "P"
+                                                                                    : std::string("Watching");
                                    std::size_t taken = 0;
                                    const auto players = netgame->session().players();
                                    for (const std::string& name : players) taken += name.empty() ? 0 : 1;
@@ -3208,6 +3313,37 @@ int main(int argc, char** argv) {
                 const auto board = static_cast<std::size_t>(e.key.scancode - SDL_SCANCODE_F5);
                 if (board < boards) focus = board;
             }
+            // A spectator: the cabinet watched, the next or the one before (Left / Right, a pad's shoulders; 1-4 for
+            // that seat), each board taking it at its next frame.
+            if (shared.spectating && boards > 1) {
+                int step = 0;
+                std::size_t to = shared.local;
+                if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) {
+                    if (e.key.scancode == SDL_SCANCODE_LEFT) step = -1;
+                    if (e.key.scancode == SDL_SCANCODE_RIGHT) step = 1;
+                    if (e.key.scancode >= SDL_SCANCODE_1 && e.key.scancode <= SDL_SCANCODE_4 &&
+                        static_cast<std::size_t>(e.key.scancode - SDL_SCANCODE_1) < boards)
+                        to = static_cast<std::size_t>(e.key.scancode - SDL_SCANCODE_1);
+                } else if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+                    if (e.gbutton.button == SDL_GAMEPAD_BUTTON_LEFT_SHOULDER) step = -1;
+                    if (e.gbutton.button == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER) step = 1;
+                }
+                if (step > 0) to = (shared.local + 1) % boards;
+                if (step < 0) to = (shared.local + boards - 1) % boards;
+                // (on one board, this device too slow for every board: only the cabinet it watches runs whole here; switching
+                // to another needs it rebuilt from its backup: the next step, docs/netplay.md)
+                if (to != shared.local && shared.one_board_frame != ~0ull) {
+                    watch_note_until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+                    std::printf("spikeout: seat %zu not watched: on one board here, switching needs every board for now\n", to + 1);
+                    to = shared.local;
+                }
+                if (to != shared.local) {
+                    shared.local = to, focus = to;
+                    shared.watched = to;
+                    watch_banner_until = std::chrono::steady_clock::now() + std::chrono::seconds(5); // (the banner again)
+                    std::printf("spikeout: watching seat %zu\n", to + 1);
+                }
+            }
 #ifdef SPIKEOUT_GPU
             // Auto render scale and the window's picture shape: the window's size decides them.
             if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED && (settings.render_scale == 0 || settings.picture_shape == 1))
@@ -3267,9 +3403,11 @@ int main(int argc, char** argv) {
         // date; the controls let go while the menu is open (the game goes on).
         static auto net_refreshed = now;
         // The host closed the room before the game started: out of it, and told.
-        if (netgame && !netgame->running && !netgame->host && netgame->session().room_closed()) {
+        // A spectator's game ended (its host gone, no new one): out of it too.
+        if (netgame && (!netgame->running || shared.spectating) && !netgame->host && netgame->session().room_closed()) {
+            const bool watched = shared.spectating;
             net_leave();
-            net_notice = "THE HOST CLOSED THE ROOM";
+            net_notice = watched ? "THE GAME YOU WATCHED ENDED" : "THE HOST CLOSED THE ROOM";
             net_notice_until = now + std::chrono::seconds(6);
 #ifdef SPIKEOUT_GPU
             if (menu_ready && menu.is_open()) menu.open(make_root());
@@ -3348,7 +3486,7 @@ int main(int argc, char** argv) {
             using State = net::Session::SeatView::State;
             using Status = net::Session::Status;
             // (each machine's platform and how it plays, for the others' lists: sent only as it changes, and repeated)
-            if (netgame && netgame->running) {
+            if (netgame && netgame->running && !shared.spectating) {
                 Status me;
 #if defined(__ANDROID__)
                 me.platform = Status::Platform::android;
@@ -3390,7 +3528,7 @@ int main(int argc, char** argv) {
                     }
                     const bool in = std::any_of(seats.begin(), seats.end(), [&](const auto& v) { return v.state == State::me; });
                     net_header = "ROOM " + (code.empty() ? std::string() : code + "  ") +
-                                 (netgame->host ? "(HOSTING)" : in ? "(JOINED)" : "(JOINING...)");
+                                 (netgame->host ? "(HOSTING)" : netgame->spectator ? "(WATCHING)" : in ? "(JOINED)" : "(JOINING...)");
                 } else if (settings.show_net) { // (playing: the game's name and its room; each player's delay in its badges)
                     std::string code;
                     {
@@ -3404,6 +3542,7 @@ int main(int argc, char** argv) {
                                                   : host < seats.size() && !seats[host].name.empty() ? tools::clean_name(seats[host].name)
                                                   : tools::clean_name(netgame->session().game_name());
                     net_header = "HOST " + host_name + (code.empty() ? std::string(" \xC2\xB7 LAN") : " \xC2\xB7 ROOM " + code);
+                    if (shared.spectating) net_header = "WATCHING \xC2\xB7 " + net_header;
                 }
                 const bool hosting = netgame->session().hosting();
                 for (std::size_t s = 0; s < seats.size(); ++s) {
@@ -3443,10 +3582,32 @@ int main(int argc, char** argv) {
                         break;
                     default: break;
                     }
+                    if (shared.spectating && netgame->running && s == shared.local) r.look = ui::NetRow::Look::you; // (the one watched)
                     net_rows.push_back(std::move(r));
+                }
+                // (spectators: an eye and how many after the header, in the room and in the game: the owner's choice)
+                net_pills.watchers = static_cast<int>(netgame->session().watching());
+                // (a spectator: whom it watches and how to change it, at the bottom for 5 s once its game shows and
+                // after each change: the owner's choice)
+                static bool banner_started = false;
+                if (!shared.spectating || !netgame->running) banner_started = false;
+                else if (!shared.catching_up && !banner_started && shown_number[shared.local] >= 600) // (past the boot's screens)
+                    banner_started = true, watch_banner_until = now + std::chrono::seconds(5);
+                const bool one_board_here = shared.one_board_frame != ~0ull; // (only the watched cabinet whole: no switching yet)
+                if (shared.spectating && netgame->running && now < watch_note_until) {
+                    menu.set_watch_banner({}, "SWITCHING PLAYERS NEEDS A FASTER DEVICE FOR NOW");
+                } else if (shared.spectating && netgame->running && !shared.catching_up && now < watch_banner_until) {
+                    const auto& v = seats[shared.local];
+                    const std::string seat = std::to_string(shared.local + 1) + "P";
+                    const std::string who = v.name.empty() ? seat : tools::clean_name(v.name) + " (" + seat + ")";
+                    if (one_board_here) menu.set_watch_banner({}, "WATCHING " + who);
+                    else menu.set_watch_banner(who);
+                } else {
+                    menu.set_watch_banner("");
                 }
             } else {
                 seat_was.fill(State::none);
+            menu.set_watch_banner("");
                 seat_news.fill({});
             }
             // (a game joined in progress, catching up with the others: a loading screen, the game's picture not real yet)
@@ -3454,7 +3615,7 @@ int main(int argc, char** argv) {
                 // (the bar: how much of the gap there was as catching up started has been closed)
                 const uint64_t behind = shared.catch_up_behind, start = shared.catch_up_start;
                 const int percent = start && behind <= start ? static_cast<int>(100 * (start - behind) / start) : 0;
-                menu.set_loading("JOINING THE GAME", percent, "Catching up with the others");
+                menu.set_loading(shared.spectating ? "WATCHING THE GAME" : "JOINING THE GAME", percent, "Catching up with the others");
             } else {
                 menu.set_loading("");
             }
@@ -3668,7 +3829,7 @@ int main(int argc, char** argv) {
     shared.paused = false;
     if (netgame) parting(), netgame->session().leave();
     stop_games();
-    keep_seat(); // (a network game: only this player's board is ours to keep)
+    if (!shared.spectating) keep_seat(); // (a network game: only this player's board is ours to keep; a spectator's: none)
     if (!test_run && !shared.netplay) save_nvram(data_folder, shared, boards); // (a network game's boards aren't ours to keep)
     netgame.reset();
     browser.reset();

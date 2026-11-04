@@ -225,6 +225,16 @@ bool windows(double x, double y) {
     return (in(x, 0, side) || in(x, side + gap, 24)) && (in(y, 0, side) || in(y, side + gap, 24));
 }
 
+// An eye (the spectators' count, after the host line): its almond outline, a lens of two circles (22 wide, 14 tall)
+// less a smaller lens inside it (18 by 9.6), and the iris (a disc of radius 4) in the middle; 24 x 24 as the others.
+bool eye(double x, double y) {
+    const auto lens = [&](double half_w, double half_h) { // (circles through the corners and the top or bottom)
+        const double sum = half_w * half_w / half_h, r = (half_h + sum) / 2, d = r - half_h;
+        return std::hypot(x - 12, y - (12 - d)) <= r && std::hypot(x - 12, y - (12 + d)) <= r;
+    };
+    return (lens(11, 7) && !lens(9, 4.8)) || std::hypot(x - 12, y - 12) <= 4;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -233,14 +243,15 @@ int main(int argc, char** argv) {
         return 1;
     }
     const Path apple(kApplePath), android(kAndroidPath);
-    // (in platforms.rcss's order: platform-windows, -macos, -linux, -android)
+    // (in platforms.rcss's order: platform-windows, -macos, -linux, -android; then eye, the spectators' count)
     const std::function<double(double, double)> icons[] = {
         windows,
         [&](double x, double y) { return inside(apple.polys(), x, y); },
         flat_penguin,
         [&](double x, double y) { return inside(android.polys(), x, y); },
+        eye,
     };
-    constexpr int kIcons = 4;
+    constexpr int kIcons = 5;
     const int w = kIcons * (kCell + 2), h = kCell + 2; // (a pixel of space round each, as flags.png's)
     std::vector<uint32_t> out(static_cast<std::size_t>(w) * h, 0);
     const double scale = (kCell - 2 * kInset) / 24.0;

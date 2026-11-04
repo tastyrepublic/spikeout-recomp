@@ -85,7 +85,7 @@ test("a public game listed (in progress too, while a cabinet is empty), joined b
 		assert.equal(typeof g.country, "string"), delete g.country;
 		assert.ok(Number.isInteger(g.ms) && g.ms >= -1), delete g.ms;
 	}
-	assert.deepEqual(games, [{ code, name: "Ann's game", seats: 2, taken: 1, started: false, session: "abcdef" }]); // (the session: a game found nearby too shown once)
+	assert.deepEqual(games, [{ code, name: "Ann's game", seats: 2, taken: 1, watchers: 0, started: false, session: "abcdef" }]); // (the session: a game found nearby too shown once)
 
 	guest.send({ t: "join", code: code.toLowerCase(), port: 47100, candidates: ["10.0.0.7:47100"] });
 	const joining = await guest.next("joining");
@@ -113,15 +113,22 @@ test("a public game listed (in progress too, while a cabinet is empty), joined b
 	guest.send({ t: "list" });
 	assert.deepEqual(
 		(await guest.next("games")).games.map(({ country, ms, ...g }) => g),
-		[{ code, name: "Ann's game", seats: 2, taken: 1, started: true, session: "abcdef" }],
+		[{ code, name: "Ann's game", seats: 2, taken: 1, watchers: 0, started: true, session: "abcdef" }],
 	);
 	guest.send({ t: "join", code, port: 1, candidates: [] });
 	assert.equal((await guest.next("joining")).session, "abcdef");
-	host.send({ t: "update", taken: 2, started: true }); // full: off the list, not joinable
+	assert.equal((await host.next("joiner")).watch, false);
+	host.send({ t: "update", taken: 2, started: true, watchers: 1 }); // full: still listed (to watch), not joinable
 	guest.send({ t: "list" });
-	assert.deepEqual((await guest.next("games")).games, []);
+	assert.deepEqual(
+		(await guest.next("games")).games.map(({ code: c, taken, watchers }) => ({ c, taken, watchers })),
+		[{ c: code, taken: 2, watchers: 1 }],
+	);
 	guest.send({ t: "join", code, port: 1, candidates: [] });
 	assert.equal((await guest.next("error")).why, "that game is full");
+	guest.send({ t: "join", code, port: 1, candidates: [], watch: true }); // a spectator: yes
+	assert.equal((await guest.next("joining")).session, "abcdef");
+	assert.equal((await host.next("joiner")).watch, true);
 
 	guest.send("ping");
 	await guest.next("pong");

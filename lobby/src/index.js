@@ -7,14 +7,17 @@
 //
 //   hello  {build, name}                 -> welcome {address, country, turn} (country: Cloudflare's two letters for the
 //                                           player, "" if none: a host shows its own with its seat)
-//   list   {from}                        -> games {games: [{code, name, seats, taken, started, session, country, ms}],
-//                                                  from, total} (LIST_PAGE from `from`; waiting first, newest first)
+//   list   {from}                        -> games {games: [{code, name, seats, taken, watchers, started, session, country,
+//                                                  ms}], from, total} (LIST_PAGE from `from`: waiting first, then in
+//                                                  progress with a cabinet free, then full ones (to watch))
 //   host   {name, seats, public, session, port, candidates[, takeover: code]}
 //                                        -> hosted {code}
-//   update {taken, started}              (the host's game)
+//   update {taken, started[, watchers]}  (the host's game)
 //   unhost {}
-//   join   {code, port, candidates}      -> joining {code, name, seats, session, candidates, country}
-//                                           and the host gets joiner {name, candidates, country} (each the
+//   join   {code, port, candidates[, watch]}
+//                                        -> joining {code, name, seats, session, candidates, country} (watch: a
+//                                           spectator, let into a full game too)
+//                                           and the host gets joiner {name, candidates, country, watch} (each the
 //                                           other's country, as the lobby has it: never what a game says)
 //   turn   {}                            -> turn {iceServers} (short-lived TURN credentials)
 //   "ping"                               -> "pong" (answered without waking the object)
@@ -135,16 +138,18 @@ export class Lobby extends DurableObject {
 				// `from`, and how many there are (the game asks for the next page).
 				const open = [];
 				for (const p of this.players())
-					if (p.a.game && p.a.game.public && p.a.game.taken < p.a.game.seats && p.a.build === a.build) // (in progress too: an empty cabinet)
+					if (p.a.game && p.a.game.public && p.a.build === a.build) // (in progress too; full ones to watch)
 						open.push(p.a);
 				const near = (h) => { const e = estimate(a, h); return e < 0 ? 1e9 : e; }; // (nearest first; unknown last)
-				open.sort((x, y) => Number(x.game.started) - Number(y.game.started) || near(x) - near(y) || (y.game.created || 0) - (x.game.created || 0));
+				const full = (g) => Number(g.taken >= g.seats);
+				open.sort((x, y) => full(x.game) - full(y.game) || Number(x.game.started) - Number(y.game.started) || near(x) - near(y) || (y.game.created || 0) - (x.game.created || 0));
 				const from = Math.max(0, Number(m.from) | 0);
 				const games = open.slice(from, from + LIST_PAGE).map((h) => ({
 					code: h.game.code,
 					name: h.game.name,
 					seats: h.game.seats,
 					taken: h.game.taken,
+					watchers: h.game.watchers || 0,
 					started: h.game.started,
 					session: h.game.session,
 					country: h.country || "",
@@ -189,6 +194,7 @@ export class Lobby extends DurableObject {
 				if (!a.game) return send({ t: "error", why: "no game offered" });
 				a.game.taken = Math.min(a.game.seats, Math.max(1, Number(m.taken) | 0));
 				a.game.started = Boolean(m.started);
+				if (m.watchers !== undefined) a.game.watchers = Math.min(4, Math.max(0, Number(m.watchers) | 0));
 				ws.serializeAttachment(a);
 				return;
 
@@ -202,10 +208,10 @@ export class Lobby extends DurableObject {
 				const host = this.findGame(code, a.build);
 				if (!host) return send({ t: "error", why: "no game with that code" });
 				const g = host.a.game;
-				if (g.taken >= g.seats) return send({ t: "error", why: "that game is full" });
+				if (g.taken >= g.seats && !m.watch) return send({ t: "error", why: "that game is full" });
 				const port = Number(m.port) | 0;
 				const mine = candidates(m.candidates, seen && port ? `${seen}:${port}` : "");
-				host.ws.send(JSON.stringify({ t: "joiner", name: a.name, candidates: mine, country: a.country }));
+				host.ws.send(JSON.stringify({ t: "joiner", name: a.name, candidates: mine, country: a.country, watch: Boolean(m.watch) }));
 				return send({ t: "joining", code, name: g.name, seats: g.seats, session: g.session, candidates: g.candidates, country: host.a.country });
 			}
 

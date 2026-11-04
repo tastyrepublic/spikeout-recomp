@@ -55,9 +55,11 @@
 namespace net {
 
 constexpr uint16_t kDiscoveryPort = 47326;
-constexpr uint8_t kProtocol = 1;
+constexpr uint8_t kProtocol = 2; // (2: spectators)
 constexpr std::size_t kMaxSeats = 4;
 constexpr std::chrono::milliseconds kDropAfter{3000};
+constexpr std::size_t kMaxWatchers = 4; // spectators a game (the owner's choice)
+constexpr uint64_t kWatchLag = 120;     // frames a spectator runs behind the furthest inputs (about 2 s)
 
 using InputBytes = std::array<uint8_t, 4>; // bank 0, bank 1, controls, controls 2 (as tools::Recording::Inputs)
 
@@ -70,6 +72,7 @@ struct GameInfo {
     bool started = false;
     Address host;       // its game port
     std::vector<Address> candidates; // (from the lobby) every address it may be reached at
+    uint8_t watchers = 0; // spectators (up to kMaxWatchers)
 };
 
 // Listens for games on the networks this machine is on.
@@ -144,6 +147,20 @@ public:
     bool host(const std::string& name, uint8_t seats);
     // Join a game discovery (or the lobby) found, as `name`.
     bool join(const GameInfo& game, const std::string& name);
+    // Watch it instead (a spectator: docs/netplay.md, "Spectators"): every board's inputs from the room's host, each
+    // frame's given out kWatchLag frames after they're all in; no seat, nothing sent the players wait for. The start
+    // (and, the game in progress, every board's state) come as a late joiner's; StartInfo::my_seat is 0xFF.
+    // room_closed() once the host is gone and no new one greets it.
+    bool watch(const GameInfo& game, const std::string& name);
+    bool spectator() const;
+    // A spectator running one board (docs/netplay.md, "Spectators on one board"): every player's own backups wanted
+    // (Callbacks::backup, from each player's machine, at a speed that never holds the players back); false: every board.
+    void set_watch_one_board(bool one);
+    // A player: the spectators on one board its backups go to too, as send_backup's `seat` (kWatcherBase + their
+    // number: 0x10-0x13), and Callbacks::backup_wanted's for one's whole.
+    std::vector<uint8_t> backup_watchers() const;
+    // Spectators of this game (the host's count: as it last told us).
+    std::size_t watching() const;
     // Our game port opened before joining, to find our addresses first
     // (candidates(): STUN, the relay) and give them to the lobby.
     bool listen();

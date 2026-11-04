@@ -186,8 +186,12 @@ public:
             }
             changed_.notify_all();
         };
-        cb.backup = [this](uint8_t seat, uint64_t, std::vector<uint8_t> backup) {
-            if (keeper_.backup(seat, backup)) return;
+        cb.backup = [this](uint8_t seat, uint64_t frame, std::vector<uint8_t> backup) {
+            const bool ok = keeper_.backup(seat, backup);
+            static const bool say = std::getenv("NET_BACKUPS_IN") != nullptr; // (tests: each backup that comes, and taken or not)
+            if (say && log_) log_("backup of seat " + std::to_string(seat + 1) + " at frame " + std::to_string(frame) + ", " +
+                                  std::to_string(backup.size() / 1024) + " KB packed: " + (ok ? "kept" : "not from one here"));
+            if (ok) return;
             std::lock_guard guard(lock_); // (changes from one not had: its whole asked for next, not from in here)
             backup_missing_.push_back(seat);
         };
@@ -507,10 +511,12 @@ inline void lobby_pump(net::LobbyClient& lobby, net::Session& session) {
 }
 
 // Joins the game with this code (the session listening, its addresses found).
+// (`watch`: as a spectator, Session::watch; the lobby lets one into a full game)
 inline bool lobby_join(net::LobbyClient& lobby, net::Session& session, uint64_t build, const std::string& code,
-                       const std::string& name, std::string& error) {
+                       const std::string& name, std::string& error, bool watch = false) {
     net::Json m = net::Json::object();
     m.set("t", "join"), m.set("code", code), m.set("port", static_cast<int>(session.port()));
+    if (watch) m.set("watch", true);
     m.set("candidates", address_list(session.candidates()));
     lobby.send(m);
     const auto joining = lobby.wait_for("joining", 10000);
@@ -524,7 +530,7 @@ inline bool lobby_join(net::LobbyClient& lobby, net::Session& session, uint64_t 
     game.name = (*joining)["name"].as_string();
     game.seats = static_cast<uint8_t>((*joining)["seats"].as_number(2));
     game.candidates = parse_addresses((*joining)["candidates"]);
-    if (!session.join(game, name)) {
+    if (!(watch ? session.watch(game, name) : session.join(game, name))) {
         error = session.error();
         return false;
     }

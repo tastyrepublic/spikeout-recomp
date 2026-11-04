@@ -2951,6 +2951,109 @@ added to the clock and counters). Exact (two-board states and sound the
 same), small (~0.03 ms a frame). Off: --no-net-idle-skip (or
 --no-idle-skip, which turns off both).
 
+## Spectators (2026-11-04)
+
+The owner's choices: up to 4 a game (`net::kMaxWatchers`), about 2 s
+behind the players, Watch in the game list and by code, an eye and the
+spectators' count after the room's line (in the room and in the game) and
+after a listed game's name; never slowing the players; every board or one board
+chosen by the device's power (only every board so far: below).
+
+A spectator talks to the room's host only (`Session::watch`): its join
+says so, and the host gives it a number, not a seat (it sends as
+`kWatcherBase` + its number). The host sends it every seat's inputs as far
+as it has them (its own as they're set, the others' as they come: each
+frame complete only once every player's is in), the start, and, a game in
+progress, every board's state as a late joiner gets it; its inputs then
+start after that frame. The players never wait for a spectator, never
+count it (drops, the authority, hashes), and never hear from it. The
+spectator gives each frame's inputs out only once every seat's are in
+`net::kWatchLag` (120) frames beyond it: a late input never stalls its
+picture, and it runs on inputs all in (no rollback, no one board here).
+Every second the host sends its spectators every seat as it sees it
+(`kWatchInfo`: names, countries, round trips, each machine's mode) for
+their status list, and tells the players how many watch (`kWatchers`).
+
+A host change: the host's `kWatchers` names each spectator and where it
+can be reached, so every player has the list. The player that comes to
+host the room (`set_idle`'s host migration) takes them over and greets
+each (`kWatchWelcome` again); a spectator takes inputs from it from then
+on, from where it is (nothing sent until it says how far it has them).
+A spectator whose host has gone waits 10 s for a new one (the players drop
+a silent host after 3), then its game ends ("THE GAME YOU WATCHED ENDED").
+On the host's goodbye a spectator runs every frame complete so far.
+
+The window: Network play > Join a game: a listed game (nearby or the
+lobby's; full ones too) opens Join / Watch; Watch by code next to Join by
+code. Watching, Left / Right (a pad's shoulders, 1-4 for a seat) change
+whose screen is shown: each board takes it at its next frame's start (its
+texture RAM taken afresh). The sound goes on from the board shown before
+(its MIDI then the new board's): a moment of the other player's sound, the
+music the same in a linked game. The status list: "WATCHING · HOST ...
+· ROOM ...  (eye) N", the watched seat yellow; at the bottom for 5 s, once
+the game is past its boot screens (frame 600) and after each change, a
+banner: "WATCHING KENJI (2P)  LEFT RIGHT / LB RB  another player" (the
+owner's pick of the mockups; `ui::Menu::set_watch_banner`). The eye is in
+the platform icons' sheet (tools/platform_icons.cpp). The lobby lists full games last
+(to watch), with their spectators' count, and lets a spectator join a
+full game by code (`watch: true`).
+
+What it costs the players: the host sends ~4 bytes a seat a frame to each
+spectator, and saves every board's state once for one that comes into a
+game in progress (as for a late joiner: in one board a PC, every board
+made whole first, `Game::want_whole`).
+
+Proved (`tools/spectate-tests.ps1`, gamerun `--net-join NAME
+--net-spectate`; two players running every board, the spectator's boards
+against the host's, every frame): in the room before the start, 7,600
+frames the same; coming 15 s into the game, every frame from then the same;
+the host gone at frame 2,500 without a word (`--net-vanish-at`), or saying
+goodbye (`--net-leave-at`): 7,600 the same, through the other player as the
+new host. (Found on the way: `--net-leave-at` hung in every-board runs, the
+leaver's other boards waiting for its inputs: every board there now stops
+at its parting frame, `g_parted_after`.) The window, two windows
+(`tools/spectate-window-test.ps1`): watched from the room, seats switched.
+### Spectators on one board (2026-11-04)
+
+A device too slow for every board (Auto, as a player's: frames over 97% of
+the budget; `--net-one-board` forces it) runs only the cabinet it watches
+whole; the others are made from their players' buttons, and where that
+can't follow (a coin, a time over) a cabinet's shadow is its player's
+backup run on here to the frame (`backup::Replay`, as for a player gone),
+not its machine's state asked for: the players never do anything for a
+spectator but send what they already make. The owner's chosen option and
+rules:
+- Only a spectator on one board gets backups: it tells the host
+  (`Session::set_watch_one_board`, kWatchMode), the host's kWatchers marks
+  it, and each player sends its own board's backups to it too
+  (`Session::backup_watchers`: kWatcherBase + its number as send_backup's
+  seat; the host on its Watcher channel, the others on a channel of their
+  own, `Impl::Bulk`, the spectator opening its router to each with
+  datagrams to the addresses kWatchInfo gives). Back on every board: none.
+- Spectator traffic goes last and within a share: one rate for all of a
+  machine's channels to spectators (`Impl::Cap`, from 256 KB/s, 25% more
+  each second up to 4 MB/s), halved and paused a second as soon as a
+  player's round trip rises 40 ms above its least (`guard_spectator_cap`):
+  the inputs never wait behind it.
+- A spectator runs about 2 s behind the players, whose backups are taken
+  live: it keeps each board's last three (`Keeper::set_keep`) and runs on
+  the newest at or before the frame (`Keeper::copy_for`); none: said, the
+  shadow not had (the module goes on as when a state doesn't come).
+
+Switching players on one board needs the new cabinet rebuilt from its
+backup: the next step; meanwhile Left / Right say "SWITCHING PLAYERS NEEDS A
+FASTER DEVICE FOR NOW", and the banner shows no keys.
+
+Proved (`tools/spectate-tests.ps1 -Only oneboard,oneboard2`; gamerun
+`--pace`, new: the players at the arcade's speed, as windows, else they run
+far ahead of the spectator and its backups): watching seat 1, then seat 2,
+the other cabinet held whole until calm (as the window), handed to side
+runs at 4,621, the other player's coin at 6,100: its shadow its player's
+backup of frame 6,120 run on to 6,130 in 0.1 s, handed back; the watched
+board the same as the players', every frame of 7,600. The window: a
+spectator forced to one board (two windows), the host told; Right refused
+with the note.
+
 ## Plan
 
 1. Single board, single player (milestones 1–4).

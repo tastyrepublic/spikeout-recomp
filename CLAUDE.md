@@ -11,6 +11,21 @@
 ## Latest (2026-11-04)
 
 Read this first; the older hand-off below is history.
+- Spectators (docs/netplay.md "Spectators" and "Spectators on one board";
+  the owner's choices): up to 4 a game, ~2 s behind (net::kWatchLag), talk
+  to the room's host only (Session::watch, kWatcher*); survive a host change
+  (the new host adopts them); Watch in the game list / by code; Left/Right
+  (LB/RB, 1-4) switch the watched seat on every board; an eye + count after
+  the room line and a listed game's name; a 5 s banner. Weak devices: one
+  board (Auto by power), shadows from the players' backups (sent only to
+  spectators on one board, last, under an adaptive cap that halves when a
+  player's round trip rises; three kept, Keeper::copy_for). Switching on
+  one board is step 2 (not built: Left/Right show a note). Lobby deployed
+  (full games listed, watch by code). Tests: tools/spectate-tests.ps1 (6),
+  tools/spectate-window-test.ps1 [-Mode switch|oneboard]; gamerun
+  --net-spectate [--net-spectate-seat N], --pace (arcade speed). Fixed on
+  the way: --net-leave-at hung in every-board runs. Next after step 2:
+  save-state safeguards, all-auto network settings, then 21:9 (memory notes).
 - Done (2026-11-04, docs/netplay.md "Side runs on other cores"): one
   board's side runs on worker threads (min(other cabinets, cores - 2, at
   least 1); SPIKEOUT_SIDE_WORKERS=N, SPIKEOUT_SIDE_THREAD=0 for none,

@@ -244,16 +244,37 @@ private:
 // since, its player's inputs since.
 class Keeper {
 public:
-    explicit Keeper(std::size_t seats) : copies_(seats), history_(seats) {
+    explicit Keeper(std::size_t seats) : copies_(seats), older_(seats), history_(seats) {
         for (std::size_t s = 0; s < seats; ++s) logs_.push_back(std::make_unique<PacketLog>());
     }
     // Seat `seat`'s backup (packed). False: changes from one this hasn't (its whole wanted).
     bool backup(std::size_t seat, std::span<const uint8_t> packed) {
         std::lock_guard guard(lock_);
-        if (seat >= copies_.size() || !copies_[seat].apply(packed)) return false;
-        logs_[seat]->forget_before(copies_[seat].taken);
-        history_.forget_before(seat, copies_[seat].frame);
+        if (seat >= copies_.size()) return false;
+        Copy before = keep_ > 1 && copies_[seat].valid() ? copies_[seat] : Copy{};
+        if (!copies_[seat].apply(packed)) return false;
+        if (before.valid()) { // (kept: a spectator runs behind the players, its backups' frames ahead of it)
+            older_[seat].push_back(std::move(before));
+            while (older_[seat].size() + 1 > keep_) older_[seat].pop_front();
+        }
+        const Copy& oldest = older_[seat].empty() ? copies_[seat] : older_[seat].front();
+        logs_[seat]->forget_before(oldest.taken);
+        history_.forget_before(seat, oldest.frame);
         return true;
+    }
+    // How many of each board's backups are kept (1: the last; a spectator on one board, a few: Session::watch).
+    void set_keep(std::size_t n) {
+        std::lock_guard guard(lock_);
+        keep_ = std::max<std::size_t>(1, n);
+    }
+    // The newest backup of seat `seat` at or before `frame` (none: not valid).
+    Copy copy_for(std::size_t seat, uint64_t frame) const {
+        std::lock_guard guard(lock_);
+        if (seat >= copies_.size()) return {};
+        if (copies_[seat].valid() && copies_[seat].frame <= frame) return copies_[seat];
+        for (auto it = older_[seat].rbegin(); it != older_[seat].rend(); ++it)
+            if (it->frame <= frame) return *it;
+        return {};
     }
     void packet(std::size_t to, uint64_t seq, uint64_t at, const std::vector<uint8_t>& data) {
         if (to < logs_.size()) logs_[to]->add(seq, at, data);
@@ -289,6 +310,8 @@ public:
 private:
     mutable std::mutex lock_;
     std::vector<Copy> copies_;
+    std::vector<std::deque<Copy>> older_; // (the ones before the last, set_keep)
+    std::size_t keep_ = 1;
     std::vector<std::unique_ptr<PacketLog>> logs_;
     InputTable history_;
 };

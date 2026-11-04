@@ -36,6 +36,7 @@ struct MenuItem {
     std::function<void()> clear;        // Delete / Y: back to none (a key binding)
     std::string country;                // a flag before the label (two letters; "" none): a listed game's host
     int estimate_ms = -1;               // signal bars and "~N ms" on the right: a listed game's estimated speed (-1 none)
+    int watchers = 0;                   // an eye and this count after the label: a listed game's spectators (0: none)
 };
 
 // A seat of a network game, in the list under the frame rate.
@@ -57,6 +58,7 @@ struct NetRow {
 struct NetPills {
     int delay = -1;
     bool auto_delay = false;
+    int watchers = 0; // (spectators: an eye and their count after the header line; 0 none)
 };
 
 // A page for typing a short code (a game's): a box of its letters and an
@@ -103,6 +105,10 @@ public:
     // A screen over the whole window, the game's picture hidden (a network game joined in progress, catching up with
     // the others): a title, a bar filled to `percent` (0-100; -1: no bar) and a line under it (an empty title: none).
     void set_loading(const std::string& title, int percent = -1, const std::string& detail = {});
+    // A spectator's banner at the bottom: whom it watches and the keys that change it ("WATCHING KENJI (2P)  LEFT RIGHT /
+    // LB RB  another player"; the owner's choice of the mockups); empty: none.
+    // (`note`: that message instead, plain: "switching needs a faster device")
+    void set_watch_banner(const std::string& who, const std::string& note = {});
 
     bool is_open() const { return open_; }
     void open(MenuPage root);
@@ -144,7 +150,7 @@ private:
     std::unique_ptr<Impl> impl_;
     std::string error_;
     bool open_ = false;
-    bool fps_shown_ = false, net_shown_ = false, loading_shown_ = false;
+    bool fps_shown_ = false, net_shown_ = false, loading_shown_ = false, banner_shown_ = false;
     std::string net_rml_; // (what the seat list shows: not set again unchanged)
     void show_corner();   // the corner page shown while either is
     std::vector<MenuPage> stack_;
