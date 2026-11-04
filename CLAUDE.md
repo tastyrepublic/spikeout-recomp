@@ -37,8 +37,19 @@ Read this first; the older hand-off below is history.
   board with its sound and music boards),
   the game kept in spikeout-undo.state, F9 within 5 s goes back; F10 not in
   network play; notices at the bottom (STATE SAVED, CAN'T LOAD: why);
-  network F9 only with --net-save-key. Next: all-auto network settings,
-  then 21:9 (memory notes).
+  network F9 only with --net-save-key.
+- Network settings all automatic (owner's choice, 2026-11-04; no menu item
+  now): rollback (12 frames, fit to memory) for an internet game or a player
+  over 10 ms away one way, none on a LAN; input delay from the furthest
+  player (with rollback half its frames, 2 at most), re-checked each second
+  in play, moved a frame once the same for 3 s; board mode Auto as before.
+  --net-delay N / --net-rollback N force them (tests). Distance simulated:
+  SPIKEOUT_TEST_LATENCY=MS[,MS@SECONDS] holds a machine's datagrams;
+  tools/net-window-matrix.ps1 -Modes every|one|auto,... (2-4 windows, each
+  its board mode, latency 40 then 110 ms): 2 (every+one, one+every), 3
+  (every+one+one), 4 (auto x4: each went to one board under the load) all
+  the same, rollback on, delay 1 then 2. Not tried over a real distance yet
+  (the owner's internet test). Next: 21:9 (memory notes).
 - Done (2026-11-04, docs/netplay.md "Side runs on other cores"): one
   board's side runs on worker threads (min(other cabinets, cores - 2, at
   least 1); SPIKEOUT_SIDE_WORKERS=N, SPIKEOUT_SIDE_THREAD=0 for none,

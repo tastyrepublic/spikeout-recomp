@@ -366,7 +366,53 @@ struct Session::Impl {
     // ---- Sending ----
 
     void send(const Address& to, const Writer& w) { send_raw(to, w.out); }
+    // Tests: SPIKEOUT_TEST_LATENCY=MS[,MS@SECONDS...] holds every datagram this machine sends that long, as a network
+    // that far away would (two windows on one PC as players apart: the network settings' Auto chooses by it); later
+    // values from that many seconds after the session opened (the delay in play following a change).
+    struct Held {
+        Clock::time_point due;
+        Address to;
+        std::vector<uint8_t> data;
+    };
+    std::deque<Held> held_out;
+    int test_latency_ms(Clock::time_point now) const {
+        static const std::vector<std::pair<int, int>> steps = [] { // (seconds from, ms)
+            std::vector<std::pair<int, int>> out;
+            if (const char* v = std::getenv("SPIKEOUT_TEST_LATENCY"))
+                for (const char* p = v; *p;) {
+                    char* end = nullptr;
+                    const int ms = static_cast<int>(std::strtol(p, &end, 10));
+                    if (end == p) break; // (not a number: the rest left)
+                    int from = 0;
+                    if (*end == '@') from = static_cast<int>(std::strtol(end + 1, &end, 10));
+                    out.push_back({from, ms});
+                    if (*end != ',') break;
+                    p = end + 1;
+                }
+            return out;
+        }();
+        int ms = 0;
+        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(now - epoch).count();
+        for (const auto& [from, v] : steps)
+            if (seconds >= from) ms = v;
+        return ms;
+    }
+    void send_held(Clock::time_point now) {
+        while (!held_out.empty() && held_out.front().due <= now) {
+            Held h = std::move(held_out.front());
+            held_out.pop_front();
+            send_now(h.to, h.data);
+        }
+    }
     void send_raw(const Address& to, std::span<const uint8_t> data) {
+        const auto now = Clock::now();
+        if (const int ms = test_latency_ms(now); ms > 0) {
+            held_out.push_back({now + std::chrono::milliseconds(ms), to, std::vector<uint8_t>(data.begin(), data.end())});
+            return;
+        }
+        send_now(to, data);
+    }
+    void send_now(const Address& to, std::span<const uint8_t> data) {
         if (to.relayed && turn) turn->send_to(Address{to.ip, to.port}, data, turn_send());
         else if (!socket.send_to(to, data)) ++send_failures;
     }
@@ -1493,6 +1539,7 @@ struct Session::Impl {
             std::lock_guard guard(lock);
             while (auto d = socket.receive()) ++datagrams_in, received(*d);
             const auto now = Clock::now();
+            send_held(now); // (tests: SPIKEOUT_TEST_LATENCY's, due)
             if (is_host && now - last_beacon > kBeaconEvery) beacon(now);
             if (joining && my_seat == kNoSeat && my_watch == kNoSeat && !leaving && now - last_join > kJoinRetry) {
                 last_join = now; // (to every address the host may be at: the first to answer is where it is)

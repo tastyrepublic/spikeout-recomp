@@ -243,7 +243,7 @@ struct Shared {
     tools::NetPlay* netplay = nullptr;
     tools::InputTable* inputs = nullptr;
     std::size_t local = 0;
-    uint64_t input_delay = 0;
+    std::atomic<uint64_t> input_delay{0}; // (Auto: changed in play, read by the boards each frame)
     net::StartInfo net_start;
     // Every board's state: saved for a machine that asks (a player joining
     // the game in progress, or one out of step), or (`net_state`, unpacked)
@@ -1799,6 +1799,8 @@ int main(int argc, char** argv) {
     bool net_save_key = false; // --net-save-key
     Shared::OneBoard net_one_board = Shared::OneBoard::automatic; // --net-every-board, --net-one-board (Auto: the default)
     uint64_t net_rollback = 0; // --net-rollback N (tools::rollback; every board here: no one board then)
+    bool net_rollback_forced = false; // (--net-rollback given: not chosen by itself)
+    int cli_net_delay = -1;           // --net-delay N: the input delay forced (tests; -1: Auto)
     uint64_t max_frames = 0;
     bool mute = false, cli_quads = false, cli_smooth = false, cli_smooth_log = false, midi_burst = false, dma_instant = false, use_gpu = true, cli_soft_3d = false, fifo = false,
          sleep_pacing = false, list_audio = false;
@@ -1812,7 +1814,8 @@ int main(int argc, char** argv) {
         else if (arg == "--net-one-board") net_one_board = Shared::OneBoard::always;
         else if (arg == "--net-every-board") net_one_board = Shared::OneBoard::never;
         else if (arg == "--net-auto-board") net_one_board = Shared::OneBoard::automatic;
-        else if (arg == "--net-rollback" && i + 1 < argc) net_rollback = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--net-rollback" && i + 1 < argc) net_rollback = std::strtoull(argv[++i], nullptr, 0), net_rollback_forced = true;
+        else if (arg == "--net-delay" && i + 1 < argc) cli_net_delay = std::clamp(std::atoi(argv[++i]), 0, 8);
         else if (arg == "--no-idle-skip") m3::games::set_idle_skip(false), m3::CommBoard::set_wait_skip(false); // (the vblank wait and the network board's waits spun, as before)
         else if (arg == "--no-net-idle-skip") m3::CommBoard::set_wait_skip(false); // (the network board's only)
         else if (arg == "--fog-over-nothing") fog_over_nothing = true;
@@ -2361,7 +2364,24 @@ int main(int argc, char** argv) {
     int net_seats = 2;      // a game offered: its players
     bool net_listed = true; // on the internet: in the lobby's list, or by its code only
     int net_where = 0;      // a game offered: 0 this network, 1 the internet (listed), 2 the internet (private)
-    int net_delay = 0;      // input delay in frames (0: as the arcade; -1: Auto, from the round trip at the start)
+    int net_delay = cli_net_delay; // input delay in frames (-1: Auto, the default: from the furthest player, kept up in play)
+    // The network settings' Auto (net_begin, and the delay in play): no rollback within a LAN's reach (each way, ms),
+    // its window otherwise (frames, what memory allows); the delay the frames the furthest player is away past a
+    // frame's slack, half of them (two at most) with rollback, which covers the rest.
+    static constexpr int kLanOneWayMs = 10;
+    static constexpr uint64_t kAutoRollback = 12;
+    auto furthest_one_way = [&](std::size_t me, std::size_t seats) {
+        int one_way = -1;
+        const auto trips = netgame->session().round_trips();
+        for (std::size_t s = 0; s < seats && s < trips.size(); ++s)
+            if (s != me && trips[s] >= 0) one_way = std::max(one_way, trips[s] / 2);
+        return one_way;
+    };
+    auto auto_delay = [](int one_way, bool rollback) -> uint64_t {
+        if (one_way <= 8) return 0;
+        const auto frames = static_cast<uint64_t>(std::ceil((one_way - 8) / (1000.0 / recomp::FrameTiming::kRefreshHz)));
+        return rollback ? std::min<uint64_t>(2, frames / 2) : frames;
+    };
     std::unique_ptr<net::Discovery> discovery; // games on this network, while looked for
     std::unique_ptr<net::LobbyClient> browser; // the lobby's list, while looked at
     std::vector<net::Json> internet_games;
@@ -2496,14 +2516,19 @@ int main(int argc, char** argv) {
     std::function<void()> set_up_display; // (the 3D renderer for what the window shows: below, with the GPU)
     // The game started (ours or the host's): this window runs all its boards.
     auto net_begin = [&](const net::StartInfo& start) {
-        uint64_t delay = net_delay >= 0 ? static_cast<uint64_t>(net_delay) : 0;
-        if (net_delay < 0) { // Auto: enough frames for our inputs to reach the furthest of them, past the frame's slack
-            int one_way = 0;
-            const auto trips = netgame->session().round_trips();
-            for (std::size_t s = 0; s < start.seats; ++s)
-                if (s != start.my_seat) one_way = std::max(one_way, trips[s] / 2);
-            delay = one_way <= 8 ? 0 : static_cast<uint64_t>(std::ceil((one_way - 8) / (1000.0 / recomp::FrameTiming::kRefreshHz)));
-        }
+        // (the network settings chosen by themselves, nothing to set (the owner's choice, 2026-11-04): rollback for a
+        // game through the internet or with a player further than a LAN's; the input delay from the furthest player,
+        // kept up to date in play (below); the board mode by this PC's speed, as before. --net-delay N and
+        // --net-rollback N force them, for tests.)
+        const bool spectator = start.my_seat >= start.seats;
+        const int one_way = furthest_one_way(start.my_seat, start.seats);
+        if (!net_rollback_forced)
+            shared.rollback_wanted = !spectator && (netgame->internet || one_way > kLanOneWayMs) ? kAutoRollback : 0;
+        const uint64_t delay = net_delay >= 0 ? static_cast<uint64_t>(net_delay) : auto_delay(one_way, shared.rollback_wanted > 0);
+        std::printf("spikeout: network settings: %s, input delay %llu (the furthest player %d ms away one way)\n",
+                    shared.rollback_wanted ? ("rollback over " + std::to_string(shared.rollback_wanted) + " frames").c_str()
+                                           : "waiting for inputs",
+                    static_cast<unsigned long long>(delay), one_way);
         std::vector<uint8_t> state; // (a game joined in progress: every board as the host had them)
         if (start.state_frame) {
             if (auto unpacked = net::decompress(start.state)) state = std::move(*unpacked);
@@ -3236,11 +3261,7 @@ int main(int argc, char** argv) {
         if (netgame) p.items.erase(p.items.begin(), p.items.begin() + 2); // (in a room: no other until it's left)
         p.items.push_back({"Player name", "The name the other players see. Enter: change it.", [&] { return player_name(settings); },
                            {}, [&] { menu.push(name_page()); }});
-        p.items.push_back({"Input delay",
-                           "Frames your controls are sent ahead, so they reach the others in time. 0 is as the arcade; "
-                           "Auto: 0 on a quick network, more the further away they are.",
-                           [&] { return net_delay < 0 ? std::string("Auto") : std::to_string(net_delay); },
-                           [&](int d) { net_delay = std::clamp(net_delay + d, -1, 4); }});
+        // (no input delay, board mode or rollback to set: chosen by themselves, net_begin; the owner's choice)
         p.items.push_back(back_item());
         return p;
     };
@@ -3570,6 +3591,23 @@ int main(int argc, char** argv) {
         // The host left the game in progress and this machine hosts the room
         // now (host migration): on the internet, the room listed again under
         // its code (the lobby still knows it), so the others can join it.
+        // The input delay in play (Auto): each second, what the furthest player's round trip asks for now; moved a frame
+        // towards it once it has asked for the same for 3 seconds (a moment's spike doesn't move it; a raised delay
+        // leaves a frame held, a lowered one drops one: the session's stream takes either).
+        static auto delay_checked = now;
+        static int delay_asked = 0;
+        if (netgame && netgame->running && !shared.spectating && net_delay < 0 && now - delay_checked >= std::chrono::seconds(1)) {
+            delay_checked = now;
+            const int one_way = furthest_one_way(shared.local, shared.boards);
+            const uint64_t want = auto_delay(one_way, shared.rollback != nullptr), have = shared.input_delay;
+            delay_asked = want == have ? 0 : delay_asked + 1;
+            if (delay_asked >= 3 && one_way >= 0) {
+                delay_asked = 0;
+                shared.input_delay = want > have ? have + 1 : have - 1;
+                std::printf("spikeout: input delay %llu (the furthest player %d ms away one way)\n",
+                            static_cast<unsigned long long>(shared.input_delay.load()), one_way);
+            }
+        }
         if (netgame && netgame->running && !netgame->host && netgame->session().hosting()) {
             netgame->host = true;
             netgame->set_status("The host left: you host the room now");
@@ -3712,6 +3750,10 @@ int main(int argc, char** argv) {
                     r.seat = std::to_string(s + 1) + "P";
                     r.name = tools::clean_name(v.name); // (as ours: what the menu's font has)
                     r.country = v.country;
+                    // (tests: SPIKEOUT_TEST_FLAGS=gb,jp,... each seat's flag as if the lobby had said its country: a LAN
+                    // game's list seen as an internet one's)
+                    if (static const char* flags = std::getenv("SPIKEOUT_TEST_FLAGS"); flags && std::strlen(flags) >= 3 * s + 2)
+                        r.country = std::string(flags + 3 * s, 2);
                     if (v.state == State::me || v.state == State::playing || v.state == State::joining)
                         r.platform = platform_icon(v.status), r.mode = mode_tag(v.status);
                     if (v.state == State::playing && shared.rollback && shared.inputs && netgame->running)

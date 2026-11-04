@@ -51,7 +51,7 @@ function Start-Window($name, $keys, $presses, $frames = $Frames) {
     $p
 }
 # (the host: Network play, Host a game, Start hosting (2 players, this network), then Start game six seconds on;
-# the joiner, a second later: Network play, Join a game two seconds on (the game found nearby), the first game)
+# the joiner, a second later: Network play, Join a game two seconds on (the game found nearby), the first game, Join)
 # (the other player's coin at 6,100, long after the hand-back: the one-board window's rules want a shadow then, from
 # the other window's real board)
 $hostPresses = 'coin@1200,start@1300,beat@1700' + $(if ($OneBoard -eq 'joiner') { ',coin@6100' } else { '' })
@@ -59,7 +59,7 @@ $joinPresses = 'coin@2600,start@2700,beat@3300,beat@3650' + $(if ($OneBoard -eq 
 $hostWindow = Start-Window 'host' ('esc,down,enter,down,enter,down,down,enter' + (',F13' * 24) + ',enter') $hostPresses
 Start-Sleep -Seconds 1
 $joinFrames = if ($OneBoard -eq 'leave') { 5500 } else { $Frames }
-$joinWindow = Start-Window 'joiner' ('esc,down,enter' + (',F13' * 8) + ',enter,enter') $joinPresses $joinFrames
+$joinWindow = Start-Window 'joiner' ('esc,down,enter' + (',F13' * 8) + ',enter,enter,enter') $joinPresses $joinFrames
 $gone = $OneBoard -eq 'leave' -or $OneBoard -eq 'crash'
 $rollback = $Extra -match '--net-rollback' # (the windows with rollback: every board, no backups run on: none needed)
 if ($OneBoard -eq 'crash') { # (the joiner's window ended as a crash would, mid-game: about frame 5,600)

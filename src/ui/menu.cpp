@@ -16,6 +16,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
+#include <map>
 #include <set>
 
 namespace ui {
@@ -134,6 +136,12 @@ struct Menu::Impl {
     AssetFiles files;
     std::set<std::string> flags = flag_codes();
     float ratio = 1; // (the dp scale, the window's height / 720: set as it's drawn)
+    // (the seat list's round-trip times: by seat, how many digit places each keeps, and since when it has had fewer)
+    struct MsWidth {
+        std::size_t places = 0;
+        std::chrono::steady_clock::time_point shorter_since{};
+    };
+    std::map<std::string, MsWidth> ms_width;
     // A length in whole pixels (the signal bars: at a scale that isn't whole, each bar's dp rounded where it lies
     // made them differ in width).
     std::string px(double dp) const { return std::to_string(std::max(1L, std::lround(dp * ratio))) + "px"; }
@@ -212,13 +220,14 @@ bool Menu::init(SDL_GPUDevice* device, SDL_Window* window) {
         ".seat.player { color: #ffffff; } .seat.fresh { color: #7fe07f; } .seat.dim { color: #9a9a9a; } "
         ".seat .p { margin-right: 6dp; } .seat .name { white-space: nowrap; } " // (right-aligned, each as wide as it is: a long name the row out to the left)
         ".seat .st { margin-left: 8dp; white-space: nowrap; } "
-        ".conn { display: flex; justify-content: flex-end; align-items: flex-end; margin-left: 4dp; } "
+        ".conn { display: flex; justify-content: flex-end; align-items: flex-end; margin-left: 8dp; } "
         ".bars { display: flex; align-items: flex-end; height: 16dp; margin-bottom: 3dp; margin-left: 5dp; } "
         ".bar { width: 3dp; margin-left: 1dp; background-color: #4a4a4a; border: 1dp #000000; } "
         ".g .on { background-color: #5fd35f; } .y .on { background-color: #ffd34a; } .r .on { background-color: #e05555; } "
-        ".ms { width: 48dp; text-align: right; white-space: nowrap; } " // (as wide as "999 ms": the name stays put as it changes)
-        ".flag { width: 19dp; height: 14dp; margin: 0 6dp 4dp 0; border: 1dp #000000; } " // (as tall as the 20dp text's capitals)
-        ".noflag { width: 21dp; height: 14dp; margin: 0 6dp 4dp 0; } "
+        ".ms { text-align: right; white-space: nowrap; } " // (as wide as it is, against the bars: the gap after the name the same at any time; the owner's choice)
+        ".dg { display: inline-block; width: 10dp; text-align: center; } " // (a digit's place: as wide as the widest)
+        ".flag { width: 20dp; height: 15dp; margin: 0 6dp 3dp 0; border: 1dp #000000; } " // (as tall as the 20dp text's capitals, on their middle: measured)
+        ".noflag { width: 22dp; height: 15dp; margin: 0 6dp 3dp 0; } "
         ".head .eye { width: 22dp; height: 22dp; margin: 0 3dp 0 10dp; image-color: #ffd34a; } " // (the spectators' count)
         // (a spectator's banner: bottom middle, over the game, its keys as key caps)
         "#watchb { display: none; position: absolute; left: 0; width: 100%; bottom: 28dp; text-align: center; } "
@@ -226,7 +235,7 @@ bool Menu::init(SDL_GPUDevice* device, SDL_Window* window) {
         "#watchb .key { font-size: 15dp; padding: 0 6dp; margin: 0 2dp; border: 1dp #c8ccd4; border-radius: 4dp; "
         "background-color: #2a2e38; font-effect: none; } "
         "#watchb .pill { display: inline-block; padding: 4dp 14dp; background-color: #0b0d12d9; border: 1dp #000000; border-radius: 16dp; } "
-        ".plat { width: 14dp; height: 14dp; margin: 0 6dp 4dp 0; } .noplat { width: 14dp; height: 14dp; margin: 0 6dp 4dp 0; } " // (as the flag: the capitals' height, on their line)
+        ".plat { width: 15dp; height: 15dp; margin: 0 6dp 3.5dp 0; } .noplat { width: 15dp; height: 15dp; margin: 0 6dp 3.5dp 0; } " // (as the flag: the capitals' height, on their line)
         ".badges { display: flex; justify-content: flex-end; height: 19dp; margin-bottom: 3dp; } " // (a seat's badges, under it)
         ".badge { font-size: 13dp; line-height: 16dp; height: 16dp; padding: 0 6dp; margin-left: 4dp; border-radius: 8dp; "
         "border: 1dp #000000; font-effect: none; } .badge.mode { background-color: #3a3f4a; color: #ffffff; } "
@@ -287,8 +296,26 @@ void Menu::set_net(const std::vector<NetRow>& rows, const std::string& header, c
         if (!r.status.empty()) { // (our own row: none, its name at the right edge as the others' bars)
             rml += "<span class=\"st\">" + escape(r.status) + "</span>";
         } else if (r.bars >= 0) {
-            rml += "<div class=\"conn\"><span class=\"ms\">" + (r.ms >= 0 ? std::to_string(r.ms) + " ms" : std::string()) +
-                   "</span><div class=\"bars " + (r.bars >= 3 ? "g" : r.bars == 2 ? "y" : "r") + "\">";
+            // (the time against the bars, the gap after the name the same at any time; each digit as wide as any (the
+            // font's aren't), and as many digit places as it has had until it has had fewer for 5 s: the name moves
+            // only when the time keeps another number of digits a while, never back and forth: the owner's choice)
+            std::string time;
+            if (r.ms >= 0) {
+                const std::string digits = std::to_string(r.ms);
+                Impl::MsWidth& w = impl_->ms_width[r.seat];
+                const auto now = std::chrono::steady_clock::now();
+                if (digits.size() >= w.places) {
+                    w.places = digits.size(), w.shorter_since = {};
+                } else if (w.shorter_since == std::chrono::steady_clock::time_point{}) {
+                    w.shorter_since = now;
+                } else if (now - w.shorter_since > std::chrono::seconds(5)) {
+                    w.places = digits.size(), w.shorter_since = {};
+                }
+                for (std::size_t k = digits.size(); k < w.places; ++k) time += "<span class=\"dg\"></span>";
+                for (const char d : digits) time += std::string("<span class=\"dg\">") + d + "</span>";
+                time += "&nbsp;ms";
+            }
+            rml += "<div class=\"conn\"><span class=\"ms\">" + time + "</span><div class=\"bars " + (r.bars >= 3 ? "g" : r.bars == 2 ? "y" : "r") + "\">";
             for (int b = 0; b < 4; ++b) // (whole pixels: Impl::px)
                 rml += "<div class=\"bar" + std::string(b < r.bars ? " on" : "") + "\" style=\"height: " + impl_->px(5 + 3 * b) +
                        "; width: " + impl_->px(3) + "; margin-left: " + impl_->px(1) + "; border-width: " + impl_->px(1) + ";\"></div>";
