@@ -231,6 +231,18 @@ inside: [docs/recompiler.md](docs/recompiler.md), [docs/control-flow.md](docs/co
 [docs/hardware-notes.md](docs/hardware-notes.md), [docs/memory-map.md](docs/memory-map.md),
 [docs/netplay.md](docs/netplay.md), [docs/fidelity.md](docs/fidelity.md).
 
+## Authors, and the use of AI
+
+- **Don** ([tastyrepublic](https://github.com/tastyrepublic)): the project, its direction and every decision on how
+  the game should look, sound and play; the testing on real PCs, pads and networks.
+- **Claude** (Anthropic's AI model, through [Claude Code](https://claude.com/claude-code)): a contributor to every
+  commit, writing much of the code and the documentation.
+
+This project is made with AI. Claude writes code, runs the tests and investigates, at Don's direction; Don decides
+what's built, plays it, and asks for each change to be committed. What AI writes is held to the same rule as the rest:
+a change to what the game shows or plays must be checked against the reference (Supermodel) or proved identical by
+hashes (pictures, sound, RAM, recordings, save states), as the docs record. Each commit names Claude as co-author.
+
 ## Credits and references
 
 - [Supermodel](https://github.com/trzy/Supermodel): the primary Model 3 hardware reference (ROM layout, address map, Real3D, network board).
