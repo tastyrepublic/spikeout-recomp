@@ -10,6 +10,7 @@ four-player co-op over the internet, one player a PC, as four linked cabinets pl
   <a href="https://github.com/tastyrepublic/spikeout-recomp/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/tastyrepublic/spikeout-recomp?include_prereleases&label=release"></a>
   <a href="LICENSE"><img alt="Licence: GPL-3.0" src="https://img.shields.io/badge/licence-GPL--3.0-blue"></a>
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%2F%20Steam%20Deck-informational">
+  <a href="https://buymeacoffee.com/donfy"><img alt="Buy me a coffee" src="https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?logo=buymeacoffee&logoColor=black"></a>
 </p>
 
 <p align="center">
@@ -261,9 +262,30 @@ hashes (pictures, sound, RAM, recordings, save states), as the docs record. Each
 
 See [docs/REFERENCES.md](docs/REFERENCES.md) for how sources are used.
 
-## Support
+## Support the project
 
-If you enjoy it, you can [buy me a coffee](https://buymeacoffee.com/donfy).
+Spikeout: Final Edition Recomp is free, and always will be. It's made in spare time by one person (with an AI
+helper), and it has a long road ahead: if it brought back some arcade nights for you, a coffee helps it keep going.
+
+<p align="center">
+  <a href="https://buymeacoffee.com/donfy"><img alt="Buy me a coffee" src="https://img.shields.io/badge/Buy%20me%20a%20coffee-donfy-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black"></a>
+</p>
+
+What your support pays for:
+
+- **The online lobby and its relay**, which run on Cloudflare: the relay carries the games of players whose networks
+  can't connect directly, and costs more as more people play.
+- **Devices to test on**: a Steam Deck, handhelds, pads, so it plays as well on them as on a PC.
+- **Time** for what's next: smooth motion, the cable link mode, more systems.
+
+Not in a position to donate? That helps too:
+
+- **Star the repository**, so more Spikeout players find it.
+- **Play online and tell others**: a beat 'em up made for four is best with four.
+- **Report what looks or plays differently** from the arcade, in
+  [Issues](https://github.com/tastyrepublic/spikeout-recomp/issues): every report makes it closer to the real
+  cabinet.
+- **Try it on your device** (a Steam Deck, another Linux, a laptop) and say how it runs.
 
 ## Licence
 
