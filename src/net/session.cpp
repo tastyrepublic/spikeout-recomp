@@ -508,7 +508,12 @@ struct Session::Impl {
         send_now(to, data);
     }
     void send_now(const Address& to, std::span<const uint8_t> data) {
-        if (to.relayed && turn) turn->send_to(Address{to.ip, to.port}, data, turn_send());
+        // (tests: SPIKEOUT_TEST_RELAY_ONLY: the game's datagrams out through our relay too, as in comes only through it:
+        // a router letting nothing through between the players, every exchange relay to relay; else a direct send to
+        // the other's relay had its answer, straight back from that relay, refused here)
+        static const bool relay_only = std::getenv("SPIKEOUT_TEST_RELAY_ONLY") != nullptr;
+        const bool through_relay = to.relayed || (relay_only && !stun::is_stun(data) && turn && turn->relayed());
+        if (through_relay && turn) turn->send_to(Address{to.ip, to.port}, data, turn_send());
         else if (!socket.send_to(to, data)) ++send_failures;
     }
     TurnClient::Send turn_send() {
@@ -2183,6 +2188,7 @@ void Session::leave() {
                     m.pump_reliable(0, v);
                 }
             }
+        if (m.turn) m.turn->release(m.turn_send()); // (the relay's allocation given back: the next run may have one)
     }
 }
 
@@ -2205,10 +2211,11 @@ std::optional<Address> Session::public_address() const {
     return impl_->public_address;
 }
 
-void Session::use_relay(const Address& turn_server, const std::string& username, const std::string& password) {
+void Session::use_relay(const std::vector<Address>& turn_servers, const std::string& username, const std::string& password) {
     Impl& m = *impl_;
     std::lock_guard guard(m.lock);
-    m.turn.emplace(turn_server, username, password);
+    if (turn_servers.empty()) return;
+    m.turn.emplace(turn_servers, username, password);
     for (const auto& p : m.peers) { // (the players known so far may send to it)
         if (!p.present) continue;
         m.permit(p.address);

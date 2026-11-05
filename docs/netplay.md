@@ -3124,6 +3124,64 @@ board the same as the players', every frame of 7,600. The window: a
 spectator forced to one board (two windows), the host told; Right refused
 with the note.
 
+## The first tests over the internet (2026-11-05)
+
+Every test before was on one PC or a LAN. Two GitHub Codespaces (Azure,
+UK South and Central India; .devcontainer, tools/codespace.sh: gamerun
+built there from the ROM set, headless) and this PC (a home connection in
+the UK) made three networks: 2, 3 and 4 players (the 4th a second player on
+the India machine), each machine every board, rollback 12, at the arcade's
+pace, then a spectator, then the window joining by its code.
+
+What held: every run the same on every machine (0 hash checks differing),
+direct and through the relay. This PC reached Azure directly in both places
+(UK 10 ms, India 144 ms round trips); everyone forced through Cloudflare's
+relay (relay to relay) 14 and 162 ms. Two players on one machine's network
+found each other as LAN (1 ms). In play, once everyone was in: 0-8 frames
+in a run over 1.5 frames from the last, 0-23 rollbacks at 144 ms, never
+waiting for inputs. A spectator in India: the same, no stutters. The
+window chose rollback 12 and delay 2 by itself (the furthest 72 ms away).
+
+Found and fixed:
+- The relay after a run that ended without releasing its allocation: a
+  cloud machine's router gives every run the same public address and port,
+  so the next run's allocation was refused (437) for 10 minutes. The
+  allocation is released on leaving (a refresh with lifetime 0), and the
+  next of the relay's addresses (Cloudflare's 3478, then 53) tried on a
+  refusal (TurnClient's servers).
+- SPIKEOUT_TEST_RELAY_ONLY sent straight from the socket but took in only
+  what came through its relay: a direct send to the other's relay had its
+  answer, straight back from that relay, refused. Now it sends through its
+  relay too (every exchange relay to relay, as behind the strictest routers).
+- gamerun, the test tool: hosting through the lobby it stopped reading it
+  once the game started (--net-start-alone), so nobody could join on the
+  internet (on one PC a joiner's datagrams reached it anyway); now it reads
+  it the whole run. --net-catch-up joins as the window does (unpaced until
+  within 4 frames of the others, then the cabinet; tools/codespace.sh join
+  uses it): taking the seat at once held the host 2-3 s. Its time sync
+  when paced is the window's (a little slower or sooner each frame), not a
+  wait until close, which made stutters; it doesn't sleep the last 2 ms on
+  Windows (its sleeps end up to 15 ms late). The end says each player's
+  link, the pace (stutters: over 1.5 frames from the last, and the longest
+  gap), and how often a frame waited over a frame's time for inputs;
+  SPIKEOUT_NET_DEBUG a line each 300 frames.
+
+Still open, in order:
+1. The window joining a game in progress goes out of step: the next hash
+   check (frame 3000, two frames after the hand-over at 2998) finds its
+   own cabinet's board different on every machine; it asks the host for
+   every board again (9 MB with 3 cabinets) and catches up again. Over the
+   internet that held all three machines about 20 s; on one PC (build-
+   jit\shots\local3.ps1: gamerun host, gamerun player, the window) about
+   1 s. gamerun joiners never did, so it's something the window does at
+   the hand-over (its first inputs, or what it sets on its cabinet).
+2. The host's game holds 220-630 ms (more cabinets, more) whenever someone
+   joins or starts watching: every board's state saved and packed on its
+   game thread. Rollback mostly hides it from the others.
+3. A player gone without a goodbye holds everyone about 3 s, until dropped.
+4. The packed state is about 3 MB a cabinet in play (9.3 MB with three):
+   fixed in size, not growing with the game's length.
+
 ## Plan
 
 1. Single board, single player (milestones 1–4).

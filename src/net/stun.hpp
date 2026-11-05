@@ -51,7 +51,10 @@ public:
     using Send = std::function<void(const Address& to, std::span<const uint8_t> data)>;
     using Clock = std::chrono::steady_clock;
 
-    TurnClient(Address server, std::string username, std::string password);
+    // `servers`: the relay's addresses to try in turn (Cloudflare's on two ports): the next one if an allocation is
+    // refused (437: one left behind by a run that ended without releasing it, from the same address and port as ours,
+    // as a cloud machine's router gives every run) or not answered.
+    TurnClient(std::vector<Address> servers, std::string username, std::string password);
     const Address& server() const { return server_; }
     // The relay address the others can send to, once allocated.
     std::optional<Address> relayed() const { return relayed_; }
@@ -66,6 +69,8 @@ public:
     std::optional<UdpSocket::Datagram> received(std::span<const uint8_t> data, const Send& send);
     // A datagram to a peer through the relay.
     void send_to(const Address& peer, std::span<const uint8_t> data, const Send& send);
+    // The allocation given back (leaving: else it stays 10 minutes, and the next run from this address can't have one).
+    void release(const Send& send);
 
 private:
     std::vector<uint8_t> request(uint16_t type, const std::vector<std::pair<uint16_t, std::vector<uint8_t>>>& attributes,
@@ -74,7 +79,10 @@ private:
     void refresh(const Send& send);
     void create_permissions(const Send& send);
     static bool is_public(uint32_t ip);
+    bool next_server(const Send& send); // (another of the servers: true if there was one)
 
+    std::vector<Address> servers_;
+    std::size_t server_at_ = 0;
     Address server_;
     std::string username_, password_, realm_, nonce_;
     std::array<uint8_t, 16> key_{};

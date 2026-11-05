@@ -109,6 +109,19 @@ Read this first; the older hand-off below is history.
   were thrown away: stuck for good); no backups to a joiner; tested on a
   simulated slow line (SPIKEOUT_TEST_LINK=KB,LOSS). The relay can't be
   fully tested on one PC (one public address): a second network needed.
+  INTERNET TESTS (2026-11-05, docs/netplay.md "The first tests over the
+  internet"): two Codespaces (UK South, Central India; the account allows
+  two running; stopped, not deleted: spikeout-net-test-*, spikeout-net-
+  southeastasia-*, the ROM set in their home folders) and this PC: 2-4
+  players, direct and relay, a spectator, the window: all the same on
+  every machine. Fixed: the relay's allocation released on leaving and a
+  second relay port on a refusal; the relay-only test switch; gamerun's
+  lobby reading while hosting, --net-catch-up, its time sync and pace
+  measures. OPEN, NEXT: the window joining in progress goes out of step at
+  the first hash check after the hand-over (on one PC: build-jit\shots\
+  local3.ps1); then the host's 0.2-0.6 s hold at a join (state saved on the
+  game thread). Driving a Codespace: gh (the codespace scope granted),
+  build-jit\cs-*.sh, pc-join.ps1, shots\win.ps1 (the window joins by code).
   UPDATE CHECK (2026-11-05, the owner's step 1 of 2; step 2, the game
   updating itself, later): the version is built in (CMake
   SPIKEOUT_VERSION, default PROJECT_VERSION-dev; a release is built with

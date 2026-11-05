@@ -113,8 +113,29 @@ std::array<uint8_t, 12> new_transaction() {
 
 // ---- TURN ----
 
-TurnClient::TurnClient(Address server, std::string username, std::string password)
-    : server_(server), username_(std::move(username)), password_(std::move(password)) {}
+TurnClient::TurnClient(std::vector<Address> servers, std::string username, std::string password)
+    : servers_(std::move(servers)), server_(servers_.empty() ? Address{} : servers_[0]), username_(std::move(username)),
+      password_(std::move(password)) {}
+
+bool TurnClient::next_server(const Send& send) {
+    if (relayed_ || server_at_ + 1 >= servers_.size()) return false;
+    server_ = servers_[++server_at_];
+    realm_.clear(), nonce_.clear();
+    tries_ = 0, pending_type_ = 0;
+    if (std::getenv("SPIKEOUT_NET_DEBUG")) std::fprintf(stderr, "turn: trying the relay at %s\n", server_.str().c_str());
+    allocate(send);
+    return true;
+}
+
+void TurnClient::release(const Send& send) {
+    if (!relayed_ || nonce_.empty()) return;
+    std::vector<uint8_t> lifetime;
+    be32(lifetime, 0);
+    const auto m = request(kRefresh, {{kLifetime, lifetime}}, true);
+    for (int k = 0; k < 2; ++k) send(server_, m); // (no answer waited for: sent twice)
+    relayed_.reset();
+    pending_type_ = 0;
+}
 
 std::vector<uint8_t> TurnClient::request(uint16_t type, const std::vector<std::pair<uint16_t, std::vector<uint8_t>>>& attributes,
                                          bool authenticated) {
@@ -175,6 +196,7 @@ void TurnClient::tick(const Send& send) {
     if (pending_type_ != 0) { // a request unanswered
         if (now - sent_ < kRetry) return;
         if (++tries_ > 6) {
+            if (pending_type_ == kAllocate && next_server(send)) return;
             failed_ = !relayed_;
             error_ = "the relay doesn't answer";
             if (pending_type_ == kCreatePermission && !to_permit_.empty()) to_permit_.pop_front(); // (that one given up)
@@ -230,6 +252,7 @@ std::optional<UdpSocket::Datagram> TurnClient::received(std::span<const uint8_t>
             return std::nullopt;
         }
         if (method == kAllocate && !relayed_) {
+            if (next_server(send)) return std::nullopt;
             failed_ = true;
             error_ = "the relay said " + std::to_string(code);
         }

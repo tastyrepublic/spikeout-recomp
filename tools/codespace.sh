@@ -42,7 +42,7 @@ build)
 join)
     code="${2:?the room code: tools/codespace.sh join CODE}"
     shift 2
-    run --net-join "$code" "$@"
+    run --net-join "$code" --net-catch-up "$@" # (as the window: the cabinet taken once caught up with the others)
     ;;
 host)
     seats="${2:-2}"

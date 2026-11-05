@@ -313,7 +313,7 @@ public:
     std::optional<Address> public_address() const;
     // A relay address on a TURN server (its short-lived credentials from the
     // lobby), for when routers won't let us through to each other.
-    void use_relay(const Address& turn_server, const std::string& username, const std::string& password);
+    void use_relay(const std::vector<Address>& turn_servers, const std::string& username, const std::string& password);
     std::optional<Address> relay_address() const;
     // Every address another machine may reach us at (this machine's own on
     // its networks, our router's, the relay's), with our game port.

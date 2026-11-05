@@ -462,24 +462,25 @@ inline void find_addresses(net::LobbyClient& lobby, net::Session& session, bool 
         if (const auto turn = lobby.wait_for("turn", 5000); turn && (*turn)["t"].as_string() == "turn") {
             for (const net::Json& server : (*turn)["iceServers"].items()) {
                 const std::string& user = server["username"].as_string();
+                std::vector<net::Address> addresses; // (each UDP address it gives, tried in turn: Cloudflare's 3478 and 53)
                 for (const net::Json& u : server["urls"].items()) {
                     const std::string& url = u.as_string(); // turn:HOST:PORT?transport=udp
                     if (user.empty() || url.rfind("turn:", 0) != 0 || url.find("transport=udp") == std::string::npos) continue;
                     const std::size_t colon = url.find(':', 5), q = url.find('?');
                     const auto ip = net::resolve(url.substr(5, colon - 5));
                     const unsigned long port = std::strtoul(url.substr(colon + 1, q - colon - 1).c_str(), nullptr, 10);
-                    if (ip && port) {
-                        session.use_relay({*ip, static_cast<uint16_t>(port)}, user, server["credential"].as_string());
-                        break;
-                    }
+                    if (ip && port) addresses.push_back({*ip, static_cast<uint16_t>(port)});
                 }
-                if (session.relay_address() || !user.empty()) break;
+                if (!addresses.empty()) {
+                    session.use_relay(addresses, user, server["credential"].as_string());
+                    break;
+                }
             }
         } else if (log) {
             log("no relay from the lobby");
         }
     }
-    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5); // (a relay refused on one port: the next)
     while (std::chrono::steady_clock::now() < until &&
            (!session.public_address() || (relay && !session.relay_address())))
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
