@@ -1,0 +1,8 @@
+{
+  // A GitHub Codespace for testing network play over the internet: a Linux machine with its own public address, a
+  // second network for a PC's window to play against. Headless (gamerun): tools/codespace.sh explains the steps.
+  "name": "spikeout network test",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "hostRequirements": { "cpus": 4 },
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build unzip libcurl4-openssl-dev libssl-dev"
+}

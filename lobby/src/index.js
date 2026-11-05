@@ -5,7 +5,7 @@
 //
 // One WebSocket a player, JSON text messages, {"t": type, ...}:
 //
-//   hello  {build, name}                 -> welcome {address, country, turn} (country: Cloudflare's two letters for the
+//   hello  {build, name, version}        -> welcome {address, country, turn} (country: Cloudflare's two letters for the
 //                                           player, "" if none: a host shows its own with its seat)
 //   list   {from}                        -> games {games: [{code, name, seats, taken, watchers, started, session, country,
 //                                                  ms}], from, total} (LIST_PAGE from `from`: waiting first, then in
@@ -26,7 +26,9 @@
 // machine can be reached at (its own on its networks, its public one as
 // STUN saw it); the lobby adds the address it sees the player at.
 // Games are listed only to players with the same build (the same game,
-// ROMs and version); private games only by their code.
+// ROMs and version); private games only by their code. The list says how
+// many public games are on other builds (others), and a join by the code
+// of one says its version (the game asks the player to update).
 
 import { DurableObject } from "cloudflare:workers";
 
@@ -101,7 +103,7 @@ export class Lobby extends DurableObject {
 	}
 
 	findGame(code, build) {
-		for (const p of this.players()) if (p.a.game && p.a.game.code === code && p.a.build === build) return p;
+		for (const p of this.players()) if (p.a.game && p.a.game.code === code && (build === null || p.a.build === build)) return p; // (null: any build)
 		return null;
 	}
 
@@ -129,6 +131,7 @@ export class Lobby extends DurableObject {
 			case "hello":
 				a.build = text(m.build, 32);
 				a.name = text(m.name, 32);
+				a.version = text(m.version, 32); // ("" from builds before 2026-11-05)
 				ws.serializeAttachment(a);
 				return send({ t: "welcome", address: a.ip, country: a.country, turn: Boolean(this.env.TURN_KEY_ID && this.env.TURN_KEY_API_TOKEN) });
 
@@ -137,9 +140,11 @@ export class Lobby extends DurableObject {
 				// empty cabinet; the nearest (estimate) first in each, then the newest. A page of LIST_PAGE from
 				// `from`, and how many there are (the game asks for the next page).
 				const open = [];
+				let others = 0; // (public games on other versions: the game tells the player there are some)
 				for (const p of this.players())
 					if (p.a.game && p.a.game.public && p.a.build === a.build) // (in progress too; full ones to watch)
 						open.push(p.a);
+					else if (p.a.game && p.a.game.public) ++others;
 				const near = (h) => { const e = estimate(a, h); return e < 0 ? 1e9 : e; }; // (nearest first; unknown last)
 				const full = (g) => Number(g.taken >= g.seats);
 				open.sort((x, y) => full(x.game) - full(y.game) || Number(x.game.started) - Number(y.game.started) || near(x) - near(y) || (y.game.created || 0) - (x.game.created || 0));
@@ -155,7 +160,7 @@ export class Lobby extends DurableObject {
 					country: h.country || "",
 					ms: estimate(a, h),
 				}));
-				return send({ t: "games", games, from, total: open.length });
+				return send({ t: "games", games, from, total: open.length, others });
 			}
 
 			case "host": {
@@ -206,7 +211,12 @@ export class Lobby extends DurableObject {
 			case "join": {
 				const code = text(m.code, CODE_LENGTH).toUpperCase();
 				const host = this.findGame(code, a.build);
-				if (!host) return send({ t: "error", why: "no game with that code" });
+				if (!host) {
+					const elsewhere = this.findGame(code, null);
+					if (!elsewhere) return send({ t: "error", why: "no game with that code" });
+					const v = elsewhere.a.version;
+					return send({ t: "error", why: v && v !== a.version ? `that game is on version ${v} (this is ${a.version || "older"})` : "that game is on another version", version: v || "" });
+				}
 				const g = host.a.game;
 				if (g.taken >= g.seats && !m.watch) return send({ t: "error", why: "that game is full" });
 				const port = Number(m.port) | 0;

@@ -13,6 +13,19 @@ Set-Location $repo
 if (Test-Path $Out) { Remove-Item $Out -Recurse -Force }
 New-Item -ItemType Directory $Out | Out-Null
 
+# Each program built as this version (cmake -DSPIKEOUT_VERSION=$Version: the menu shows it, the update check compares
+# it with GitHub's releases, the lobby says it), found in the file as src/net/update.cpp marks it.
+function check_version([string]$exe) {
+    $bytes = [IO.File]::ReadAllBytes((Resolve-Path $exe))
+    $text = [Text.Encoding]::ASCII.GetString($bytes)
+    if (-not $text.Contains("SPIKEOUT_VERSION=$Version`0")) {
+        $found = [regex]::Match($text, "SPIKEOUT_VERSION=([^\x00]{1,40})\x00").Groups[1].Value
+        throw "$exe is version '$found', not ${Version}: build it with -DSPIKEOUT_VERSION=${Version}"
+    }
+}
+check_version $WindowsExe
+if ($LinuxExe) { check_version $LinuxExe }
+
 # A dependency's source folder: the build's own, else the one it was pointed at (FETCHCONTENT_SOURCE_DIR_*)
 function dep_dir([string]$name) {
     $own = Join-Path $Deps "$name-src"
@@ -78,6 +91,10 @@ Your settings, the rankings and the translated game: Windows
 To keep them next to the program instead, put an empty file called portable.txt
 beside it. Save states (F9) and screenshots (F12) go in the folder the game was
 started from.
+
+New versions: at start the game asks GitHub whether a newer one is out, and the menu
+says so (Esc > Game > Check for updates turns that off). Players need the same
+version to play together.
 
 Linux: needs glibc 2.38 or later (Ubuntu 24.04, Fedora 39 and later, current SteamOS) and
 OpenSSL 3. Make it runnable (chmod +x spikeout) if your file manager doesn't.

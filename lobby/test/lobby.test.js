@@ -61,7 +61,7 @@ async function player() {
 
 test("a public game listed (in progress too, while a cabinet is empty), joined by its code; a private one only by its code", async () => {
 	const host = await player();
-	host.send({ t: "hello", build: "b1", name: "Ann" });
+	host.send({ t: "hello", build: "b1", name: "Ann", version: "0.1.0" });
 	const welcome = await host.next("welcome");
 	assert.equal(welcome.turn, false);
 	assert.equal(typeof welcome.country, "string"); // (Cloudflare's; "" here, run locally)
@@ -101,12 +101,18 @@ test("a public game listed (in progress too, while a cabinet is empty), joined b
 	guest.send({ t: "join", code: secretCode, port: 47100, candidates: [] }); // (by its code: yes)
 	assert.equal((await guest.next("joining")).seats, 3);
 
-	const other = await player(); // another build sees nothing, joins nothing
-	other.send({ t: "hello", build: "b2", name: "Di" });
+	const other = await player(); // another build sees nothing, joins nothing: told how many there are, and the version
+	other.send({ t: "hello", build: "b2", name: "Di", version: "0.0.9" });
 	await other.next("welcome");
 	other.send({ t: "list" });
-	assert.deepEqual((await other.next("games")).games, []);
+	const elsewhere = await other.next("games");
+	assert.deepEqual(elsewhere.games, []);
+	assert.equal(elsewhere.others, 1); // (Ann's; Cy's is private)
 	other.send({ t: "join", code, port: 1, candidates: [] });
+	assert.equal((await other.next("error")).why, "that game is on version 0.1.0 (this is 0.0.9)");
+	other.send({ t: "join", code: secretCode, port: 1, candidates: [] }); // (a host from before versions were sent)
+	assert.equal((await other.next("error")).why, "that game is on another version");
+	other.send({ t: "join", code: "ZZZZZZ", port: 1, candidates: [] });
 	assert.equal((await other.next("error")).why, "no game with that code");
 
 	host.send({ t: "update", taken: 1, started: true }); // in progress, a cabinet empty: still listed, joinable

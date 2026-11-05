@@ -80,8 +80,14 @@ target_include_directories(m3runtime PUBLIC src)
 target_link_libraries(m3runtime PUBLIC ppc PRIVATE moira minimp3 spikeout_warnings)
 
 # Network play (docs/netplay.md): UDP sockets, LAN discovery, Mode B sessions.
-add_library(m3net src/net/udp.cpp src/net/session.cpp src/net/stun.cpp src/net/digest.cpp src/net/compress.cpp)
+# The version (shown in the menu and checked for updates, src/net/update.hpp):
+# a release is built with its tag without the "v" (-DSPIKEOUT_VERSION=0.1.0-preview2,
+# tools/make-release.ps1 checks); any other build ends in -dev and never checks.
+set(SPIKEOUT_VERSION "${PROJECT_VERSION}-dev" CACHE STRING "This build's version (a release: its tag without the v)")
+set(SPIKEOUT_RELEASES_URL "https://api.github.com/repos/tastyrepublic/spikeout-recomp/releases?per_page=30" CACHE STRING "The releases checked for a newer version (GitHub's API)")
+add_library(m3net src/net/udp.cpp src/net/session.cpp src/net/stun.cpp src/net/digest.cpp src/net/compress.cpp src/net/update_versions.cpp)
 target_include_directories(m3net PUBLIC src)
+target_compile_definitions(m3net PUBLIC SPIKEOUT_VERSION="${SPIKEOUT_VERSION}")
 target_link_libraries(m3net PRIVATE spikeout_warnings)
 find_package(Threads REQUIRED)
 target_link_libraries(m3net PUBLIC Threads::Threads)
@@ -178,9 +184,10 @@ if(SPIKEOUT_LOBBY)
     endif()
 endif()
 if(SPIKEOUT_LOBBY AND TARGET CURL::libcurl)
-    target_sources(m3net PRIVATE src/net/lobby.cpp)
+    target_sources(m3net PRIVATE src/net/lobby.cpp src/net/update.cpp)
     target_link_libraries(m3net PUBLIC CURL::libcurl)
-    target_compile_definitions(m3net PUBLIC SPIKEOUT_LOBBY SPIKEOUT_LOBBY_URL="${SPIKEOUT_LOBBY_URL}")
+    target_compile_definitions(m3net PUBLIC SPIKEOUT_LOBBY SPIKEOUT_LOBBY_URL="${SPIKEOUT_LOBBY_URL}"
+                               SPIKEOUT_RELEASES_URL="${SPIKEOUT_RELEASES_URL}")
 else()
     target_sources(m3net PRIVATE src/net/lobby_none.cpp)
     message(STATUS "No libcurl: the internet lobby is left out (LAN play only)")

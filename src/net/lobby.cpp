@@ -51,7 +51,7 @@ std::string LobbyClient::error() const {
 void LobbyClient::connect(const std::string& build, const std::string& name, const std::string& url) {
     if (thread_.joinable()) return;
     Json hello = Json::object();
-    hello.set("t", "hello"), hello.set("build", build), hello.set("name", name);
+    hello.set("t", "hello"), hello.set("build", build), hello.set("name", name), hello.set("version", SPIKEOUT_VERSION);
     thread_ = std::thread([this, url, h = hello.dump()] { run(url, h); });
 }
 

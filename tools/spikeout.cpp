@@ -99,6 +99,7 @@
 #include "arcade_settings.hpp"
 #include "netplay.hpp"
 #include "net/compress.hpp"
+#include "net/update.hpp"
 #include "one_board.hpp"
 #include "rollback.hpp"
 #include "settings.hpp"
@@ -1995,6 +1996,15 @@ int main(int argc, char** argv) {
     // The settings, and the command line over them.
     const std::string settings_path = tools::data_folder() + "settings.ini";
     tools::Settings settings = tools::load_settings(settings_path);
+    // Whether a newer version is out (GitHub's release list, on its own thread; the menu says so). Not for builds that
+    // aren't releases ("-dev"); SPIKEOUT_UPDATE_AS=VERSION: as if this were that version (tests).
+    std::string version = net::kVersion;
+    if (const char* e = std::getenv("SPIKEOUT_UPDATE_AS"); e && *e) version = e;
+    net::UpdateCheck update_check;
+    std::optional<net::Release> newer_version;
+    bool update_told = false;
+    std::printf("spikeout: version %s\n", net::kVersion);
+    if (settings.check_updates && !net::dev_build(version)) update_check.start(version);
     if (cli_render_scale) settings.render_scale = cli_render_scale;
     if (cli_quads) settings.quads = true;
     if (cli_smooth) settings.smooth_motion = true;
@@ -2311,7 +2321,7 @@ int main(int argc, char** argv) {
     if (on_gpu) {
         menu_ready = menu.init(gpu_device->get(), window);
         if (menu_ready) {
-            menu.set_footer("Spikeout: Final Edition recomp");
+            menu.set_footer(std::string("Spikeout: Final Edition recomp ") + net::kVersion);
             presenter->overlay = [&](SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* swapchain, uint32_t w, uint32_t h) {
                 menu.render(cmd, swapchain, w, h);
             };
@@ -2598,6 +2608,7 @@ int main(int argc, char** argv) {
     std::unique_ptr<net::LobbyClient> browser; // the lobby's list, while looked at
     std::vector<net::Json> internet_games;
     int internet_from = 0, internet_total = 0; // the lobby's list: the page shown (from this game), and how many there are
+    int internet_others = 0;                   // and how many public games are on other versions
     std::vector<net::GameInfo> nearby_games;
     // This computer's cabinet (its first: board 0's settings and backup RAM,
     // as the board has them now), what it brings to a network game; its
@@ -3262,6 +3273,15 @@ int main(int argc, char** argv) {
                            }});
         p.items.push_back({"ROM set", "The game's ROM set, spikeofe.zip: which one is used.", {}, {},
                            [&] { menu.push(rom_page()); }});
+        if (net::UpdateCheck::available())
+            p.items.push_back({"Check for updates",
+                               "At each start, asks GitHub whether a newer version is out, and says so in this menu (the game "
+                               "doesn't update itself). This is version " + std::string(net::kVersion) + ".",
+                               [&] { return on_off(settings.check_updates); },
+                               [&](int) {
+                                   settings.check_updates = !settings.check_updates;
+                                   changed();
+                               }});
         p.items.push_back(back_item());
         return p;
     };
@@ -3394,7 +3414,7 @@ int main(int argc, char** argv) {
         for (const net::GameInfo& g : nearby_games) {
             const std::string text = label(g.name, g.taken, g.seats, "nearby", g.started);
             if (g.build != build) {
-                p.items.push_back({text, "A different game or build.", [] { return std::string(); }, {}, {}, true});
+                p.items.push_back({text, "Another version of the game, or another ROM set: players need the same ones to play together.", [] { return std::string(); }, {}, {}, true});
             } else {
                 ui::MenuItem it{text, g.taken >= g.seats ? "Full: watch it." : g.started ? kInProgress : "Join or watch this game (on this network).",
                                 {}, {}, [&, g] {
@@ -3420,6 +3440,7 @@ int main(int argc, char** argv) {
             if (auto answer = browser->wait_for("games", 3000); answer && (*answer)["t"].as_string() == "games") {
                 internet_games = (*answer)["games"].items();
                 internet_total = static_cast<int>((*answer)["total"].as_number()); // (0 from an older lobby: no pages)
+                internet_others = static_cast<int>((*answer)["others"].as_number(0));
             }
             if (browser->failed()) lobby_note = "No internet lobby: " + browser->error();
             for (const net::Json& g : internet_games) {
@@ -3450,6 +3471,16 @@ int main(int argc, char** argv) {
             }
         }
         if (p.items.empty()) p.items.push_back({"No games found yet", "", {}, {}, {}, true});
+        if (internet_others > 0) {
+            // Games the lobby has on other versions: not listed, but said, so a player whose friends updated knows why.
+            std::string help = "Their players have another version of the game (this is " + std::string(net::kVersion) +
+                               "): players need the same one to play together.";
+            if (newer_version) help += " Version " + newer_version->version + " is out: Enter opens its page.";
+            p.items.push_back({std::to_string(internet_others) + (internet_others == 1 ? " game" : " games") + " on another version",
+                               help, {}, {}, [&] {
+                                   if (newer_version) SDL_OpenURL(newer_version->page.c_str());
+                               }});
+        }
         if (!lobby_note.empty()) p.items.push_back({lobby_note, "", {}, {}, {}, true});
         constexpr int kPage = 50; // (the lobby's)
         if (internet_from + kPage < internet_total)
@@ -3576,6 +3607,11 @@ int main(int argc, char** argv) {
                                },
                                {}, [&] { menu.push(lobby_page()); }});
         p.items.push_back({"Resume", "Back to the game.", {}, {}, [&] { menu.close(); }});
+        if (newer_version)
+            p.items.push_back({"Version " + newer_version->version + " is out",
+                               "This is version " + std::string(net::kVersion) +
+                                   ". Opens its page on GitHub, with the downloads. Players need the same version to play together.",
+                               {}, {}, [&] { SDL_OpenURL(newer_version->page.c_str()); }});
         p.items.push_back({"Network play", netgame ? "The game you're in." : "Play with others, on this network or the internet.", {},
                            {}, [&] { menu.push(netgame ? lobby_page() : network_page()); }});
         p.items.push_back({"Display", "Render scale, antialiasing, quads, the 3D renderer, CRT colours, screen filter, fullscreen.", {}, {},
@@ -3875,6 +3911,19 @@ int main(int argc, char** argv) {
         // lobby told of players joining; the menu's lobby page kept up to
         // date; the controls let go while the menu is open (the game goes on).
         static auto net_refreshed = now;
+        // The update check answered: a newer version said once at the bottom (the menu's first items say it from now on).
+        if (!update_told && update_check.done()) {
+            update_told = true;
+            newer_version = update_check.newer();
+            if (newer_version) {
+                std::printf("spikeout: version %s is out (%s)\n", newer_version->version.c_str(), newer_version->page.c_str());
+                std::string upper = newer_version->version;
+                for (char& c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                shared.say("VERSION " + upper + " IS OUT: SEE THE MENU (ESC)", 8);
+            } else if (const std::string why = update_check.error(); !why.empty()) {
+                std::printf("spikeout: the update check: %s\n", why.c_str());
+            }
+        }
         // The host closed the room before the game started: out of it, and told.
         // A spectator's game ended (its host gone, no new one): out of it too.
         if (netgame && (!netgame->running || shared.spectating) && !netgame->host && netgame->session().room_closed()) {

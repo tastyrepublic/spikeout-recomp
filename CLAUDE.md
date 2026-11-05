@@ -109,6 +109,20 @@ Read this first; the older hand-off below is history.
   were thrown away: stuck for good); no backups to a joiner; tested on a
   simulated slow line (SPIKEOUT_TEST_LINK=KB,LOSS). The relay can't be
   fully tested on one PC (one public address): a second network needed.
+  UPDATE CHECK (2026-11-05, the owner's step 1 of 2; step 2, the game
+  updating itself, later): the version is built in (CMake
+  SPIKEOUT_VERSION, default PROJECT_VERSION-dev; a release is built with
+  -DSPIKEOUT_VERSION=<tag without v>, and tools/make-release.ps1 refuses an
+  exe whose SPIKEOUT_VERSION= mark differs). src/net/update.*: at start the
+  window asks GitHub's release list (SPIKEOUT_RELEASES_URL) on a detached
+  thread; newer: a notice at the bottom and "Version X is out" in the menu
+  (opens its page); test builds offered test builds, releases only
+  releases, drafts never; "-dev" builds never ask. Esc > Game > Check for
+  updates (settings.ini check_updates). Menu footer shows the version.
+  The lobby gets the version in hello: the list says how many public
+  games are on other builds ("N games on another version" in the join
+  list), and a join by code of one says "that game is on version X".
+  Tests: SPIKEOUT_UPDATE_AS=VERSION (as if this were it), SPIKEOUT_UPDATE_URL.
   MACOS NEXT (the owner builds it on their own Mac): docs/building-macos.md
   is the hand-off (tools, the JIT and reference builds, what may break:
   exceptions through JIT code first, then MAP_JIT/allow-jit for a signed

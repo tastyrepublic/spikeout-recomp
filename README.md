@@ -189,6 +189,10 @@ it's kept, so that happens once (and again after an update or with another ROM s
 **Can I play with someone on another system?** Yes: Windows and Linux play together, as long as both have the same
 version.
 
+**How do I know a new version is out?** At start the game asks GitHub whether there's a newer release, and the menu
+says so, with a link to its page; the lobby also tells you when a game is on another version. The game doesn't update
+itself. The check can be turned off (Esc > Game > Check for updates).
+
 **Is it emulation?** The board's chips are rebuilt in code, as an emulator does, but the game's own program runs as
 native code on your CPU, translated once, not instruction by instruction while it plays.
 

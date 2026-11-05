@@ -3,6 +3,7 @@
 #include "net/digest.hpp"
 #include "net/session.hpp"
 #include "net/stun.hpp"
+#include "net/update.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -356,4 +357,33 @@ TEST_CASE("net session: the host leaving a game in progress, the room goes on: a
                           : f < b_taken ? in == InputBytes{0xFF, 0xFF, 0xFF, 0xFF}
                                         : in == InputBytes{0x44, 0xFF, 0xFF, 0xFF});
     CHECK(right);
+}
+
+TEST_CASE("net update: versions compared as the releases' tags, the newest newer release found in GitHub's list") {
+    CHECK(compare_versions("0.1.0", "0.1.0") == 0);
+    CHECK(compare_versions("v0.1.0", "0.1.0") == 0);
+    CHECK(compare_versions("0.1.0-preview1", "0.1.0-preview2") < 0);
+    CHECK(compare_versions("0.1.0-preview9", "0.1.0-preview10") < 0); // (numbers, not letters)
+    CHECK(compare_versions("0.1.0-preview2", "0.1.0") < 0);           // (a test build before its release)
+    CHECK(compare_versions("0.1.0", "0.1.1-preview1") < 0);
+    CHECK(compare_versions("0.10.0", "0.9.3") > 0);
+    CHECK(compare_versions("1.0.0", "0.99.99") > 0);
+    CHECK(prerelease("0.1.0-preview1"));
+    CHECK(!prerelease("0.1.0"));
+    CHECK(dev_build("0.1.0-dev"));
+    CHECK(!dev_build("0.1.0-preview1"));
+
+    const auto list = Json::parse(R"([
+        {"tag_name": "v0.2.0", "draft": true, "prerelease": false, "html_url": "draft"},
+        {"tag_name": "v0.1.1-preview1", "draft": false, "prerelease": true, "html_url": "p1"},
+        {"tag_name": "v0.1.0", "draft": false, "prerelease": false, "html_url": "r010"},
+        {"tag_name": "v0.1.0-preview1", "draft": false, "prerelease": true, "html_url": "p0"}
+    ])");
+    CHECK(list.has_value());
+    const auto a = newer_release(*list, "0.1.0-preview1"); // a test build: offered test builds too
+    CHECK(a.has_value() && a->version == "0.1.1-preview1" && a->page == "p1");
+    const auto b = newer_release(*list, "0.0.9"); // a release: only releases (never the draft)
+    CHECK(b.has_value() && b->version == "0.1.0" && b->page == "r010");
+    CHECK(!newer_release(*list, "0.1.0").has_value());
+    CHECK(!newer_release(*list, "0.1.1-preview1").has_value());
 }

@@ -14,3 +14,17 @@ std::optional<Json> LobbyClient::wait_for(const std::string&, int) { return std:
 void LobbyClient::run(std::string, std::string) {}
 
 } // namespace net
+
+// The update check too (it needs libcurl): never done.
+#include "net/update.hpp"
+
+namespace net {
+
+bool UpdateCheck::available() { return false; }
+UpdateCheck::~UpdateCheck() = default;
+void UpdateCheck::start(std::string, std::string) {}
+std::optional<Release> UpdateCheck::newer() const { return std::nullopt; }
+std::string UpdateCheck::error() const { return "built without it"; }
+void UpdateCheck::run(std::shared_ptr<State>, std::string, std::string) {}
+
+} // namespace net
