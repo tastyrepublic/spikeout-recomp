@@ -30,6 +30,10 @@
 #include <string_view>
 #include <vector>
 
+namespace recomp {
+struct JitAccess; // (the LLVM JIT's generated code reads RAM and the fast write limits: src/jit)
+}
+
 namespace m3 {
 
 constexpr uint32_t bswap32(uint32_t v) {
@@ -363,6 +367,7 @@ public:
     }
 
 private:
+    friend struct ::recomp::JitAccess;
     uint8_t read_byte(uint32_t addr);
     uint16_t read_slow16(uint32_t addr);
     uint32_t read_slow32(uint32_t addr);

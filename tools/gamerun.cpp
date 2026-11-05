@@ -214,6 +214,9 @@
 #include "remote_cabinet.hpp"
 #include "png_write.hpp"
 #include "wav_write.hpp"
+#ifdef SPIKEOUT_JIT
+#include "jit/jit.hpp" // (gamerun-jit: the game translated from the ROM at start, LLVM)
+#endif
 #ifdef SPIKEOUT_GPU
 #include "gpu/present.hpp"
 #include "gpu/real3d_gpu.hpp"
@@ -3657,6 +3660,14 @@ int main(int argc_given, char** argv_given) {
         std::fprintf(stderr, "gamerun: ROM set incomplete; run romcheck for details\n");
         return 1;
     }
+#ifdef SPIKEOUT_JIT
+    try {
+        jit::prepare(game, roms);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "gamerun: %s\n", e.what());
+        return 1;
+    }
+#endif
 
     const std::vector<recomp::FunctionEntry> functions = tools::game_functions();
     const std::vector<recomp::FunctionEntry> blocks = tools::game_blocks(); // (save states)

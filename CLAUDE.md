@@ -8,9 +8,78 @@
 - Build and test: `cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on-failure`.
   CI builds with warnings as errors on Linux and macOS.
 
-## Latest (2026-11-04)
+## Latest (2026-11-05)
 
 Read this first; the older hand-off below is history.
+- RELEASE (owner's decisions): downloads must not contain the recompiled
+  game code (made from SEGA's ROM), so the game is translated from the
+  player's own ROM at start by an LLVM JIT, and cached. Easiest for
+  players; Android too; iOS allows no JIT at all (an interpreter or
+  sideloading, later). Measured first: Clang 18's build of the generated
+  C++ runs exactly as fast as GCC 13's and gives the same hashes.
+- LLVM JIT PROTOTYPE, DONE (2026-11-05): src/jit/ppc_ir.cpp is the
+  lifter's second back end (LLVM IR, case for case as src/recomp/
+  lifter.cpp: keep the two in step); src/jit/jit.cpp translates the ROM
+  (analysis as ppcrecomp, 48 modules on every core, ORC), caches the
+  objects (SPIKEOUT_JIT_CACHE, default ./jit-cache/<key>: the ROM, the
+  translator version kTranslatorVersion (bump it when the IR changes),
+  LLVM, the CPU, the Context/Bus layout) and gives the generated:: tables.
+  Context and Bus have a friend (recomp::JitAccess) for the fields the IR
+  touches. Windows: SehMemoryManager registers each object's .pdata
+  (RtlAddFunctionTable), without which C++ exceptions (rfi, MissingCode)
+  can't unwind through JIT code. CMake: -DSPIKEOUT_LLVM_JIT=ON (off by
+  default; the C++ build stays the reference and the default) builds
+  gamerun-jit (tools/gamerun.cpp, SPIKEOUT_JIT). LLVM (owner's choice:
+  built ourselves, the same everywhere): cmake/llvm.cmake downloads LLVM
+  18.1.8 (SHA-256 checked) and builds it once with this compiler into
+  %LOCALAPPDATA%/spikeout-llvm or ~/.cache/spikeout-llvm (Windows 38 min
+  on 6 jobs, 308 MB; WSL 34 min, 250 MB; SPIKEOUT_LLVM_JOBS; GCC 15+
+  needs -include cstdint for LLVM 18); SPIKEOUT_LLVM_SYSTEM=ON uses an
+  installed one (LLVM_DIR). -O1 is the default (owner: same speed as
+  -O2, made ~15% sooner). Env: SPIKEOUT_JIT_THREADS, _OPT, _NO_CACHE,
+  _VERIFY, _DUMP (IR per part). Build dir here: build-jit (Release,
+  gamerun + gamerun-jit).
+  Proved the same, by hashes, JIT against C++ on Windows and Linux, and
+  the Windows JIT against the Linux JIT: attract with sound (WAV equal),
+  the two-board mash fight, the bot's seg2 replay (11,356 frames, its 189
+  hashes), save states (identical files, loaded across);
+  tools/onepc-tests.ps1 (18) and onepc-net-tests.ps1 (14) with
+  -Exe build-jit/gamerun-jit.exe; network play C++ <-> JIT both ways (WSL).
+  Numbers (i7-8700K): first start 13.6 s on 12 threads, 18.1 on 6, 72 on
+  1 (analysis + IR under 2 s, the rest LLVM); cached start 0.2 s; runs as
+  fast as C++ or 1-5% faster; +43 MB memory; the exe +39 MB stripped
+  (Windows 55 vs 16 MB, zipped 21 vs 5). --gc-sections gains nothing
+  (PassBuilder names every pass).
+  NEXT, in order: (1) the window (spikeout.exe) with the JIT: translate
+  behind a "preparing the game" screen on the first start (progress, all
+  cores), fed by the ROM picker's zip; settings for the cache folder;
+  (2) CI: build LLVM once per runner and cache it (actions/cache on the
+  install folder), build gamerun-jit/spikeout with the JIT, run the hash
+  proofs headless where the ROM is available locally only (CI has no ROM:
+  build checks only); (3) macOS: Homebrew-free, our own LLVM build
+  (arm64 + x86_64), MAP_JIT and the allow-jit entitlement when signing;
+  JITLink MachO and EH frames to test; (4) size: our own pass list
+  instead of PassBuilder's default pipeline, LLVM built -Os or with LTO;
+  (5) Steam Deck: the Linux build (SteamOS); (6) then the default flips
+  to the JIT (downloads carry no game code) and the C++ build stays for
+  proofs.
+- GITHUB PAGE / FIRST RELEASE (owner's design, before the LLVM work): the
+  repo (github.com/tastyrepublic/spikeout-recomp) stays PRIVATE until the
+  first playable download. Downloads for Windows, Mac, Linux and Steam
+  Deck on GitHub Releases, with no game files and nothing made from them.
+  README in vf3-recomp's style: the owner's "SO" icon as a banner; the
+  no-game-files notice; features with screenshots (resolutions, picture
+  shapes up to 21:9, CRT colours, filters, the widescreen screens); the
+  network play challenges overcome; supported devices (Windows, Mac,
+  Linux, Steam Deck) and later ones (Android, iOS, Xbox, Switch 1-player);
+  a roadmap (smooth motion, the direct cable mode, maybe direct IP, a
+  Chinese/Japanese menu); install guides for Windows, Mac and Steam Deck;
+  FAQ; legal (not affiliated with SEGA); Buy Me a Coffee:
+  https://buymeacoffee.com/donfy (also on the GitHub page). Memory note
+  release-distribution.
+- Fixed (2026-11-05, 360dfb6): a network one-board host's use after free
+  at exit (a gone player's backup runs outliving NetPlay; Linux aborted or
+  hung, Windows didn't notice); found by the JIT's tests.
 - Spectators (docs/netplay.md "Spectators" and "Spectators on one board";
   the owner's choices): up to 4 a game, ~2 s behind (net::kWatchLag), talk
   to the room's host only (Session::watch, kWatcher*); survive a host change

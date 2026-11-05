@@ -6,7 +6,7 @@
 # delay), for as long as all of that run's boards ran (and a shadow in the process: it stops at its own block
 # limit, the board then on alone). Exit code 1 if any differs.
 #
-#   tools/onepc-net-tests.ps1 [-Only two,four,apart,coin1,coin0,poweron,late1,late0,fourauto,three,leave,leave3,vanish,vanish3]
+#   tools/onepc-net-tests.ps1 [-Exe PATH] [-Only two,four,apart,coin1,coin0,poweron,late1,late0,fourauto,three,leave,leave3,vanish,vanish3]
 #
 # two: two seats from build/onepc/mash-5990.state (tools/onepc-tests.ps1 -Prepare makes it), both players
 # mashing (tools/onepc-mash-presses.txt), handed over at 6,000. four: four seats from
@@ -20,11 +20,11 @@
 # seats from four-8000.state, each other cabinet held until calm, seat 3's coin at 8,600; three: three seats from power-on,
 # the third player joining at 4,600: the rules following each other cabinet. Outputs go to build/onepc/net. Run from PowerShell with the
 # toolchain's PATH (CLAUDE.md); it loads every core for several minutes.
-param([string[]]$Only)
+param([string[]]$Only, [string]$Exe) # (-Exe: another gamerun, e.g. build-jit/gamerun-jit.exe)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot
 Set-Location $root
-$exe = if (Test-Path build/gamerun.exe) { 'build/gamerun.exe' } else { 'build/gamerun' }
+$exe = if ($Exe) { $Exe } elseif (Test-Path build/gamerun.exe) { 'build/gamerun.exe' } else { 'build/gamerun' }
 $out = 'build/onepc/net'
 New-Item -ItemType Directory -Force $out | Out-Null
 $mash = (Get-Content -Raw tools/onepc-mash-presses.txt).Trim() -split '\s+'

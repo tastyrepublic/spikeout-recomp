@@ -468,6 +468,45 @@ if(SPIKEOUT_ROM_DIR)
     endif()
 endif()
 
+# Prototype (off by default): gamerun-jit, the game translated from the
+# player's ROM at start with LLVM (src/jit), no recompiled code built in.
+# LLVM: a pinned release built once with this compiler (cmake/llvm.cmake), the
+# same on every system; SPIKEOUT_LLVM_SYSTEM=ON uses one found on the system
+# instead (LLVM_DIR).
+option(SPIKEOUT_LLVM_JIT "Build gamerun-jit (LLVM JIT prototype)" OFF)
+if(SPIKEOUT_LLVM_JIT)
+    option(SPIKEOUT_LLVM_SYSTEM "Use an LLVM found on the system (LLVM_DIR) instead of building the pinned one" OFF)
+    if(NOT SPIKEOUT_LLVM_SYSTEM)
+        include(cmake/llvm.cmake)
+        spikeout_llvm(LLVM_DIR)
+    endif()
+    find_package(LLVM REQUIRED CONFIG)
+    message(STATUS "LLVM ${LLVM_PACKAGE_VERSION} from ${LLVM_DIR}")
+    add_library(spikeout_jit src/jit/ppc_ir.cpp src/jit/jit.cpp)
+    target_include_directories(spikeout_jit SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+    separate_arguments(llvm_definitions NATIVE_COMMAND ${LLVM_DEFINITIONS})
+    target_compile_definitions(spikeout_jit PRIVATE ${llvm_definitions})
+    option(SPIKEOUT_LLVM_SHARED "Link LLVM's shared library instead of its static components" OFF)
+    if(SPIKEOUT_LLVM_SHARED)
+        set(llvm_libs LLVM)
+    else()
+        llvm_map_components_to_libnames(llvm_libs orcjit passes native)
+    endif()
+    target_link_libraries(spikeout_jit PUBLIC recomp_runtime analysis PRIVATE ${llvm_libs} spikeout_warnings)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        # (LLVM 18's headers include <ciso646>, which GCC 15+ warns about with #warning)
+        target_compile_options(spikeout_jit PRIVATE -Wno-cpp)
+    endif()
+
+    add_executable(gamerun-jit tools/gamerun.cpp)
+    target_link_libraries(gamerun-jit PRIVATE spikeout_jit m3net spikeout_warnings)
+    target_compile_definitions(gamerun-jit PRIVATE SPIKEOUT_JIT)
+    if(SPIKEOUT_GPU)
+        target_link_libraries(gamerun-jit PRIVATE m3gpu)
+        target_compile_definitions(gamerun-jit PRIVATE SPIKEOUT_GPU)
+    endif()
+endif()
+
 if(SPIKEOUT_BUILD_TESTS)
     enable_testing()
     add_executable(spikeout_tests

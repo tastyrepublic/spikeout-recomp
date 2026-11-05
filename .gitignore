@@ -1,6 +1,7 @@
 # Build output
 /build*/
 /out/
+/jit-cache/
 compile_commands.json
 
 # Editors

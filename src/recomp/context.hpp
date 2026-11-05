@@ -25,6 +25,7 @@ namespace recomp {
 
 class Context;
 class Scheduler;
+struct JitAccess; // (the LLVM JIT's generated code reads and writes some private fields: src/jit)
 using GuestFunction = void (*)(Context&);
 
 // A recompiled function, or a place inside one to resume at: `resume` is an
@@ -306,6 +307,7 @@ public:
     static constexpr uint32_t kMsrEE = 1u << 15;
 
 private:
+    friend struct JitAccess;
     void slow_tick(uint32_t pc);
     uint64_t cycle_of_tb(uint64_t tb) const;
 

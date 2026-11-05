@@ -4,17 +4,17 @@
 # two-board run's RAM hashes, for as long as both boards ran; its notes (shadows, hand-backs, side runs that
 # failed) shown beside.
 #
-#   tools/onepc-tests.ps1 [-Only NAME,NAME] [-Prepare]
+#   tools/onepc-tests.ps1 [-Only NAME,NAME] [-Prepare] [-Exe PATH]   (-Exe: another gamerun, e.g. build-jit/gamerun-jit.exe)
 #
 # Needs build/onepc/fight-4700.state (the two-board fight, saved with --save-state at frame 4700) and the
 # ROMs in build/roms/spikeofe. -Prepare makes, from it, the reference (build/onepc/mash.txt) and the two
 # states the runs start from (mash-5990.state, mash-10890.state); once, or after a change that moves the game.
 # Outputs go to build/onepc/tests. Run from PowerShell with the toolchain's PATH (CLAUDE.md).
-param([string[]]$Only, [switch]$Prepare)
+param([string[]]$Only, [switch]$Prepare, [string]$Exe)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot
 Set-Location $root
-$exe = if (Test-Path build/gamerun.exe) { 'build/gamerun.exe' } else { 'build/gamerun' }
+$exe = if ($Exe) { $Exe } elseif (Test-Path build/gamerun.exe) { 'build/gamerun.exe' } else { 'build/gamerun' }
 $roms = 'build/roms/spikeofe'
 $dir = 'build/onepc'
 $out = "$dir/tests"
