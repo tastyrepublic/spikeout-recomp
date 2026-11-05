@@ -73,9 +73,11 @@ ROM set, spikeofe.zip, as MAME and Supermodel have it.
 First start: choose spikeofe.zip in the window. The game is then translated from it
 (about 15-25 seconds, once; later starts take a moment). Esc opens the menu.
 
-Your settings and saves: Windows %APPDATA%\spikeout-recomp\Spikeout, Linux
-~/.local/share/spikeout-recomp/Spikeout. To keep them next to the program instead,
-put an empty file called portable.txt beside it.
+Your settings, the rankings and the translated game: Windows
+%APPDATA%\spikeout-recomp\Spikeout, Linux ~/.local/share/spikeout-recomp/Spikeout.
+To keep them next to the program instead, put an empty file called portable.txt
+beside it. Save states (F9) and screenshots (F12) go in the folder the game was
+started from.
 
 Linux: needs glibc 2.38 or later (Ubuntu 24.04, Fedora 39 and later, current SteamOS) and
 OpenSSL 3. Make it runnable (chmod +x spikeout) if your file manager doesn't.
