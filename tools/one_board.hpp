@@ -473,7 +473,7 @@ public:
             live_stopped_ = true;
         }
         live_changed_.notify_all();
-        replay_threads_.clear();
+        replay_threads_.clear(); // (none left if the staying board stopped: end_replays)
     }
     static void keep_whole(Board& stays) { stays.whole = true; }
     // Where the boards meet (every one stopped): once the other is run whole for good (keep_whole) and its shadow is
@@ -519,6 +519,13 @@ public:
     static void stopped(Board& m) {
         if (m.net_inputs && m.cabinets && m.inputs) m.inputs->close();
         if (m.cabinets && m.game) m.game->live(~0ull, true);
+        // (the staying board: the runs of boards from their backups (seat_gone) ended with it, as they read the
+        // network's inputs and logs, gone once the run is over; gamerun's Game, a global, was destroyed after them)
+        if (m.game && m.index == m.game->settings_.stays) m.game->end_replays();
+    }
+    void end_replays() {
+        live(~0ull, true);
+        replay_threads_.clear(); // (joined: each stops at its next frame, the live game stopped)
     }
 
     // The leaving board's own bytes for a shadow of it later: where its RAM and the staying board's differ, at its
