@@ -85,7 +85,8 @@ function(spikeout_llvm out_var)
         set(cores ${SPIKEOUT_LLVM_JOBS})
     endif()
     message(STATUS "LLVM ${SPIKEOUT_LLVM_VERSION}: building on ${cores} threads, once (log: ${root}/build-${tag}.log)")
-    execute_process(COMMAND "${CMAKE_COMMAND}" --build "${work}/build" --target install --parallel ${cores}
+    # (--config: Visual Studio's and Xcode's generators pick the build type when building, Debug unless told)
+    execute_process(COMMAND "${CMAKE_COMMAND}" --build "${work}/build" --config Release --target install --parallel ${cores}
                     RESULT_VARIABLE result OUTPUT_FILE "${root}/build-${tag}.log" ERROR_FILE "${root}/build-${tag}.log")
     if(NOT result EQUAL 0 OR NOT EXISTS "${config}/LLVMConfig.cmake")
         message(FATAL_ERROR "LLVM's build failed: see ${root}/build-${tag}.log")

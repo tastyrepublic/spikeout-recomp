@@ -50,10 +50,62 @@ Read this first; the older hand-off below is history.
   fast as C++ or 1-5% faster; +43 MB memory; the exe +39 MB stripped
   (Windows 55 vs 16 MB, zipped 21 vs 5). --gc-sections gains nothing
   (PassBuilder names every pass).
-  NEXT, in order: (1) the window (spikeout.exe) with the JIT: translate
-  behind a "preparing the game" screen on the first start (progress, all
-  cores), fed by the ROM picker's zip; settings for the cache folder;
-  (2) CI: build LLVM once per runner and cache it (actions/cache on the
+  THE WINDOW WITH THE JIT, DONE (2026-11-05): spikeout-jit (CMake, with
+  -DSPIKEOUT_LLVM_JIT=ON and the frontend; tools/spikeout.cpp under
+  SPIKEOUT_JIT). After the ROM set is read (the picker's zip or a folder),
+  jit::prepare runs on a thread; the window shows "PREPARING THE GAME" with
+  a bar (jit::Options::progress: the step, parts compiled) only after 0.3 s,
+  so a cached start (0.18 s) shows nothing. Closing the window stops it
+  (Options::cancel, jit::Cancelled; ~4 s, each worker finishes its part;
+  nothing half-written kept). Kept in the data folder's jit-cache, or
+  settings.ini jit_cache (Game > ROM set: "Translated game" its size,
+  "Choose its folder", used from the next start), or SPIKEOUT_JIT_CACHE
+  when the setting is empty; Options::prune deletes the folder's other
+  translations (only 16-hex-digit folders holding nothing but part*.o and
+  complete). Error: a message box. Measured: first start 16 s on 12
+  threads (12.4 MB), the window's recording replayed by the C++ gamerun:
+  30/30 hashes. Build dir in the lan-play worktree: build-jit (window +
+  gamerun-jit, test folder build-jit\wtest with portable.txt).
+  Also then (2026-11-05): the app's icon, the owner's "SO" picture
+  (assets/icon, made by tools/make-icons.ps1 -Source PICTURE: icon.png
+  1024, icon-256.png built into the window and set with SDL_SetWindowIcon,
+  spikeout.ico in the Windows .exe by spikeout.rc, spikeout.icns and
+  spikeout.desktop for macOS/Linux packages, not used yet; CMake
+  spikeout_window_app). The window is a Windows GUI program now (no
+  console window; main() attaches to the console it was started from,
+  and a script's redirected output still arrives). Quads drawn whole are
+  on by default (owner, 2026-11-05; settings.ini keeps a saved choice).
+  CI's jit job written (.github/workflows/ci.yml: Linux and Windows,
+  LLVM in actions/cache keyed by the runner image; macOS left for (3):
+  its minutes cost 10x on a private repo); not run yet. Its Linux build
+  tried in WSL as CI does it (warnings as errors, GCC 13): LLVM 18's
+  unique_function gave a false "maybe uninitialized" at -O3, now off for
+  spikeout_jit only; then gamerun-jit and spikeout-jit built. The Linux
+  JIT window: first start 21 s (16.1 MB), cached 0.20 s; its recording
+  replayed by the Windows C++ gamerun: 30/30 hashes. WSL copy for this:
+  ~/spikeout-jitwin (build/, portable).
+  FIRST DOWNLOADS (2026-11-05): a private DRAFT release on GitHub,
+  v0.1.0-preview1 (not published: the tag is made on publishing), with
+  spikeout-0.1.0-preview1-windows-x64.zip (26 MB) and -linux-x64.tar.gz
+  (29 MB), made by tools/make-release.ps1 -Version V -LinuxExe FILE:
+  the JIT window as spikeout(.exe), stripped, LICENSE.txt (GPL-3),
+  THIRD-PARTY-NOTICES.txt (every library's licence), README.txt.
+  Windows: GCC's runtime linked in (SPIKEOUT_STATIC_RUNTIME, on with
+  MinGW; ran with only Windows' folders on the PATH). Linux: built on
+  Ubuntu 24.04, needs glibc 2.38 and OpenSSL 3 (an older build system
+  would widen it). Both tested unpacked into empty folders. The repo is
+  still private, so the downloads reach collaborators only; going public
+  is the owner's call (GPL-3: the source must be available with them).
+  README rewritten (vf3-recomp's style, the owner's plan). SCREENSHOTS
+  ARE ALLOWED IN THE REPO (the owner's decision, 2026-11-05, as other
+  recomp projects do): docs/images/*.jpg, taken from the window (sized,
+  title bar cropped, PrintWindow) from the owner's saved states, 1280
+  wide, JPEG 84. Nothing else made from the ROMs is.
+  MACOS NEXT (the owner builds it on their own Mac): docs/building-macos.md
+  is the hand-off (tools, the JIT and reference builds, what may break:
+  exceptions through JIT code first, then MAP_JIT/allow-jit for a signed
+  app; the hash proofs; the app bundle and download).
+  NEXT, in order: (2) CI: build LLVM once per runner and cache it (actions/cache on the
   install folder), build gamerun-jit/spikeout with the JIT, run the hash
   proofs headless where the ROM is available locally only (CI has no ROM:
   build checks only); (3) macOS: Homebrew-free, our own LLVM build

@@ -21,6 +21,8 @@ extern const Asset font_medium, font_semibold, font_bold_italic; // Barlow Conde
 extern const Asset flags_png, flags_rcss;
 // The players' platforms (the network seat list): "platform-windows", -macos, -linux, -android (tools/platform_icons.cpp)
 extern const Asset platforms_png, platforms_rcss;
+// The app's icon, 256 x 256 (assets/icon, tools/make-icons.ps1): the window's own (title bar, taskbar, macOS's Dock)
+extern const Asset app_icon_png;
 } // namespace assets
 
 } // namespace ui

@@ -17,6 +17,15 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
 endif()
 
+# Windows with MinGW: GCC's own runtime (libstdc++, libgcc, winpthread) built
+# into each program, so a download runs on a PC without GCC installed.
+if(MINGW)
+    option(SPIKEOUT_STATIC_RUNTIME "Link GCC's runtime into the programs (MinGW)" ON)
+    if(SPIKEOUT_STATIC_RUNTIME)
+        add_link_options(-static)
+    endif()
+endif()
+
 add_library(spikeout_warnings INTERFACE)
 if(MSVC)
     target_compile_options(spikeout_warnings INTERFACE /W4 /permissive- /utf-8)
@@ -261,6 +270,34 @@ if(SPIKEOUT_FRONTEND OR SPIKEOUT_GPU)
     endif()
 endif()
 
+# The app's icon (assets/icon, made by tools/make-icons.ps1 from the owner's
+# picture): built into the window (SDL sets it: title bar, taskbar, macOS's
+# Dock) and, on Windows, the .exe's own (Explorer). spikeout_window_app(<target>)
+# gives a window program both, and no console window on Windows.
+if(SPIKEOUT_FRONTEND)
+    set(app_icon_cpp ${CMAKE_BINARY_DIR}/app_icon/app_icon_png.cpp)
+    add_custom_command(
+        OUTPUT ${app_icon_cpp}
+        COMMAND ${CMAKE_COMMAND} -DNAME=app_icon_png -DIN=${CMAKE_SOURCE_DIR}/assets/icon/icon-256.png -DOUT=${app_icon_cpp}
+                -P ${CMAKE_SOURCE_DIR}/cmake/embed_file.cmake
+        DEPENDS ${CMAKE_SOURCE_DIR}/assets/icon/icon-256.png ${CMAKE_SOURCE_DIR}/cmake/embed_file.cmake
+        COMMENT "Embedding the app's icon"
+        VERBATIM)
+    add_library(app_icon STATIC ${app_icon_cpp})
+    target_include_directories(app_icon PUBLIC src)
+    if(WIN32)
+        enable_language(RC)
+    endif()
+endif()
+function(spikeout_window_app target)
+    target_link_libraries(${target} PRIVATE app_icon)
+    # (Windows: a program with no console window of its own; spikeout.cpp prints to the one it was started from)
+    set_target_properties(${target} PROPERTIES WIN32_EXECUTABLE ON)
+    if(WIN32)
+        target_sources(${target} PRIVATE ${CMAKE_SOURCE_DIR}/assets/icon/spikeout.rc)
+    endif()
+endfunction()
+
 # The GPU renderer. Its shaders (src/gpu/shaders, GLSL) are compiled at build
 # time to SPIR-V for Vulkan with glslang (BSD-3-Clause and others) and to
 # Metal source with SPIRV-Cross (Apache-2.0), both downloaded as build tools.
@@ -461,6 +498,7 @@ if(SPIKEOUT_ROM_DIR)
     if(SPIKEOUT_FRONTEND)
         add_executable(spikeout tools/spikeout.cpp)
         target_link_libraries(spikeout PRIVATE game_ram boot_rom m3net SDL3::SDL3 spikeout_warnings)
+        spikeout_window_app(spikeout)
         if(SPIKEOUT_GPU)
             target_link_libraries(spikeout PRIVATE m3gpu m3ui)
             target_compile_definitions(spikeout PRIVATE SPIKEOUT_GPU)
@@ -496,6 +534,8 @@ if(SPIKEOUT_LLVM_JIT)
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         # (LLVM 18's headers include <ciso646>, which GCC 15+ warns about with #warning)
         target_compile_options(spikeout_jit PRIVATE -Wno-cpp)
+        # (and GCC 13 at -O3 sees "maybe uninitialized" inside LLVM 18's unique_function, a false alarm in its headers)
+        target_compile_options(spikeout_jit PRIVATE -Wno-maybe-uninitialized)
     endif()
 
     add_executable(gamerun-jit tools/gamerun.cpp)
@@ -504,6 +544,19 @@ if(SPIKEOUT_LLVM_JIT)
     if(SPIKEOUT_GPU)
         target_link_libraries(gamerun-jit PRIVATE m3gpu)
         target_compile_definitions(gamerun-jit PRIVATE SPIKEOUT_GPU)
+    endif()
+
+    # The window with the JIT: the game translated behind a "preparing the
+    # game" screen on its first start, from the ROM set chosen in the window.
+    if(SPIKEOUT_FRONTEND)
+        add_executable(spikeout-jit tools/spikeout.cpp)
+        target_link_libraries(spikeout-jit PRIVATE spikeout_jit m3net SDL3::SDL3 spikeout_warnings)
+        spikeout_window_app(spikeout-jit)
+        target_compile_definitions(spikeout-jit PRIVATE SPIKEOUT_JIT)
+        if(SPIKEOUT_GPU)
+            target_link_libraries(spikeout-jit PRIVATE m3gpu m3ui)
+            target_compile_definitions(spikeout-jit PRIVATE SPIKEOUT_GPU)
+        endif()
     endif()
 endif()
 

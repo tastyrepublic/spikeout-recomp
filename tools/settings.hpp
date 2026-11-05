@@ -49,7 +49,7 @@ struct Settings {
     // 4 21:9 (widescreen: the gameplay's 3D wider, the 2D in the middle)
     int picture_shape = 0;
     int antialiasing = 1;  // drawn this many times larger each way and averaged down (1: off)
-    bool quads = false;    // quads drawn whole
+    bool quads = true;     // quads drawn whole (on by default: the owner's choice, 2026-11-05)
     bool gpu_3d = true;    // the 3D on the GPU (else in software)
     bool fullscreen = false;
     bool show_fps = false; // the frames shown a second, in a corner
@@ -72,6 +72,8 @@ struct Settings {
     // The ROM set: its zip (spikeofe.zip) or the folder of its files, in UTF-8 (empty: not chosen yet; chosen at the
     // first start and in the menu; a folder on the command line goes over it)
     std::string rom_path;
+    // The JIT build: the folder its translation of the game is kept in, UTF-8 (empty: jit-cache in the data folder)
+    std::string jit_cache;
     // Controls: two players' keys (SDL scancodes, 0: none)
     std::array<std::array<int, kActions>, 2> keys{{
         {SDL_SCANCODE_5, SDL_SCANCODE_1, SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT,
@@ -152,6 +154,7 @@ inline Settings load_settings(const std::string& path) {
     if (auto it = v.find("rear_output"); it != v.end()) s.rear_output = it->second;
     if (auto it = v.find("player_name"); it != v.end()) s.player_name = clean_name(it->second);
     if (auto it = v.find("rom_path"); it != v.end()) s.rom_path = it->second;
+    if (auto it = v.find("jit_cache"); it != v.end()) s.jit_cache = it->second;
     get("screen_filter", s.screen_filter, 0, 2);
     get("volume", s.volume, 0, 100);
     get("sound_volume", s.sound_volume, 0, 200);
@@ -187,6 +190,7 @@ inline bool save_settings(const std::string& path, const Settings& s) {
     o << "rear_output = " << s.rear_output << "\n";
     o << "player_name = " << s.player_name << "\n";
     o << "rom_path = " << s.rom_path << "\n";
+    o << "jit_cache = " << s.jit_cache << "\n";
     o << "crt_colours = " << s.crt_colours << "\n";
     o << "screen_filter = " << s.screen_filter << "\n";
     o << "volume = " << s.volume << "\n";

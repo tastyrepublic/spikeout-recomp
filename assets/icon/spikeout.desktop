@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Spikeout: Final Edition
+Comment=The arcade game, recompiled
+Exec=spikeout
+Icon=spikeout
+Terminal=false
+Categories=Game;ActionGame;

@@ -102,6 +102,10 @@
 #include "one_board.hpp"
 #include "rollback.hpp"
 #include "settings.hpp"
+#include "ui/assets.hpp" // (the app's icon)
+#ifdef SPIKEOUT_JIT
+#include "jit/jit.hpp" // (spikeout-jit: the game translated from the ROM set at the first start, LLVM)
+#endif
 #ifdef SPIKEOUT_GPU
 #include "gpu/present.hpp"
 #include "gpu/real3d_gpu.hpp"
@@ -110,6 +114,15 @@
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h> // (the console: main)
+#endif
 
 #include <algorithm>
 #include <array>
@@ -1592,6 +1605,17 @@ std::string rom_problem(const std::filesystem::path& path) {
     return {};
 }
 
+// A folder for a menu line, UTF-8: a long one as its root and its last two folders (a path has no spaces to wrap at).
+[[maybe_unused]] std::string short_path(const std::filesystem::path& p) {
+    const std::string whole = path_utf8(p);
+    if (whole.size() <= 48) return whole;
+    std::vector<std::filesystem::path> parts(p.begin(), p.end());
+    while (!parts.empty() && parts.back().empty()) parts.pop_back();
+    if (parts.size() < 4) return whole;
+    const char sep = static_cast<char>(std::filesystem::path::preferred_separator);
+    return path_utf8(p.root_path()) + "..." + sep + path_utf8(parts[parts.size() - 2]) + sep + path_utf8(parts.back());
+}
+
 // The ROM set chosen in the window (no location set yet, or the one set can't be used), drawn as the no-GPU screen is:
 // SDL's 2D renderer, its 8x8 font, the menu's colours. The keys, a pad or the mouse choose the zip with the
 // system's own dialog; checked at once. The renderer is let go before the GPU takes the window.
@@ -1659,6 +1683,28 @@ public:
         clear();
         line("LOADING", 0.42f, 4, kTitle);
         line("Reading the ROM set...", 0.56f, 2, kText);
+        SDL_RenderPresent(r_);
+    }
+
+    // The JIT build's first start: the game being translated from the ROM set, how far (a share, 0-1) and what
+    // it's doing; once only, later starts load it.
+    void preparing(float share, const std::string& doing) {
+        if (!r_ && !open()) return;
+        clear();
+        int w = 0, h = 0;
+        SDL_GetRenderOutputSize(r_, &w, &h);
+        const float small = h < 600 ? 1.0f : 2.0f;
+        line("PREPARING THE GAME", 0.30f, small * 2, kTitle);
+        line("Translating the game from your ROM set.", 0.42f, small, kText);
+        line("This happens on the first start only.", 0.47f, small, kText);
+        const float bw = static_cast<float>(w) * 0.6f, bh = 12 * small;
+        const SDL_FRect frame{(static_cast<float>(w) - bw) / 2, static_cast<float>(h) * 0.56f, bw, bh};
+        SDL_FRect bar{frame.x + 2, frame.y + 2, (frame.w - 4) * std::clamp(share, 0.0f, 1.0f), frame.h - 4};
+        SDL_SetRenderDrawColor(r_, kTitle.r, kTitle.g, kTitle.b, 255);
+        SDL_RenderFillRect(r_, &bar);
+        SDL_SetRenderDrawColor(r_, kText.r, kText.g, kText.b, 255);
+        SDL_RenderRect(r_, &frame);
+        line(doing, 0.56f + bh / static_cast<float>(h) + 0.03f, small, kText);
         SDL_RenderPresent(r_);
     }
 
@@ -1841,6 +1887,19 @@ int music_volume(const tools::Settings& s) { return s.music_volume * s.volume / 
 } // namespace
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    // A Windows program (no console window of its own: WIN32_EXECUTABLE). Its messages go where they're sent (a
+    // script's file), else to the console it was started from, if any; started from Explorer, nowhere.
+    auto std_handle_set = [](DWORD which) {
+        const HANDLE h = GetStdHandle(which);
+        return h != nullptr && h != INVALID_HANDLE_VALUE && GetFileType(h) != FILE_TYPE_UNKNOWN;
+    };
+    if (!std_handle_set(STD_OUTPUT_HANDLE) && AttachConsole(ATTACH_PARENT_PROCESS)) {
+        FILE* f = nullptr;
+        freopen_s(&f, "CONOUT$", "w", stdout);
+        if (!std_handle_set(STD_ERROR_HANDLE)) freopen_s(&f, "CONOUT$", "w", stderr);
+    }
+#endif
     const char* dir = nullptr;
     std::string record_path, load_state;
     int scale = 0, cli_render_scale = 0, cli_sound = -1, cli_music = -1;
@@ -1949,12 +2008,18 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "spikeout: %s\n", SDL_GetError());
         return 1;
     }
+    // The app's icon (its title bar and taskbar; macOS's Dock too; the .exe's own is its resource on Windows).
+    if (SDL_Surface* icon = SDL_LoadPNG_IO(SDL_IOFromConstMem(ui::assets::app_icon_png.data, ui::assets::app_icon_png.size), true)) {
+        SDL_SetWindowIcon(window, icon);
+        SDL_DestroySurface(icon);
+    }
     if (settings.fullscreen && !test_run) SDL_SetWindowFullscreen(window, true);
 
     // The ROM set: the command line's, else the one chosen before (settings.ini), else chosen here (the release
     // checklist's picker: a zip or a folder, remembered). One that can't be used: chosen again, said why.
     m3::RomSet roms;
     std::string rom_in_use; // (its location, UTF-8: the menu shows it)
+    std::filesystem::path jit_cache_in_use; // (the JIT build: the translation's folder; empty: not kept, or the C++ build)
     {
         const bool given = dir != nullptr;
         std::filesystem::path rom_path = given ? std::filesystem::path(dir) : utf8_path(settings.rom_path);
@@ -2006,6 +2071,71 @@ int main(int argc, char** argv) {
         }
         std::printf("spikeout: ROM set %s\n", chosen.c_str());
         rom_in_use = chosen;
+#ifdef SPIKEOUT_JIT
+        // The game's code, translated from this ROM set by the JIT on another thread: the first start (or a new
+        // set or version) ~15 s on every core, behind a screen with how far it is; later starts load it from the
+        // cache folder in a fraction of a second (no screen: shown only after 0.3 s). Kept in the data folder's
+        // jit-cache unless the settings or SPIKEOUT_JIT_CACHE say elsewhere; translations of other sets deleted.
+        std::atomic<int> step{0};
+        std::atomic<unsigned> done{0}, total{0};
+        std::atomic<bool> cancel{false}, finished{false};
+        std::string error;
+        jit::Options jo;
+        jo.cancel = &cancel;
+        jo.prune = true;
+        if (!settings.jit_cache.empty()) jo.cache_dir = utf8_path(settings.jit_cache);
+        else if (const char* e = std::getenv("SPIKEOUT_JIT_CACHE"); !e || !*e) jo.cache_dir = utf8_path(tools::data_folder() + "jit-cache");
+        jo.progress = [&](const jit::Progress& p) {
+            step = static_cast<int>(p.step);
+            if (p.step == jit::Step::Compile) total = p.total, done = p.done;
+        };
+        std::thread worker([&] {
+            try {
+                const jit::Report report = jit::prepare(m3::games::kSpikeoutFinalEdition, roms, jo);
+                jit_cache_in_use = report.cache_path;
+            } catch (const jit::Cancelled&) {
+            } catch (const std::exception& e) {
+                error = e.what();
+            }
+            finished = true;
+        });
+        const auto began = std::chrono::steady_clock::now();
+        bool quit = false;
+        while (!finished) {
+            for (SDL_Event e; SDL_PollEvent(&e);)
+                if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) quit = true, cancel = true;
+            if (!quit && std::chrono::steady_clock::now() - began > std::chrono::milliseconds(300)) {
+                // (the compile is nearly all of the time: the analysis and IR take the first 10%, linking the last 2%)
+                const unsigned n = total, d = done;
+                const auto s = static_cast<jit::Step>(step.load());
+                const float share = s == jit::Step::Compile && n ? 0.10f + 0.88f * static_cast<float>(d) / static_cast<float>(n)
+                                    : s == jit::Step::Load   ? 0.98f
+                                    : s == jit::Step::Ir     ? 0.05f
+                                                             : 0.0f;
+                const std::string doing = s == jit::Step::Compile ? "Part " + std::to_string(d) + " of " + std::to_string(n)
+                                          : s == jit::Step::Load  ? "Starting..."
+                                                                  : "Reading the game's code...";
+                screen.preparing(share, doing);
+            }
+            SDL_Delay(16);
+        }
+        worker.join();
+        if (quit) {
+            screen.close();
+            SDL_DestroyWindow(window);
+            SDL_Quit();
+            return 0;
+        }
+        if (!error.empty()) {
+            std::fprintf(stderr, "spikeout: the game couldn't be translated: %s\n", error.c_str());
+            const std::string text = "The game couldn't be translated from the ROM set:\n" + error;
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Spikeout", text.c_str(), window);
+            screen.close();
+            SDL_DestroyWindow(window);
+            SDL_Quit();
+            return 1;
+        }
+#endif
         screen.close(); // (the window given to the GPU)
     }
     SDL_ShowWindow(window);
@@ -3055,6 +3185,8 @@ int main(int argc, char** argv) {
         std::mutex lock;
         std::optional<std::string> path; // (empty: cancelled)
         std::string status;
+        std::optional<std::string> jit_folder; // (the JIT build: the translation's folder chosen; empty: cancelled)
+        std::string jit_status;
     } rom_pick;
     auto rom_dialog = [&] {
         auto answer = +[](void* u, const char* const* files, int) {
@@ -3074,6 +3206,33 @@ int main(int argc, char** argv) {
                            {}, {}, true});
         p.items.push_back({"Choose the zip file", "spikeofe.zip, as MAME and Supermodel have it. Used from the next start.", {},
                            {}, [&] { rom_dialog(); }});
+#ifdef SPIKEOUT_JIT
+        // The game translated from the set at the first start, kept in a folder: its size, the folder, and another
+        // chosen (used from the next start, translated there again).
+        p.items.push_back({"Translated game", "", [&] {
+                               if (!rom_pick.jit_status.empty()) return rom_pick.jit_status;
+                               if (jit_cache_in_use.empty()) return std::string("Not kept");
+                               std::error_code ec;
+                               std::uintmax_t bytes = 0;
+                               for (const auto& f : std::filesystem::directory_iterator(jit_cache_in_use, ec))
+                                   if (f.is_regular_file(ec)) bytes += f.file_size(ec);
+                               return std::to_string((bytes + 500000) / 1000000) + " MB";
+                           },
+                           {}, {}, true});
+        p.items.push_back({"Choose its folder",
+                           "Where the game translated from the ROM set is kept (about 12 MB)" +
+                               (jit_cache_in_use.empty() ? std::string()
+                                                         : ", now " + short_path(jit_cache_in_use.parent_path())) +
+                               ". Used from the next start, translated there again.",
+                           {}, {}, [&] {
+                               auto answer = +[](void* u, const char* const* files, int) {
+                                   auto* pick = static_cast<RomPick*>(u);
+                                   std::lock_guard guard(pick->lock);
+                                   pick->jit_folder = files && files[0] ? std::string(files[0]) : std::string();
+                               };
+                               SDL_ShowOpenFolderDialog(answer, &rom_pick, window, nullptr, false);
+                           }});
+#endif
         p.items.push_back(back_item());
         return p;
     };
@@ -3669,6 +3828,20 @@ int main(int argc, char** argv) {
                 std::printf("spikeout: ROM set chosen: %s (%s)\n", path_utf8(p).c_str(), why.empty() ? "good" : why.c_str());
                 if (menu_ready && menu.is_open()) menu.refresh();
             }
+#ifdef SPIKEOUT_JIT
+            std::optional<std::string> folder;
+            {
+                std::lock_guard guard(rom_pick.lock);
+                folder.swap(rom_pick.jit_folder);
+            }
+            if (folder && !folder->empty()) {
+                settings.jit_cache = *folder;
+                changed();
+                rom_pick.jit_status = path_utf8(utf8_path(*folder).filename()) + ", from the next start";
+                std::printf("spikeout: the translation's folder chosen: %s\n", folder->c_str());
+                if (menu_ready && menu.is_open()) menu.refresh();
+            }
+#endif
         }
         const bool menu_open = menu_ready && menu.is_open();
         if (menu_open != menu_was_open) {

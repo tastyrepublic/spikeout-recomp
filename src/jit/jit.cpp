@@ -234,6 +234,31 @@ std::vector<char> read_file(const std::filesystem::path& p) {
     return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
 }
 
+// A path for the log, UTF-8 (string() can throw on Windows for names outside the system's code page).
+std::string shown(const std::filesystem::path& p) {
+    const std::u8string s = p.u8string();
+    return {s.begin(), s.end()};
+}
+
+// The other translations in a cache folder deleted (a ROM set or a version before): only folders named as this
+// translator names them (16 hex digits) holding its files, whatever else the folder has kept.
+void prune_others(const std::filesystem::path& cache, const std::filesystem::path& keep) {
+    std::error_code ec;
+    for (const auto& e : std::filesystem::directory_iterator(cache, ec)) {
+        const std::string name = e.path().filename().string();
+        if (!e.is_directory(ec) || e.path() == keep || name.size() != 16 ||
+            name.find_first_not_of("0123456789abcdef") != std::string::npos)
+            continue;
+        if (!std::filesystem::exists(e.path() / "part0.o", ec)) continue;
+        bool only_ours = true;
+        for (const auto& f : std::filesystem::directory_iterator(e.path(), ec)) {
+            const std::string n = f.path().filename().string();
+            only_ours &= f.is_regular_file(ec) && (n == "complete" || (n.rfind("part", 0) == 0 && f.path().extension() == ".o"));
+        }
+        if (only_ours) std::filesystem::remove_all(e.path(), ec);
+    }
+}
+
 } // namespace
 
 namespace jit {
@@ -244,13 +269,18 @@ std::span<const recomp::FunctionEntry> blocks() { return g_blocks; }
 Report prepare(const m3::GameSpec& game, const m3::RomSet& roms, Options o) {
     const auto start = std::chrono::steady_clock::now();
     Report report;
-    if (o.cache_dir.empty()) o.cache_dir = env("SPIKEOUT_JIT_CACHE");
+    if (o.cache_dir.empty()) o.cache_dir = std::filesystem::path(env("SPIKEOUT_JIT_CACHE"));
     if (o.cache_dir.empty()) o.cache_dir = "jit-cache";
     if (o.threads == 0) o.threads = static_cast<unsigned>(std::atoi(env("SPIKEOUT_JIT_THREADS").c_str()));
     if (o.threads == 0) o.threads = std::max(1u, std::thread::hardware_concurrency());
     if (o.opt_level < 0) o.opt_level = env("SPIKEOUT_JIT_OPT").empty() ? 1 : std::atoi(env("SPIKEOUT_JIT_OPT").c_str());
     if (env("SPIKEOUT_JIT_NO_CACHE") == "1") o.use_cache = false;
     report.threads = o.threads;
+    auto say = [&](Step step, unsigned done = 0, unsigned total = 0) {
+        if (o.progress) o.progress({step, done, total});
+    };
+    auto stopped = [&] { return o.cancel && o.cancel->load(std::memory_order_relaxed); };
+    say(Step::Cache);
 
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
@@ -281,7 +311,7 @@ Report prepare(const m3::GameSpec& game, const m3::RomSet& roms, Options o) {
     for (const analysis::Entry& e : boot.entries) key.u64(e.addr);
     char key_hex[32];
     std::snprintf(key_hex, sizeof key_hex, "%016llx", static_cast<unsigned long long>(key.h));
-    const std::filesystem::path dir = std::filesystem::path(o.cache_dir) / key_hex;
+    const std::filesystem::path dir = o.cache_dir / key_hex;
     auto part_path = [&](uint32_t i) { return dir / ("part" + std::to_string(i) + ".o"); };
 
     // The objects: from the cache, or made now.
@@ -295,9 +325,11 @@ Report prepare(const m3::GameSpec& game, const m3::RomSet& roms, Options o) {
             }
         }
         report.from_cache = !objects.empty();
+        if (report.from_cache) report.cache_path = dir;
     }
     if (objects.empty()) {
         auto t = std::chrono::steady_clock::now();
+        say(Step::Analysis);
         // As ppcrecomp: the boot ROM's functions from an analysis of the vectors, the game's with pointers scanned too.
         analysis::Options base;
         for (const analysis::Segment& seg : boot.image.segments())
@@ -318,6 +350,8 @@ Report prepare(const m3::GameSpec& game, const m3::RomSet& roms, Options o) {
             }
         }
         report.analysis_s = seconds_since(t);
+        if (stopped()) throw Cancelled();
+        say(Step::Ir);
 
         t = std::chrono::steady_clock::now();
         std::unique_ptr<llvm::TargetMachine> tm0 = take(jtmb.createTargetMachine(), "target machine");
@@ -325,6 +359,7 @@ Report prepare(const m3::GameSpec& game, const m3::RomSet& roms, Options o) {
         std::vector<IrPart> parts = build_ir(lifts, layout, kParts, tm0->createDataLayout().getStringRepresentation(),
                                              jtmb.getTargetTriple().str(), &stats);
         report.ir_s = seconds_since(t);
+        if (stopped()) throw Cancelled();
         if (o.verbose)
             std::printf( "jit: %u functions, %u blocks, %u instructions, %u return sites\n", stats.functions,
                          stats.blocks, stats.instructions, stats.return_sites);
@@ -332,6 +367,8 @@ Report prepare(const m3::GameSpec& game, const m3::RomSet& roms, Options o) {
         t = std::chrono::steady_clock::now();
         objects.resize(parts.size());
         std::atomic<size_t> next{0};
+        std::atomic<unsigned> compiled{0};
+        say(Step::Compile, 0, static_cast<unsigned>(parts.size()));
         std::mutex error_mutex;
         std::string error;
         const bool verify = env("SPIKEOUT_JIT_VERIFY") == "1";
@@ -340,6 +377,7 @@ Report prepare(const m3::GameSpec& game, const m3::RomSet& roms, Options o) {
             try {
                 std::unique_ptr<llvm::TargetMachine> tm = take(jtmb.createTargetMachine(), "target machine");
                 for (size_t i; (i = next++) < parts.size();) {
+                    if (stopped()) break;
                     llvm::Module& m = *parts[i].module;
                     if (verify && llvm::verifyModule(m, &llvm::errs())) fail("part " + std::to_string(i) + " doesn't verify");
                     auto write_ir = [&](const char* tag) {
@@ -376,6 +414,7 @@ Report prepare(const m3::GameSpec& game, const m3::RomSet& roms, Options o) {
                     objects[i].assign(buffer.begin(), buffer.end());
                     parts[i].module.reset();
                     parts[i].context.reset();
+                    say(Step::Compile, ++compiled, static_cast<unsigned>(parts.size()));
                 }
             } catch (const std::exception& e) {
                 std::lock_guard lock(error_mutex);
@@ -387,6 +426,7 @@ Report prepare(const m3::GameSpec& game, const m3::RomSet& roms, Options o) {
         for (unsigned n = 0; n < std::min<size_t>(o.threads, parts.size()); ++n) threads.emplace_back(worker);
         for (std::thread& th : threads) th.join();
         if (!error.empty()) throw std::runtime_error(error);
+        if (stopped()) throw Cancelled();
         report.compile_s = seconds_since(t);
 
         if (o.use_cache) {
@@ -398,14 +438,18 @@ Report prepare(const m3::GameSpec& game, const m3::RomSet& roms, Options o) {
                 out.write(objects[i].data(), static_cast<std::streamsize>(objects[i].size()));
                 ok = static_cast<bool>(out);
             }
-            if (ok) std::ofstream(dir / "complete") << kTranslatorVersion << "\n";
-            else if (o.verbose) std::printf( "jit: couldn't write the cache in %s\n", dir.string().c_str());
+            if (ok) {
+                std::ofstream(dir / "complete") << kTranslatorVersion << "\n";
+                report.cache_path = dir;
+                if (o.prune) prune_others(o.cache_dir, dir);
+            } else if (o.verbose) std::printf( "jit: couldn't write the cache in %s\n", shown(dir).c_str());
         }
     }
     for (const auto& obj : objects) report.object_bytes += obj.size();
 
     // Load and link them.
     auto t = std::chrono::steady_clock::now();
+    say(Step::Load);
     llvm::orc::LLJITBuilder builder;
     builder.setJITTargetMachineBuilder(jtmb);
 #ifdef _WIN32
@@ -446,7 +490,7 @@ Report prepare(const m3::GameSpec& game, const m3::RomSet& roms, Options o) {
     if (o.verbose) {
         if (report.from_cache)
             std::printf( "jit: loaded from the cache (%s) in %.2f s: %zu entries, %zu blocks, %.1f MB of code objects\n",
-                         dir.string().c_str(), report.total_s, report.functions, report.blocks, static_cast<double>(report.object_bytes) / 1e6);
+                         shown(dir).c_str(), report.total_s, report.functions, report.blocks, static_cast<double>(report.object_bytes) / 1e6);
         else
             std::printf(
                          "jit: translated in %.2f s (analysis %.2f, IR %.2f, compile -O%d on %u threads %.2f, link %.2f): "

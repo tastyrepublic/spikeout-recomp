@@ -39,3 +39,63 @@ jobs:
         run: cmake --build build --config Release --parallel 4
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+
+  # The LLVM JIT (gamerun-jit and the window, spikeout-jit): build checks only (CI has no ROM; the hash proofs run
+  # where the ROM is). LLVM is built once per runner image (about 1-2 hours on its 4 cores) and kept in the cache;
+  # later runs restore it in a minute. macOS comes with the JIT's macOS work (MAP_JIT, signing).
+  jit:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            werror: ON
+          - os: windows-2022
+            werror: OFF
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 300
+    env:
+      LLVM_ROOT: ${{ github.workspace }}/.llvm  # (inside the workspace: the cache action takes paths there)
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SDL's dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libpulse-dev libaudio-dev libfribidi-dev libjack-dev libsndio-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev \
+            libxkbcommon-dev libdrm-dev libgbm-dev libgl1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev \
+            libdbus-1-dev libibus-1.0-dev libudev-dev libthai-dev libusb-1.0-0-dev \
+            libpipewire-0.3-dev libwayland-dev libdecor-0-dev liburing-dev
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev
+      # (the key: the runner image, whose compiler LLVM is built with, and how it's built)
+      - name: The runner image
+        id: image
+        shell: bash
+        run: echo "version=$ImageVersion" >> "$GITHUB_OUTPUT"
+      - name: LLVM from the cache
+        id: llvm
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.LLVM_ROOT }}
+          key: llvm-${{ matrix.os }}-${{ steps.image.outputs.version }}-${{ hashFiles('cmake/llvm.cmake') }}
+      - name: Configure (LLVM built here when not in the cache)
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSPIKEOUT_WARNINGS_AS_ERRORS=${{ matrix.werror }}
+          -DSPIKEOUT_LLVM_JIT=ON "-DSPIKEOUT_LLVM_ROOT=${{ env.LLVM_ROOT }}"
+      - name: LLVM's build logs (when it failed)
+        if: failure()
+        shell: bash
+        run: tail -n 60 "$LLVM_ROOT"/*.log || true
+      # (kept at once, even if the build below fails: LLVM takes the time)
+      - name: LLVM into the cache
+        if: steps.llvm.outputs.cache-hit != 'true'
+        shell: bash
+        run: rm -rf "$LLVM_ROOT"/*.tar.xz "$LLVM_ROOT"/work-* "$LLVM_ROOT"/*.log
+      - if: steps.llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.LLVM_ROOT }}
+          key: ${{ steps.llvm.outputs.cache-primary-key }}
+      - name: Build
+        run: cmake --build build --config Release --parallel 4 --target gamerun-jit spikeout-jit
