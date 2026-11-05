@@ -26,13 +26,16 @@ Intel Iris 5100; macOS 15.7.9; Apple Clang 17.0.0). An Intel Mac, not Apple sili
   (`SDL_PROP_GPU_DEVICE_CREATE_METAL_ALLOW_MACFAMILY1_BOOLEAN` in src/gpu/present.cpp, since bfe0f32 with the
   game thread's stack fix, tools/game_thread.hpp). Without it: SDL's renderer, software 3D and no menu.
 
-**OPEN: the characters' shadows are missing in the window, and maybe other effects** (the owner's report, playing
-the JIT window on this Mac with Metal). Not looked into yet. First find which part is at fault:
-- the renderer: `gamerun-jit ... --renderer compare` over a fight (a saved state from the window, F9) compares the
-  GPU's picture with the software renderer's (FILE-<frame>-gpu.png beside each). Only the GPU's missing them points
-  at Metal (this MTLGPUFamilyMac1 GPU, or the MSL made from the shaders: check on an Apple silicon Mac too);
-- the JIT: the same state through the C++ build's gamerun (step 3, never built from main here yet) with
-  `--renderer gpu`; the hash proofs of section 5 also show whether the JIT runs the same game here.
+**FIXED: every translucent polygon was missing on Metal** (the owner's report: the characters' shadows, and
+`--renderer compare` showed the hit sparks and window glass gone too). Not the GPU or the JIT: the translucent scene
+shaders (scene.frag without OPAQUE) take a second texture, the opaque depth, so their storage buffers are bindings 2
+and up in set 2, right for Vulkan; `--msl-decoration-binding` made those `[[buffer(2)]]`..., but SDL's Metal backend
+puts storage buffers straight after the uniform buffer, `[[buffer(1)]]`..., whatever the textures. The translucent
+passes read the wrong buffers and drew nothing, on every Mac. Now each shader's Metal source is made from its own
+SPIR-V compiled with `-DMETAL` (CMakeLists.txt, `<name>_metal.spv`), where scene.frag's storage buffers start at 1;
+the Vulkan SPIR-V is unchanged. Checked: attract's GPU picture against the software renderer's (only edge pixels
+differ), and the owner's shadows back in play. Any new shader with more than one texture and storage buffers needs
+the same: compare each `.msl`'s `[[buffer(n)]]` with SDL's order (uniform buffers, then storage buffers).
 
 Not done yet: the hash proofs (section 5), the C++ reference build from main, the app bundle and download
 (section 6), an Apple silicon build.

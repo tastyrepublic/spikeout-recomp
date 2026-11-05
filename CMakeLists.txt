@@ -351,13 +351,16 @@ if(SPIKEOUT_GPU)
         endforeach()
         set(name ${name}_${stage})
         set(spv ${shader_out}/${name}.spv)
+        set(metal_spv ${shader_out}/${name}_metal.spv) # (with METAL: Metal's binding numbers)
         set(msl ${shader_out}/${name}.msl)
         set(cpp ${shader_out}/${name}.cpp)
         add_custom_command(
             OUTPUT ${cpp}
             COMMAND $<TARGET_FILE:glslang-standalone> -V --target-env vulkan1.0 -I${shader_dir} ${defines}
                     -o ${spv} ${shader_dir}/${shader}
-            COMMAND $<TARGET_FILE:spirv-cross> ${spv} --msl --msl-version 20100 --msl-decoration-binding --output ${msl}
+            COMMAND $<TARGET_FILE:glslang-standalone> -V --target-env vulkan1.0 -I${shader_dir} ${defines} -DMETAL
+                    -o ${metal_spv} ${shader_dir}/${shader}
+            COMMAND $<TARGET_FILE:spirv-cross> ${metal_spv} --msl --msl-version 20100 --msl-decoration-binding --output ${msl}
             COMMAND ${CMAKE_COMMAND} -DNAME=${name} -DSPV=${spv} -DMSL=${msl} -DOUT=${cpp}
                     -P ${CMAKE_SOURCE_DIR}/cmake/embed_shader.cmake
             DEPENDS ${shader_dir}/${shader} ${shader_includes} ${CMAKE_SOURCE_DIR}/cmake/embed_shader.cmake

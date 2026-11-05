@@ -18,11 +18,13 @@ Read this first; the older hand-off below is history.
   175 MB; CMake/Ninja from pip, Homebrew's CMake has no bottle there). The
   JIT works on macOS x86_64: translated in 96-117 s on 4 threads, attract
   3,000 frames, exceptions unwind through JIT code. The window draws with
-  Metal (MTLGPUFamilyMac1 allowed since bfe0f32). OPEN, first: the
-  characters' shadows missing in the window, maybe other effects too (the
-  owner's report; GPU, Metal on Mac1, or JIT not yet told apart: --renderer
-  compare on a fight state). Not done: hash proofs, the C++ build from
-  main, the app bundle and download, Apple silicon.
+  Metal (MTLGPUFamilyMac1 allowed since bfe0f32). FIXED then: every
+  translucent polygon missing on Metal (shadows, sparks, glass; every Mac):
+  the translucent scene shaders' storage buffers were Metal slots 2+, SDL
+  binds them at 1+ (after the uniform buffer, whatever the textures); the
+  Metal source is now made from SPIR-V compiled with -DMETAL (Vulkan's
+  unchanged). Not done: hash proofs, the C++ build from main, the app
+  bundle and download, Apple silicon.
 - RELEASE (owner's decisions): downloads must not contain the recompiled
   game code (made from SEGA's ROM), so the game is translated from the
   player's own ROM at start by an LLVM JIT, and cached. Easiest for
