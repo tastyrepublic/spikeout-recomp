@@ -101,6 +101,14 @@ Read this first; the older hand-off below is history.
   recomp projects do): docs/images/*.jpg, taken from the window (sized,
   title bar cropped, PrintWindow) from the owner's saved states, 1280
   wide, JPEG 84. Nothing else made from the ROMs is.
+  JOINING (2026-11-05, docs/netplay.md "Joining over a slow line or a
+  relay"): the seat list shows each player's link (LAN/DIRECT/RELAY); a
+  join's progress on both sides (the joiner's loading screen with MB and
+  steps, the host's RECEIVING/CATCHING UP %); the reliable channel paced
+  and with selective acknowledgements; a joiner's early inputs kept (they
+  were thrown away: stuck for good); no backups to a joiner; tested on a
+  simulated slow line (SPIKEOUT_TEST_LINK=KB,LOSS). The relay can't be
+  fully tested on one PC (one public address): a second network needed.
   MACOS NEXT (the owner builds it on their own Mac): docs/building-macos.md
   is the hand-off (tools, the JIT and reference builds, what may break:
   exceptions through JIT code first, then MAP_JIT/allow-jit for a signed

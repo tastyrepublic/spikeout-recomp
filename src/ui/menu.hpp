@@ -52,6 +52,7 @@ struct NetRow {
     std::string platform; // its icon before the flag: "windows", "macos", "linux", "android" ("": none)
     std::string mode;     // a tag after the name: how its machine plays ("1 BOARD · RB"; "": none)
     int rollbacks = -1;   // a pill after it: times gone back for its inputs lately, coloured by how many (-1: none)
+    int progress = -1;    // a small bar after the status (a player joining: RECEIVING, CATCHING UP), 0-100 (-1: none)
 };
 
 // The pills above the seats: the input delay (frames; -1: not shown), chosen by Auto or set.
@@ -104,7 +105,9 @@ public:
     void set_net(const std::vector<NetRow>& rows, const std::string& header = {}, const NetPills& pills = {});
     // A screen over the whole window, the game's picture hidden (a network game joined in progress, catching up with
     // the others): a title, a bar filled to `percent` (0-100; -1: no bar) and a line under it (an empty title: none).
-    void set_loading(const std::string& title, int percent = -1, const std::string& detail = {});
+    // (sub: a line under the title; steps: what the wait is made of, `step` the one now: those before it ticked off)
+    void set_loading(const std::string& title, int percent = -1, const std::string& detail = {}, const std::string& sub = {},
+                     const std::vector<std::string>& steps = {}, int step = -1);
     // A spectator's banner at the bottom: whom it watches and the keys that change it ("WATCHING KENJI (2P)  LEFT RIGHT /
     // LB RB  another player"; the owner's choice of the mockups); empty: none.
     // (`note`: that message instead, plain: "switching needs a faster device")

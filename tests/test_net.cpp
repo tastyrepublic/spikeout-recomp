@@ -197,6 +197,11 @@ TEST_CASE("net session: two machines on this one, inputs each frame, a hash, a g
                    host_seen.inputs[1][k].first == f && host_seen.inputs[1][k].second[0] == static_cast<uint8_t>(held + 100);
     }
     CHECK(in_order);
+    // How each reaches the other: this PC's address, so the same network; no link for itself.
+    using Link = Session::SeatView::Link;
+    CHECK(host.seats()[1].link == Link::lan);
+    CHECK(guest->seats()[0].link == Link::lan);
+    CHECK(host.seats()[0].link == Link::none);
 
     host.report_hash(120, 0xABC);
     guest->report_hash(120, 0xABD); // (different)

@@ -55,7 +55,7 @@
 namespace net {
 
 constexpr uint16_t kDiscoveryPort = 47326;
-constexpr uint8_t kProtocol = 2; // (2: spectators)
+constexpr uint8_t kProtocol = 3; // (2: spectators; 3: selective acknowledgements, the state's size, catch-up in the status)
 constexpr std::size_t kMaxSeats = 4;
 constexpr std::chrono::milliseconds kDropAfter{3000};
 constexpr std::size_t kMaxWatchers = 4; // spectators a game (the owner's choice)
@@ -254,6 +254,7 @@ public:
         Net net = Net::unknown;
         int16_t delay = -1;       // input delay, frames (-1: unknown)
         bool auto_delay = false;  // chosen by Auto
+        int8_t catch_up = -1;     // joined in progress: percent caught up with the others (-1: not catching up)
         bool operator==(const Status&) const = default;
     };
     void set_status(const Status& status);
@@ -273,8 +274,29 @@ public:
         bool left = false; // gone after saying goodbye
         int round_trip = -1; // ms (-1: not measured yet)
         Status status;       // as its machine last said (ours: set_status's)
+        // How this machine reaches the player: on the same network (a private address: a LAN, a hotspot, this PC),
+        // straight over the internet, or through the TURN relay (ours or theirs). none: ours, not reached yet, or a
+        // spectator's view (the host's seats).
+        enum class Link : uint8_t { none, lan, direct, relay };
+        Link link = Link::none;
+        // A player joining the game in progress (state joining): receiving the state (as far as this machine, the
+        // host, has it acknowledged), then catching up (as its machine says), in percent; none: neither yet.
+        enum class Joining : uint8_t { none, receiving, catching_up };
+        Joining joining = Joining::none;
+        int progress = -1;
     };
     std::array<SeatView, kMaxSeats> seats() const;
+    // Joining a game (this machine): asking (the host not answered yet), receiving its every-board state (bytes of
+    // total), then seating (the state in: catching up and taking the cabinet, until it's ours); none otherwise.
+    struct JoinProgress {
+        enum class Stage : uint8_t { none, asking, receiving, seating };
+        Stage stage = Stage::none;
+        std::size_t bytes = 0, total = 0; // (receiving; total 0: not known yet)
+    };
+    JoinProgress join_progress() const;
+    // A player joined in progress whose cabinet isn't theirs yet (catching up): sent no board backups meanwhile,
+    // which they don't run on, and which, MBs, would hold up the messages behind them (their cabinet's handover).
+    bool joining(uint8_t seat) const;
     // This machine hosts the room: from the start, or since the host left a
     // game in progress (host migration: the lowest seat still connected).
     bool hosting() const;

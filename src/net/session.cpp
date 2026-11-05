@@ -24,7 +24,8 @@ enum Message : uint8_t { kWelcome = 1, kRoster = 2, kStart = 3, kSuspect = 4, kH
                         kWatchWelcome = 20, // (the host to a spectator: its number, the seats, whether the game is on)
                         kWatchInfo = 21,    // (the host to its spectators: every seat as the host sees it, and their count)
                         kWatchers = 22,     // (the host to the players: how many watch, and who)
-                        kWatchMode = 23 };  // (a spectator to the host: it runs one board: the players' backups wanted)
+                        kWatchMode = 23,    // (a spectator to the host: it runs one board: the players' backups wanted)
+                        kStateSize = 24 };  // (before kState: its size, for the receiver's progress)
 
 // Spectators (docs/netplay.md, "Spectators"): each talks to the room's host only, sending as kWatcherBase + its
 // number; the players never wait for them, nor count them. They take every seat's inputs from the host and run each
@@ -124,6 +125,7 @@ struct Reliable {
         std::vector<uint8_t> data;
         Clock::time_point sent{};
         bool ever_sent = false;
+        bool sacked = false; // (the receiver has it, beyond a gap: not sent again)
     };
     std::deque<Fragment> out;
     uint32_t next_seq = 0;
@@ -144,8 +146,27 @@ struct Reliable {
             if (message.empty()) break;
         }
     }
-    void acked(uint32_t ack) {
+    // Acknowledged: everything before `ack`, and of the 64 pieces after it, those `sack`'s bits name (bit i: ack + 1
+    // + i) that came beyond the gap: only the pieces really lost are sent again (one lost piece no longer brings its
+    // whole window again, which a slow line or a relay drops in turn).
+    void acked(uint32_t ack, uint64_t sack) {
         while (!out.empty() && static_cast<int32_t>(out.front().seq - ack) < 0) out.pop_front();
+        if (!sack) return;
+        for (Fragment& f : out) {
+            const int32_t d = static_cast<int32_t>(f.seq - ack) - 1;
+            if (d < 0) continue;
+            if (d >= 64) break;
+            if (sack >> d & 1) f.sacked = true;
+        }
+    }
+    // What we have beyond the next piece expected, for the sender (acked's `sack`).
+    uint64_t sack_bits() const {
+        uint64_t bits = 0;
+        for (const auto& [seq, piece] : early) {
+            const int32_t d = static_cast<int32_t>(seq - rx_next) - 1;
+            if (d >= 0 && d < 64) bits |= uint64_t{1} << d;
+        }
+        return bits;
     }
     // A fragment in: the messages it completes, in order.
     std::vector<std::vector<uint8_t>> receive(uint32_t seq, uint8_t flags, std::vector<uint8_t> data) {
@@ -179,6 +200,13 @@ std::string two_letters(const std::string& country) {
             static_cast<char>(std::tolower(static_cast<unsigned char>(country[1])))};
 }
 
+// An address on a network of its own, not the internet (RFC 1918's 10/8, 172.16/12, 192.168/16, link-local
+// 169.254/16, this PC's 127/8): a player there is on the same network (a LAN, a hotspot) or this machine.
+bool private_address(uint32_t ip) {
+    const uint32_t a = ip >> 24, b = (ip >> 16) & 0xFF;
+    return a == 10 || a == 127 || (a == 172 && b >= 16 && b < 32) || (a == 192 && b == 168) || (a == 169 && b == 254);
+}
+
 } // namespace
 
 struct Session::Impl {
@@ -207,6 +235,7 @@ struct Session::Impl {
         Writer w;
         w.u8(kStatus), w.u8(static_cast<uint8_t>(my_status.platform)), w.u8(static_cast<uint8_t>(my_status.boards)),
             w.u8(static_cast<uint8_t>(my_status.net)), w.u16(static_cast<uint16_t>(my_status.delay)), w.u8(my_status.auto_delay ? 1 : 0);
+        w.u8(static_cast<uint8_t>(my_status.catch_up + 1)); // (0: not catching up)
         send_all(w.out);
         status_sent = Clock::now();
     }
@@ -238,6 +267,12 @@ struct Session::Impl {
     std::vector<Address> beacon_targets; // (the host: every network's broadcast address)
     Clock::time_point targets_asked{};
 
+    // A rate for bulk sending (Impl::cap_take): bytes a second, and the bytes allowed now.
+    struct Cap {
+        double rate = 256e3, tokens = 0; // bytes a second; bytes allowed now
+        Clock::time_point at{}, paused_until{}, changed{};
+    };
+
     struct Peer {
         bool present = false;   // a player in this seat (not me)
         bool connected = false; // heard from, not dropped
@@ -261,6 +296,13 @@ struct Session::Impl {
         bool wants_state = false;         // (the host: it waits for every board's state)
         Session::Status status;           // (as it last said: kStatus)
         int rtt_floor = -1;               // (its least round trip so far: Cap's guard)
+        // Its reliable channel paced (a joiner's every-board state: MBs a relay or a slow line drops in a burst):
+        // the rate grows a quarter each second nothing was sent again, halves when pieces had to be.
+        Cap pace;
+        unsigned resent = 0, sent = 0; // (pieces this second)
+        // (the host: every board's state on its way to it, its pieces' sequence numbers [state_first, state_end))
+        uint32_t state_first = 0, state_end = 0;
+        bool state_going = false;
     };
     std::array<Peer, kMaxSeats> peers;
     std::array<Stream, kMaxSeats> streams;
@@ -328,6 +370,7 @@ struct Session::Impl {
     std::vector<Clock::time_point> set_at; // (then: when each of our frames was set, from our stream's first)
     uint64_t send_failures = 0, datagrams_in = 0; // (told with a peer not answering)
     bool late = false, want_state = false;
+    uint32_t state_size = 0; // (a joiner: the coming kState's size, from kStateSize: its progress)
     std::optional<StartInfo> late_start;
     std::optional<uint64_t> mine_from;
     // Our cabinet asked for (kTake), until it's handed over (kTaken): asked
@@ -404,10 +447,62 @@ struct Session::Impl {
             send_now(h.to, h.data);
         }
     }
+    // Tests: SPIKEOUT_TEST_LINK=KB[,LOSS] this machine's uplink as a slow line: KB kilobytes a second, a second's
+    // queue at most (more is dropped, as a router's full buffer drops), and LOSS percent of datagrams lost on the
+    // way. With SPIKEOUT_TEST_LATENCY, a far and slow connection on one PC (the join's pacing and progress).
+    struct TestLink {
+        double bytes_per_s = 0, loss = 0;
+    };
+    static const TestLink& test_link() {
+        static const TestLink link = [] {
+            TestLink l;
+            if (const char* v = std::getenv("SPIKEOUT_TEST_LINK")) {
+                char* end = nullptr;
+                l.bytes_per_s = std::strtod(v, &end) * 1024;
+                if (*end == ',') l.loss = std::strtod(end + 1, nullptr) / 100;
+            }
+            return l;
+        }();
+        return link;
+    }
+    Clock::time_point link_free{};
+    std::minstd_rand link_random{12345};
+    std::array<uint64_t, 256> sent_bytes{}; // (SPIKEOUT_NET_DEBUG: bytes sent by datagram type, every 5 s)
+    Clock::time_point sent_shown{};
     void send_raw(const Address& to, std::span<const uint8_t> data) {
         const auto now = Clock::now();
-        if (const int ms = test_latency_ms(now); ms > 0) {
-            held_out.push_back({now + std::chrono::milliseconds(ms), to, std::vector<uint8_t>(data.begin(), data.end())});
+        static const bool debug = std::getenv("SPIKEOUT_NET_DEBUG") != nullptr;
+        if (debug) {
+            sent_bytes[data.size() > 3 ? data[3] : 255] += data.size() + 28;
+            if (now - sent_shown > std::chrono::seconds(5)) {
+                std::string line;
+                for (std::size_t t = 0; t < sent_bytes.size(); ++t)
+                    if (sent_bytes[t]) line += " type " + std::to_string(t) + ": " + std::to_string(sent_bytes[t] / 5120) + " KB/s;";
+                line += " inputs known:";
+                for (uint8_t s = 0; s < seats && s < kMaxSeats; ++s) line += " " + std::to_string(streams[s].next());
+                line += ";";
+                for (uint8_t s = 0; s < kMaxSeats; ++s)
+                    if (peers[s].present)
+                        line += " seat " + std::to_string(s + 1) + ": " + std::to_string(peers[s].rel.out.size()) + " pieces queued, pace " +
+                                std::to_string(static_cast<int>(peers[s].pace.rate / 1024)) + " KB/s, rtt " + std::to_string(peers[s].rtt) +
+                                (peers[s].rel.out.empty() ? std::string() : ", front " + std::to_string(peers[s].rel.out.front().seq) + " type " +
+                                 std::to_string(peers[s].rel.out.front().data.empty() ? -1 : peers[s].rel.out.front().data[0])) + ";";
+                if (sent_shown != Clock::time_point{}) std::fprintf(stderr, "sent:%s\n", line.c_str());
+                sent_bytes.fill(0), sent_shown = now;
+            }
+        }
+        const TestLink& link = test_link();
+        auto due = now + std::chrono::milliseconds(test_latency_ms(now));
+        if (link.loss > 0 && std::uniform_real_distribution<double>(0, 1)(link_random) < link.loss) return; // (lost)
+        if (link.bytes_per_s > 0) {
+            if (link_free < now) link_free = now;
+            if (link_free - now > std::chrono::seconds(1)) return; // (the line's queue full: dropped)
+            link_free += std::chrono::duration_cast<Clock::duration>(
+                std::chrono::duration<double>(static_cast<double>(data.size() + 28) / link.bytes_per_s));
+            due = std::max(due, link_free);
+        }
+        if (due > now) {
+            held_out.push_back({due, to, std::vector<uint8_t>(data.begin(), data.end())});
             return;
         }
         send_now(to, data);
@@ -430,7 +525,12 @@ struct Session::Impl {
         if (turn) turn->permit(a.ip);
     }
 
-    void send_reliable(uint8_t seat, const std::vector<uint8_t>& message) { peers[seat].rel.queue(message); }
+    void send_reliable(uint8_t seat, const std::vector<uint8_t>& message) {
+        static const bool debug = std::getenv("SPIKEOUT_NET_DEBUG") != nullptr;
+        if (debug && message.size() > 8000)
+            std::fprintf(stderr, "reliable to seat %u: message %u, %zu bytes\n", seat + 1, message.empty() ? 0u : message[0], message.size());
+        peers[seat].rel.queue(message);
+    }
     void send_all(const std::vector<uint8_t>& message, uint8_t except = kNoSeat) {
         for (uint8_t s = 0; s < kMaxSeats; ++s)
             if (s != except && s != my_seat && peers[s].present && peers[s].connected) send_reliable(s, message);
@@ -440,10 +540,6 @@ struct Session::Impl {
     // every spectator this machine sends to (its uplink is one), which grows while the players' round trips stay as
     // they were and halves, pausing a second, as soon as one rises (a full uplink delays the inputs first). The same
     // for the host's channel to each spectator (its every-board state too) and a player's backups to one.
-    struct Cap {
-        double rate = 256e3, tokens = 0; // bytes a second; bytes allowed now
-        Clock::time_point at{}, paused_until{}, changed{};
-    };
     Cap spectator_cap;
     static constexpr double kCapMin = 16e3, kCapMax = 4e6;
     bool cap_take(Cap& c, std::size_t bytes, Clock::time_point now) {
@@ -471,16 +567,53 @@ struct Session::Impl {
             c.rate = std::min(kCapMax, c.rate * 1.25), c.changed = now;
         }
     }
+    // The host: how many of a peer's every-board state pieces (Session::send_state) it hasn't acknowledged yet.
+    static std::size_t state_left(const Peer& p) {
+        if (!p.state_going || p.rel.out.empty()) return 0;
+        const uint32_t front = p.rel.out.front().seq;
+        if (static_cast<int32_t>(front - p.state_end) >= 0) return 0;
+        const uint32_t from = static_cast<int32_t>(front - p.state_first) > 0 ? front : p.state_first;
+        return p.state_end - from;
+    }
+    // A player's reliable channel's rate, each second: up a quarter while what's sent gets through (a busy second
+    // with almost nothing sent again), halved when more had to be (a relay or a line dropping the rest), from 1 MB/s.
+    static constexpr double kPaceStart = 1e6, kPaceMin = 32e3, kPaceMax = 16e6;
+    void pace(Peer& p, Clock::time_point now) {
+        Cap& c = p.pace;
+        if (c.changed == Clock::time_point{}) // (the same network: a line many times faster, so from far higher)
+            c.rate = !p.address.relayed && private_address(p.address.ip) ? kPaceMax / 2 : kPaceStart, c.changed = now;
+        if (now - c.changed < std::chrono::seconds(1)) return;
+        // (and halved, as the spectators' rate is, when a player's round trip rises: the uplink filling delays the
+        // players' inputs before anything is lost, and they come first)
+        bool rising = false;
+        for (uint8_t s = 0; s < seats && s < kMaxSeats; ++s) {
+            Peer& o = peers[s];
+            // (the peer sent to counts too, once it plays: its own inputs wait behind what fills the line to it; a joiner
+            // still taking in the state isn't playing yet)
+            if (s == my_seat || !o.present || o.dropped || o.rtt < 0 || (&o == &p && state_left(p) > 0)) continue;
+            o.rtt_floor = o.rtt_floor < 0 ? o.rtt : std::min(o.rtt_floor, o.rtt);
+            if (o.rtt > o.rtt_floor + 40) rising = true;
+        }
+        if (p.resent > std::max(4u, p.sent / 20) || (rising && p.sent > 0)) c.rate = std::max(kPaceMin, c.rate / 2);
+        else if (p.sent >= 16) c.rate = std::min(kPaceMax, c.rate * 1.25); // (only a busy second shows the line takes more)
+        c.changed = now, p.resent = 0, p.sent = 0;
+    }
     template <class P> void pump_reliable(uint8_t seat, P& p, Cap* cap = nullptr) {
         const auto now = Clock::now();
         bool sent_any = false;
         std::size_t n = 0;
+        // (a player's: sent again after twice its round trip and a tenth of a second: a far one's pieces, or ones queued
+        // on a full line, aren't lost yet, and sent again too soon they'd count as lost and halve its pace)
+        Clock::duration resend = kResend;
+        if constexpr (requires { p.pace; })
+            if (p.rtt > 0) resend = std::max<Clock::duration>(kResend, std::chrono::milliseconds(p.rtt * 2 + 100));
         for (auto& f : p.rel.out) {
             if (n++ >= kWindow) break;
-            if (f.ever_sent && now - f.sent < kResend) continue;
+            if (f.sacked || (f.ever_sent && now - f.sent < resend)) continue;
             if (cap && !cap_take(*cap, f.data.size() + 32, now)) break; // (spectator traffic: its share only)
+            if constexpr (requires { p.resent; }) ++(f.ever_sent ? p.resent : p.sent);
             Writer w = header(kReliable, session, me());
-            w.u32(p.rel.rx_next), w.u8(1), w.u32(f.seq), w.u8(f.flags);
+            w.u32(p.rel.rx_next), w.u64(p.rel.sack_bits()), w.u8(1), w.u32(f.seq), w.u8(f.flags);
             w.out.insert(w.out.end(), f.data.begin(), f.data.end());
             send_peer(p, w);
             f.sent = now, f.ever_sent = true;
@@ -488,7 +621,7 @@ struct Session::Impl {
         }
         if (p.rel.ack_due && !sent_any) {
             Writer w = header(kReliable, session, me());
-            w.u32(p.rel.rx_next), w.u8(0);
+            w.u32(p.rel.rx_next), w.u64(p.rel.sack_bits()), w.u8(0);
             send_peer(p, w);
         }
         p.rel.ack_due = false;
@@ -691,9 +824,10 @@ struct Session::Impl {
         v.address = d.from, v.heard = Clock::now(), v.reached = true;
         if (type == kReliable) {
             const uint32_t ack = r.u32();
+            const uint64_t sack = r.u64();
             const uint8_t has = r.u8();
             if (!r.ok()) return;
-            v.rel.acked(ack);
+            v.rel.acked(ack, sack);
             if (!has) return;
             const uint32_t seq = r.u32();
             const uint8_t flags = r.u8();
@@ -847,9 +981,10 @@ struct Session::Impl {
         b.address = d.from, b.reached = true, b.heard = Clock::now();
         if (type != kReliable) return;
         const uint32_t ack = r.u32();
+        const uint64_t sack = r.u64();
         const uint8_t has = r.u8();
         if (!r.ok()) return;
-        b.rel.acked(ack);
+        b.rel.acked(ack, sack);
         if (!has) return;
         const uint32_t seq = r.u32();
         const uint8_t flags = r.u8();
@@ -920,6 +1055,16 @@ struct Session::Impl {
     void received(const UdpSocket::Datagram& d) {
         // STUN and TURN: our router's address, and what the relay passes on.
         if (stun::is_stun(d.data)) {
+            {
+                static const bool debug = std::getenv("SPIKEOUT_NET_DEBUG") != nullptr;
+                static int shown = 0;
+                if (debug && shown < 40) {
+                    ++shown;
+                    const auto m = stun::parse(d.data);
+                    std::fprintf(stderr, "stun in from %s (relay server %s): type %04x, %zu bytes\n", d.from.str().c_str(),
+                                 turn ? turn->server().str().c_str() : "none", m ? m->type : 0u, d.data.size());
+                }
+            }
             if (turn && d.from.same_place(turn->server())) {
                 if (auto inner = turn->received(d.data, turn_send())) received(*inner);
                 return;
@@ -1096,9 +1241,10 @@ struct Session::Impl {
 
     void on_reliable(uint8_t from, Peer& p, Reader& r) {
         const uint32_t ack = r.u32();
+        const uint64_t sack = r.u64();
         const uint8_t has = r.u8();
         if (!r.ok()) return;
-        p.rel.acked(ack);
+        p.rel.acked(ack, sack);
         if (!has) return;
         const uint32_t seq = r.u32();
         const uint8_t flags = r.u8();
@@ -1122,6 +1268,11 @@ struct Session::Impl {
                 send_reliable(host_seat, c.out);
             }
             break;
+        case kStateSize: {
+            const uint32_t size = r.u32();
+            if (r.ok()) state_size = size;
+            break;
+        }
         case kWatchWelcome: // (a spectator let in; or greeted by the room's new host, the old one gone)
             if (watch_mode && !is_host) {
                 const uint8_t id = r.u8(), n = r.u8();
@@ -1232,6 +1383,7 @@ struct Session::Impl {
             s.net = static_cast<Session::Status::Net>(std::min<uint8_t>(r.u8(), 2));
             s.delay = static_cast<int16_t>(r.u16());
             s.auto_delay = r.u8() != 0;
+            if (r.ok() && r.left() > 0) s.catch_up = static_cast<int8_t>(std::min<int>(r.u8(), 101) - 1);
             if (r.ok() && from < seats) peers[from].status = s;
             break;
         }
@@ -1431,6 +1583,7 @@ struct Session::Impl {
         if (s == my_seat) {
             mine_from = x;
             take_wanted = false;
+            pending_local.erase(pending_local.begin(), pending_local.lower_bound(x)); // (kept before it was known: not ours)
             flush_pending();
         }
         fill_open_to_mine();
@@ -1478,7 +1631,9 @@ struct Session::Impl {
         for (uint8_t s = 0; s < seats; ++s) {
             Peer& p = peers[s];
             if (s == my_seat || !p.present || p.dropped) continue;
-            if (now - p.heard > kDropAfter && !drops[s].suspected) {
+            // (a joiner still taking in every board's state: a slow line's or relay's acknowledgements can lag)
+            const auto quiet = state_left(p) > 0 ? kDropAfter * 5 : kDropAfter;
+            if (now - p.heard > quiet && !drops[s].suspected) {
                 drops[s].suspected = true; // (its inputs frozen here)
                 const auto ms = [&](Clock::time_point t) { return std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(now - t).count()); };
                 log((p.name.empty() ? "seat " + std::to_string(s + 1) : p.name) + " isn't answering (heard " + ms(p.heard) +
@@ -1607,7 +1762,8 @@ struct Session::Impl {
                 }
                 if ((p.inputs_due || inputs_pending(s, p)) && now - p.inputs_sent >= kInputResend) send_inputs(s, p);
                 else if (now - p.inputs_sent >= kKeepAlive) send_inputs(s, p);
-                pump_reliable(s, p);
+                pace(p, now);
+                pump_reliable(s, p, &p.pace);
             }
             if (!is_host && !leaving) pump_spectators(now); // (a player's backups to spectators on one board: last)
             if (!is_host && !started && my_seat == kNoSeat && leaving) break;
@@ -1837,7 +1993,15 @@ void Session::local_input(uint64_t frame, const InputBytes& in) {
     Impl& m = *impl_;
     std::lock_guard guard(m.lock);
     if (m.my_seat == kNoSeat || !m.started) return;
-    if (m.late && (!m.mine_from || frame < *m.mine_from)) return; // (not ours yet: none, as the others have it)
+    // A cabinet joined in progress: our inputs kept until the frame it's ours from is known (kTaken), since with an
+    // input delay we make them before then and the first of them may be ours (thrown away, those frames were never
+    // filled: every machine waited for them for good); the ones before it dropped then (Impl::taken).
+    if (m.late && !m.mine_from) {
+        m.pending_local[frame] = in;
+        while (m.pending_local.size() > 1200) m.pending_local.erase(m.pending_local.begin()); // (a long wait: the latest)
+        return;
+    }
+    if (m.late && frame < *m.mine_from) return; // (not ours: none, as the others have it)
     if (m.mine_from && (!m.streams[m.my_seat].known || m.streams[m.my_seat].next() < *m.mine_from)) {
         m.pending_local[frame] = in; // (the frames before it, none, still to come)
         return;
@@ -1859,7 +2023,12 @@ void Session::send_state(uint64_t frame, std::vector<uint8_t> state) {
         Impl::Peer& p = m.peers[s];
         if (s == m.my_seat || !p.present || !p.wants_state) continue;
         p.wants_state = false;
+        Writer size; // (its size first: the receiver's progress, Session::join_progress)
+        size.u8(kStateSize), size.u32(static_cast<uint32_t>(w.out.size()));
+        m.send_reliable(s, size.out);
+        p.state_first = p.rel.next_seq;
         m.send_reliable(s, w.out);
+        p.state_end = p.rel.next_seq, p.state_going = true;
         m.log("every board's state (frame " + std::to_string(frame) + ", " + std::to_string(state.size() / 1024) + " KB) to " +
               (p.name.empty() ? "seat " + std::to_string(s + 1) : p.name));
     }
@@ -2117,6 +2286,19 @@ Session::SeatView Session::Impl::view(uint8_t s) const {
     } else if (p.present && !p.dropped) {
         v.name = p.name, v.country = p.country, v.round_trip = p.rtt, v.status = p.status;
         v.state = cab.open && !cab.until ? State::joining : State::playing;
+        if (p.reached)
+            v.link = p.address.relayed               ? SeatView::Link::relay
+                     : private_address(p.address.ip) ? SeatView::Link::lan
+                                                     : SeatView::Link::direct;
+        if (v.state == State::joining) {
+            if (const std::size_t left = state_left(p); left > 0) { // (the state on its way: the pieces it has acknowledged)
+                const uint32_t all = p.state_end - p.state_first;
+                v.joining = SeatView::Joining::receiving;
+                v.progress = all ? static_cast<int>(100 * (all - left) / all) : 0;
+            } else if (p.status.catch_up >= 0) {
+                v.joining = SeatView::Joining::catching_up, v.progress = p.status.catch_up;
+            }
+        }
     } else if (!gone_name[s].empty() || said_bye[s]) {
         v.state = State::gone, v.name = gone_name[s], v.country = gone_country[s], v.left = said_bye[s];
     } else {
@@ -2124,6 +2306,32 @@ Session::SeatView Session::Impl::view(uint8_t s) const {
         if (s < start_info.names.size() && !cab.open) v.name = start_info.names[s]; // (before the drop is known)
     }
     return v;
+}
+
+bool Session::joining(uint8_t seat) const {
+    const Impl& m = *impl_;
+    std::lock_guard guard(m.lock);
+    return seat < kMaxSeats && seat != m.my_seat && m.peers[seat].present && m.cabinets[seat].open && !m.cabinets[seat].until;
+}
+
+Session::JoinProgress Session::join_progress() const {
+    const Impl& m = *impl_;
+    std::lock_guard guard(m.lock);
+    JoinProgress out;
+    if (m.is_host || m.watch_mode || m.leaving) return out;
+    if (m.joining && m.my_seat == kNoSeat) {
+        out.stage = JoinProgress::Stage::asking;
+    } else if (m.late && !m.started) {
+        out.stage = JoinProgress::Stage::receiving;
+        const Reliable& rel = m.peers[m.host_seat].rel; // (what has come of it: in order, and the pieces beyond a gap)
+        out.bytes = rel.assembling.size();
+        for (const auto& [seq, piece] : rel.early) out.bytes += piece.second.size();
+        out.total = m.state_size;
+        if (out.total) out.bytes = std::min(out.bytes, out.total);
+    } else if (m.late && m.started && !m.mine_from) {
+        out.stage = JoinProgress::Stage::seating;
+    }
+    return out;
 }
 
 std::array<Session::SeatView, kMaxSeats> Session::seats() const {

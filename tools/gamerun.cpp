@@ -2172,8 +2172,10 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
                 if (g_ring) g_ring->abandon_cut(m.index); // (one board's state alone: no cut under way)
                 std::vector<uint8_t> to_changes, to_whole;
                 std::vector<uint8_t> to = o.netplay->session().backup_watchers(); // (spectators on one board too)
-                for (uint8_t s = 0; s < o.boards; ++s)
-                    if (s != m.index) to.push_back(s);
+                for (uint8_t s = 0; s < o.boards; ++s) // (a player still joining: none yet, Session::joining)
+                    if (s == m.index) continue;
+                    else if (o.netplay->session().joining(s)) m.backup_bases.erase(s); // (whole once seated)
+                    else to.push_back(s);
                 for (const uint8_t s : to) {
                     (m.backups.changes_possible() && m.backup_bases.count(s) ? to_changes : to_whole).push_back(s);
                     m.backup_bases.insert(s);

@@ -1071,8 +1071,10 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
                 if (r) r->abandon_cut(index); // (one board's state alone: no cut under way)
                 std::vector<uint8_t> to_changes, to_whole;
                 std::vector<uint8_t> to = shared.netplay->session().backup_watchers(); // (spectators on one board too)
-                for (uint8_t s = 0; s < shared.boards; ++s)
-                    if (s != index) to.push_back(s);
+                for (uint8_t s = 0; s < shared.boards; ++s) // (a player still joining: none yet, Session::joining)
+                    if (s == index) continue;
+                    else if (shared.netplay->session().joining(s)) shared.backup_bases.erase(s); // (whole once seated)
+                    else to.push_back(s);
                 for (const uint8_t s : to) {
                     (shared.backups.changes_possible() && shared.backup_bases.count(s) ? to_changes : to_whole).push_back(s);
                     shared.backup_bases.insert(s);
@@ -2521,6 +2523,7 @@ int main(int argc, char** argv) {
     std::string net_notice; // (a line where the room's was, for a while: the host closed it)
     std::chrono::steady_clock::time_point net_notice_until{};
     std::chrono::steady_clock::time_point watch_banner_until{}; // (a spectator's banner: whom it watches, the keys)
+    bool join_shown = false; // (a game joined in progress: the room page closed once for the joining screen)
     // Save states' safeguards (F9 / F10 below): F10's first press arms it a few seconds; after a load, F9 goes back to
     // the game kept just before it (kUndoState) a few seconds. A state checked before anything is reset: read, then
     // loaded into a spare board, all of it (CPU, frame timing, the bus and its devices, the sound board and its music);
@@ -3987,6 +3990,11 @@ int main(int argc, char** argv) {
                 me.boards = shared.one_board_frame != ~0ull ? Status::Boards::one : Status::Boards::every;
                 me.net = shared.rollback ? Status::Net::rollback : Status::Net::delay;
                 me.delay = static_cast<int16_t>(shared.input_delay), me.auto_delay = net_delay < 0;
+                if (shared.catching_up) { // (joined in progress: how far caught up, for the host's seat list; by fives)
+                    const uint64_t behind = shared.catch_up_behind, start = shared.catch_up_start;
+                    const int percent = start && behind <= start ? static_cast<int>(100 * (start - behind) / start) : 0;
+                    me.catch_up = static_cast<int8_t>(percent / 5 * 5);
+                }
                 netgame->session().set_status(me);
             }
             const auto platform_icon = [](const Status& s) -> std::string {
@@ -4051,12 +4059,24 @@ int main(int argc, char** argv) {
                         r.country = std::string(flags + 3 * s, 2);
                     if (v.state == State::me || v.state == State::playing || v.state == State::joining)
                         r.platform = platform_icon(v.status), r.mode = mode_tag(v.status);
+                    // (how this machine reaches each other player, first in its tag: the owner's ask, 2026-11-05)
+                    using Link = net::Session::SeatView::Link;
+                    if (v.link != Link::none && !r.mode.empty())
+                        r.mode = std::string(v.link == Link::lan ? "LAN" : v.link == Link::relay ? "RELAY" : "DIRECT") +
+                                 " \xC2\xB7 " + r.mode;
                     if (v.state == State::playing && shared.rollback && shared.inputs && netgame->running)
                         r.rollbacks = static_cast<int>(shared.inputs->wrongs_since(s, lately));
                     switch (v.state) {
                     case State::me: r.name = "YOU", r.look = ui::NetRow::Look::you; break;
                     case State::open: r.status = hosting ? "WAITING" : "OPEN", r.look = ui::NetRow::Look::dim; break;
-                    case State::joining: r.status = "JOINING", r.look = ui::NetRow::Look::fresh; break;
+                    case State::joining: // (as far as the host knows it: its state received, then its catching up)
+                        using Joining = net::Session::SeatView::Joining;
+                        r.status = v.joining == Joining::receiving     ? "RECEIVING " + std::to_string(v.progress) + "%"
+                                   : v.joining == Joining::catching_up ? "CATCHING UP " + std::to_string(v.progress) + "%"
+                                                                       : std::string("JOINING");
+                        if (v.joining != Joining::none) r.progress = v.progress;
+                        r.look = ui::NetRow::Look::fresh;
+                        break;
                     case State::gone:
                         r.status = !v.left ? "IDLE" : news ? "LEFT" : hosting ? "WAITING" : "OPEN";
                         if (v.left && !news) r.name.clear();
@@ -4119,14 +4139,58 @@ int main(int argc, char** argv) {
                 if (now < shared.notice_until) menu.set_watch_banner({}, shared.notice);
                 else if (!netgame) menu.set_watch_banner("");
             }
-            // (a game joined in progress, catching up with the others: a loading screen, the game's picture not real yet)
-            if (netgame && netgame->running && shared.catching_up) {
-                // (the bar: how much of the gap there was as catching up started has been closed)
-                const uint64_t behind = shared.catch_up_behind, start = shared.catch_up_start;
-                const int percent = start && behind <= start ? static_cast<int>(100 * (start - behind) / start) : 0;
-                menu.set_loading(shared.spectating ? "WATCHING THE GAME" : "JOINING THE GAME", percent, "Catching up with the others");
+            // (a game joined in progress: a loading screen through each step, the game's picture not real until the
+            // cabinet is ours: receiving every board's state, catching up with the others, taking the cabinet; the
+            // owner's design, 2026-11-05. A spectator's: catching up only, as before)
+            const auto join = netgame && !netgame->spectator ? netgame->session().join_progress() : net::Session::JoinProgress{};
+            using Stage = net::Session::JoinProgress::Stage;
+            const bool catching = netgame && netgame->running && shared.catching_up;
+            if (join.stage == Stage::receiving || join.stage == Stage::seating || catching) {
+                if (join.stage == Stage::receiving && !join_shown) { // (once: the room page closed for the screen)
+                    join_shown = true;
+                    if (menu_ready && menu.is_open()) menu.close();
+                }
+                std::string code;
+                {
+                    std::lock_guard guard(netgame->lock);
+                    code = netgame->code;
+                }
+                const auto seats = netgame->session().seats();
+                const uint8_t host = netgame->session().host_seat();
+                std::size_t players = 0;
+                for (const auto& v : seats) players += v.state == State::me || v.state == State::playing || v.state == State::joining;
+                std::string sub;
+                if (host < seats.size() && !seats[host].name.empty()) sub = "HOST " + tools::clean_name(seats[host].name) + " \xC2\xB7 ";
+                sub += std::to_string(players) + " PLAYERS";
+                if (host < seats.size()) {
+                    using Link = net::Session::SeatView::Link;
+                    const Link l = seats[host].link;
+                    if (l != Link::none) sub += l == Link::relay ? " \xC2\xB7 THROUGH THE RELAY" : l == Link::lan ? " \xC2\xB7 ON THIS NETWORK" : " \xC2\xB7 DIRECT";
+                }
+                const std::string title = shared.spectating ? "WATCHING THE GAME" : code.empty() ? "JOINING THE GAME" : "JOINING ROOM " + code;
+                static const std::vector<std::string> kSteps = {"JOINED", "RECEIVING THE GAME", "CATCHING UP", "YOUR CABINET"};
+                const auto mb = [](std::size_t b) {
+                    char t[16];
+                    std::snprintf(t, sizeof t, "%.1f", static_cast<double>(b) / (1024.0 * 1024.0));
+                    return std::string(t);
+                };
+                if (catching) {
+                    // (the bar: how much of the gap there was as catching up started has been closed)
+                    const uint64_t behind = shared.catch_up_behind, start = shared.catch_up_start;
+                    const int percent = start && behind <= start ? static_cast<int>(100 * (start - behind) / start) : 0;
+                    menu.set_loading(title, percent, "Catching up with the others", sub, shared.spectating ? std::vector<std::string>{} : kSteps, 2);
+                } else if (join.stage == Stage::receiving) {
+                    const int percent = join.total ? static_cast<int>(100 * join.bytes / join.total) : -1;
+                    menu.set_loading(title, percent,
+                                     join.total ? "Receiving the game: " + mb(join.bytes) + " of " + mb(join.total) + " MB"
+                                                : std::string("Waiting for the game..."),
+                                     sub, kSteps, 1);
+                } else {
+                    menu.set_loading(title, 100, "Taking your cabinet", sub, kSteps, 3);
+                }
             } else {
                 menu.set_loading("");
+                if (!netgame) join_shown = false;
             }
             // (Network status off: the seats left out, the room's line still shown)
             menu.set_net(settings.show_net ? net_rows : std::vector<ui::NetRow>(), net_header,

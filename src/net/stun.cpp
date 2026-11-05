@@ -161,6 +161,8 @@ bool TurnClient::is_public(uint32_t ip) {
 }
 
 void TurnClient::permit(uint32_t ip) {
+    if (std::getenv("SPIKEOUT_NET_DEBUG"))
+        std::fprintf(stderr, "turn: permit %s (%s)\n", Address{ip, 0}.str().c_str(), is_public(ip) ? "asked" : "private, skipped");
     if (!is_public(ip)) return;
     if (std::find(permitted_.begin(), permitted_.end(), ip) != permitted_.end()) return;
     permitted_.push_back(ip);

@@ -220,6 +220,8 @@ bool Menu::init(SDL_GPUDevice* device, SDL_Window* window) {
         ".seat.player { color: #ffffff; } .seat.fresh { color: #7fe07f; } .seat.dim { color: #9a9a9a; } "
         ".seat .p { margin-right: 6dp; } .seat .name { white-space: nowrap; } " // (right-aligned, each as wide as it is: a long name the row out to the left)
         ".seat .st { margin-left: 8dp; white-space: nowrap; } "
+        ".seat .pbar { display: inline-block; width: 60dp; height: 8dp; margin: 0 0 3dp 8dp; background-color: #3a3f4a; "
+        "border: 1dp #000000; border-radius: 4dp; } .seat .pfill { display: block; height: 100%; background-color: #5fd35f; } "
         ".conn { display: flex; justify-content: flex-end; align-items: flex-end; margin-left: 8dp; } "
         ".bars { display: flex; align-items: flex-end; height: 16dp; margin-bottom: 3dp; margin-left: 5dp; } "
         ".bar { width: 3dp; margin-left: 1dp; background-color: #4a4a4a; border: 1dp #000000; } "
@@ -257,9 +259,13 @@ bool Menu::init(SDL_GPUDevice* device, SDL_Window* window) {
         "border: 2dp #000000; border-radius: 11dp; } "
         "#lfill { display: block; height: 100%; width: 0%; background-color: #ffd34a; border-radius: 9dp 0dp 0dp 9dp; } "
         "#lpct { display: block; margin-top: 8dp; font-size: 26dp; color: #ffffff; font-effect: outline(2dp #000000); } "
+        "#lsub { display: block; margin-top: 4dp; font-size: 20dp; color: #8d939e; } "
+        "#lsteps { display: block; margin-top: 22dp; font-size: 20dp; color: #5d636e; } "
+        "#lsteps .done { color: #5fd35f; } #lsteps .now { color: #ffffff; } #lsteps .sep { color: #3d424c; padding: 0 10dp; } "
         "</style></head><body><div id=\"loading\"><div class=\"box\"><span class=\"title\" id=\"ltitle\"></span>"
+        "<span id=\"lsub\"></span>"
         "<div id=\"lbar\"><div id=\"lfill\"></div></div><span id=\"lpct\"></span>"
-        "<span class=\"detail\" id=\"ldetail\"></span></div></div>"
+        "<span class=\"detail\" id=\"ldetail\"></span><div id=\"lsteps\"></div></div></div>"
         "<div id=\"swcover\"><span class=\"t\" id=\"swtext\"></span></div><div id=\"corner\"><div id=\"fps\"></div></div><div id=\"net\"></div><div id=\"watchb\"></div></body></rml>");
     return true;
 }
@@ -295,6 +301,9 @@ void Menu::set_net(const std::vector<NetRow>& rows, const std::string& header, c
         rml += "<span class=\"name\">" + escape(r.name) + "</span>";
         if (!r.status.empty()) { // (our own row: none, its name at the right edge as the others' bars)
             rml += "<span class=\"st\">" + escape(r.status) + "</span>";
+            if (r.progress >= 0)
+                rml += "<span class=\"pbar\"><span class=\"pfill\" style=\"width: " + std::to_string(std::clamp(r.progress, 0, 100)) +
+                       "%;\"></span></span>";
         } else if (r.bars >= 0) {
             // (the time against the bars, the gap after the name the same at any time; each digit as wide as any (the
             // font's aren't), and as many digit places as it has had until it has had fewer for 5 s: the name moves
@@ -341,7 +350,8 @@ void Menu::set_net(const std::vector<NetRow>& rows, const std::string& header, c
     show_corner();
 }
 
-void Menu::set_loading(const std::string& title, int percent, const std::string& detail) {
+void Menu::set_loading(const std::string& title, int percent, const std::string& detail, const std::string& sub,
+                       const std::vector<std::string>& steps, int step) {
     if (!impl_->fps) return;
     const bool shown = !title.empty();
     if (Rml::Element* e = impl_->fps->GetElementById("loading")) e->SetProperty("display", shown ? "block" : "none");
@@ -353,6 +363,17 @@ void Menu::set_loading(const std::string& title, int percent, const std::string&
         if (Rml::Element* e = impl_->fps->GetElementById("lpct"))
             e->SetInnerRML(percent >= 0 ? std::to_string(p) + "%" : std::string());
         if (Rml::Element* e = impl_->fps->GetElementById("ldetail")) e->SetInnerRML(escape(detail));
+        if (Rml::Element* e = impl_->fps->GetElementById("lsub")) e->SetInnerRML(escape(sub));
+        if (Rml::Element* e = impl_->fps->GetElementById("lsteps")) {
+            std::string rml;
+            for (std::size_t i = 0; i < steps.size(); ++i) {
+                if (i) rml += "<span class=\"sep\">&gt;</span>";
+                const int n = static_cast<int>(i);
+                rml += std::string("<span class=\"") + (n < step ? "done" : n == step ? "now" : "next") + "\">" +
+                       escape(steps[i]) + "</span>";
+            }
+            e->SetInnerRML(rml);
+        }
     }
     loading_shown_ = shown;
     show_corner();

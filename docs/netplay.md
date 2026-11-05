@@ -961,6 +961,62 @@ game's default settings player 1's time hadn't run out by then and player
 2 played. Whether the arcade does this or the link's emulation does is
 open (docs/fidelity.md).
 
+## Joining over a slow line or a relay, its progress, each link's kind (2026-11-05)
+
+The owner's report: two windows, both through the relay (`SPIKEOUT_TEST_RELAY_ONLY`), the host's list going
+JOINING, WAITING, JOINING and the joiner staying in the lobby with nothing shown. The host sent the 1-5 MB state at
+once (256 pieces a burst, no pace), heard nothing for 3 s, dropped the joiner, which joined again, the state larger
+each time. Tried on one PC with gamerun (`relay-join.ps1` in build\speedcheck\scripts: a host started alone on the
+lobby, a joiner by its code, `-Relay both|host|joiner|none`, `-Extra` options) and a new switch,
+`SPIKEOUT_TEST_LINK=KB[,LOSS]` (this machine's uplink as a slow line: KB kilobytes a second, a second's queue at most,
+LOSS percent lost; with `SPIKEOUT_TEST_LATENCY`). Found and fixed, in order:
+
+- **No pace.** Each player's reliable channel now has one (`Impl::pace`, a `Cap` as the spectators'): from 1 MB/s (8
+  MB/s to an address on the same network), up a quarter each busy second, halved when more than 5% of the pieces
+  had to be sent again, or when a player's round trip rises 40 ms above its least (the uplink filling delays the
+  inputs, which come first; the joiner itself left out while it takes in the state). Pieces are sent again after
+  twice the round trip and 0.1 s (not 150 ms: a far one's, or one queued on a full line, isn't lost yet). Inputs
+  aren't on the reliable channel and aren't paced.
+- **Cumulative acknowledgements only**: one lost piece made its whole window come again, which the pace took for
+  heavy loss (down to its 32 KB/s floor on a 300 KB/s line). Each acknowledgement now carries which of the 64 pieces
+  after the gap have come (`Reliable::sack_bits`, `acked(ack, sack)`), and only the missing are sent again.
+- **A joiner's inputs thrown away** until it knew its cabinet's first frame (`Session::local_input`): with an
+  input delay and a far host, the first frames that turned out ours were made before kTaken came and dropped, so
+  every machine waited for them for good (both stuck at the cabinet's first frame). Kept now, the ones before it
+  dropped when it comes (`Impl::taken`). Possibly behind the earlier "buttons dead after joining".
+- **Backups to a joiner**: every player sends its board's backups to the others (one board a PC), a newcomer the
+  whole (1.5-3 MB); the joiner's kTaken waited behind them in its reliable channel (the host waited 38 s at the
+  cabinet's first frame). None to a player still joining now (`Session::joining`; its base forgotten, so the first
+  after is whole).
+- A joiner still taking in the state is dropped after 15 s unheard, not 3.
+
+Measured (two gamerun, 300 KB/s each way, 3% lost, 60 ms each way, `--input-delay 8`): before, never got in (or got
+in and stalled for good); now joined, the cabinet taken, no hash check differing, the longest wait 11 s (gamerun
+takes its cabinet before catching up, as its comment says; the window catches up first). Windows on that line: the
+4.1 MB state at ~95 KB/s; on this PC's network, the 4.2 MB state, caught up and the cabinet taken within seconds.
+
+**The progress shown** (the owner's design from mockups): the joiner's loading screen covers the whole join now,
+not only the catching up: JOINING ROOM CODE (or THE GAME on a LAN), the host, the players and the link (ON THIS
+NETWORK, DIRECT, THROUGH THE RELAY), the bar with "Receiving the game: 1.8 of 4.3 MB" (`Session::join_progress`:
+the host sends the state's size first, kStateSize), then catching up, then taking the cabinet, the steps along the
+bottom (JOINED > RECEIVING THE GAME > CATCHING UP > YOUR CABINET); the room page closes once for it (Esc opens the
+menu over it). The host's list: RECEIVING 42% (the state's pieces it has acknowledged) then CATCHING UP 80% (the
+joiner's status, `Status::catch_up`, by fives), with a small bar (`NetRow::progress`).
+
+**Each player's link** (the owner's ask): the seat list's tag starts with LAN, DIRECT or RELAY
+(`SeatView::link`: through our relay or theirs; else an address on a network of its own, RFC 1918, link-local or
+this PC; else straight over the internet). Seen: LAN (windows on this PC). DIRECT and RELAY not yet on screen.
+
+**What one PC can't test**: a machine straight to another's relay. Both "machines" have this PC's one internet
+address, and data sent to a relay from it never came through (the permission for that address granted; no Data
+indication ever arrived): very likely the relay refusing a peer at its client's own address. Relay to relay goes
+through (the windows, both relay-only, got the state moving), though headless runs of it were unreliable. A second
+network is needed for those (a VPN would give one, on a second device).
+
+Debugging (`SPIKEOUT_NET_DEBUG=1`, stderr): each 5 s the bytes sent by datagram type, every seat's inputs known,
+each peer's queue, pace, round trip and first piece; big reliable messages queued (type, size); the TURN client's
+answers and permissions; the first 40 STUN/TURN datagrams in.
+
 ## Repeated host changes: found and fixed (2026-10-27)
 
 The deep test (build\speedcheck\scripts\deep-test.ps1, gamerun, LAN): a
