@@ -53,7 +53,7 @@ translation is checked against the project's own ahead-of-time build by recordin
 | The 3D on the GPU (Vulkan) or in software | Working: render scale up to 6x, antialiasing, quads drawn whole |
 | Widescreen (16:10, 16:9, 21:9) | Working: the fights see more to the sides; the 2D screens (the intro, the title and its doors, the fighter select, the linking screen) widened from the game's own art |
 | Sound and music | Working: the cabinet's front and rear speakers apart, on four channels or two outputs |
-| Online play: up to four players, each on their own PC | Working, experimental: an internet lobby with room codes, games on your own network found by themselves, rollback, spectators (see [Online play](#online-play)) |
+| Online play: up to four players, each on their own PC | Working, experimental: an internet lobby with room codes, games on your own network found automatically, rollback, spectators (see [Online play](#online-play)) |
 | Save states | Working (one player, not in network games) |
 | Windows 10 / 11 (64-bit) | Working |
 | Linux / Steam Deck (x86-64) | Working on Ubuntu 24.04; the Steam Deck not tried yet |
@@ -157,11 +157,11 @@ and only the players' inputs travel, so the game is the same on every screen.
   code to share; private rooms are joined by code only.
 - **Join a game**: the list shows the games on the lobby and on your own network (no setup, nothing to forward), or
   join by code. Players can join a game already started; their cabinet joins as a new player joins a linked cabinet.
-- **No settings to tune**: the input delay and rollback are chosen by themselves from the players' distance.
+- **No settings to tune**: the input delay and rollback are set automatically from how far apart the players are.
 - **Spectators**: up to four can watch a game (Watch in the list, or by code), a moment behind, never slowing the
   players.
 - **If the host leaves**, the game goes on and another player hosts it, under the same room code.
-- Weaker PCs (a handheld, an older laptop) run only their own cabinet in full, chosen by themselves.
+- **Weaker PCs** (a handheld, an older laptop) automatically run only their own cabinet in full; there is no setting for it.
 
 What it took to get there is written up in [docs/netplay.md](docs/netplay.md): the linked cabinets running in slow
 motion until the network board's ring was modelled, four boards on one PC, and keeping every PC's game identical.
