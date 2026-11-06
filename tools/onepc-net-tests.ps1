@@ -20,7 +20,8 @@
 # seats from four-8000.state, each other cabinet held until calm, seat 3's coin at 8,600; three: three seats from power-on,
 # the third player joining at 4,600: the rules following each other cabinet. Outputs go to build/onepc/net. Run from PowerShell with the
 # toolchain's PATH (CLAUDE.md); it loads every core for several minutes.
-param([string[]]$Only, [string]$Exe) # (-Exe: another gamerun, e.g. build-jit/gamerun-jit.exe)
+param([string[]]$Only, [string]$Exe, [switch]$LeaverFirst) # (-Exe: another gamerun, e.g. build-jit/gamerun-jit.exe;
+# -LeaverFirst: leave3/vanish3's leaver joins before player 2, so it has seat 2: the seats as a race of the joins may give them)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot
 Set-Location $root
@@ -130,12 +131,14 @@ foreach ($t in $leaves) {
     $net = $auto + @('--one-board-held', '--net-one-board', '100')
     $stay = @(Start-Process $exe -ArgumentList ($common + $net + @('--frames', "$($end + 10000)", '--net-host', $game, '--seats', "$seats")) -RedirectStandardOutput "$out/$name-0.txt" -RedirectStandardError "$out/$name-0.err" -NoNewWindow -PassThru)
     Start-Sleep -Milliseconds 500
+    $leaver = $seats - 1
+    $startLeaver = { Start-Process $exe -ArgumentList ($common + $net + @('--net-join', $game, "--net-$how-at", "$leave")) -RedirectStandardOutput "$out/$name-$leaver.txt" -RedirectStandardError "$out/$name-$leaver.err" -NoNewWindow -PassThru }
+    if ($LeaverFirst -and $seats -gt 2) { $l = & $startLeaver; Start-Sleep -Milliseconds 1500 }
     for ($k = 1; $k -lt $seats - 1; $k++) {
         $stay += Start-Process $exe -ArgumentList ($common + $net + @('--frames', "$($end + 10000)", '--net-join', $game)) -RedirectStandardOutput "$out/$name-$k.txt" -RedirectStandardError "$out/$name-$k.err" -NoNewWindow -PassThru
         Start-Sleep -Milliseconds 500
     }
-    $leaver = $seats - 1
-    $l = Start-Process $exe -ArgumentList ($common + $net + @('--net-join', $game, "--net-$how-at", "$leave")) -RedirectStandardOutput "$out/$name-$leaver.txt" -RedirectStandardError "$out/$name-$leaver.err" -NoNewWindow -PassThru
+    if (-not ($LeaverFirst -and $seats -gt 2)) { $l = & $startLeaver }
     $l.WaitForExit()
     if ($how -eq 'vanish') { Start-Sleep -Seconds 6 } # (gone without a word: the others drop it after 3 seconds)
     $joiner = $seats
@@ -154,9 +157,10 @@ foreach ($t in $leaves) {
         '{0,-6} {1} and {2}: {3} of {4} hashes the same' -f $name, (& $label $a), (& $label $b), $same, $n
     }
     if ($how -eq 'vanish') { # (each other machine's replay of the board, where the board itself ran: the same)
+        $leaverBoard = if ($LeaverFirst -and $seats -gt 2) { 1 } else { $leaver } # (-LeaverFirst: its board, seat 2)
         for ($k = 0; $k -lt $leaver; $k++) {
-            $r = @(Select-String -Path "$out/$name-$k.txt" -Pattern "^replay board $leaver frame").Count
-            if (-not $r) { $failed++; "$name : machine $k didn't run board $leaver on from its backup" }
+            $r = @(Select-String -Path "$out/$name-$k.txt" -Pattern "^replay board $leaverBoard frame").Count
+            if (-not $r) { $failed++; "$name : machine $k didn't run board $leaverBoard on from its backup" }
         }
     }
     $notes = @(Select-String -Path "$out/$name-0.txt" -Pattern 'player gone|run on from its backup|leaving after frame|its shadow from its machine''s state|every board whole here|every board''s state at frame|taken from frame|hash checks differed' | ForEach-Object { $_.Line })

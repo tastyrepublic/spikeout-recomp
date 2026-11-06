@@ -117,11 +117,33 @@ Read this first; the older hand-off below is history.
   every machine. Fixed: the relay's allocation released on leaving and a
   second relay port on a refusal; the relay-only test switch; gamerun's
   lobby reading while hosting, --net-catch-up, its time sync and pace
-  measures. OPEN, NEXT: the window joining in progress goes out of step at
-  the first hash check after the hand-over (on one PC: build-jit\shots\
-  local3.ps1); then the host's 0.2-0.6 s hold at a join (state saved on the
-  game thread). Driving a Codespace: gh (the codespace scope granted),
-  build-jit\cs-*.sh, pc-join.ps1, shots\win.ps1 (the window joins by code).
+  measures. Then FIXED (same day, docs/netplay.md there): the window's
+  13-21 s stand-still after a join (pace() skipped while catching up); the
+  host's 0.3-0.6 s hold at each join (packing and putting the state
+  together off the game thread, no wait for far players' inputs, saves
+  with their room reserved: 24 ms now); a vanished player held everyone
+  3 s (1 s now, kDropInGame); a host with rollback and no input delay
+  stopping for good at a join. The "out of step" join was the tests' own
+  link-role pokes (gamerun now writes the role as the window does). Then
+  (2026-11-06): no freeze when a player vanishes (a quiet player guessed
+  standing still over rollback's long history, the drop still at 3 s);
+  lazy snapshots; cheaper snapshots; leave3's flaky failure fixed (a gone
+  player's board taken whole at an agreed frame). All measured, in
+  docs/netplay.md. Before committing network code: tools/onepc-net-tests.ps1
+  (and -Only leave3,vanish3 -LeaverFirst), tools/onepc-tests.ps1, and the
+  internet tests, tools/internet-tests.sh (the two Codespaces, ~25 min,
+  bash; the owner wants real networks tested). The local suites need the
+  main checkout's build/roms (a junction) and build/onepc states and
+  mash.txt copied into a worktree. NEXT (agreed with the owner): LAN games' rollback on
+  automatically per PC when it has CPU to spare (no input delay: lazy
+  can't skip there), switched on with the first snapshot copied in slices
+  over a few frames (page tracking, a tiny final pass, proved byte for
+  byte); then the join pacing, the spectator matrix, the owner's play
+  session over the Codespaces. LEFT: a joiner too slow to catch up on
+  every board takes its cabinet anyway and the others wait. Driving a Codespace: gh (the codespace scope
+  granted), build-jit\cs-*.sh, pc-join.ps1, shots\win.ps1 (the window
+  joins, SPIKEOUT_TEST_JOIN), shots\winhost.ps1 (it hosts, SPIKEOUT_TEST_
+  HOST), shots\local3.ps1 (all on one PC).
   UPDATE CHECK (2026-11-05, the owner's step 1 of 2; step 2, the game
   updating itself, later): the version is built in (CMake
   SPIKEOUT_VERSION, default PROJECT_VERSION-dev; a release is built with

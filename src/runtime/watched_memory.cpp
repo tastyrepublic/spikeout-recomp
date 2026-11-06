@@ -377,17 +377,23 @@ namespace m3::watched {
 
 namespace {
 struct Records {
+    std::mutex lock; // (each block its own: every board's threads ask at once, at their frames' ends)
     std::map<int, std::vector<uint8_t>> marks; // by reader: a byte a page, 1 written since it last asked
 };
-std::mutex g_records_lock;
+std::mutex g_records_lock;          // (the map only)
 std::map<void*, Records> g_records; // by memory block
-std::vector<std::size_t> g_noted;    // (scratch, under the lock)
+
+Records& records(void* base) {
+    std::lock_guard guard(g_records_lock);
+    return g_records[base]; // (a map's nodes stay put)
+}
 
 // What the system has noted since, onto every reader's record (false: it couldn't say).
 bool pass_on(void* base, std::size_t bytes, Records& r) {
-    if (!os_take_written(base, bytes, g_noted)) return false;
+    static thread_local std::vector<std::size_t> noted;
+    if (!os_take_written(base, bytes, noted)) return false;
     for (auto& [reader, marks] : r.marks)
-        for (const std::size_t p : g_noted)
+        for (const std::size_t p : noted)
             if (p < marks.size()) marks[p] = 1;
     return true;
 }
@@ -402,10 +408,13 @@ int new_reader() {
 
 bool take_written(int reader, void* base, std::size_t bytes, std::vector<std::size_t>& pages) {
     pages.clear();
-    std::lock_guard guard(g_records_lock);
-    Records& r = g_records[base];
+    Records& r = records(base);
+    std::lock_guard guard(r.lock);
     const auto it = r.marks.find(reader);
-    if (it == r.marks.end() || !pass_on(base, bytes, r)) return false; // (not watched by it yet; or not listable)
+    if (it == r.marks.end()) return false; // (not watched by it yet)
+    // (the only reader, rollback's mostly: the system's list as it is, nothing kept for others)
+    if (r.marks.size() == 1) return os_take_written(base, bytes, pages);
+    if (!pass_on(base, bytes, r)) return false; // (not listable)
     std::vector<uint8_t>& marks = it->second;
     for (std::size_t p = 0; p < marks.size(); ++p)
         if (marks[p]) pages.push_back(p), marks[p] = 0;
@@ -413,8 +422,8 @@ bool take_written(int reader, void* base, std::size_t bytes, std::vector<std::si
 }
 
 void forget_written(int reader, void* base, std::size_t bytes) {
-    std::lock_guard guard(g_records_lock);
-    Records& r = g_records[base];
+    Records& r = records(base);
+    std::lock_guard guard(r.lock);
     if (r.marks.empty()) os_forget_written(base, bytes); // (the first: watching starts)
     else pass_on(base, bytes, r);                        // (the others keep what was noted)
     r.marks[reader].assign((bytes + kPage - 1) / kPage, 0);

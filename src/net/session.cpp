@@ -382,6 +382,7 @@ struct Session::Impl {
     Clock::time_point take_sent{};
     std::optional<uint64_t> state_at; // (the frame of the last state we ran on from: hashes before it not compared)
     std::map<uint64_t, InputBytes> pending_local;
+    std::array<bool, kMaxSeats> quiet_told{}; // (Callbacks::quiet: as last told, each seat)
 
     struct Drop {
         bool suspected = false;
@@ -481,6 +482,11 @@ struct Session::Impl {
                 line += " inputs known:";
                 for (uint8_t s = 0; s < seats && s < kMaxSeats; ++s) line += " " + std::to_string(streams[s].next());
                 line += ";";
+                if (late) // (a cabinet joined in progress: ours from, and our inputs held back)
+                    line += " ours from " + (mine_from ? std::to_string(*mine_from) : std::string("?")) + ", " +
+                            std::to_string(pending_local.size()) + " held" +
+                            (pending_local.empty() ? std::string() : " (" + std::to_string(pending_local.begin()->first) + "-" +
+                                                                         std::to_string(pending_local.rbegin()->first) + ")") + ";";
                 for (uint8_t s = 0; s < kMaxSeats; ++s)
                     if (peers[s].present)
                         line += " seat " + std::to_string(s + 1) + ": " + std::to_string(peers[s].rel.out.size()) + " pieces queued, pace " +
@@ -490,6 +496,17 @@ struct Session::Impl {
                 if (sent_shown != Clock::time_point{}) std::fprintf(stderr, "sent:%s\n", line.c_str());
                 sent_bytes.fill(0), sent_shown = now;
             }
+        }
+        // (tests: SPIKEOUT_TEST_SILENT=SECONDS,MS: nothing sent for MS ms from that many seconds after the session
+        // opened, then as before: a machine stalled or its network gone a moment, back; the others' game goes on)
+        static const std::pair<double, double> silent = [] {
+            double from = 0, ms = 0;
+            if (const char* v = std::getenv("SPIKEOUT_TEST_SILENT")) std::sscanf(v, "%lf,%lf", &from, &ms);
+            return std::pair{from, ms};
+        }();
+        if (silent.second > 0) {
+            const double t = std::chrono::duration<double>(now - epoch).count();
+            if (t >= silent.first && t < silent.first + silent.second / 1000) return;
         }
         const TestLink& link = test_link();
         auto due = now + std::chrono::milliseconds(test_latency_ms(now));
@@ -1633,11 +1650,21 @@ struct Session::Impl {
 
     void check_drops() {
         const auto now = Clock::now();
+        for (uint8_t s = 0; s < seats; ++s) { // (quiet or heard again: told as it changes)
+            Peer& p = peers[s];
+            const bool quiet = s != my_seat && p.present && !p.dropped && now - p.heard > kQuietAfter;
+            if (quiet != quiet_told[s]) {
+                quiet_told[s] = quiet;
+                if (cb.quiet) cb.quiet(s, quiet);
+            }
+        }
         for (uint8_t s = 0; s < seats; ++s) {
             Peer& p = peers[s];
             if (s == my_seat || !p.present || p.dropped) continue;
             // (a joiner still taking in every board's state: a slow line's or relay's acknowledgements can lag)
-            const auto quiet = state_left(p) > 0 ? kDropAfter * 5 : kDropAfter;
+            // (heard: any datagram from it, its session's thread's, which goes on while its game stalls; a game going
+            // on: a second of silence)
+            const auto quiet = state_left(p) > 0 ? kDropAfter * 5 : started ? kDropInGame : kDropAfter;
             if (now - p.heard > quiet && !drops[s].suspected) {
                 drops[s].suspected = true; // (its inputs frozen here)
                 const auto ms = [&](Clock::time_point t) { return std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(now - t).count()); };
@@ -2126,6 +2153,16 @@ void Session::take_seat() {
 uint64_t Session::inputs_known(uint8_t seat) const {
     std::lock_guard guard(impl_->lock);
     return seat < kMaxSeats ? impl_->streams[seat].next() : 0;
+}
+
+bool Session::fills_inputs(uint8_t seat, uint64_t frame) const {
+    Impl& m = *impl_;
+    std::lock_guard guard(m.lock);
+    if (seat >= kMaxSeats) return false;
+    if (seat == m.my_seat) return true;
+    if (m.authority() != m.my_seat) return false;
+    const auto& c = m.cabinets[seat];
+    return c.open && frame >= c.from && (!c.until || frame < *c.until); // (as fill_open has them)
 }
 
 void Session::feed_inputs(uint64_t frame) {

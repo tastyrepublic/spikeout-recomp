@@ -178,6 +178,8 @@ public:
         std::function<void(uint64_t frame)> run_again_from;
     };
     static constexpr uint64_t kAskAhead = 30; // (frames: the other machine reaching it, its state on its way)
+    // (frames from a gone player's last inputs to its board taken whole here, run on from its backup: seat_gone)
+    static constexpr uint64_t kGoneHandOver = 600;
     // (the calm frames before a hand-back; tests: ONEBOARD_CALM=N, a hand-back put where wanted)
     static inline const uint64_t kCalm = [] {
         const char* n = std::getenv("ONEBOARD_CALM");
@@ -434,7 +436,8 @@ public:
                         seat);
     }
     // (called at the staying board's frame end)
-    void seat_gone(std::size_t seat) {
+    // (`idle_from`: the frame its inputs are none from, agreed by every machine)
+    void seat_gone(std::size_t seat, uint64_t idle_from) {
         Board& m = *boards_[settings_.stays];
         std::lock_guard guard(lock_);
         if (departed_.count(seat) || lost_.count(seat) || !m.cabinets || !goes(seat)) return;
@@ -453,7 +456,24 @@ public:
         // (run from its backup on its own, a frame of it once this game has run that frame, to a frame ahead: as
         // many frames on as it is behind (twice as fast as the game), at least two seconds; this game waits there
         // if it hasn't come)
-        const uint64_t until = now + std::max<uint64_t>(120, now - *from);
+        // The frame it is taken whole from: the same on every machine, kGoneHandOver frames after its player's inputs
+        // end (agreed), not from when each machine noticed (a frame apart, the boards' network boards then differed:
+        // onepc-net-tests leave3 -LeaverFirst, 2026-11-06). Late enough for the run from its backup (at least twice
+        // the game's speed) to come up to it after a drop noticed 3 s on; if this machine is past that, as before.
+        uint64_t until = idle_from + kGoneHandOver;
+        if (until < std::max(now + 120, 2 * now - *from)) {
+            const uint64_t late = now + std::max<uint64_t>(120, now - *from);
+            std::printf("board %zu: board %zu's player gone at frame %llu, noticed at %llu: whole from %llu, not %llu (this machine's own)\n",
+                        m.index, seat, (unsigned long long)idle_from, (unsigned long long)now, (unsigned long long)late,
+                        (unsigned long long)until);
+            until = late;
+        }
+        // (tests: ONEBOARD_UNTIL_EXTRA=STAYS:N, the machine whose own board is STAYS takes it whole N frames later:
+        // two machines doing so at different frames, as their timing may have them)
+        if (const char* e = std::getenv("ONEBOARD_UNTIL_EXTRA")) {
+            unsigned long long stays = 0, extra = 0;
+            if (std::sscanf(e, "%llu:%llu", &stays, &extra) == 2 && stays == settings_.stays) until += extra;
+        }
         departed_.insert(seat);
         remote_frames_[seat] = until;
         replays_[seat] = Replaying{};

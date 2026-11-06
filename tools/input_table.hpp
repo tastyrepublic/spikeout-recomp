@@ -67,10 +67,14 @@ public:
     // frames past the last set, a guess, remembered (`guessed` true): what this board's player held last (a cabinet
     // held: as held). Set later to something else, it was guessed wrong (wrong_from). Further ahead: waited for, as
     // wait() (nothing: the table closed).
-    std::optional<Inputs> guess(std::size_t board, uint64_t frame, uint64_t ahead, bool& guessed) {
+    // `ahead_quiet`: how far for a board whose player's machine has gone quiet (set_quiet): the long window, so the
+    // game runs on with them standing still (as the drop will have them) rather than waiting for the drop.
+    std::optional<Inputs> guess(std::size_t board, uint64_t frame, uint64_t ahead, bool& guessed, uint64_t ahead_quiet = 0) {
         std::unique_lock guard(lock_);
         Board& b = boards_[board];
-        changed_.wait(guard, [&] { return closed_ || find(b, frame) || !b.known || frame < b.next + ahead; });
+        changed_.wait(guard, [&] {
+            return closed_ || find(b, frame) || !b.known || frame < b.next + (b.quiet ? std::max(ahead, ahead_quiet) : ahead);
+        });
         guessed = false;
         if (const auto in = find(b, frame)) return in;
         if (closed_) return std::nullopt;
@@ -79,6 +83,28 @@ public:
         b.guesses[frame] = g;
         guessed = true;
         return g;
+    }
+    // Rollback's lazy snapshots (tools::rollback::Linked::wants): nothing guessed and not settled yet, no wrong guess
+    // still to go back for, and `frame`'s inputs in for every board but those this machine fills itself (`local`: its
+    // own, and the empty cabinets when it's the authority: never guessed). Then the frame before `frame` needn't be
+    // kept: nothing will go back to it.
+    bool settled_but(uint64_t frame, std::size_t boards, const std::vector<bool>& local) const { // (the first `boards`)
+        std::lock_guard guard(lock_);
+        if (wrong_ != ~0ull) return false;
+        for (std::size_t i = 0; i < boards && i < boards_.size(); ++i) {
+            if (!boards_[i].guesses.empty()) return false;
+            if (!(i < local.size() && local[i]) && !find(boards_[i], frame)) return false;
+        }
+        return true;
+    }
+    // Board `board`'s player's machine quiet (nothing heard from it for a while, the session says) or heard again.
+    void set_quiet(std::size_t board, bool on) {
+        {
+            std::lock_guard guard(lock_);
+            if (board >= boards_.size()) return;
+            boards_[board].quiet = on;
+        }
+        changed_.notify_all(); // (a guess waiting for it may go on)
     }
     // The first frame guessed wrong since the last asked (~0: none).
     uint64_t take_wrong() {
@@ -101,10 +127,11 @@ public:
         for (Board& b : boards_) b.guesses.erase(b.guesses.upper_bound(frame), b.guesses.end());
     }
     // Every board's inputs up to `frame` set (none guessed or still to be).
-    bool all_set(uint64_t frame, std::size_t boards) const { // (the first `boards`: those in the game)
+    bool all_set(uint64_t frame, std::size_t boards, std::size_t but = ~std::size_t{0}) const { // (the first `boards`: those
+                                                                                           // in the game; `but`: ours)
         std::lock_guard guard(lock_);
         for (std::size_t i = 0; i < boards && i < boards_.size(); ++i)
-            if (!find(boards_[i], frame)) return false;
+            if (i != but && !find(boards_[i], frame)) return false;
         return true;
     }
     // And waited for (nothing: the table closed).
@@ -191,6 +218,7 @@ private:
         std::optional<uint64_t> hold_from, hold_until;
         Inputs held;
         std::map<uint64_t, Inputs> guesses; // (rollback: frames read before they were set, as guessed)
+        bool quiet = false; // (its player's machine not heard from for a while: guessed as far as the long window)
         struct Wrong {
             uint64_t first, last; // (a run of frames guessed wrong, one after another: one going back, most likely)
         };

@@ -128,6 +128,8 @@ public:
             table_.set(seat, frame, {in[0], in[1], in[2], in[3]});
             keeper_.input(seat, frame, {in[0], in[1], in[2], in[3]});
         };
+        // (a quiet player: guessed as far as the long window meanwhile, standing still: the game goes on)
+        cb.quiet = [this](uint8_t seat, bool quiet) { table_.set_quiet(seat, quiet); };
         cb.idle = [this](uint8_t seat, uint64_t frame) { // (its inputs none from there come as anyone's)
             // (and are none here at once: they come as far as the authority's own, and one board a PC reads the other
             // cabinets' a frame or so ahead of its own: with no input delay, a wait for frames made only as ours are)
@@ -135,7 +137,7 @@ public:
             keeper_.hold_from(seat, frame);
             {
                 std::lock_guard guard(lock_);
-                gone_.push_back(seat);
+                gone_.push_back({seat, frame});
                 if (seat < absent_.size()) absent_[seat] = true;
             }
             changed_.notify_all(); // (a wait for its board ends)
@@ -205,12 +207,33 @@ public:
     // One board a PC: every other board's last backup, the packets to it and its player's inputs since
     // (tools::backup); and the seats wanting this machine's own board's next backup whole, since the last asked.
     backup::Keeper& keeper() { return keeper_; }
+    // Every board's state for a player joining or a spectator (session().send_state's), packed and sent on the
+    // backups' thread: the game goes on meanwhile (packed on the game thread, the host's game held 0.2-0.6 s at each
+    // join; the session keeps every frame's inputs, so the state may go out a little after its frame).
+    // (`make`: the state, made there too: LinkedState::assemble's 80 MB copy)
+    void send_state_later(uint64_t frame, std::function<std::vector<uint8_t>()> make) {
+        {
+            std::lock_guard guard(backup_lock_);
+            BackupOut b;
+            b.frame = frame, b.whole_state = true, b.make = std::move(make);
+            backups_out_.push_back(std::move(b));
+        }
+        start_backup_sender();
+        backup_queued_.notify_all();
+    }
     // This machine's own board's backup out (backup::Maker's, not packed yet) to each of `seats`: packed and sent on
     // a thread of its own (the whole board takes 100 ms or so), every backup in the order given.
     void send_backup(uint64_t frame, std::vector<uint8_t> raw, std::vector<uint8_t> seats) {
         {
             std::lock_guard guard(backup_lock_);
-            backups_out_.push_back({frame, std::move(raw), std::move(seats), {}});
+            backups_out_.push_back({frame, std::move(raw), std::move(seats), {}, false, {}});
+        }
+        start_backup_sender();
+        backup_queued_.notify_all();
+    }
+    void start_backup_sender() {
+        {
+            std::lock_guard guard(backup_lock_);
             if (!backup_sender_.joinable())
                 backup_sender_ = std::jthread([this](std::stop_token stop) {
                     for (;;) {
@@ -221,6 +244,18 @@ public:
                             if (stop.stop_requested()) return;
                             b = std::move(backups_out_.front());
                             backups_out_.pop_front();
+                        }
+                        if (b.whole_state) { // (send_state_later: every board's, to the players and spectators asking)
+                            const auto started = std::chrono::steady_clock::now();
+                            b.raw = b.make();
+                            std::vector<uint8_t> packed = net::compress(b.raw);
+                            std::printf("net: every board's state at frame %llu: %zu KB, %zu KB packed (in %.0f ms, off the game "
+                                        "thread)\n",
+                                        static_cast<unsigned long long>(b.frame), b.raw.size() / 1024, packed.size() / 1024,
+                                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
+                            std::fflush(stdout);
+                            session_->send_state(b.frame, std::move(packed));
+                            continue;
                         }
                         if (b.raw.empty()) { // (send_board_after_backups)
                             for (const uint8_t seat : b.seats) session_->send_board(seat, b.frame, b.board);
@@ -238,7 +273,7 @@ public:
     void send_board_after_backups(uint64_t frame, std::vector<uint8_t> board, std::vector<uint8_t> seats) {
         {
             std::lock_guard guard(backup_lock_);
-            backups_out_.push_back({frame, {}, std::move(seats), std::move(board)});
+            backups_out_.push_back({frame, {}, std::move(seats), std::move(board), false, {}});
         }
         backup_queued_.notify_all();
     }
@@ -288,7 +323,8 @@ public:
         std::lock_guard guard(lock_);
         return std::exchange(partings_, {});
     }
-    std::vector<uint8_t> take_gone() {
+    // (each with the frame its inputs are none from: the same on every machine, agreed)
+    std::vector<std::pair<uint8_t, uint64_t>> take_gone() {
         std::lock_guard guard(lock_);
         return std::exchange(gone_, {});
     }
@@ -397,7 +433,8 @@ private:
     std::vector<std::pair<uint8_t, uint64_t>> boards_wanted_, partings_;     // (seat, frame)
     std::vector<std::pair<uint8_t, uint64_t>> boards_again_;                 // (seat, frame: rollback's, board_request_again)
     static constexpr uint64_t kAgainFrames = 256;                             // (longer than rollback's window)
-    std::vector<uint8_t> gone_, taken_, whole_wanted_, backup_missing_;
+    std::vector<std::pair<uint8_t, uint64_t>> gone_;
+    std::vector<uint8_t> taken_, whole_wanted_, backup_missing_;
     std::array<bool, net::kMaxSeats> absent_{}; // (by seat: its player gone, nobody's since)
     std::map<std::pair<uint8_t, uint64_t>, std::vector<uint8_t>> boards_; // (seat, frame): a board's state, compressed
     std::map<std::pair<uint8_t, uint64_t>, backup::Copy> board_copies_;    // (and "my backup": the copy as it came)
@@ -410,6 +447,8 @@ private:
         uint64_t frame = 0;
         std::vector<uint8_t> raw, seats;
         std::vector<uint8_t> board; // (send_board_after_backups: a board's state, sent as is; raw empty)
+        bool whole_state = false;   // (send_state_later: every board's state, made by `make`, for session().send_state)
+        std::function<std::vector<uint8_t>()> make;
     };
     std::mutex backup_lock_;
     std::condition_variable_any backup_queued_;
@@ -418,6 +457,41 @@ private:
 };
 
 // ---- Internet play: the lobby (net::LobbyClient) ----
+
+// Whether every other player's inputs (seats with a player, not `me`) are known here past `frame`: every board's state
+// taken at `frame` then waits for none (the empty cabinets are the authority's to fill, with its own).
+inline bool players_inputs_past(const net::Session& session, std::size_t me, uint64_t frame) {
+    const auto seats = session.seats();
+    for (std::size_t s = 0; s < seats.size(); ++s)
+        if (s != me && seats[s].state == net::Session::SeatView::State::playing &&
+            session.inputs_known(static_cast<uint8_t>(s)) <= frame)
+            return false;
+    return true;
+}
+
+// (tests: SPIKEOUT_RAM_DUMP=DIR@FROM-TO, each board's main RAM written at the frames hashed between them, as
+// DIR/TAG-b<board>-f<frame>.bin (TAG: SPIKEOUT_RAM_DUMP_TAG, else "run"): what differs when a hash check does)
+inline void ram_dump(std::size_t board, uint64_t frame, const uint8_t* ram, std::size_t size) {
+    static const char* spec = std::getenv("SPIKEOUT_RAM_DUMP");
+    if (!spec) return;
+    static std::string dir;
+    static unsigned long long from = 0, to = 0;
+    static const bool parsed = [] {
+        const std::string s = spec;
+        const auto at = s.rfind('@');
+        dir = s.substr(0, at);
+        if (at != std::string::npos) std::sscanf(s.c_str() + at + 1, "%llu-%llu", &from, &to);
+        return true;
+    }();
+    (void)parsed;
+    if (frame < from || (to && frame > to)) return;
+    const char* tag = std::getenv("SPIKEOUT_RAM_DUMP_TAG");
+    const std::string path = dir + "/" + (tag ? tag : "run") + "-b" + std::to_string(board) + "-f" + std::to_string(frame) + ".bin";
+    if (std::FILE* f = std::fopen(path.c_str(), "wb")) {
+        std::fwrite(ram, 1, size, f);
+        std::fclose(f);
+    }
+}
 
 inline std::string hex64(uint64_t v) {
     char buf[20];

@@ -3,6 +3,10 @@
 #include "runtime/watched_memory.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <unordered_map>
@@ -48,9 +52,26 @@ void Snapshots::written(Region& r, std::vector<std::size_t>& pages) {
         if (std::memcmp(r.data + p * kPage, r.copy.data() + p * kPage, page_bytes(r, p)) != 0) pages.push_back(p);
 }
 
+// (tests: ROLLBACK_SAVE_PROFILE=1, where a save's time goes: printed every 2,000 saves, all boards together)
+namespace {
+struct SaveProfile {
+    std::atomic<uint64_t> saves{0}, walk_ns{0}, written_ns{0}, copy_ns{0}, thin_ns{0}, pages{0};
+    static SaveProfile& get() {
+        static SaveProfile p;
+        return p;
+    }
+};
+uint64_t ns_since(std::chrono::steady_clock::time_point t) {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t).count());
+}
+} // namespace
+
 void Snapshots::save(uint64_t frame, const std::function<void(State&)>& walk) {
+    static const bool profile = std::getenv("ROLLBACK_SAVE_PROFILE") != nullptr;
+    auto t = std::chrono::steady_clock::now();
     Frame f{frame, {}, {}};
     const auto found = walk_regions(walk, f.small);
+    if (profile) SaveProfile::get().walk_ns += ns_since(t), t = std::chrono::steady_clock::now();
     bool same = !frames_.empty() && frame > frames_.back().frame && found.size() == regions_.size();
     for (std::size_t i = 0; same && i < found.size(); ++i)
         same = found[i].first == regions_[i].data && found[i].second == regions_[i].bytes;
@@ -69,9 +90,12 @@ void Snapshots::save(uint64_t frame, const std::function<void(State&)>& walk) {
         return;
     }
     pages_last_ = 0;
+    uint64_t written_ns = 0;
     for (std::size_t i = 0; i < regions_.size(); ++i) {
         Region& r = regions_[i];
+        const auto w = std::chrono::steady_clock::now();
         written(r, pages_);
+        if (profile) written_ns += ns_since(w);
         for (std::size_t p : pages_) {
             const std::size_t at = p * kPage, n = page_bytes(r, p);
             std::vector<uint8_t> before;
@@ -86,6 +110,30 @@ void Snapshots::save(uint64_t frame, const std::function<void(State&)>& walk) {
         pages_last_ += pages_.size();
     }
     frames_.push_back(std::move(f));
+    if (profile) {
+        SaveProfile& sp = SaveProfile::get();
+        const uint64_t all = ns_since(t);
+        sp.written_ns += written_ns, sp.copy_ns += all - written_ns, sp.pages += pages_last_;
+        t = std::chrono::steady_clock::now();
+    }
+    struct Thin { // (the thinning's time, at the end of this save, however it returns)
+        bool on;
+        std::chrono::steady_clock::time_point t;
+        ~Thin() {
+            if (!on) return;
+            SaveProfile& sp = SaveProfile::get();
+            sp.thin_ns += ns_since(t);
+            if (++sp.saves % 2000 == 0) {
+                const double n = static_cast<double>(sp.saves);
+                std::fprintf(stderr, "snapshot profile, %llu saves: walk %.3f ms, written pages asked %.3f ms, pages copied %.3f ms "
+                             "(%.0f pages), thinning %.3f ms\n",
+                             static_cast<unsigned long long>(sp.saves.load()), static_cast<double>(sp.walk_ns) / n / 1e6,
+                             static_cast<double>(sp.written_ns) / n / 1e6,
+                             static_cast<double>(sp.copy_ns) / n / 1e6, static_cast<double>(sp.pages) / n,
+                             static_cast<double>(sp.thin_ns) / n / 1e6);
+            }
+        }
+    } thin{profile, t};
     if (every_) { // (sparse: the older frames thinned, and kept as far back as `depth` frames)
         const uint64_t newest = frames_.back().frame;
         for (std::size_t i = 1; i + 1 < frames_.size();) { // (the oldest kept as it is: the run's start, until gone by)

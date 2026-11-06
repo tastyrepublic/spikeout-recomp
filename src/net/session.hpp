@@ -58,6 +58,13 @@ constexpr uint16_t kDiscoveryPort = 47326;
 constexpr uint8_t kProtocol = 3; // (2: spectators; 3: selective acknowledgements, the state's size, catch-up in the status)
 constexpr std::size_t kMaxSeats = 4;
 constexpr std::chrono::milliseconds kDropAfter{3000};
+// A player in a game going on, heard nothing from for this long, is let go (its cabinet idle from the furthest of
+// its inputs any machine has). 1 s was tried (2026-11-05: the others held less) and dropped a machine that was only
+// stalled (four games run flat out on one PC, each making a board whole from its backup at once): 3 s, as before.
+constexpr std::chrono::milliseconds kDropInGame{3000};
+// A player's machine heard nothing from for this long is quiet (Callbacks::quiet): its datagrams come every frame or
+// so (a keep-alive at least every 100 ms), so a few of them missed in a row.
+constexpr std::chrono::milliseconds kQuietAfter{150};
 constexpr std::size_t kMaxWatchers = 4; // spectators a game (the owner's choice)
 constexpr uint64_t kWatchLag = 120;     // frames a spectator runs behind the furthest inputs (about 2 s)
 
@@ -117,6 +124,10 @@ public:
         // Seat `seat` dropped: its inputs from `frame` on are none (its
         // character stands idle; the cabinet is free to be taken again).
         std::function<void(uint8_t seat, uint64_t frame)> idle;
+        // A player's machine not heard from for kQuietAfter (true), or heard again (false), in a game going on: with
+        // rollback its inputs are guessed further meanwhile (standing still, as the drop will have them), so the
+        // game runs on rather than waiting for the drop. From the session's own thread.
+        std::function<void(uint8_t seat, bool quiet)> quiet;
         // Another machine's boards differ from ours at the end of `frame`.
         std::function<void(uint8_t seat, uint64_t frame)> desync;
         // The host: a machine needs every board's state (a player joining
@@ -216,6 +227,9 @@ public:
     void take_seat();
     // Seat `seat`'s inputs are in up to (not including) this frame.
     uint64_t inputs_known(uint8_t seat) const;
+    // Whether this machine makes seat `seat`'s inputs of `frame` itself (its own; an empty cabinet's, as the
+    // authority): never guessed (rollback's lazy snapshots don't wait for them).
+    bool fills_inputs(uint8_t seat, uint64_t frame) const;
     // Every input from `frame` on, again through Callbacks::input (a
     // machine running on from a state, its table made afresh).
     void feed_inputs(uint64_t frame);

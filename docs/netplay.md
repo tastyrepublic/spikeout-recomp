@@ -3166,21 +3166,108 @@ Found and fixed:
   gap), and how often a frame waited over a frame's time for inputs;
   SPIKEOUT_NET_DEBUG a line each 300 frames.
 
-Still open, in order:
-1. The window joining a game in progress goes out of step: the next hash
-   check (frame 3000, two frames after the hand-over at 2998) finds its
-   own cabinet's board different on every machine; it asks the host for
-   every board again (9 MB with 3 cabinets) and catches up again. Over the
-   internet that held all three machines about 20 s; on one PC (build-
-   jit\shots\local3.ps1: gamerun host, gamerun player, the window) about
-   1 s. gamerun joiners never did, so it's something the window does at
-   the hand-over (its first inputs, or what it sets on its cabinet).
-2. The host's game holds 220-630 ms (more cabinets, more) whenever someone
-   joins or starts watching: every board's state saved and packed on its
-   game thread. Rollback mostly hides it from the others.
-3. A player gone without a goodbye holds everyone about 3 s, until dropped.
-4. The packed state is about 3 MB a cabinet in play (9.3 MB with three):
-   fixed in size, not growing with the game's length.
+Then found (the packed state is about 3 MB a cabinet in play, 9.3 MB with
+three: fixed in size, not growing with the game's length) and fixed:
+1. The window joining in progress stood still 13-21 s after catching up
+   (everyone held, its inputs stopped at the frame it took its cabinet
+   from). A frame caught up is "unseen" and unseen frames skipped pace(),
+   so the pacing's start never moved on: the first frame after waited out,
+   at the game's speed, every frame caught up. Now pace() runs while
+   catching up (it only moves its start then). On one PC the catch-up was
+   short (70 frames, ~1 s): it passed for a join's hitch.
+   What looked like the window going out of step was the tests' own:
+   their --poke wrote seat numbers (1, 2, 3) into the link role (0x10019E:
+   1 master, 2 slave), which the window writes itself over a cabinet's
+   first 3,000 frames (kLinkSettingFrames): a window joining before then
+   differed in that byte. gamerun now writes it as the window does in
+   network play (no --poke needed).
+2. The host's hold at each join or spectator (0.34-0.63 s on a Codespace
+   host, more cabinets more): the state's packing, and putting the boards'
+   states together, moved to NetPlay's backup thread (send_state_later,
+   LinkedState::parts_sink); each board's save made with its room at once
+   (kBoardStateBytes: grown, it was copied over and over: 40-60 ms, now
+   18-20); and, with rollback, no wait for a far player's inputs at the
+   frame taken (0.12-0.13 s): the state is armed, the game paced 0.3 of a
+   frame slower each frame, and taken once every player's inputs are here
+   past it (players_inputs_past; after 2 s as before). Measured on the UK
+   Codespace, 3 cabinets, India 140 ms away: the longest gap at a join
+   24 ms. On the way: a host with rollback and no input delay stopped for
+   good at a join (the window as a one-board host, alone at first): it
+   waited for every board's inputs of the frame before setting its own,
+   and the empty cabinets' (the authority's fill) come with them. The
+   capture is decided after our own inputs now.
+3. A player gone without a goodbye held everyone 2.8 s (the drop's 3 s
+   less rollback's 12 guessed frames). Dropping after 1 s was tried and
+   undone: a machine only stalled (four games flat out on one PC, each
+   running a board on from its backup at once) was dropped and went out of
+   step (onepc-net-tests vanish3). Instead (the owner's ask, "no freeze"):
+   the game plays on. The session tells, from its own thread, when a
+   player's machine has been quiet 150 ms (kQuietAfter, Callbacks::quiet ->
+   InputTable::set_quiet); a quiet player's inputs are guessed as far as
+   rollback's long history (tools::rollback::kWindow, 210 frames, as memory
+   allows: quiet_ahead), held 8 frames then none, as the drop at 3 s will
+   have them (so a gone player's frames need nothing run again); a heard
+   one's still only 12 ahead. Measured (two gamerun, 40 ms apart, rollback):
+   the host's longest gap when the other vanished 2,794 ms -> 93 ms; a
+   player silent 1.5 s while pressing buttons, then back: the host went
+   back 13 times, 123 frames run again, its longest gap 76 ms, nothing out
+   of step (the silent player's own game held 0.9 s). Test switch:
+   SPIKEOUT_TEST_SILENT=SECONDS,MS (nothing sent for MS ms then).
+   Cost of the long history (6,000 frames, two players, flat out): CPU
+   84.7 -> 91.3 s (+8%), each process's peak memory 500 -> 608 MB, the
+   kept frames 36 -> 141 MB (two boards; about 70 MB a board).
+4. Rollback's snapshots lazy (Linked::wants): a frame kept only while a
+   guess is outstanding or a wrong one is still to be gone back for, or
+   when the next frame's inputs aren't all in (the boards this machine
+   fills itself aside: Session::fills_inputs, Linked::set_local), pinned
+   frames, and every 32nd (kAlways: a guess not foreseen goes back no
+   further). Decided once a frame, the first board to ask for all
+   (InputTable::settled_but). With an input delay of 1 or more, at the
+   arcade's pace: a player's machine kept 419 of 2,999 frames (86% not
+   needed); at no input delay (a LAN's) nothing can be skipped: the next
+   frame's inputs are never in before it. ROLLBACK_EVERY_FRAME_SAVE=1:
+   every frame, as before.
+5. A snapshot's cost (ROLLBACK_SAVE_PROFILE=1: where its time goes): the
+   small state 0.04 ms, the written pages asked of the system 0.185 ms,
+   their copies 0.15 ms (~110 pages, twice each), the thinning 0.03 ms.
+   The pages asked: each memory block its own lock now (every board saved
+   at once queued on one), and with one reader the system's list as it is
+   (watched::take_written): 0.185 -> 0.140 ms; a save ~10% cheaper.
+6. leave3 failed now and then (also with the build before these): when
+   the leaver had joined before player 2 (seat 2: -LeaverFirst does that),
+   its board, run on from its backup on each other machine, was taken
+   whole from the frame each noticed the player gone, a frame apart, and
+   the boards' network boards (the 68000's registers and some of its RAM;
+   GAMERUN_STATE_PARTS, GAMERUN_NETBOARD_DUMP) then differed, the main RAM
+   the same. Now taken whole kGoneHandOver (600) frames after its inputs
+   end (cb.idle's frame, agreed: NetPlay::take_gone gives it), on every
+   machine (later only if this one noticed too late, said).
+The internet tests as a script (2026-11-06): tools/internet-tests.sh drives
+the two Codespaces and this PC (this checkout's changed sources synced and
+built there first; one run at a time; every Codespace command time-limited;
+the Codespaces stopped at the end): two, relay, three, four, vanish, stall,
+spectator, spectators (four at once, a fifth turned away), oneboard. Every
+machine "0 hash checks differed" and the joiners in, the worst gaps
+reported (vanish and stall: none over 300-500 ms allowed). The first run
+(before committing the work above): all passed; the longest gaps 37-96 ms;
+four spectators each the same, the players' longest gap 36 ms as they came,
+a fifth "the host refused: 4 are watching already". Found by it: a joiner
+on one board from the start (gamerun --net-one-board 100, at frame 1309)
+caught up at 28 frames a second (the others' boards made by side runs) and
+took its cabinet "not gaining", the others held 4.5 s; open (the window's
+Auto catches up on every board first; a weak device would meet it).
+
+One board: a one-board player joining, a one-board host with two joiners,
+players leaving it and one vanishing: the same, nothing out of step, no
+hold at the joins. Left: a joiner whose PC can't run every board well
+over the game's speed (a Codespace: 1.6x for three) doesn't catch up a
+long state's gap within 5 s, takes its cabinet anyway, and the others wait
+for it to come up to that frame (4.5 s seen). The window's Auto may go to
+one board then; it should rather catch up on one board, or wait longer.
+Test switches: the window's SPIKEOUT_TEST_JOIN=CODE and SPIKEOUT_TEST_HOST
+=SEATS (no menu keys); SPIKEOUT_RAM_DUMP=DIR@FROM-TO (both: each board's
+RAM at the hashed frames); SPIKEOUT_NET_DEBUG adds long pacing waits, long
+frame ends, a joiner's held inputs, and the host's capture timings.
 
 ## Plan
 

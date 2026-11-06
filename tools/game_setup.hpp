@@ -211,6 +211,9 @@ inline StateFile read_state_file(std::vector<uint8_t> bytes) {
     return f;
 }
 
+// About a board's state, with its sound: the room a save makes for it at once.
+constexpr std::size_t kBoardStateBytes = 30u << 20;
+
 inline void board_state(m3::State& s, recomp::Context& c, recomp::FrameTiming& timing,
                         const std::function<void(m3::State&)>& sound) {
     s.tag("spikeout save state 1");
@@ -363,6 +366,20 @@ struct LinkedState {
     // for it, handed to `sink` (again each time asked).
     std::atomic<uint64_t> capture_frame{0};
     std::function<void(uint64_t, std::vector<uint8_t>)> sink;
+    // Or its parts, put together by the receiver (on another thread: 80 MB copied once more, on the game thread a
+    // pause at each join): the ring's cut and each board's state, for `assemble`.
+    std::function<void(uint64_t, std::vector<uint8_t>, std::vector<std::vector<uint8_t>>)> parts_sink;
+    // The state those parts make (as io writes it).
+    static std::vector<uint8_t> assemble(const std::vector<uint8_t>& cut_bytes, std::vector<std::vector<uint8_t>>& parts) {
+        std::size_t total = cut_bytes.size() + 4096;
+        for (const auto& b : parts) total += b.size() + 8;
+        m3::State s(total);
+        s.tag("spikeout linked save state 1");
+        s.bytes(const_cast<uint8_t*>(cut_bytes.data()), cut_bytes.size());
+        for (auto& b : parts) s.io(b);
+        s.tag("end");
+        return std::move(s.data());
+    }
     // The window's F9 in network play: this capture written to `path`
     // rather than handed to `sink` (then ready for the next capture). Set
     // before capture_frame.
@@ -377,7 +394,20 @@ struct LinkedState {
             if (written || saved < boards.size() || (!ring->cut_complete() && cut.empty())) return;
             written = true;
         }
-        m3::State s;
+        if (parts_sink && !to_file) { // (put together elsewhere: the ring's cut taken here, where the boards met)
+            if (cut.empty()) {
+                m3::State c;
+                ring->cut_state(c);
+                cut = std::move(c.data());
+            }
+            parts_sink(capture_frame, std::exchange(cut, {}), std::exchange(boards, std::vector<std::vector<uint8_t>>(boards.size())));
+            std::lock_guard guard(lock);
+            capture_frame = 0, saved = 0, written = false;
+            return;
+        }
+        std::size_t total = cut.size() + 4096; // (the whole of it at once: grown, 80 MB were copied over and over)
+        for (const auto& b : boards) total += b.size() + 8;
+        m3::State s(total);
         io(s);
         if (sink && !to_file) {
             sink(capture_frame, std::move(s.data()));

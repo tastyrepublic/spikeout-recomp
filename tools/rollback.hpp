@@ -43,6 +43,8 @@ constexpr uint64_t kWindow = 210;
 // Kept sparsely beyond the newest kDense frames: every kEvery-th (going further back, rare, runs up to kEvery - 1
 // frames more again); about 5 times less memory over the window.
 constexpr std::size_t kDense = 16, kEvery = 8;
+// Lazy snapshots (Linked::wants): a frame kept at least this often, all else aside.
+constexpr uint64_t kAlways = 32;
 
 // The window this machine can keep: `wanted`, shorter where the kept frames of `boards` boards wouldn't fit in a
 // third of the memory free now (`free_bytes`, m3::memory_free_bytes; 0: not known, as wanted), kLeast frames at
@@ -58,6 +60,9 @@ inline uint64_t fit_window(uint64_t wanted, std::size_t boards, uint64_t free_by
     const uint64_t fits = each > kBoardCopy ? (each - kBoardCopy) / kFrameBytes : 0;
     return std::min(wanted, std::max(kLeast, fits));
 }
+// How far a quiet player's inputs may be guessed (InputTable::guess's ahead_quiet) with a history of `depth` frames:
+// short of it by a sparse step, so the frame before the first of those guesses is still kept to go back to.
+inline uint64_t quiet_ahead(uint64_t depth) { return depth > kEvery + 2 ? depth - kEvery - 2 : 0; }
 // The memory free for it now (tests: ROLLBACK_FREE_MB=N, as if that much were free).
 inline uint64_t free_for_window() {
     if (const char* mb = std::getenv("ROLLBACK_FREE_MB")) return std::strtoull(mb, nullptr, 0) << 20;
@@ -106,6 +111,34 @@ public:
     void pin(uint64_t frame) {
         std::lock_guard guard(pins_lock_);
         pins_.push_back(frame);
+    }
+
+    // Lazy snapshots (2026-11-05): whether `frame` is to be kept, asked by every board at its snapshot point (the first
+    // to ask decides for all: the boards must keep the same frames). Kept while anything is guessed and not settled,
+    // or a wrong guess is still to be gone back for, or the next frame's inputs aren't all in (it may be guessed: going
+    // back is to the frame before the first wrong guess); and pinned frames. Else not: nothing will go back to it (a
+    // game on a network whose inputs come in time keeps none at all). ROLLBACK_EVERY_FRAME_SAVE=1: every frame, as before.
+    bool wants(uint64_t frame) {
+        std::lock_guard guard(decide_lock_);
+        if (const auto it = decided_.find(frame); it != decided_.end()) return it->second;
+        static const bool every = std::getenv("ROLLBACK_EVERY_FRAME_SAVE") != nullptr;
+        // (and every kAlways-th frame: a guess not foreseen (the boards filled here told late) goes back to the newest
+        // kept before it, never far: its inputs still kept, a few frames more run again)
+        bool want = every || frame % kAlways == 0 || !table_.settled_but(frame + 1, parts_.size(), local_);
+        if (!want) {
+            std::lock_guard pins(pins_lock_);
+            want = std::find(pins_.begin(), pins_.end(), frame) != pins_.end();
+        }
+        decided_[frame] = want;
+        if (frame > 256) decided_.erase(decided_.begin(), decided_.lower_bound(frame - 256));
+        ++(want ? kept_frames_ : skipped_frames_);
+        return want;
+    }
+    // The boards whose inputs this machine fills itself (its own; the empty cabinets when it's the authority): never
+    // guessed, so not waited for by wants(). Set as it changes (a player taking a cabinet, one dropped).
+    void set_local(std::vector<bool> local) {
+        std::lock_guard guard(decide_lock_);
+        local_ = std::move(local);
     }
 
     // Before the boards run (every one stopped where it starts, at the end of `frame`: power-on, or a state loaded):
@@ -206,11 +239,13 @@ public:
         uint64_t saves = 0;
         std::size_t peak = 0, kept = 0; // (the boards' peaks added: at most that at once)
         for (const Part& p : parts_) save += p.save_ms, saves += p.saves, peak += p.peak_bytes, kept = std::max(kept, p.kept_frames);
-        char buf[300];
+        char buf[400];
         std::snprintf(buf, sizeof buf,
-                      "went back %llu times, %llu frames run again; a snapshot %.2f ms, going back %.2f ms; %zu frames kept, at most %.1f MB",
+                      "went back %llu times, %llu frames run again; a snapshot %.2f ms, going back %.2f ms; %zu frames kept, at most %.1f MB; "
+                      "snapshots taken for %llu frames, %llu not needed",
                       (unsigned long long)backs_, (unsigned long long)frames_again_, saves ? save / static_cast<double>(saves) : 0.0,
-                      backs_ ? back_ms_ / static_cast<double>(backs_) : 0.0, kept, static_cast<double>(peak) / 1048576.0);
+                      backs_ ? back_ms_ / static_cast<double>(backs_) : 0.0, kept, static_cast<double>(peak) / 1048576.0,
+                      (unsigned long long)kept_frames_, (unsigned long long)skipped_frames_);
         return buf;
     }
 
@@ -237,6 +272,10 @@ private:
     std::mutex pins_lock_;
     std::vector<uint64_t> pins_; // (pin: every one asked, in order)
     bool mismatched_ = false;    // (between: the boards' saved frames differed at the last meeting)
+    std::mutex decide_lock_;     // (wants)
+    std::map<uint64_t, bool> decided_;
+    std::vector<bool> local_;
+    uint64_t kept_frames_ = 0, skipped_frames_ = 0;
     uint64_t backs_ = 0, frames_again_ = 0;
     double back_ms_ = 0;
 };
