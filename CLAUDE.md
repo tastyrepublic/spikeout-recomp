@@ -150,7 +150,15 @@ Read this first; the older hand-off below is history.
   (kGoodbye: the reliable one was lost once, the others held 3 s). Open:
   a vanish in a no-rollback game still holds 3 s. Planned: one shared
   set-up for gamerun and the window (tests then run the window's code);
-  LAN auto rollback deferred until after another release (owner). Driving a Codespace: gh (the codespace scope
+  LAN auto rollback deferred until after another release (owner).
+  BOTS (2026-11-06, docs/netplay.md "Players pressing all the time"):
+  every test's players are bots now (gamerun --bot SEED; the owner's
+  rule). They found rollback with 3+ players going out of step (a wrong
+  guess cleared while going back: FIXED, InputTable::
+  forget_guesses_after) and, OPEN, a one-board machine in a mixed game
+  of three going out of step after its cabinets' hand-back to side runs
+  (internet cases mixed, mixed-host1 fail; build-jit\rbbot.ps1 -Seats 3
+  -OneBoard 1 repeats it here). Driving a Codespace: gh (the codespace scope
   granted), build-jit\cs-*.sh, pc-join.ps1, shots\win.ps1 (the window
   joins, SPIKEOUT_TEST_JOIN), shots\winhost.ps1 (it hosts, SPIKEOUT_TEST_
   HOST), shots\local3.ps1 (all on one PC).

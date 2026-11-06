@@ -3304,6 +3304,57 @@ Worth doing later: one shared set-up for the window and gamerun (the
 hand-over above was gamerun's own copy), so the tests run the window's
 code.
 
+### Players pressing all the time: bots, and rollback with three (2026-11-06)
+
+The owner's play session (the window joining the two Codespaces, each a
+player pressing random buttons) had every machine out of step at the same
+frame (10320, all three disagreeing), put back again and again (the
+joining screen in play, freezes). Every test before had players pressing
+a few scripted buttons. Reproduced on this PC: three gamerun players,
+every board, rollback 12, 70 ms held: out of step by frame 2160-2520 every
+run; two players never; input delay without rollback never; lazy
+snapshots off: the same (not them).
+
+Cause: rollback's going back (Linked::between) read the first frame
+guessed wrong, put the boards back to a kept frame before it (a few ms),
+then cleared every wrong guess (take_wrong). Another board's inputs coming
+in meanwhile could show a guess wrong earlier still, before the frame gone
+back to; cleared, it was never gone back for, and that machine stayed out
+of step. With two players there's one other board, whose inputs come in
+order (a later wrong guess: run again anyway); with three or more one's
+inputs can lag another's. Now InputTable::forget_guesses_after(back)
+clears only the wrong guesses after `back`, in the same lock as the
+guesses it forgets; one before it is kept and gone back for next.
+Three bot players: 9,000 frames, ~900 rollbacks each, the same; four: the
+same.
+
+Bots in every test (the owner's rule: "thats how real game work"):
+gamerun --bot SEED[@FROM] presses at random all the time (moves held
+10-44 frames, beats, jumps, charges, shifts; coin and start every 3000
+frames), on every board (network play: only its own is sent); --presses
+FILE reads --press specs from a file. tools/internet-tests.sh gives every
+player a bot (BOTS=0: scripted presses only). The whole internet suite
+with bots: two, relay, three, four, vanish, stall, spectator, spectators,
+oneboard, oneboard-rb all the same; mixed and mixed-host1 not (below).
+
+Open, found by the bots: a one-board machine in a game of three with
+other players pressing all the time goes out of step after its other
+cabinets are handed back to side runs (both on the same frame: 4-20
+frames later, every time; on frames apart: much later). Its own board
+first differs 4 frames after the hand-back (frame 3933 after 3929,
+repeatable on this PC: build-jit\rbbot.ps1 -Seats 3 -OneBoard 1 -Net
+'--input-delay 2'). Not rollback (input delay the same). Not the side
+runs themselves: three boards offline (gamerun --one-board 0@6100
+--one-board 2@6100 --one-board-tasks from a three-board bot state) are
+the same as every board whole, byte for byte, at frame 7000. The buttons
+the side runs read over the network looked right (ONEBOARD_HELD_LOG=
+FROM-TO prints them). The all-one-board cases can't see it: no machine
+there has another's board whole to compare. India crashed once in it
+(std::out_of_range, map::at: done_seed.at or late_.at in one_board.hpp).
+Also: gamerun's per-frame RAM hashes in one-board runs aren't comparable
+with an every-board run's (taken at another point); compare --ram-dump
+files instead (byte for byte).
+
 ## Plan
 
 1. Single board, single player (milestones 1–4).

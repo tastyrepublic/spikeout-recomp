@@ -121,10 +121,14 @@ public:
         std::lock_guard guard(lock_);
         wrong_ = std::min(wrong_, frame);
     }
-    // Going back to the end of `frame`: the guesses after it made again as the frames run again.
+    // Going back to the end of `frame`: the guesses after it made again as the frames run again, and the wrong ones
+    // after it so dealt with. One found wrong at or before `frame` meanwhile (another board's inputs come in while the
+    // boards were put back: with three players or more, one's inputs behind another's) is kept, to go back for next:
+    // cleared with the rest, that machine stayed out of step for good (2026-11-06, bots pressing all the time).
     void forget_guesses_after(uint64_t frame) {
         std::lock_guard guard(lock_);
         for (Board& b : boards_) b.guesses.erase(b.guesses.upper_bound(frame), b.guesses.end());
+        if (wrong_ != ~0ull && wrong_ > frame) wrong_ = ~0ull;
     }
     // Every board's inputs up to `frame` set (none guessed or still to be).
     bool all_set(uint64_t frame, std::size_t boards, std::size_t but = ~std::size_t{0}) const { // (the first `boards`: those
@@ -154,6 +158,11 @@ public:
         std::size_t n = 0;
         for (const Board::Wrong& w : boards_[board].wrong) n += w.last >= frame;
         return n;
+    }
+    // The first frame still kept (forget_before).
+    uint64_t first(std::size_t board) const {
+        std::lock_guard guard(lock_);
+        return boards_[board].first;
     }
     // The first frame not yet set (0: none).
     uint64_t next(std::size_t board) const {

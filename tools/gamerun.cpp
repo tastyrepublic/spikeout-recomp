@@ -148,7 +148,8 @@
 //
 // --press [B:]NAME@FRAME[:N] holds an input for N frames (default 6) from
 // FRAME: coin, start, test, service, beat, charge, shift, jump, up, down,
-// left, right. Repeat it for more presses. --poke [B:]ADDR=VALUE@FRAME[:N]
+// left, right. Repeat it for more presses (--presses FILE: a list of them; --bot SEED[@FROM]: a player pressing
+// all the time, random, on every board). --poke [B:]ADDR=VALUE@FRAME[:N]
 // writes a byte of RAM; --peek [B:]ADDR:LENGTH@FRAME[:N] prints LENGTH bytes
 // of RAM at the end of those frames; --ram-dump B:LO-HI@FRAME:N FILE writes
 // board B's main RAM [LO, HI) at the end of each of N frames (after the
@@ -236,6 +237,7 @@
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <random>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -3809,6 +3811,66 @@ int main(int argc_given, char** argv_given) {
                 return 2;
             }
             o.presses.push_back(p);
+            g_presses = &o.presses;
+        }
+        else if (arg == "--bot" && i + 1 < argc) { // SEED[@FROM]: a player pressing all the time, as real players do
+            // (random: moves held 10-44 frames, beats, jumps, charges, shifts; coin and start every 3000 frames, so it
+            // plays on after a game over), on every board (network play: only this machine's own is sent), from FROM
+            // (default 1200) for 150,000 frames (43 minutes). The same SEED, the same presses.
+            const std::string spec = argv[++i];
+            const std::size_t at = spec.find('@');
+            const uint32_t seed = static_cast<uint32_t>(std::strtoul(spec.c_str(), nullptr, 0));
+            const uint64_t from = at == std::string::npos ? 1200 : std::strtoull(spec.c_str() + at + 1, nullptr, 0);
+            auto add = [&](int board, const char* name, uint64_t frame, uint64_t frames) {
+                Press p;
+                p.name = name, p.frame = frame, p.frames = frames, p.board = board;
+                input_bit(p.name, p.bank, p.bit);
+                o.presses.push_back(p);
+            };
+            for (int board = 0; board < 4; ++board) {
+                std::mt19937 r(seed * 4u + static_cast<uint32_t>(board));
+                auto n = [&](uint32_t k) { return static_cast<uint64_t>(r() % k); };
+                static const char* const dirs[] = {"up", "down", "left", "right"};
+                for (uint64_t f = from; f < from + 150000;) {
+                    if (f % 3000 < 30) {
+                        add(board, "coin", f, 6), add(board, "start", f + 60, 6);
+                        f += 120;
+                        continue;
+                    }
+                    switch (n(10)) {
+                    case 0: case 1: case 2: case 3: add(board, dirs[n(4)], f, 10 + n(35)); f += 8 + n(20); break;
+                    case 4: case 5: case 6: add(board, "beat", f, 2 + n(5)); f += 10 + n(15); break;
+                    case 7: add(board, "jump", f, 3 + n(4)); f += 20 + n(20); break;
+                    case 8: add(board, "charge", f, 20 + n(30)); f += 40 + n(20); break;
+                    default: add(board, "shift", f, 4); f += 15 + n(15); break;
+                    }
+                }
+            }
+            g_presses = &o.presses;
+        }
+        else if (arg == "--presses" && i + 1 < argc) { // FILE: --press specs, one a line ("--press " before each or not):
+                                                       // a player pressing all the time (bots), past a command line's length
+            std::ifstream in(argv[++i]);
+            if (!in) {
+                std::fprintf(stderr, "gamerun: can't read %s\n", argv[i]);
+                return 2;
+            }
+            for (std::string line; std::getline(in, line);) {
+                if (const auto p = line.find("--press "); p != std::string::npos) line = line.substr(p + 8);
+                while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+                if (line.empty() || line[0] == '#') continue;
+                Press p;
+                const std::string spec = board_prefix(line.c_str(), p.board);
+                const size_t at = spec.find('@'), colon = spec.find(':', at == std::string::npos ? 0 : at);
+                p.name = spec.substr(0, at);
+                if (at != std::string::npos) p.frame = std::strtoull(spec.c_str() + at + 1, nullptr, 0);
+                if (colon != std::string::npos) p.frames = std::strtoull(spec.c_str() + colon + 1, nullptr, 0);
+                if (!input_bit(p.name, p.bank, p.bit)) {
+                    std::fprintf(stderr, "gamerun: unknown input '%s' in %s\n", p.name.c_str(), argv[i]);
+                    return 2;
+                }
+                o.presses.push_back(p);
+            }
             g_presses = &o.presses;
         }
         else if (!o.dir) o.dir = argv[i];

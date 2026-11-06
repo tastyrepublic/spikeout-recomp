@@ -8,6 +8,9 @@
 #
 #   tools/internet-tests.sh [case ...]   cases: two relay three four vanish stall spectator spectators oneboard oneboard-rb mixed mixed-host1 (all)
 #
+# Every player is a bot (gamerun --bot SEED: pressing all the time, as real players do; the owner's rule, 2026-11-06:
+# scripted presses alone missed rollback going out of step with three players); BOTS=0: the scripted presses only.
+#
 # Needs: gh signed in with the codespace scope; the Codespaces made from .devcontainer and built once with
 # tools/codespace.sh build (the ROM set in their home folder, never in the repo); this PC's build/gamerun.exe (or
 # build/gamerun) built; the ROM set at ROMS (default the main checkout's build/roms/spikeofe). Each Codespace gets
@@ -21,6 +24,7 @@ gamerun="$repo/build/gamerun.exe"; [ -x "$gamerun" ] || gamerun="$repo/build/gam
 lobby="wss://spikeout-lobby.spikeout-lobby.workers.dev/v1/lobby"
 out="$repo/build/internet-tests"; mkdir -p "$out"
 cases="${*:-two relay three four vanish stall spectator spectators oneboard oneboard-rb mixed mixed-host1}"
+BOT_SEED=0 # (each player its own bot: --bot 1, 2, ...)
 by_location() { gh api user/codespaces --jq ".codespaces[] | select(.location==\"$1\") | .name" | head -1; }
 UK="${UK:-$(by_location UkSouth)}"
 IN="${IN:-$(by_location CentralIndia)}"
@@ -55,7 +59,8 @@ cs_play() { # CODESPACE TAG ENV... -- MODE ARGS...
     while [ "$1" != "--" ]; do env="$env $1"; shift; done
     shift
     # (its debug lines apart, in ~/TAG.err: mixed in, one cut a summary line in two)
-    cs "$c" "cd /workspaces/spikeout-recomp && (nohup env SPIKEOUT_NET_DEBUG=1 $env tools/codespace.sh $* > ~/$tag.log 2> ~/$tag.err &)" >/dev/null
+    local bot=""; [ "${BOTS:-1}" = 0 ] || { BOT_SEED=$((BOT_SEED + 1)); bot="--bot $BOT_SEED"; }
+    cs "$c" "cd /workspaces/spikeout-recomp && (nohup env SPIKEOUT_NET_DEBUG=1 $env tools/codespace.sh $* $bot > ~/$tag.log 2> ~/$tag.err &)" >/dev/null
 }
 room_of() { # CODESPACE TAG: the room code its host printed
     local code=""
@@ -74,8 +79,9 @@ pc_play() { # TAG ENV... -- ARGS...
     local env=()
     while [ "$1" != "--" ]; do env+=("$1"); shift; done
     shift
+    local bot=(); [ "${BOTS:-1}" = 0 ] || { BOT_SEED=$((BOT_SEED + 1)); bot=(--bot "$BOT_SEED"); }
     env SPIKEOUT_NET_DEBUG=1 "${env[@]}" "$gamerun" "$roms" --blocks 900000000000 --no-sound --no-2d --pace --lobby "$lobby" "$@" \
-        > "$out/$tag.txt" 2> "$out/$tag.err" &
+        "${bot[@]}" > "$out/$tag.txt" 2> "$out/$tag.err" &
     PC_PID=$!
 }
 cs_done() { # CODESPACE TAG: until its run has ended (or 6 minutes)

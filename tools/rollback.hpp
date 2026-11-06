@@ -221,8 +221,7 @@ public:
         m3::State load(std::vector<uint8_t>(cuts_.at(back)));
         ring_->cut_state(load);
         cuts_.erase(cuts_.upper_bound(back), cuts_.end());
-        table_.forget_guesses_after(back);
-        table_.take_wrong();
+        table_.forget_guesses_after(back); // (and the wrong guesses after `back`: one before it, found meanwhile, kept)
         ++backs_;
         frames_again_ += frame - back;
         back_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();

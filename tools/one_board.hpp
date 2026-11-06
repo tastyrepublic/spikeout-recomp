@@ -207,6 +207,16 @@ public:
                     held_wait_seconds_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - waited).count();
                     ++held_waits_;
                 }
+                static const std::pair<uint64_t, uint64_t> log_range = [] {
+                    unsigned long long a = 0, b = 0;
+                    if (const char* v = std::getenv("ONEBOARD_HELD_LOG")) std::sscanf(v, "%llu-%llu", &a, &b);
+                    return std::pair<uint64_t, uint64_t>{a, b};
+                }();
+                if (frame >= log_range.first && frame <= log_range.second)
+                    std::printf("held: seat %zu frame %llu (board at %llu): %s %08x, the table %llu-%llu\n", seat,
+                                (unsigned long long)frame, (unsigned long long)here->timing.frames(), in ? "in" : "NONE",
+                                in ? remote::held_word(in->bank0, in->controls, in->controls2) : 0u,
+                                (unsigned long long)table->first(seat), (unsigned long long)table->next(seat));
                 return in ? remote::held_word(in->bank0, in->controls, in->controls2) : 0u; // (before its first: none)
             }
             const auto in = settings_.buttons ? settings_.buttons(seat, frame) : std::nullopt;
