@@ -94,8 +94,8 @@ Read this first; the older hand-off below is history.
   MinGW; ran with only Windows' folders on the PATH). Linux: built on
   Ubuntu 24.04, needs glibc 2.38 and OpenSSL 3 (an older build system
   would widen it). Both tested unpacked into empty folders. The repo is
-  still private, so the downloads reach collaborators only; going public
-  is the owner's call (GPL-3: the source must be available with them).
+  PUBLIC now (checked 2026-11-06): GitHub Actions is free, macOS runners
+  included; the release is still a draft (GPL-3: the source is there).
   README rewritten (vf3-recomp's style, the owner's plan). SCREENSHOTS
   ARE ALLOWED IN THE REPO (the owner's decision, 2026-11-05, as other
   recomp projects do): docs/images/*.jpg, taken from the window (sized,
@@ -132,7 +132,9 @@ Read this first; the older hand-off below is history.
   docs/netplay.md. Before committing network code: tools/onepc-net-tests.ps1
   (and -Only leave3,vanish3 -LeaverFirst), tools/onepc-tests.ps1, and the
   internet tests, tools/internet-tests.sh (the two Codespaces, ~25 min,
-  bash; the owner wants real networks tested). The local suites need the
+  bash; the owner wants real networks tested; EVERY case, owner 2026-11-06:
+  every board, one board with and without rollback, mixed boards; plus the
+  window's own tests for window changes). The local suites need the
   main checkout's build/roms (a junction) and build/onepc states and
   mash.txt copied into a worktree. NEXT (agreed with the owner): LAN games' rollback on
   automatically per PC when it has CPU to spare (no input delay: lazy
@@ -140,7 +142,15 @@ Read this first; the older hand-off below is history.
   over a few frames (page tracking, a tiny final pass, proved byte for
   byte); then the join pacing, the spectator matrix, the owner's play
   session over the Codespaces. LEFT: a joiner too slow to catch up on
-  every board takes its cabinet anyway and the others wait. Driving a Codespace: gh (the codespace scope
+  every board takes its cabinet anyway and the others wait.
+  FIXED (2026-11-06, docs/netplay.md "The one-board joiner's slowness"):
+  gamerun's one-board joiner ran every board whole plus failing side runs
+  (hand-over only at exactly --net-one-board's frame; the window was never
+  affected): now 57.5 fps; a quitting player's goodbye also a datagram
+  (kGoodbye: the reliable one was lost once, the others held 3 s). Open:
+  a vanish in a no-rollback game still holds 3 s. Planned: one shared
+  set-up for gamerun and the window (tests then run the window's code);
+  LAN auto rollback deferred until after another release (owner). Driving a Codespace: gh (the codespace scope
   granted), build-jit\cs-*.sh, pc-join.ps1, shots\win.ps1 (the window
   joins, SPIKEOUT_TEST_JOIN), shots\winhost.ps1 (it hosts, SPIKEOUT_TEST_
   HOST), shots\local3.ps1 (all on one PC).
@@ -173,8 +183,8 @@ Read this first; the older hand-off below is history.
   to the JIT (downloads carry no game code) and the C++ build stays for
   proofs.
 - GITHUB PAGE / FIRST RELEASE (owner's design, before the LLVM work): the
-  repo (github.com/tastyrepublic/spikeout-recomp) stays PRIVATE until the
-  first playable download. Downloads for Windows, Mac, Linux and Steam
+  repo (github.com/tastyrepublic/spikeout-recomp) was to stay private until
+  the first playable download (it is public now). Downloads for Windows, Mac, Linux and Steam
   Deck on GitHub Releases, with no game files and nothing made from them.
   README in vf3-recomp's style: the owner's "SO" icon as a banner; the
   no-game-files notice; features with screenshots (resolutions, picture

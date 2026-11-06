@@ -14,7 +14,11 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 // Every datagram: "SK", the protocol, its type, the session, the sender's seat (13 bytes).
-enum Type : uint8_t { kBeacon = 1, kJoin = 2, kReliable = 3, kInput = 4, kRefuse = 5, kPunch = 6 };
+// (kGoodbye: a player leaving, as a datagram of its own too, sent beside the reliable goodbye. In an internet test
+// (2026-11-06) a one-board player's reliable goodbye, sent in one burst as it quit, never came (2 pieces queued, so
+// not its window), and the others held kDropInGame for it; with this datagram too it came. A build without it
+// ignores the type.)
+enum Type : uint8_t { kBeacon = 1, kJoin = 2, kReliable = 3, kInput = 4, kRefuse = 5, kPunch = 6, kGoodbye = 7 };
 constexpr uint8_t kNoSeat = 0xFF;
 
 // Control messages, on the reliable channel.
@@ -1149,6 +1153,7 @@ struct Session::Impl {
         p.connected = true;
         if (type == kReliable) on_reliable(from, p, r);
         else if (type == kInput) on_inputs(from, p, r);
+        else if (type == kGoodbye && !said_bye[from]) on_bye(from);
     }
 
     void on_join(const Address& from, Reader& r) {
@@ -1273,6 +1278,19 @@ struct Session::Impl {
         if (!r.ok()) return;
         std::vector<uint8_t> data(r.here(), r.here() + r.left());
         for (auto& m : p.rel.receive(seq, flags, std::move(data))) on_message(from, m);
+    }
+
+    // A player's goodbye (kBye in the reliable channel, or its kGoodbye datagram, whichever comes first).
+    void on_bye(uint8_t from) {
+        // (as if silent for long: dropped next; a spectator waits from now for a new host to greet it)
+        peers[from].heard = watch_mode ? Clock::now() : Clock::time_point{};
+        if (watch_mode && from == host_seat) deliver_watched(true); // (every frame complete so far: nothing more may come)
+        said_bye[from] = true;
+        log(peers[from].name + " left");
+        if (!started && !is_host && from == host_seat && !room_closed) { // (before the start: the room goes with it)
+            room_closed = true;
+            log("the host closed the room");
+        }
     }
 
     void on_message(uint8_t from, const std::vector<uint8_t>& m) {
@@ -1495,15 +1513,7 @@ struct Session::Impl {
             }
             break;
         case kBye:
-            // (as if silent for long: dropped next; a spectator waits from now for a new host to greet it)
-            peers[from].heard = watch_mode ? Clock::now() : Clock::time_point{};
-            if (watch_mode && from == host_seat) deliver_watched(true); // (every frame complete so far: nothing more may come)
-            said_bye[from] = true;
-            log(peers[from].name + " left");
-            if (!started && !is_host && from == host_seat && !room_closed) { // (before the start: the room goes with it)
-                room_closed = true;
-                log("the host closed the room");
-            }
+            if (!said_bye[from]) on_bye(from); // (its datagram may have come first)
             break;
         default: break;
         }
@@ -2211,11 +2221,17 @@ void Session::leave() {
         w.u8(kBye);
         m.send_all(w.out);
         for (uint8_t s = 0; s < kMaxSeats; ++s) // (no waiting for acknowledgements: sent a few times)
-            if (s != m.my_seat && m.peers[s].present && !m.peers[s].dropped)
+            if (s != m.my_seat && m.peers[s].present && !m.peers[s].dropped) {
                 for (int k = 0; k < 3; ++k) {
                     for (auto& f : m.peers[s].rel.out) f.ever_sent = false;
                     m.pump_reliable(s, m.peers[s]);
                 }
+                if (m.my_watch == kNoSeat) // (a player's: its datagram too, past whatever fills the channel's window)
+                    for (int k = 0; k < 3; ++k) m.send_peer(m.peers[s], header(kGoodbye, m.session, m.me()));
+                if (const std::size_t queued = m.peers[s].rel.out.size(); queued > 1)
+                    m.log("goodbye to " + m.peers[s].name + ": " + std::to_string(queued) + " reliable pieces still queued to it" +
+                          (queued > kWindow ? " (past the window: the reliable goodbye not sent)" : ""));
+            }
         if (m.is_host) // (the spectators: theirs too; with a game in progress they wait for the room's next host)
             for (Impl::Watcher& v : m.watchers) {
                 if (!v.present) continue;

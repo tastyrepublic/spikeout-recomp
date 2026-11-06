@@ -6,7 +6,7 @@
 # reported (a vanished or stalled player's others must not hold). Run it before committing network code: a run takes
 # about 25 minutes and two 4-core Codespaces' time (stopped at the end; KEEP=1 leaves them on).
 #
-#   tools/internet-tests.sh [case ...]   cases: two relay three four vanish stall spectator spectators oneboard (all)
+#   tools/internet-tests.sh [case ...]   cases: two relay three four vanish stall spectator spectators oneboard oneboard-rb mixed mixed-host1 (all)
 #
 # Needs: gh signed in with the codespace scope; the Codespaces made from .devcontainer and built once with
 # tools/codespace.sh build (the ROM set in their home folder, never in the repo); this PC's build/gamerun.exe (or
@@ -20,7 +20,7 @@ roms="${ROMS:-$(cd "$repo/../../.." 2>/dev/null && pwd)/build/roms/spikeofe}"
 gamerun="$repo/build/gamerun.exe"; [ -x "$gamerun" ] || gamerun="$repo/build/gamerun"
 lobby="wss://spikeout-lobby.spikeout-lobby.workers.dev/v1/lobby"
 out="$repo/build/internet-tests"; mkdir -p "$out"
-cases="${*:-two relay three four vanish stall spectator spectators oneboard}"
+cases="${*:-two relay three four vanish stall spectator spectators oneboard oneboard-rb mixed mixed-host1}"
 by_location() { gh api user/codespaces --jq ".codespaces[] | select(.location==\"$1\") | .name" | head -1; }
 UK="${UK:-$(by_location UkSouth)}"
 IN="${IN:-$(by_location CentralIndia)}"
@@ -160,13 +160,23 @@ run_case() {
         else
             say "  a fifth spectator: FAILED (let in, or no word why)"; failed=$((failed + 1))
         fi ;;
-    oneboard) # (one board a PC on every machine, as weak devices play: no rollback, a delay of 2)
-        local ob="--input-delay 2 --one-board-auto --one-board-held --net-one-board 100"
-        cs_play "$UK" h-$name FRAMES=6000 -- host 3 $ob --press 0:coin@1200 --press 0:start@1300 --press 0:beat@1700
+    oneboard | oneboard-rb | mixed | mixed-host1)
+        # (one board a PC on every machine: oneboard as weak devices play, no rollback, a delay of 2; oneboard-rb with
+        # the window's Auto for players this far apart, rollback. Mixed, with rollback: mixed the host and this PC on
+        # every board, India on one; mixed-host1 the host on one board, the others on every board)
+        local one="--one-board-auto --one-board-held --net-one-board 100"
+        local hb ib pb
+        hb="--input-delay 2 $one" ib="--input-delay 2 $one" pb="--input-delay 2 $one"
+        case "$name" in
+        oneboard-rb) hb="$rb $one" ib="$rb $one" pb="$rb $one" ;;
+        mixed) hb="$rb" ib="$rb $one" pb="$rb" ;;
+        mixed-host1) hb="$rb $one" ib="$rb" pb="$rb" ;;
+        esac
+        cs_play "$UK" h-$name FRAMES=6000 -- host 3 $hb --press 0:coin@1200 --press 0:start@1300 --press 0:beat@1700
         local code; code=$(room_of "$UK" h-$name)
-        cs_play "$IN" i-$name FRAMES=5600 -- join "$code" $ob --press 1:coin@2400 --press 1:start@2500
+        cs_play "$IN" i-$name FRAMES=5600 -- join "$code" $ib --press 1:coin@2400 --press 1:start@2500
         seat_taken "$UK" h-$name 2
-        pc_play pc-$name -- --frames 5400 $ob --net-join "$code" --net-catch-up --press 2:coin@3000 --press 2:start@3100
+        pc_play pc-$name -- --frames 5400 $pb --net-join "$code" --net-catch-up --press 2:coin@3000 --press 2:start@3100
         wait $PC_PID; cs_done "$UK" h-$name; cs_done "$IN" i-$name
         judge "UK (host)" "$(cs_text "$UK" h-$name)"; judge "India" "$(cs_text "$IN" i-$name)"; judge "this PC" "$(cat "$out/pc-$name.txt")" ;;
     *) say "  (no such case)"; failed=$((failed + 1)) ;;

@@ -589,6 +589,7 @@ struct Machine {
     bool leave_next = false;
     tools::backup::Maker backups;   // (--net-one-board: this board's backups on the other machines, tools::backup)
     std::map<uint64_t, uint64_t> hash_pending; // (--net-rollback: RAM hashes for the others, once their frames are settled)
+    bool one_board_handed = false; // (--one-board: handed over already)
     double input_wait_max = 0; // (network play: the longest a frame waited for inputs, ms)
     uint64_t sync_waits = 0;   // (--net-rollback: frames held back by the time sync)
     uint64_t input_waits_long = 0; // (network play: frames that waited over a frame's time for inputs)
@@ -1609,7 +1610,11 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             tools::one_board::Game::keep_whole(m.ob);
             std::printf("board %zu: the other run whole from frame %llu\n", m.index, (unsigned long long)frame);
         }
-        if (one_board_goes(o, m.index) && frame == o.one_board_frame && !o.one_board_late) { // --one-board B@FRAME
+        // (at the first frame's end from FRAME on: a network game joined after --net-one-board's frame starts later, and
+        // its boards, never at that frame, stayed whole for good, the side runs of their seeds failing every frame beside
+        // them (a joiner at 16-28 frames a second, 2026-11-06))
+        if (one_board_goes(o, m.index) && frame >= o.one_board_frame && !m.one_board_handed && !o.one_board_late) { // --one-board B@FRAME
+            m.one_board_handed = true;
             if (o.one_board_camera) throw Dropped{2400000, o.slice, true, o.one_board_shadow != 0 || o.one_board_auto};
             g_one_board.hand_over(m.ob, o.one_board_held); // (--one-board-held: handed back when the rules find it calm)
         }

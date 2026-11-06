@@ -3254,8 +3254,8 @@ four spectators each the same, the players' longest gap 36 ms as they came,
 a fifth "the host refused: 4 are watching already". Found by it: a joiner
 on one board from the start (gamerun --net-one-board 100, at frame 1309)
 caught up at 28 frames a second (the others' boards made by side runs) and
-took its cabinet "not gaining", the others held 4.5 s; open (the window's
-Auto catches up on every board first; a weak device would meet it).
+took its cabinet "not gaining", the others held 4.5 s (gamerun's own:
+fixed 2026-11-06, below).
 
 One board: a one-board player joining, a one-board host with two joiners,
 players leaving it and one vanishing: the same, nothing out of step, no
@@ -3268,6 +3268,41 @@ Test switches: the window's SPIKEOUT_TEST_JOIN=CODE and SPIKEOUT_TEST_HOST
 =SEATS (no menu keys); SPIKEOUT_RAM_DUMP=DIR@FROM-TO (both: each board's
 RAM at the hashed frames); SPIKEOUT_NET_DEBUG adds long pacing waits, long
 frame ends, a joiner's held inputs, and the host's capture timings.
+
+### The one-board joiner's slowness: found and fixed (2026-11-06)
+
+The "28 frames a second" joiner above was gamerun's own: it handed the
+other cabinets over to side runs only at the end of exactly
+--net-one-board's frame (100). A joiner starts from the host's state much
+later (frame 337 locally, 1306 on the internet), never ended that frame,
+and so ran every board whole for good, while the side-run module, finding
+their seeds, also ran a side run of each one's tasks every frame beside
+them. Those failed (each to its 30M-block budget at the vblank wait's loop
+0x36E08, 25-46 ms each, every frame: 1,211 of 1,211 in a local two-player
+run). The window was never affected (it hands over at its set-up). Now
+gamerun hands over at the first frame's end from that frame on, once
+(Machine::one_board_handed). Two players, one board each, on this PC:
+joiner 15.6 -> 57.52 frames a second, host 19.4 -> 56.8, no failures;
+onepc-tests 14/14 and onepc-net-tests all the same. Internet oneboard
+(UK host, India, this PC, three players one board each): this PC's
+longest gap 3204 -> 75 ms, every machine the same.
+
+Seen then: when this PC quit at its last frame, the host and India never
+heard its goodbye and held kDropInGame (3.1-3.2 s; input delay, no
+rollback: they need its inputs). Its reliable goodbye (kBye, pumped three
+times as it quits) never came, with only 2 pieces queued (so not the
+channel's window). A goodbye is now also a datagram of its own (kGoodbye,
+three times; a build without it ignores the type), handled as kBye
+(Impl::on_bye, whichever comes first); leave() logs the pieces still
+queued. Internet oneboard again: both heard "gamerun left", longest gaps
+117 / 172 / 75 ms.
+
+Still open: a player vanishing without a goodbye (a crash, a cut line) in
+a game with input delay and no rollback still holds the others
+kDropInGame (3 s): only rollback can guess its inputs meanwhile.
+Worth doing later: one shared set-up for the window and gamerun (the
+hand-over above was gamerun's own copy), so the tests run the window's
+code.
 
 ## Plan
 
