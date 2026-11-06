@@ -102,6 +102,7 @@
 #include "net/update.hpp"
 #include "one_board.hpp"
 #include "rollback.hpp"
+#include "delay_tuner.hpp"
 #include "settings.hpp"
 #include "ui/assets.hpp" // (the app's icon)
 #ifdef SPIKEOUT_JIT
@@ -153,9 +154,6 @@ namespace {
 constexpr int kWidth = m3::TilegenRenderer::kWidth, kHeight = m3::TilegenRenderer::kHeight;
 constexpr std::size_t kMaxBoards = 4;
 constexpr uint32_t kTurnLines = 8; // display lines a linked board runs before passing the turn on
-// Rollback's time sync: frames ahead of another player before this machine slows a little, behind the one furthest
-// on before it runs a little faster, and before it runs unpaced to catch up (a stall).
-constexpr int64_t kSyncAhead = 4, kSyncBehind = 8, kSyncFar = 60;
 
 struct Stop {}; // thrown from the frame callback to end the run
 
@@ -838,26 +836,22 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
                             static_cast<long long>(lead.ahead), static_cast<long long>(lead.behind));
             // (behind: this frame a little earlier, a fiftieth of a frame for each frame beyond, up to a tenth (the game's
             // sound commands come that much faster: run unpaced, the music raced); far behind (a stall): unpaced)
-            if (lead.behind < -kSyncFar) {
+            static tools::TimeSync sync; // (the rule: tools/netplay.hpp; gamerun --pace the same)
+            const auto step = sync.step(lead.ahead, lead.behind);
+            if (step.free) {
                 ++shared.sync_free;
                 start = clock::now();
                 paced_from = timing.frames();
                 return;
             }
-            if (lead.behind < -kSyncBehind) {
-                ++shared.sync_sooner;
-                const double sooner = std::min(0.1, 0.02 * static_cast<double>(-lead.behind - kSyncBehind));
-                start -= std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(sooner / recomp::FrameTiming::kRefreshHz));
-            }
+            if (step.sooner) ++shared.sync_sooner;
+            if (step.slowed) ++shared.sync_slowed;
+            if (step.later != 0)
+                start += std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(step.later / recomp::FrameTiming::kRefreshHz));
             // (every board's state wanted, at a frame whose inputs are all in (Shared::capture_armed): each frame 0.3 of
             // one later, the far players' inputs coming up to the game: ~0.3 s at 77% for one 70 ms away)
             if (shared.capture_armed)
                 start += std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(0.3 / recomp::FrameTiming::kRefreshHz));
-            if (lead.ahead > kSyncAhead) { // (the further ahead, the more: a twentieth of a frame for each frame, up to half)
-                ++shared.sync_slowed;
-                const double later = std::min(0.5, 0.05 * static_cast<double>(lead.ahead - kSyncAhead + 1));
-                start += std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(later / recomp::FrameTiming::kRefreshHz));
-            }
         }
         const auto due = start + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(
                                      static_cast<double>(timing.frames() - paced_from) / recomp::FrameTiming::kRefreshHz));
@@ -2670,11 +2664,8 @@ int main(int argc, char** argv) {
             if (s != me && trips[s] >= 0) one_way = std::max(one_way, trips[s] / 2);
         return one_way;
     };
-    auto auto_delay = [](int one_way, bool rollback) -> uint64_t {
-        if (one_way <= 8) return 0;
-        const auto frames = static_cast<uint64_t>(std::ceil((one_way - 8) / (1000.0 / recomp::FrameTiming::kRefreshHz)));
-        return rollback ? std::min<uint64_t>(2, frames / 2) : frames;
-    };
+    auto auto_delay = [](int one_way, bool rollback) -> uint64_t { return tools::DelayTuner::base(one_way, rollback); };
+    tools::DelayTuner delay_tuner; // (in play: with rollback, raised while its catch-ups run late; tools/delay_tuner.hpp)
     std::unique_ptr<net::Discovery> discovery; // games on this network, while looked for
     std::unique_ptr<net::LobbyClient> browser; // the lobby's list, while looked at
     std::vector<net::Json> internet_games;
@@ -4045,7 +4036,8 @@ int main(int argc, char** argv) {
         if (netgame && netgame->running && !shared.spectating && net_delay < 0 && now - delay_checked >= std::chrono::seconds(1)) {
             delay_checked = now;
             const int one_way = furthest_one_way(shared.local, shared.boards);
-            const uint64_t want = auto_delay(one_way, shared.rollback != nullptr), have = shared.input_delay;
+            const auto [catches, late] = shared.rollback ? shared.rollback->take_catches() : std::pair<uint64_t, uint64_t>{0, 0};
+            const uint64_t want = delay_tuner.tick(one_way, shared.rollback != nullptr, catches, late), have = shared.input_delay;
             delay_asked = want == have ? 0 : delay_asked + 1;
             if (delay_asked >= 3 && one_way >= 0) {
                 delay_asked = 0;

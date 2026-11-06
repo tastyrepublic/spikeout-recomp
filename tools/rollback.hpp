@@ -19,16 +19,20 @@
 #include "runtime/state.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -207,6 +211,10 @@ public:
             return 0;
         }
         const auto t0 = std::chrono::steady_clock::now();
+        // (one board after another. Tried, 2026-11-06: each on a thread of its own, at once (1.8 ms against 2.8 for
+        // three boards), but the heap was found damaged (by a thread ending, freeing its thread_local buffers) in
+        // internet games of three and four, with threads started each time and with threads kept alike, never
+        // one after another; the cause not found: dropped, the gain ~1 ms)
         for (Part& p : parts_) { // (each board's walk marks its ring port saved: the ring's load after clears it)
             if (!p.active || p.fresh) { // (its network board put back in the staying board's)
                 p.back_to = back;
@@ -224,27 +232,53 @@ public:
         table_.forget_guesses_after(back); // (and the wrong guesses after `back`: one before it, found meanwhile, kept)
         ++backs_;
         frames_again_ += frame - back;
+        {
+            std::lock_guard guard(catch_lock_);
+            catch_t0_ = t0, catch_to_ = frame, catching_ = true; // (quiet(): the time from here to the frame after `frame`)
+        }
         back_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         return back;
     }
     // A board leaving the meeting: true once after going back.
     bool rewind(std::size_t board) { return std::exchange(parts_[board].rewind, false); }
     // A frame being run again (drawn and heard nothing).
-    bool quiet(std::size_t board, uint64_t frame) const { return frame <= parts_[board].quiet_through; }
+    bool quiet(std::size_t board, uint64_t frame) const {
+        const bool again = frame <= parts_[board].quiet_through;
+        if (!again && catching_.load(std::memory_order_relaxed)) { // (back where it was: how long it took)
+            std::lock_guard guard(catch_lock_);
+            if (catching_ && frame > catch_to_) {
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - catch_t0_).count();
+                catching_ = false;
+                catch_ms_ += ms, catch_max_ = std::max(catch_max_, ms), ++catches_;
+                catch_over_[0] += ms > 1000.0 / 57.524, catch_over_[1] += ms > 2000.0 / 57.524;
+            }
+        }
+        return again;
+    }
 
     // How it went: times gone back, frames run again, the average snapshot (a board) and going back (all of them).
+    // Catch-ups after going back since the last asked, and how many took longer than a frame (tools::DelayTuner).
+    std::pair<uint64_t, uint64_t> take_catches() {
+        std::lock_guard guard(catch_lock_);
+        const std::pair<uint64_t, uint64_t> r{catches_ - taken_catches_, catch_over_[0] - taken_late_};
+        taken_catches_ = catches_, taken_late_ = catch_over_[0];
+        return r;
+    }
     std::string report() const {
         double save = 0;
         uint64_t saves = 0;
         std::size_t peak = 0, kept = 0; // (the boards' peaks added: at most that at once)
         for (const Part& p : parts_) save += p.save_ms, saves += p.saves, peak += p.peak_bytes, kept = std::max(kept, p.kept_frames);
-        char buf[400];
+        char buf[600];
+        std::lock_guard guard(catch_lock_);
         std::snprintf(buf, sizeof buf,
                       "went back %llu times, %llu frames run again; a snapshot %.2f ms, going back %.2f ms; %zu frames kept, at most %.1f MB; "
-                      "snapshots taken for %llu frames, %llu not needed",
+                      "snapshots taken for %llu frames, %llu not needed; back where it was again in %.1f ms on average, %.1f at most, "
+                      "%llu over a frame's time, %llu over two",
                       (unsigned long long)backs_, (unsigned long long)frames_again_, saves ? save / static_cast<double>(saves) : 0.0,
                       backs_ ? back_ms_ / static_cast<double>(backs_) : 0.0, kept, static_cast<double>(peak) / 1048576.0,
-                      (unsigned long long)kept_frames_, (unsigned long long)skipped_frames_);
+                      (unsigned long long)kept_frames_, (unsigned long long)skipped_frames_, catches_ ? catch_ms_ / static_cast<double>(catches_) : 0.0,
+                      catch_max_, (unsigned long long)catch_over_[0], (unsigned long long)catch_over_[1]);
         return buf;
     }
 
@@ -277,6 +311,13 @@ private:
     uint64_t kept_frames_ = 0, skipped_frames_ = 0;
     uint64_t backs_ = 0, frames_again_ = 0;
     double back_ms_ = 0;
+    // (going back's catching up: from going back to the frame after the one it was at, as the report has it)
+    mutable std::mutex catch_lock_;
+    mutable std::atomic<bool> catching_{false};
+    mutable std::chrono::steady_clock::time_point catch_t0_;
+    mutable uint64_t catch_to_ = 0, catches_ = 0, catch_over_[2] = {0, 0};
+    uint64_t taken_catches_ = 0, taken_late_ = 0; // (take_catches: where the last left off)
+    mutable double catch_ms_ = 0, catch_max_ = 0;
 };
 
 } // namespace tools::rollback

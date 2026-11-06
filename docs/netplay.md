@@ -3355,6 +3355,65 @@ Also: gamerun's per-frame RAM hashes in one-board runs aren't comparable
 with an every-board run's (taken at another point); compare --ram-dump
 files instead (byte for byte).
 
+### Rollback's cost with players pressing all the time: the input delay raised as needed (2026-11-06)
+
+With the rollback fix the owner's three-player game (the window, two bot
+Codespaces, every board) stayed in step but ran at 40-50 frames a second:
+went back 3,929 times in 36,192 frames (one in 9), 16,512 frames run
+again, and time sync slowed 7,003 frames. Measured (rollback's report now
+gives how long each going back takes to be back at the frame it was at):
+three bot players on this PC, 70 ms apart, delay 1: 41 ms on average, 87%
+longer than a frame, 46% than two; each going back ~4.9 frames of all
+three boards (~7 ms a frame each here, all three on threads already) plus
+~4 ms putting them back. One going back: a frame shown late.
+
+The owner's choice: each PC raises its own input delay as far as it needs,
+never past the far player's distance. tools/delay_tuner.hpp (DelayTuner),
+the window's Auto and gamerun --input-delay auto alike: the start as
+before (half the far player's frames, two at most, with rollback); once a
+second, rollback's catch-ups of that second (Linked::take_catches): more
+than a quarter late (over a frame) two seconds running, a frame more (then
+3 s to see); 30 s with none late, a frame less to try (late again within
+10 s: back up, no lower for 2 minutes). The window still moves a frame at
+a time once the same is asked for 3 s.
+
+Over the internet (UK host, India, this PC; bots; three players): this PC
+2 -> 4 frames, 57.52 frames a second, 2 stutters, 70 rollbacks in 2,000
+frames; four players: 55.2 (time sync waiting for India, two players on
+one 4-core Codespace). The owner's window, same game: delay 2 -> 3 -> 4,
+went back 326 times, catching up 13.6 ms on average (60 over a frame, 2
+over two), time sync slowed 6 frames; "much much better". The cost: up to
+the far player's distance in input delay (4 frames, 70 ms, for India).
+Then time sync held closer (tools::TimeSync in netplay.hpp, the window's
+pace() and gamerun --pace alike; SPIKEOUT_SYNC_LOOSE=1 the old rule): the
+lead smoothed over ~10 frames, from over a frame ahead a fiftieth of a
+frame later for each frame more, the old rule over 4 (a twentieth each,
+up to half) and behind. And NetPlay::lead counts game frames, each
+machine's own input delay taken off (Session::PeerTiming::delay, from its
+status): with delays chosen per machine, one with a longer delay looked
+that far ahead and was slowed for nothing. Three bot players on this PC,
+the same run with each rule: frames per second the same (54.6/55.3/56.9
+against 54.7/55.3/57.2: the gentle part's slowing costs nothing seen),
+frames run again 1,097 against 1,411, catching up 21.6 ms against 28.2,
+the longest 118 ms against 3,201. The owner's window (three players, the
+Codespaces as bots): frames per rollback 1.66 against 1.76, 13% of
+catch-ups over a frame against 18%; "mostly 57.5, sometimes a little
+drop but still smooth"; the delay still settles at 4 against India.
+Four players on the 4-core Codespaces: both at full load (every board
+and rollback's re-runs), time sync holding everyone to them: a four-player
+test needs bigger machines (or one board a PC, once its hand-back is
+fixed). Tried and dropped: the boards put back at once (Linked::between,
+each board's Snapshots::restore on a thread of its own). On this PC, three
+bot players, back to back: putting back 1.79-1.85 ms against 2.64-2.93,
+catch-ups over a frame 33-42% against 43-54%, all the same. But over the
+internet this PC's gamerun stopped in the three- and four-player cases,
+gdb: the heap found damaged as a thread ended (freeing its thread_local
+buffers), with threads started for each going back and with threads kept
+for the game alike; one after another the same cases passed. Cause not
+found; the gain ~1 ms; one after another again. What's left of a going
+back is the frames run again (~8 ms each here, three players' boards on
+six cores; ~4 on a PC playing alone): the game's own code.
+
 ## Plan
 
 1. Single board, single player (milestones 1–4).

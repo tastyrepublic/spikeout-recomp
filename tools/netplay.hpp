@@ -114,6 +114,43 @@ inline std::vector<uint8_t> with_country(const std::vector<uint8_t>& eeprom, int
     return eeprom_bytes(words);
 }
 
+// Rollback's time sync, the window's pace() and gamerun --pace alike: from NetPlay::lead (frames this machine's game
+// is ahead of the furthest behind, `ahead`, and of the furthest on, `behind`: negative behind it), each frame shown a
+// little later or sooner. Ahead, the others' inputs come that much later for its frames: more guessed, more and
+// longer rollbacks. Held close since 2026-11-06: the lead smoothed (a reading moves a frame as packets come), from
+// over a frame ahead a fiftieth of a frame later for each frame more (unseen: 98%), as before over 4 (a twentieth
+// for each, up to half); behind the furthest on by over 8, a fiftieth sooner for each, up to a tenth; over 60
+// behind (a stall), unpaced. It was over 4 ahead before anything: the far players' inputs four frames later, the
+// input delay raised that much more (tools::DelayTuner).
+class TimeSync {
+public:
+    static constexpr int64_t kAhead = 4, kBehind = 8, kFar = 60;
+    static constexpr double kClose = 1.0; // (smoothed frames ahead before the gentle part)
+    struct Step {
+        bool free = false;   // far behind: not held to the pace (catch up)
+        double later = 0;    // this frame that much of a frame later (negative: sooner)
+        bool slowed = false, sooner = false;
+    };
+    Step step(int64_t ahead, int64_t behind) {
+        smooth_ = seen_ ? smooth_ + (static_cast<double>(ahead) - smooth_) * 0.1 : static_cast<double>(ahead); // (~10 frames)
+        seen_ = true;
+        Step s;
+        if (behind < -kFar) return s.free = true, s;
+        if (behind < -kBehind) s.sooner = true, s.later -= std::min(0.1, 0.02 * static_cast<double>(-behind - kBehind));
+        if (ahead > kAhead) s.slowed = true, s.later += std::min(0.5, 0.05 * static_cast<double>(ahead - kAhead + 1));
+        else if (smooth_ > kClose && !gentle_off()) s.slowed = true, s.later += std::min(0.1, 0.02 * (smooth_ - kClose));
+        return s;
+    }
+    static bool gentle_off() { // (tests: SPIKEOUT_SYNC_LOOSE=1, only over 4 ahead as before)
+        static const bool off = std::getenv("SPIKEOUT_SYNC_LOOSE") != nullptr;
+        return off;
+    }
+
+private:
+    double smooth_ = 0;
+    bool seen_ = false;
+};
+
 class NetPlay {
 public:
     NetPlay(InputTable& table, uint64_t build, std::function<void(const std::string&)> log)
@@ -380,13 +417,17 @@ public:
     };
     Lead lead(std::size_t me) const {
         const auto t = session_->timing();
-        const int64_t mine = static_cast<int64_t>(t[me].next);
+        // (game frames, not input frames: each machine's inputs run its own delay ahead of its game, and each chooses
+        // its own (tools::DelayTuner): a machine with a longer one looked ahead as far, and was slowed for nothing)
+        const bool delays = t[me].delay >= 0;
+        const int64_t mine = static_cast<int64_t>(t[me].next) - (delays ? t[me].delay : 0);
         Lead l;
         bool any = false;
         for (std::size_t s = 0; s < t.size(); ++s) {
             if (s == me || t[s].quiet_ms < 0 || t[s].quiet_ms > 300 || t[s].next == 0) continue;
             const int64_t transit = t[s].rtt > 0 ? static_cast<int64_t>(t[s].rtt / 2 / 17.4 + 0.5) : 0;
-            const int64_t d = mine - (static_cast<int64_t>(t[s].next) + transit);
+            const int64_t theirs = static_cast<int64_t>(t[s].next) - (delays && t[s].delay >= 0 ? t[s].delay : delays ? t[me].delay : 0);
+            const int64_t d = mine - (theirs + transit);
             l.ahead = any ? std::max(l.ahead, d) : d;
             l.behind = any ? std::min(l.behind, d) : d;
             any = true;

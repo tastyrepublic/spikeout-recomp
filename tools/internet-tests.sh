@@ -20,7 +20,7 @@ repo="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo"
 roms="${ROMS:-$(cd "$repo/../../.." 2>/dev/null && pwd)/build/roms/spikeofe}"
 [ -d "$roms" ] || roms="$repo/build/roms/spikeofe"
-gamerun="$repo/build/gamerun.exe"; [ -x "$gamerun" ] || gamerun="$repo/build/gamerun"
+gamerun="${GAMERUN:-$repo/build/gamerun.exe}"; [ -x "$gamerun" ] || gamerun="$repo/build/gamerun" # (GAMERUN: another, e.g. a wrapper running it under gdb)
 lobby="wss://spikeout-lobby.spikeout-lobby.workers.dev/v1/lobby"
 out="$repo/build/internet-tests"; mkdir -p "$out"
 cases="${*:-two relay three four vanish stall spectator spectators oneboard oneboard-rb mixed mixed-host1}"
@@ -101,7 +101,7 @@ judge() { # NAME FILE-TEXT [MAX_GAP_MS]
 }
 cs_text() { cs "$1" "grep -E '^Network|^Pace|caught up|seat [0-9] taken|^Rollback: went' ~/$2.log"; }
 
-rb="--net-rollback 12 --input-delay 1" # (as the window's Auto for players this far apart)
+rb="--net-rollback 12 --input-delay auto" # (as the window's Auto: tools::DelayTuner)
 run_case() {
     local name=$1
     say "== $name"

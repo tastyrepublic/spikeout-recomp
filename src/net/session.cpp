@@ -2321,6 +2321,7 @@ std::array<Session::PeerTiming, kMaxSeats> Session::timing() const {
     std::array<PeerTiming, kMaxSeats> out{};
     for (uint8_t s = 0; s < kMaxSeats && s < m.seats; ++s) {
         out[s].next = m.streams[s].next();
+        out[s].delay = s == m.my_seat ? m.my_status.delay : m.peers[s].status.delay;
         if (s == m.my_seat || !m.peers[s].present || m.peers[s].dropped) continue;
         out[s].rtt = m.peers[s].rtt;
         out[s].quiet_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now - m.peers[s].heard).count());

@@ -253,6 +253,7 @@ public:
     struct PeerTiming {
         uint64_t next = 0;
         int rtt = -1, quiet_ms = -1;
+        int delay = -1; // (its input delay, as its status last said: `next` is that many frames past its game; -1: unknown)
     };
     std::array<PeerTiming, kMaxSeats> timing() const;
     // How it goes, for an overlay: round trip to each seat (ms, -1: none).

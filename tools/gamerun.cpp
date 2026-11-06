@@ -212,6 +212,7 @@
 #include "recording.hpp"
 #include "one_board.hpp"
 #include "rollback.hpp"
+#include "delay_tuner.hpp"
 #include "remote_cabinet.hpp"
 #include "png_write.hpp"
 #include "wav_write.hpp"
@@ -752,6 +753,9 @@ m3::LinkRing* g_ring = nullptr; // (linked boards' ring: one board a PC's shadow
 std::atomic<uint64_t> g_parted_after{0}; // (--net-leave-at: this player gone after this frame; every board here stops there)
 std::atomic<bool> g_catching_up{false}; // (--net-catch-up: joined in progress, not yet with the others)
 std::atomic<int> g_catch_percent{0};    // (and how far caught up, percent)
+// (--input-delay N, or auto: tools::DelayTuner once a second in network play, as the window's Auto; read each frame)
+std::atomic<uint64_t> g_input_delay{0};
+bool g_input_delay_auto = false;
 std::atomic<bool> g_capture_armed{false}; // (every board's state wanted, at a frame whose inputs are all in already)
 std::chrono::steady_clock::time_point g_capture_armed_at{};
 struct Pace { // --pace: how well it kept to the arcade's speed (the end says)
@@ -2028,9 +2032,9 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
                 if (o.netplay) o.netplay->local(m.index, at, value);
                 else m.inputs->set(m.index, at, value);
             };
-            if (o.input_delay && !m.inputs_started) put(frame, {}); // (until the first comes: none held)
+            if (g_input_delay && !m.inputs_started) put(frame, {}); // (until the first comes: none held)
             m.inputs_started = true;
-            put(frame + o.input_delay, source);
+            put(frame + g_input_delay, source);
         }
         // (--net-one-board: from the hand-over, only this machine's own board: a shadow of another is exact in what it
         // sends, not in all of its RAM)
@@ -2345,7 +2349,32 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
 #endif
             me.boards = o.net_one_board && frame > o.net_one_board ? Status::Boards::one : Status::Boards::every;
             me.net = g_net_rb ? Status::Net::rollback : Status::Net::delay;
-            me.delay = static_cast<int16_t>(o.input_delay);
+            if (g_input_delay_auto) { // (--input-delay auto: once a second, the window's rule: tools::DelayTuner, a frame at a time
+                                      // once it has asked for the same for 3 seconds)
+                static tools::DelayTuner tuner;
+                static auto checked = std::chrono::steady_clock::now();
+                static int asked = 0;
+                if (const auto now = std::chrono::steady_clock::now(); now - checked >= std::chrono::seconds(1) && !g_catching_up) {
+                    checked = now;
+                    int one_way = -1;
+                    const auto trips = o.netplay->session().round_trips();
+                    for (std::size_t s = 0; s < o.boards && s < trips.size(); ++s)
+                        if (s != o.local_seat && trips[s] >= 0) one_way = std::max(one_way, trips[s] / 2);
+                    const auto [catches, late] = g_net_rb ? g_net_rb->take_catches() : std::pair<uint64_t, uint64_t>{0, 0};
+                    const uint64_t want = tuner.tick(one_way, g_net_rb != nullptr, catches, late), have = g_input_delay;
+                    asked = want == have ? 0 : asked + 1;
+                    if (asked >= 3 && one_way >= 0) {
+                        asked = 0;
+                        g_input_delay = want > have ? have + 1 : have - 1;
+                        std::printf("net: input delay %llu at frame %llu (auto; the furthest player %d ms away one way, %llu of %llu "
+                                    "catch-ups late)\n",
+                                    (unsigned long long)g_input_delay.load(), (unsigned long long)frame, one_way,
+                                    (unsigned long long)late, (unsigned long long)catches);
+                    }
+                }
+            }
+            me.delay = static_cast<int16_t>(g_input_delay.load());
+            me.auto_delay = g_input_delay_auto;
             if (g_catching_up) me.catch_up = static_cast<int8_t>(g_catch_percent.load());
             o.netplay->session().set_status(me);
         }
@@ -2367,14 +2396,14 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
                 };
                 if (g_net_rb && o.netplay) {
                     if (g_capture_armed) started += frame_time(0.3); // (the far players' inputs coming up, as the window)
+                    static tools::TimeSync sync; // (the window's rule: tools/netplay.hpp)
                     const auto lead = o.netplay->lead(m.index);
-                    if (lead.behind < -60) started = clock::now(), first = frame;
+                    const auto step = sync.step(lead.ahead, lead.behind);
+                    if (step.free) started = clock::now(), first = frame;
                     else {
-                        if (lead.behind < -8) started -= frame_time(std::min(0.1, 0.02 * static_cast<double>(-lead.behind - 8)));
-                        if (lead.ahead > 4) {
-                            started += frame_time(std::min(0.5, 0.05 * static_cast<double>(lead.ahead - 4 + 1)));
-                            ++m.sync_waits;
-                        }
+                        if (step.later > 0) started += frame_time(step.later);
+                        else if (step.later < 0) started -= frame_time(-step.later);
+                        if (step.slowed) ++m.sync_waits;
                     }
                 }
                 auto due = started + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(
@@ -3681,7 +3710,11 @@ int main(int argc_given, char** argv_given) {
         else if (arg == "--boards" && i + 1 < argc) o.boards = std::max<std::size_t>(1, std::strtoull(argv[++i], nullptr, 0));
         else if (arg == "--slice" && i + 1 < argc) o.slice = std::max<uint32_t>(1, static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 0)));
         else if (arg == "--link-latency" && i + 1 < argc) o.link_latency = std::strtoull(argv[++i], nullptr, 0);
-        else if (arg == "--input-delay" && i + 1 < argc) o.input_delay = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--input-delay" && i + 1 < argc) { // N, or auto (network play: tools::DelayTuner, as the window)
+            const std::string v = argv[++i];
+            g_input_delay_auto = v == "auto";
+            o.input_delay = g_input_delay_auto ? 0 : std::strtoull(v.c_str(), nullptr, 0);
+        }
         else if (arg == "--parallel") o.parallel = true;
         else if (arg == "--no-2d") o.no_2d = true;
         else if (arg == "--no-sound") o.no_sound = true;
@@ -3876,6 +3909,7 @@ int main(int argc_given, char** argv_given) {
         else if (!o.dir) o.dir = argv[i];
         else o.dir = nullptr, i = argc;
     }
+    g_input_delay = o.input_delay;
     if (!o.dir) {
         std::fprintf(stderr, "usage: gamerun <rom_dir> [--blocks N] [--text] [--dump-tile FILE]\n"
                              "               [--netboard sim|real] [--net-trace N] [--net-disasm FILE]\n"
@@ -4089,6 +4123,15 @@ int main(int argc_given, char** argv_given) {
         o.boards = start->seats;
         o.parallel = true;
         o.local_seat = start->my_seat;
+        if (g_input_delay_auto) { // (--input-delay auto: from the furthest player now, as the window's Auto starts)
+            int one_way = -1;
+            const auto trips = netplay->session().round_trips();
+            for (std::size_t s = 0; s < trips.size(); ++s)
+                if (s != o.local_seat && trips[s] >= 0) one_way = std::max(one_way, trips[s] / 2);
+            g_input_delay = tools::DelayTuner::base(one_way, o.net_rollback != 0);
+            std::printf("net: input delay %llu (auto; the furthest player %d ms away one way)\n", (unsigned long long)g_input_delay.load(),
+                        one_way);
+        }
         // (a spectator: the board it watches stands for its own here, never played: Session::local_input takes nothing)
         if (o.net_spectate) o.local_seat = std::min<uint8_t>(o.net_spectate_seat, static_cast<uint8_t>(start->seats - 1));
         o.clock = start->clock;

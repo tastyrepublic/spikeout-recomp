@@ -158,7 +158,18 @@ Read this first; the older hand-off below is history.
   forget_guesses_after) and, OPEN, a one-board machine in a mixed game
   of three going out of step after its cabinets' hand-back to side runs
   (internet cases mixed, mixed-host1 fail; build-jit\rbbot.ps1 -Seats 3
-  -OneBoard 1 repeats it here). Driving a Codespace: gh (the codespace scope
+  -OneBoard 1 repeats it here).
+  Then the input delay raised as needed (owner's choice, docs/netplay.md
+  "Rollback's cost with players pressing all the time"): tools/
+  delay_tuner.hpp, the window's Auto and gamerun --input-delay auto; with
+  bots, rollbacks ran late (41 ms, 40-50 fps): now a steady 57.5, up to
+  the far player's distance in delay. Time sync held closer (tools::
+  TimeSync, shared by the window and gamerun; leads in game frames, each
+  machine's delay taken off). 4-player tests need bigger Codespaces than
+  4 cores. TODO (owner): the parallel rollback restore (boards put back
+  at once, ~1 ms saved) was dropped for a heap-corruption crash in
+  internet games of 3-4; find the cause with a thread checker (TSan in
+  WSL), then bring it back (docs/netplay.md, "Tried and dropped"). Driving a Codespace: gh (the codespace scope
   granted), build-jit\cs-*.sh, pc-join.ps1, shots\win.ps1 (the window
   joins, SPIKEOUT_TEST_JOIN), shots\winhost.ps1 (it hosts, SPIKEOUT_TEST_
   HOST), shots\local3.ps1 (all on one PC).
