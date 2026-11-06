@@ -172,6 +172,9 @@ public:
     // Run the function at `addr` (an indirect call; the caller sets LR), or
     // resume the function containing return site `addr`.
     void call(uint32_t addr);
+    // The table row call() and resume_block() run (the interpreter runs every
+    // function through one entry, src/interp, and finds which one by it).
+    const FunctionEntry* entered = nullptr;
     // Set by call() for a return site; the function's prologue takes it
     // (and clears it) and continues at that site.
     uint32_t resume_at = 0;

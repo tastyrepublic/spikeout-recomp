@@ -217,6 +217,9 @@
 #ifdef SPIKEOUT_JIT
 #include "jit/jit.hpp" // (gamerun-jit: the game translated from the ROM at start, LLVM)
 #endif
+#ifdef SPIKEOUT_INTERP
+#include "interp/interp.hpp" // (gamerun-interp: the game run from the ROM by the interpreter)
+#endif
 #ifdef SPIKEOUT_GPU
 #include "gpu/present.hpp"
 #include "gpu/real3d_gpu.hpp"
@@ -3835,6 +3838,14 @@ int main(int argc_given, char** argv_given) {
 #ifdef SPIKEOUT_JIT
     try {
         jit::prepare(game, roms);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "gamerun: %s\n", e.what());
+        return 1;
+    }
+#endif
+#ifdef SPIKEOUT_INTERP
+    try {
+        interp::prepare(game, roms);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "gamerun: %s\n", e.what());
         return 1;

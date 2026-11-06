@@ -168,6 +168,15 @@ Read this first; the older hand-off below is history.
   games are on other builds ("N games on another version" in the join
   list), and a join by code of one says "that game is on version X".
   Tests: SPIKEOUT_UPDATE_AS=VERSION (as if this were it), SPIKEOUT_UPDATE_URL.
+  INTERPRETER PROTOTYPE, DONE (2026-11-06; for iOS, which allows no JIT): gamerun-interp (src/interp, CMake
+  SPIKEOUT_INTERP on by default), a pre-decoded interpreter with the
+  lifter's semantics (keep it in step with lifter.cpp and ppc_ir.cpp);
+  Context::entered (the row call()/resume_block() run) added for it.
+  Proved the same as the C++ build: attract, seg2 (65 hashes, states
+  equal), seg3 with sound (156 hashes, WAV and states equal). About 2-2.6
+  ms a frame more than C++ on the i7-8700K (seg3 with sound 9.6 ms against
+  7.7). docs/recompiler.md "The interpreter". Next for it: the window, an
+  iOS build, speed.
   MACOS NEXT (the owner builds it on their own Mac): docs/building-macos.md
   is the hand-off (tools, the JIT and reference builds, what may break:
   exceptions through JIT code first, then MAP_JIT/allow-jit for a signed

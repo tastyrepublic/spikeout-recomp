@@ -231,6 +231,50 @@ The MPC106 (`m3::Mpc106`) follows Supermodel's `MPC10x.cpp`: registers
 little-endian as on PCI, reset values from `CMPC10x::Reset()`, the bridge
 itself at bus 0 / device 0 and nothing else on the bus yet.
 
+## The interpreter (no JIT: iOS)
+
+`gamerun-interp` (`src/interp`, CMake `SPIKEOUT_INTERP`, on by default)
+runs the game from the player's ROM with no machine code made at all, for
+systems that allow no JIT (iOS in the App Store) and downloads that hold
+nothing made from the ROM. At start it runs the same analysis as
+`ppcrecomp` and the JIT (about 1 s), then decodes each function once into
+a list of 16-byte steps: a block's tick with its cycles
+(`ppc::block_cycles`) and hook, each instruction with its registers,
+constants, masks and SPR fields worked out (`li`/`lis` apart), and the
+block's way out with its targets resolved (a block of the same function, a
+function run in the same loop for a tail call, or `Context::jump`), jump
+tables sorted for a binary search. It runs them with the lifter's semantics
+case for case: the same calls (`push_return`, the callee run, `pop_return`,
+`follow_return`), returns, tail calls, conditional calls, `bl $+4`, return
+sites and block resumes, exceptions and `rfi`. Keep it in step with
+`lifter.cpp` and `ppc_ir.cpp`.
+
+Its tables have the same rows as the lifter's (functions, return sites,
+block starts, each with the first function that has it), so
+`tools::build_id` is the same; every row runs one entry point, which finds
+its function by the row `Context::call` and `resume_block` note
+(`Context::entered`). 2,900 functions, 22,369 blocks, 131,696
+instructions: 159,402 steps, 4.3 MB.
+
+Proved the same as the C++ build (2026-11-06, Windows): attract to frame
+600 (the same 427,473,268 blocks, registers and interrupts); the bot's
+seg2 replay (`--load-state build/bot/fullrec2/owner-50707.state --inputs
+build/linkstudy/seg2/inputs.bin`, 3,932 frames of stage 2: its 65 RAM
+hashes matched, the save states at 54600 identical); the seg3 replay with
+sound (`fullrec3/owner-62721.state`, `seg3/inputs.bin`, 9,368 frames: its
+156 hashes matched, the WAV and the save states at 72000 identical).
+
+Speed, the same runs on the i7-8700K (the 2D drawn; a network test ran
+beside them): seg2 without sound 6.8 ms a frame against the C++ build's
+4.2 ms (26.8 s and 16.4 s); seg3 with sound 9.6 ms against 7.7 (90.4 s and
+71.9 s): 2-2.6 ms a frame more, the game's own code about twice as long.
+Most of a frame is the bus, the devices and the sound, the same code in
+both. A frame lasts 17.4 ms.
+
+Not yet: the window with it; network play against the C++ build; a phone
+or a tablet (an iOS build); speed work (a computed-goto dispatch, steps
+for the commonest pairs); the raw word in an unimplemented step's message.
+
 ## Tests
 
 - `lifter_tests`: a test program written with a small assembler

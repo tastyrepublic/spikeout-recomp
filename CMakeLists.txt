@@ -513,6 +513,22 @@ if(SPIKEOUT_ROM_DIR)
     endif()
 endif()
 
+# Prototype: gamerun-interp, the game run from the player's ROM by a
+# pre-decoded interpreter (src/interp): no machine code made at all (for
+# systems with no JIT, iOS), no recompiled code built in.
+option(SPIKEOUT_INTERP "Build gamerun-interp (pre-decoded interpreter prototype)" ON)
+if(SPIKEOUT_INTERP)
+    add_library(spikeout_interp src/interp/interp.cpp)
+    target_link_libraries(spikeout_interp PUBLIC recomp_runtime analysis PRIVATE spikeout_warnings)
+    add_executable(gamerun-interp tools/gamerun.cpp)
+    target_link_libraries(gamerun-interp PRIVATE spikeout_interp m3net spikeout_warnings)
+    target_compile_definitions(gamerun-interp PRIVATE SPIKEOUT_INTERP)
+    if(SPIKEOUT_GPU)
+        target_link_libraries(gamerun-interp PRIVATE m3gpu)
+        target_compile_definitions(gamerun-interp PRIVATE SPIKEOUT_GPU)
+    endif()
+endif()
+
 # Prototype (off by default): gamerun-jit, the game translated from the
 # player's ROM at start with LLVM (src/jit), no recompiled code built in.
 # LLVM: a pinned release built once with this compiler (cmake/llvm.cmake), the

@@ -158,6 +158,7 @@ void Context::call(uint32_t addr) {
     const FunctionEntry* e = find(addr);
     if (!e) throw MissingCode(addr);
     resume_at = e->resume;
+    entered = e;
     e->fn(*this);
 }
 
@@ -170,6 +171,7 @@ void Context::resume_block(uint32_t pc) {
         e = &*it;
     }
     resume_at = e->resume; // (0: a function's entry)
+    entered = e;
     e->fn(*this);
     // Its frames are gone: each return goes on into the code it returns to.
     for (;;) jump(returned_to);
