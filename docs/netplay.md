@@ -3355,6 +3355,40 @@ Also: gamerun's per-frame RAM hashes in one-board runs aren't comparable
 with an every-board run's (taken at another point); compare --ram-dump
 files instead (byte for byte).
 
+### One board with players fighting: made records miss per-cabinet enemy fields (2026-11-06)
+
+The mixed internet cases (a one-board machine with every-board ones) fail
+with bots; so does a two-player game here (rbbot.ps1 -Seats 2 -OneBoard
+1 -Net '--input-delay 2': out of step ~25 frames after the hand-back).
+The every-board machines compare the one-board machine's own board; the
+all-one-board cases can't see it (no machine has another's board whole).
+
+Found and fixed offline (gamerun --one-board-stays 1 --one-board 2@6100
+--one-board-auto --one-board-held from a three-board bot state: board 1
+staying, board 2 a slave seen from a slave, handed back at 6399; board 1
+9 bytes off at 7000, 18 at 7800, against every board whole): the made
+record sent a gone enemy's on-screen bits. This board's entry keeps its
+own on-screen bits after a character goes (its flags word's low byte
+alone); the other cabinet's entry is then all zero. make_record now takes
+a character as there only with flags above the low byte, else the entry
+zero. Then the same, byte for byte, at 7000 and 7800; onepc-tests 14/14.
+
+Found, not fixed: the enemies' entries (written by 0x74808/0x74884 from
+each character object: +0 its first word, +4 the low bytes of +0x3F02,
++0x3F22, +0x34A0, +0x34FC, +8 a sum of +0x3C, +0x3E, +0x74, +0x76,
++0x380, +0x384, +0x388) carry values each cabinet keeps for itself: in
+the two-player game board 0's +0x34FC was board 1's less 2 for three
+enemies, constant over frames (not written each frame; same on every
+board in the offline state: changed on events, most likely the cabinet's
+own player's hits), and the +8 sums differ. The side runs (flow, tasks,
+the camera's view) don't reproduce them (their copy kept board 1's: tried
+taking them after the side run's tasks, no change). Chasing each such
+field may not end. The design's own answer ("But a sent block comes too
+late", above): each PC also sends its real block (~5 KB/s a player); a
+one-board machine compares each made block with it when it comes (a few
+frames late) and, with rollback, treats a mismatch as a wrong guess: back
+and on again with the real one. Not built yet.
+
 ### Rollback's cost with players pressing all the time: the input delay raised as needed (2026-11-06)
 
 With the rollback fix the owner's three-player game (the window, two bot

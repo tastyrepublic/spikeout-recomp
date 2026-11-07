@@ -380,6 +380,7 @@ struct Options {
     uint64_t drop_frame = 0;
     const char* drop_buttons = nullptr; // --drop-buttons DUMP
     int one_board = -1;                 // --one-board B@FRAME (and --one-board-camera FILE)
+    int one_board_stays = -1;           // --one-board-stays B (tests: the board that stays, not the first not going)
     std::vector<std::size_t> one_board_also; // (--one-board repeated: more boards made by the one that stays, from the same FRAME)
     uint64_t one_board_frame = 0;
     const char* one_board_camera = nullptr;
@@ -928,7 +929,7 @@ bool one_board_goes(const Options& o, std::size_t board) {
 m3::CommBoardOptions link_options(const Options& o);
 void set_up_one_board(std::vector<std::unique_ptr<Machine>>& machines, const Options& o) {
     tools::one_board::Game::Settings s;
-    s.stays = o.netplay ? o.local_seat : 0;
+    s.stays = o.netplay ? o.local_seat : o.one_board_stays >= 0 ? static_cast<std::size_t>(o.one_board_stays) : 0;
     while (one_board_goes(o, s.stays)) ++s.stays;
     s.going.push_back(static_cast<std::size_t>(o.one_board));
     for (std::size_t b : o.one_board_also) s.going.push_back(b);
@@ -3763,6 +3764,7 @@ int main(int argc_given, char** argv_given) {
         else if (arg == "--one-board-lookahead" && i + 1 < argc) o.one_board_lookahead = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--one-board-hand-back" && i + 1 < argc) o.one_board_hand_back = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--one-board-held") o.one_board_held = true;
+        else if (arg == "--one-board-stays" && i + 1 < argc) o.one_board_stays = std::atoi(argv[++i]);
         else if (arg == "--one-board-late") o.one_board_late = true;
         else if (arg == "--one-board-whole" && i + 1 < argc) o.one_board_whole = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--one-board-local-shadows") o.one_board_local_shadows = true;

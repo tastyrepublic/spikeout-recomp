@@ -1314,10 +1314,14 @@ inline void Cabinets::make_record(Remote& r, Block& next, const Block& mine, uin
     for (uint32_t byte : {0x47u, 0x5Fu, 0x6Bu, 0x77u}) put8(next, rec + byte, get8(r.block, old + byte));
     // (every character's view bits, players 1-4 then enemies 1-8, from its camera's tests two counts before; none
     // for one gone since: this board's entry all zero)
+    // (a character there only with flags above their low byte: this board's entry can keep its own on-screen bits
+    // for one gone (its low byte alone), which the other's, its whole word 0, hasn't: sent with them, a three-player
+    // game with players pressing all the time went out of step as an enemy left (2026-11-06, docs/netplay.md))
     for (uint32_t k = 0; k < 12; ++k) {
         const uint32_t entry = rec + 0x14 + 12 * k;
         const auto v = r.view_at.find({logic - 2, character_object(k)});
-        if (v != r.view_at.end() && next[entry / 4] != 0) put8(next, entry + 3, static_cast<uint8_t>(v->second));
+        if (!(next[entry / 4] & 0xFFFFFF00u)) next[entry / 4] = 0;
+        else if (v != r.view_at.end()) put8(next, entry + 3, static_cast<uint8_t>(v->second));
     }
 }
 
