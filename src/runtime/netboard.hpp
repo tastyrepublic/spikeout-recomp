@@ -114,6 +114,9 @@ public:
     void on_departure(std::function<void(std::size_t, uint64_t, uint64_t, const std::vector<uint8_t>&)> fn) {
         state_->on_departure = std::move(fn);
     }
+    // Every packet as it is sent, before on_departure (the sending board, the packet's number on its link, the data,
+    // changeable): one board a PC puts a made packet's real one in, once it has come (tools::NodeCheck::patch).
+    void on_patch(std::function<void(std::size_t, uint64_t, std::vector<uint8_t>&)> fn) { state_->on_patch = std::move(fn); }
 
     // Save states: true once every board's state has been saved since the
     // last cut_state (a cut is under way while some have).
@@ -157,6 +160,7 @@ private:
         std::function<void(std::size_t, uint64_t, const std::vector<uint8_t>&)> on_send;
         std::function<void(std::size_t, uint64_t, uint64_t, uint64_t)> on_receive;
         std::function<void(std::size_t, uint64_t, uint64_t, const std::vector<uint8_t>&)> on_departure;
+        std::function<void(std::size_t, uint64_t, std::vector<uint8_t>&)> on_patch;
         // A cut under way: by board, whether it has saved, its counts then,
         // and (as receiver) the packets it has taken in since.
         std::vector<uint8_t> saved; // (bytes: each board's thread writes its own)

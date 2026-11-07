@@ -3389,6 +3389,190 @@ one-board machine compares each made block with it when it comes (a few
 frames late) and, with rollback, treats a mismatch as a wrong guess: back
 and on again with the real one. Not built yet.
 
+### The real-block check (2026-11-07, uncommitted when written)
+
+tools/node_check.hpp. Step 1 (check): each machine sends its own board's
+part of each link packet it sends (its node, the first 0x900 bytes of a
+data frame) and, for every packet, a hash of the whole packet; a
+datagram of its own (kNodeData, sent twice; the reliable channel held it
+behind one-board backups for seconds), XORed with the node sent before it
+(named), whole every 8. A machine making another board's packets (or
+running it whole) compares them packet by packet. Every-board players:
+0 differences in thousands; a one-board player catches the known enemy
+bytes at once. Step 2 (made records take lasting real values): the
+enemies' entries whole from the real records when the newest three agree
+(flags and +4 bytes; all zero there: zero), other bytes seen to differ,
+and the header's (put into the made network board after its link run).
+Step 3 (rollback): a made packet sent as its real one if in (LinkRing::
+on_patch); one come late and different, back to the frame it left in
+(InputTable::run_again_from), every frame kept meanwhile (Linked::
+keep_every). Tests: NODE_CHECK_LOG, NODE_CHECK_DEBUG, NODE_FIX=0,
+NODE_FIX_TRACE=N, NODE_CORRECT=0. The quick repro: build-jit/bench/
+two-3800.state (two boards, bots, gamerun --bot 1 from power-on to 3800),
+rbbot.ps1 -Seats 2 -OneBoard @(1) -OneBoardFrame 3810 -Load it -BotSeed 1
+(a minute): the hand-back at 4109.
+
+Where it stands: with every packet the same as the real one (the whole
+packets' hashes too) up to the divergence, board 1 still diverges by
+frame 4116-4200. Its RAM at 4116 against the host's: without step 2
+(NODE_FIX=0) the known enemy bytes (0x140557 4f/51 and its copies); with
+it, the enemy entries the fix put in (from board 0's real records) show
+in board 1's own memory at 0x1405xx and 0x1421xx, where the host has
+board 1's own (zero): so the made record reaches board 1's RAM itself,
+not only through the packets (link_run's writes to it: the working record
+0x140200, its journal undone after; the link's changes kept "into its
+flows'"). Next: find which write puts the made record's entries into
+board 1's own records (a watch on 0x140557 in the one-board run), then
+whether board 1's own record should take its own entries there (its
+view, not the other cabinet's). Also seen: the enemies' presence differs
+by cabinet for a few counts as one comes or goes.
+
+### The first difference, found automatically (2026-11-07)
+
+Chasing the one-board desync through network runs went round in circles:
+each run took minutes, its symptoms came long after the cause, and a fix
+for one symptom could hide the next. So, offline and exact:
+tools/onepc-diff.ps1 runs the same bots twice from one state (gamerun
+--boards N --parallel --bot SEED), once with every board whole (the
+reference), once with only -Stays whole after -From (the others made by
+side runs), hashing the staying board's RAM page by page every frame
+(gamerun --ram-hashes B@FRAME FILE). At the first frame a page differs it
+dumps both RAMs there, lists the differing bytes, and runs both again with
+a write watch on them, so each byte comes with the code that wrote it in
+each run (and in the reference, what each cabinet's own code wrote). One
+answer every few minutes, the cause at the frame it happens.
+tools/onepc-fuzz.ps1 runs it over states, boards staying and bot seeds.
+
+What it found, in order, from two-3800.state (board 1 staying from 3810,
+handed back to side runs at 4109), each fixed before the next showed:
+
+1. 4114: enemy entries' +7 (the enemy's +0x34FC). It is the cabinet's own
+   logic count when the enemy was set up (0x1E938 stores 0x1000A8), and the
+   two cabinets' counts had been 2 apart then (0x24F against 0x251, long
+   before). Each cabinet's own history, which side runs can't rebuild, but
+   the one-board machine had both boards whole at the hand-over: Cabinets::
+   start_making keeps the other cabinet's values of the entry's four fields
+   (kEntryFields: +0x3F02, +0x3F22, +0x34A0, +0x34FC) where they differ from
+   this board's, and make_record puts them in while this board's record
+   byte is still the one it had then (the character not set up again); for
+   a gone character too (its flags word goes, the other bytes stay). A
+   shadow made from this board's state gets them written in (Shadow::fields).
+2. 4132: the master's header +0x50 (sent to every cabinet) stale. The game
+   writes it each frame (0x624F4) in the link memory, which a made board's
+   link run took whole from its last link. kLinkGameBytes: the world's bytes
+   there (+0x44, +0x118, +0x13F, +0x150-0x153, +0x15C) now this board's.
+3. 4134: the made master a count ahead. An area's set-up (count 0xC5C) took
+   2.87 M cycles of its world step (~160 k usually; a frame is ~2.89 M):
+   every cabinet loses a frame there (the master at 4132, board 1 at 4133),
+   the made one didn't. Now a made board's world step over half a frame
+   loses its next frame (Cabinets::lose_after; before, only --one-board-miss).
+4. 4135: header +0x54-0x56 and 0x11CFD4-0x11CFD5 are the cabinet's own (its
+   local player's: 0x5E92C from 0x5A87C, r3 its player's object): in
+   kCabinetOwn now.
+5. 4135: a new enemy's on-screen bits. The set-up gives them (0x1E3FC,
+   0x40000402, the same everywhere); make_record copied record bytes 0x47,
+   0x5F, 0x6B, 0x77 from the made board's previous block even when the
+   enemy wasn't there yet. Now only for one that was.
+6. 4220: the same enemy fields as (1), dropped a count early when this
+   board set the enemy up again: now judged by the record's byte, not the
+   object's now.
+7. 4956: a shared countdown in the record (+0x128) a count old: the made
+   record took this board's working record live, and this board's own step
+   of that count can come after the made link run in the frame. Now its own
+   working record after its own flow and tasks of the count before, as its
+   side run left it (Remote::working_at).
+8. 5135: the player's view bits a count late: its view test ran as a side
+   run of its own, from this board's world a count behind. Now in the same
+   run as its tasks, on the world they made (Remote::viewed).
+
+Then the same, byte for byte, every frame from 3810 to 8000.
+
+The other direction (board 0, the master, staying; board 1 made, a slave
+a frame behind) and longer runs found more, and one thing about the test:
+offline, a shadow starts from this board's state, an approximation (each
+cabinet's own bytes, a player's marks, counters only its drawing keeps);
+network play's come from the other machine's real board. So the finder's
+-NoShadows (ONEBOARD_NO_SHADOWS=1): side runs alone through everything,
+the part network play depends on. Fixed with it:
+
+9. A made slave's lost frame put on the wrong frame: its world step comes
+   before its link reaches the count (frame_for, not frame_at).
+10. A shadow's restore of what differed at the first hand-over put back
+    stale enemy fields after enemies were set up again (kept values do it).
+11. A gone enemy's own view bits stayed in the made cabinet's own bytes,
+    and every shadow started from them; cleared with the record's entry.
+12. The world's bytes in the link memory, some written after the step,
+    where a side run stops: taken from the made board's own run of the count
+    before (Remote::game_at), with what comes after done there too: the HUD
+    task (0x13654, its requests -16364|-16360(r13) with 0x10) calls 0x6252C,
+    which clears the world word's bit 0x400 (unless -16380(r13) has
+    0x300000), then 0x624F4 copies the word (+0x50) and +0x288 of the object
+    at -16068(r13) (+0x5C) into the header. The word's bit 0 is the
+    cabinet's own (0 on the master, 1 on a slave: kCabinetOwn, mask 0x01).
+    Taking this board's copy instead, by frame or by count, broke somewhere
+    each way (cabinets a frame apart lose frames at different times).
+13. The lost-frame rule's threshold: half a frame fired on a 1.71 M-cycle
+    step that lost nothing; 4/5 of a frame now.
+14. The tasks after the drawing. The main loop's walker (0x11DF4) runs the
+    task list from 0x110000 (as many as the ROM's word at 0x8CF64; each with
+    bit 0 of its +0 set: its routine +12, r12 the entry; on by +8). A side
+    run called the walker, which stopped with the drawing's vblank wait, so
+    the tasks after it never ran for a made cabinet: the 2D task (0x135C0,
+    its HUD 0x13654) and the header's copy, 0x5E9F4 at 0x11CF80 (a task,
+    its +0 the word copied into the header +0x50, its run bit the cabinet's
+    own: set on the slave, not on the master). Side runs now walk the list
+    themselves, the drawing stopped at its vblank wait and the rest run
+    (cost: nothing measurable, ~2.9 s of side runs over 2,190 frames either
+    way). A slave's link sends the copy of two counts before (its tasks
+    after the drawing come after its next link), a master's of one.
+15. The real-block check and rollback: a made master's packet comes from
+    its next frame's inputs, maybe still guessed here when this board's
+    frame is settled; made packets are compared once the frame two ahead is
+    settled. With it, 3 of 3 bot runs over the lobby in step (before: 2 of 5).
+16. gamerun crashed at its end in internet tests: the session's thread ran
+    the node check's settled test on boards already gone (g_machines
+    cleared as they go now).
+
+Then (2026-11-07, the 11:53/14:02 builds): unit tests, onepc-tests 14/14,
+onepc-net-tests all the same (apart too), -LeaverFirst, three bot runs over
+the lobby in step, every internet case with 0 hash checks differed (the
+one-board ones and spectators run again alone: a leftover process from one
+case took a seat in the next), the window's onepc-window-test (joiner, host,
+auto, leave), spectate-window-test (switch, oneboard) and net-window-matrix
+(every,one and one,every). Open: the strict finder (side runs alone, two-
+3800.state) differs at 4131 (a made slave loses the frame after the area's
+set-up one frame early) and 9068 (a made master's header copy a count late):
+both the cabinet's own frame timing, put right in play by the real-block
+check; the Codespaces showed single gaps of 2-5 s around joins (this PC
+under 65 ms); and LAN one board without rollback has nothing to put a wrong
+guess right: real packets on a LAN (Mode A) would.
+
+Where it ends offline: both directions the same to 11,339 and 11,375 (the
+header's +0x50 word aside: at the area change its bit 0x80 is a count early
+in the made one; copied around, read by nothing for thousands of frames: the
+finder's -Ignore). At 11,337 the real master lost two frames to its own drawing's
+work (the slave lost none, then held one to wait): a cabinet's own lost
+frames can't be known from side runs. The design's answer is the real-block
+check, and network play showed it needed two fixes:
+
+- Step 2 (copying real values into made records) made things worse once
+  the made records were exact: off (NODE_FIX=1 brings it back for tests).
+- A real node sent as it left could come from a frame run on guessed
+  inputs, which its machine's rollback then ran again: the joiner took it
+  as real and went out of step (5,109). Now each machine sends its own
+  nodes only once their frames are settled there (all inputs in, none
+  guessed; NodeCheck::set_settled), and compares a made packet only once
+  its frame is settled here (a re-run sends it again).
+
+Then, two machines through the lobby, bots, the joiner on one board
+(rbbot.ps1 -Seats 2 -OneBoard @(1) -Load two-3800.state -BotSeed 1,
+--input-delay 2 --net-rollback 12): no difference on either machine over
+9,000 frames (before: out of step at 4,200); the check compared 4,378
+packets, 5 differed (one byte, a record's +0x05). Tools: gamerun
+--ram-hashes B@FRAME FILE (RAM_HASH_IGNORE=LO-HI,...), tools/onepc-diff.ps1
+(-NoShadows, -Ignore), tools/onepc-fuzz.ps1, tools/hash-first-diff.ps1
+(two machines' --ram-hashes in network play: each frame's last row).
+
 ### Rollback's cost with players pressing all the time: the input delay raised as needed (2026-11-06)
 
 With the rollback fix the owner's three-player game (the window, two bot

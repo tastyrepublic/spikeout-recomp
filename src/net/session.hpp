@@ -148,6 +148,8 @@ public:
         // wanting ours whole next (want_backup).
         std::function<void(uint8_t seat, uint64_t frame, std::vector<uint8_t> backup)> backup;
         std::function<void(uint8_t seat)> backup_wanted;
+        // Seat `seat`'s own board's part of its link packet `seq` (send_node: packed as the sender chose).
+        std::function<void(uint8_t seat, uint64_t seq, std::vector<uint8_t> node)> node;
         std::function<void(const std::string&)> log; // what happened, for the frontend
     };
 
@@ -218,6 +220,9 @@ public:
     // asking seat `seat` for its whole next (ours of it is missing what its changes are from).
     void send_backup(uint8_t seat, uint64_t frame, std::vector<uint8_t> backup);
     void want_backup(uint8_t seat);
+    // One board a PC's check: our own board's part of its link packet `seq` (packed: tools::NodeCheck) to every
+    // other player, reliably, so that a machine making our board's packets (side runs) can compare its own with them.
+    void send_node(uint64_t seq, std::vector<uint8_t> node);
     // Tests: our own inputs sent to the others `frames` frames' time (1/60 s each) after they're set, as a slow
     // network's (the others, with rollback, run on on guesses meanwhile).
     void hold_inputs(uint64_t frames);

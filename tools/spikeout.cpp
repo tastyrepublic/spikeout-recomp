@@ -1540,7 +1540,10 @@ void set_up_one_board(Shared& shared) {
         if (shared.ring)
             shared.ring->on_departure([net](std::size_t to, uint64_t seq, uint64_t at, const std::vector<uint8_t>& data) {
                 net->keeper().packet(to, seq, at, data);
+                net->node_check().departed(to, seq, at, data);
             });
+        s.record_fix = [net](std::size_t seat, tools::remote::Block& next, uint32_t rec) { net->node_check().fix_record(seat, next, rec); };
+        s.header_fix = [net](std::size_t seat, const std::function<void(std::size_t, uint8_t)>& put) { net->node_check().fix_header(seat, put); };
         // A spectator on one board (docs/netplay.md, "Spectators on one board"): no machine to ask for a cabinet's state;
         // its shadow is its player's backup run on here to the frame (the backups sent to it from now on, within the
         // players' spare upload: Session::set_watch_one_board; a few kept, its frames behind theirs).
@@ -2397,6 +2400,20 @@ int main(int argc, char** argv) {
             ring->set_deferred(true);
             ring->set_latency((recomp::FrameTiming().frame_cycles() * kTurnLines + recomp::FrameTiming::kLines - 1) /
                               recomp::FrameTiming::kLines);
+            // (the made packets' check (tools::NodeCheck): our own board's to the others, the others' compared as they
+            // run here; one board's set-up adds the backups' keeper to the same hook; a spectator sends none)
+            shared.netplay->node_check().set(boards, shared.spectating ? ~std::size_t{0} : shared.local);
+            shared.netplay->node_check().set_making(true);
+            // (with rollback, our own nodes sent once their frames are settled: none from a run on guesses)
+            shared.netplay->node_check().set_settled(
+                [&shared, boards](uint64_t frame) {
+                    return !shared.rollback || !shared.inputs ||
+                           (shared.inputs->all_set(frame, boards) && shared.inputs->wrong_from() > frame);
+                },
+                recomp::FrameTiming().frame_cycles());
+            ring->on_departure([net = shared.netplay](std::size_t to, uint64_t seq, uint64_t at, const std::vector<uint8_t>& data) {
+                net->node_check().departed(to, seq, at, data);
+            });
             // Every board's state: saved when asked for, sent once the last has
             // saved (all stopped: where the slices meet); or the host's, run on from.
             tools::LinkedState& linked = shared.linked;

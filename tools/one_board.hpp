@@ -176,6 +176,9 @@ public:
         // cabinet on side runs; once it comes, back to its frame, loaded there (shadow_wait).
         std::function<bool(std::size_t seat, uint64_t frame, uint32_t ms)> has_board;
         std::function<void(uint64_t frame)> run_again_from;
+        // (network play: each record made, its cabinet's own bytes from its real ones: tools::NodeCheck::fix_record)
+        remote::Cabinets::RecordFix record_fix;
+        remote::Cabinets::HeaderFix header_fix;
     };
     static constexpr uint64_t kAskAhead = 30; // (frames: the other machine reaching it, its state on its way)
     // (frames from a gone player's last inputs to its board taken whole here, run on from its backup: seat_gone)
@@ -223,6 +226,8 @@ public:
             return in ? remote::held_word(in->bank0, in->controls) : remote::held_word(0xFF, 0xFF);
         };
         m.cabinets = std::make_unique<remote::Cabinets>(m.c, m.bus, m.timing, stays, held);
+        if (settings_.record_fix) m.cabinets->set_record_fix(settings_.record_fix);
+        if (settings_.header_fix) m.cabinets->set_header_fix(settings_.header_fix);
         m.shadow_from = settings_.shadow_from;
         // (shadows from the other machines' real boards need none of the boards' RAM kept: shadow_own_bytes is the local
         // shadows'; 8 MB a count spared)
@@ -319,8 +324,13 @@ public:
         }
         {
             std::scoped_lock guard(m.cabinets_lock, other.cabinets_lock);
-            other.cabinets->hand_back(m.index, m.done_seed.at(count), m.bus.ram(),
-                                      m.last_link_frame ? m.last_link_frame : m.timing.frames() - 1);
+            const auto seed = m.done_seed.find(count);
+            if (seed == m.done_seed.end()) { // (not kept (a going back since): a shadow still, handed back later; it threw)
+                std::printf("board %zu: no seed of count %u to hand back with: a shadow still\n", m.index, count);
+                m.shadowing = true;
+                return true;
+            }
+            other.cabinets->hand_back(m.index, seed->second, m.bus.ram(), m.last_link_frame ? m.last_link_frame : m.timing.frames() - 1);
         }
         std::printf("board %zu: its shadow handed back to board %zu's side runs after count %u (frame %llu)\n", m.index, other.index,
                     count, (unsigned long long)m.timing.frames());
@@ -600,8 +610,9 @@ public:
                 if (late && f > want) {
                     bool back_asked = false;
                     {
-                        std::lock_guard guard(lock_);
-                        back_asked = late_.at(m.index).back_asked;
+                        std::lock_guard guard(lock_); // (gone meanwhile: its late load dealt with, nothing to ask)
+                        const auto l = late_.find(m.index);
+                        back_asked = l == late_.end() || l->second.back_asked;
                     }
                     const uint64_t room = settings_.guess_ahead > kLateRoom ? settings_.guess_ahead - kLateRoom : 0;
                     if (!back_asked) {
@@ -775,6 +786,11 @@ public:
         auto ram = m.bus.ram();
         {
             std::vector<uint32_t> tracked = other.cabinets->own_addresses_list();
+            // (and the characters' fields each cabinet keeps for itself: their kept values below (own.fields), dropped
+            // once a character is set up again; as they were at the hand-over, they came back stale (2026-11-07))
+            for (uint32_t k = 0; k < 12; ++k)
+                for (const auto& [off, size] : remote::kEntryFields)
+                    for (uint32_t b = 0; b < size; ++b) tracked.push_back(remote::character_object(k) + off + b);
             std::sort(tracked.begin(), tracked.end());
             for (uint32_t at : m.shadow_own)
                 if (!std::binary_search(tracked.begin(), tracked.end(), at)) ram[at] = m.shadow_base[at];
@@ -793,6 +809,10 @@ public:
         if (own.regions.size() == remote::kRegionBytes) remote::scatter_regions(ram, own.regions);
         for (uint32_t i = 0; i < 0x80; ++i)
             if (i != 0x100 / 4) m.bus.write32(remote::kWorkingRecord + 4 * i, own.working[i]);
+        for (const auto& f : own.fields) { // (its characters' fields it keeps for itself)
+            if (f.size == 2) m.bus.write16(f.addr, static_cast<uint16_t>(f.value));
+            else m.bus.write32(f.addr, f.value);
+        }
         m.bus.write8(kRole, role);
         std::printf("board %zu: its shadow from board %zu's state after count %u (frame %llu), at frame %llu\n", m.index, other.index,
                     shadow_count_, (unsigned long long)shadow_frame_, (unsigned long long)m.timing.frames());
@@ -873,6 +893,10 @@ private:
         }
         const bool in_game = m.bus.read8(0x10400A) == 7;
         if (!cab.shadowed(gone)) {
+            // (tests: ONEBOARD_NO_SHADOWS=1, none after the first hand-back: side runs alone through everything. A shadow
+            // here starts from this board's state, an approximation; network play's come from the other's real board)
+            static const bool no_shadows = std::getenv("ONEBOARD_NO_SHADOWS") != nullptr;
+            if (no_shadows) return;
             const bool trouble = m.whole || least <= 5 * 64 || !in_game || frame < m.mask_since + 60 || joining;
             bool waiting; // (a state taken, not yet used or refused by the leaving board: not asked again over it)
             {

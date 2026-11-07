@@ -51,6 +51,7 @@ public:
             return;
         }
         Packet p{now_ + state_->latency, state_->sent[index_]++, std::vector<uint8_t>(data, data + size)};
+        if (state_->on_patch) state_->on_patch(index_, p.seq, p.data); // (one board a PC: a made packet, its real one if in)
         if (state_->on_departure) state_->on_departure((index_ + 1) % state_->inbox.size(), p.seq, p.at, p.data);
         if (state_->deferred) {
             state_->outbox[index_].push_back(std::move(p));

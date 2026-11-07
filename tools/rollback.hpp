@@ -128,7 +128,8 @@ public:
         static const bool every = std::getenv("ROLLBACK_EVERY_FRAME_SAVE") != nullptr;
         // (and every kAlways-th frame: a guess not foreseen (the boards filled here told late) goes back to the newest
         // kept before it, never far: its inputs still kept, a few frames more run again)
-        bool want = every || frame % kAlways == 0 || !table_.settled_but(frame + 1, parts_.size(), local_);
+        bool want = every || always_.load(std::memory_order_relaxed) || frame % kAlways == 0 ||
+                    !table_.settled_but(frame + 1, parts_.size(), local_);
         if (!want) {
             std::lock_guard pins(pins_lock_);
             want = std::find(pins_.begin(), pins_.end(), frame) != pins_.end();
@@ -138,6 +139,9 @@ public:
         ++(want ? kept_frames_ : skipped_frames_);
         return want;
     }
+    // Every frame kept, whatever its inputs (one board a PC correcting its made packets, tools::NodeCheck: going back
+    // for a real packet that came late, whose frame lazy snapshots would have let go).
+    void keep_every(bool on) { always_ = on; }
     // The boards whose inputs this machine fills itself (its own; the empty cabinets when it's the authority): never
     // guessed, so not waited for by wants(). Set as it changes (a player taking a cabinet, one dropped).
     void set_local(std::vector<bool> local) {
@@ -310,6 +314,7 @@ private:
     std::vector<bool> local_;
     uint64_t kept_frames_ = 0, skipped_frames_ = 0;
     uint64_t backs_ = 0, frames_again_ = 0;
+    std::atomic<bool> always_{false}; // (keep_every)
     double back_ms_ = 0;
     // (going back's catching up: from going back to the frame after the one it was at, as the report has it)
     mutable std::mutex catch_lock_;

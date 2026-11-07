@@ -18,7 +18,7 @@ using Clock = std::chrono::steady_clock;
 // (2026-11-06) a one-board player's reliable goodbye, sent in one burst as it quit, never came (2 pieces queued, so
 // not its window), and the others held kDropInGame for it; with this datagram too it came. A build without it
 // ignores the type.)
-enum Type : uint8_t { kBeacon = 1, kJoin = 2, kReliable = 3, kInput = 4, kRefuse = 5, kPunch = 6, kGoodbye = 7 };
+enum Type : uint8_t { kBeacon = 1, kJoin = 2, kReliable = 3, kInput = 4, kRefuse = 5, kPunch = 6, kGoodbye = 7, kNodeData = 8 };
 constexpr uint8_t kNoSeat = 0xFF;
 
 // Control messages, on the reliable channel.
@@ -29,7 +29,8 @@ enum Message : uint8_t { kWelcome = 1, kRoster = 2, kStart = 3, kSuspect = 4, kH
                         kWatchInfo = 21,    // (the host to its spectators: every seat as the host sees it, and their count)
                         kWatchers = 22,     // (the host to the players: how many watch, and who)
                         kWatchMode = 23,    // (a spectator to the host: it runs one board: the players' backups wanted)
-                        kStateSize = 24 };  // (before kState: its size, for the receiver's progress)
+                        kStateSize = 24,    // (before kState: its size, for the receiver's progress)
+                        kNode = 25 };       // (its own board's part of a link packet, for one board a PC's check: Session::send_node)
 
 // Spectators (docs/netplay.md, "Spectators"): each talks to the room's host only, sending as kWatcherBase + its
 // number; the players never wait for them, nor count them. They take every seat's inputs from the host and run each
@@ -1154,6 +1155,11 @@ struct Session::Impl {
         if (type == kReliable) on_reliable(from, p, r);
         else if (type == kInput) on_inputs(from, p, r);
         else if (type == kGoodbye && !said_bye[from]) on_bye(from);
+        else if (type == kNodeData && cb.node) { // (a node, as its own datagram: Session::send_node)
+            const uint64_t seq = r.u64();
+            std::vector<uint8_t> node = r.bytes();
+            if (r.ok()) cb.node(from, seq, std::move(node));
+        }
     }
 
     void on_join(const Address& from, Reader& r) {
@@ -1442,6 +1448,12 @@ struct Session::Impl {
             const uint64_t frame = r.u64();
             std::vector<uint8_t> backup = r.bytes();
             if (r.ok() && from < seats && cb.backup) cb.backup(from, frame, std::move(backup));
+            break;
+        }
+        case kNode: { // (its own board's part of a link packet: tools::NodeCheck)
+            const uint64_t seq = r.u64();
+            std::vector<uint8_t> node = r.bytes();
+            if (r.ok() && from < seats && cb.node) cb.node(from, seq, std::move(node));
             break;
         }
         case kWantBackup: // (ours whole next: it hasn't what the changes are from)
@@ -2131,6 +2143,18 @@ void Session::send_backup(uint8_t seat, uint64_t frame, std::vector<uint8_t> bac
     }
     if (seat >= kMaxSeats || seat == m.my_seat || !m.peers[seat].present || m.peers[seat].dropped) return;
     m.send_reliable(seat, w.out);
+}
+
+void Session::send_node(uint64_t seq, std::vector<uint8_t> node) {
+    // (a datagram of its own, twice, not the reliable channel: there it waited behind a one-board backup's pieces, a
+    // second and more, past what rollback can go back for; one lost leaves that packet unchecked)
+    Impl& m = *impl_;
+    std::lock_guard guard(m.lock);
+    Writer w = header(kNodeData, m.session, m.me());
+    w.u64(seq), w.bytes(node);
+    for (uint8_t s = 0; s < kMaxSeats; ++s)
+        if (s != m.my_seat && m.peers[s].present && m.peers[s].connected && !m.peers[s].dropped)
+            for (int k = 0; k < 2; ++k) m.send_peer(m.peers[s], w);
 }
 
 bool Session::seated() const {

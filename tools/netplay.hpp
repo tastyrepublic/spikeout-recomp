@@ -7,6 +7,7 @@
 #include "arcade_settings.hpp"
 #include "board_backup.hpp"
 #include "input_table.hpp"
+#include "node_check.hpp"
 #include "net/lobby.hpp"
 #include "net/session.hpp"
 #include "runtime/commboard.hpp"
@@ -238,8 +239,14 @@ public:
             std::lock_guard guard(lock_);
             whole_wanted_.push_back(seat);
         };
+        cb.node = [this](uint8_t seat, uint64_t seq, std::vector<uint8_t> node) { node_check_.received(seat, seq, node); };
         session_ = std::make_unique<net::Session>(std::move(cb), build);
+        node_check_.set_session(session_.get());
     }
+
+    // One board a PC's check: the packets made here for the other cabinets against their real ones (tools/
+    // node_check.hpp): the ring's on_departure gives it every packet; set() once the game's seats are known.
+    NodeCheck& node_check() { return node_check_; }
 
     // One board a PC: every other board's last backup, the packets to it and its player's inputs since
     // (tools::backup); and the seats wanting this machine's own board's next backup whole, since the last asked.
@@ -480,6 +487,7 @@ private:
     std::map<std::pair<uint8_t, uint64_t>, std::vector<uint8_t>> boards_; // (seat, frame): a board's state, compressed
     std::map<std::pair<uint8_t, uint64_t>, backup::Copy> board_copies_;    // (and "my backup": the copy as it came)
     backup::Keeper keeper_{net::kMaxSeats};
+    NodeCheck node_check_;
     std::atomic<uint64_t> desyncs_{0};
     std::atomic<bool> state_wanted_{false}, resync_pending_{false};
     std::unique_ptr<net::Session> session_; // (its thread, calling back into the above, stops before them)

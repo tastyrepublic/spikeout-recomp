@@ -173,6 +173,23 @@ Read this first; the older hand-off below is history.
   granted), build-jit\cs-*.sh, pc-join.ps1, shots\win.ps1 (the window
   joins, SPIKEOUT_TEST_JOIN), shots\winhost.ps1 (it hosts, SPIKEOUT_TEST_
   HOST), shots\local3.ps1 (all on one PC).
+  ONE BOARD EXACT (2026-11-07, docs/netplay.md "The first difference, found
+  automatically"): tools/onepc-diff.ps1 (gamerun --ram-hashes) finds the
+  first byte a made cabinet's board differs from every board whole and who
+  wrote it; -NoShadows (offline shadows are approximations: network play's
+  come from real boards), -Ignore, -NoBot; tools/onepc-fuzz.ps1;
+  tools/hash-first-diff.ps1 for two machines. 16 causes fixed (per-cabinet
+  enemy fields kept from the hand-over, the world's link bytes, lost frames
+  (4/5 of a frame), side runs walking the whole task list (the tasks after
+  the drawing: 2D/HUD, the header's copy, each cabinet's run bits), a made
+  slave's header two counts back, view tests in the tasks' run...). The
+  real-block check (tools/node_check.hpp): step 2 off (NODE_FIX=1), nodes
+  sent and made packets compared only once settled (+2 frames for made).
+  Every suite, internet case and window test passes. Open: the strict
+  finder at 4131/9068 (a cabinet's own frame timing), Codespace join gaps
+  of 2-5 s, LAN one board needs real packets (Mode A; memory note). Next
+  (owner): bot longplays with 2-4 players through every area, the finder
+  on each checkpoint.
   UPDATE CHECK (2026-11-05, the owner's step 1 of 2; step 2, the game
   updating itself, later): the version is built in (CMake
   SPIKEOUT_VERSION, default PROJECT_VERSION-dev; a release is built with

@@ -101,7 +101,7 @@ constexpr uint32_t kLink = 0x6D758, kLinkSkipped = 0x36E94;
 constexpr uint32_t kTasks = 0x11DF4, kVblankWait = 0x36E04;
 // The task list (each entry: +0 its flags, bit 0 run; +8 the next's offset; +12 its routine), and its 2D task
 // (0x135C0: the HUD's tile maps, through 0x92EC).
-constexpr uint32_t kTaskList = 0x110000, k2dTask = 0x135C0;
+constexpr uint32_t kTaskList = 0x110000, k2dTask = 0x135C0, kTaskCount = 0x8CF64; // (how many tasks the walker runs: the ROM's word)
 // Where the main loop goes on after its call of the tasks; its wake flag (-32709(r13): its idle wait goes on
 // when set, a frame missed counted when 2 or more).
 constexpr uint32_t kTasksReturn = 0x11AE0, kWakeFlag = 0x10004B;
@@ -113,6 +113,9 @@ constexpr uint32_t kBeforeIdle = 0x36F24;
 // waiting for 0x7100B4 to clear when the transfer is done): in a side run that goes through the drawing, no
 // vblank comes and no transfer is made (device writes held), so each is let through there.
 constexpr uint32_t kVblankLoop = 0x36E08, kVblankCount = 0x100038, kTransferLoop = 0x4DD8, kTransferBusy = 0x7100B4;
+// The drawing's copy of the world's words into the link's header (0x624F4, r12 0x11CF80: +0x50 its word, +0x5C the
+// +0x288 of the object at -16068(r13)), before the next link sends them; the drawing changes the word first.
+constexpr uint32_t kHeaderWorld = 0x11CF80, kHeaderObject = 0x10413C;
 // A character's animation step (0x62AF4, r14 the character, from its update): its pose into its buffers
 // (through its +0x2400, in 0x210000-0x22FFFF), which differ between cabinets (the pose of a character a
 // cabinet's camera doesn't see isn't worked out the same) and which its game reads back.
@@ -148,6 +151,12 @@ inline void scatter_regions(std::span<uint8_t> ram, const std::vector<uint8_t>& 
 }
 constexpr uint32_t kLinkMemory = 0x140000, kLinkBytes = 0x10000;
 constexpr std::pair<uint32_t, uint32_t> kLinkVars[] = {{0x100004, 0x100008}, {0x1000A4, 0x1000AC}, {0x106288, 0x106295}};
+// In the link memory, what the game (not the link) writes, the same on every cabinet (the world's): +0x44 (0x5A9A4,
+// 0x5A94C), the header's +0x06 (0x4B4C0), +0x18 (0x6F7B0 from 0x59B8C), +0x3F (0x59C7C), +0x50-0x57 and +0x5C-0x5F
+// (0x624F4 from 0x5EA24, each frame: the master's header sends +0x50 to the others). A made board's link memory
+// takes them from this board's, not its last link's (2026-11-07: +0x53 went stale, tools/onepc-diff.ps1).
+constexpr std::pair<uint32_t, uint32_t> kLinkGameBytes[] = {
+    {0x140044, 0x140046}, {0x140118, 0x14011C}, {0x14013F, 0x140140}, {0x140150, 0x140154}, {0x14015C, 0x140160}};
 // The main loop's own count (-32764(r13), one up at its top every time round: what a link resync puts in the
 // header's +0x20).
 constexpr uint32_t kLoopCount = 0x100004;
@@ -167,13 +176,14 @@ constexpr std::pair<uint32_t, uint32_t> kCabinetOwn[] = {
     {0x104083, 0x104084}, {0x104090, 0x104094}, {0x1040B0, 0x1040BC}, {0x1040C7, 0x1040C8}, {0x1040F0, 0x1040FC},
     {0x104103, 0x104104}, {0x10065B, 0x10065C}, {0x106004, 0x10600C}, {0x106180, 0x106181}, {0x1061B7, 0x1061BB},
     {0x1061CD, 0x1061E6}, {0x106242, 0x10624D}, {0x106268, 0x10626C}, {0x106295, 0x1062A4}, {0x1062AD, 0x1062AE},
-    {0x1062C7, 0x1062C8}, {0x1062DC, 0x1062DD}, {0x100100, 0x100120}, {0x140104, 0x140108}, {0x140300, 0x140304},
+    {0x1062C7, 0x1062C8}, {0x1062DC, 0x1062DD}, {0x100100, 0x100120}, {0x140104, 0x140108}, {0x140154, 0x140157}, {0x11CFD4, 0x11CFD6}, {0x140300, 0x140304},
     {0x1A34A0, 0x1A34C0}, {0x1A74A0, 0x1A74C0}, {0x1AB4A0, 0x1AB4C0}, {0x1AF4A0, 0x1AF4C0}, {0x1B34A0, 0x1B34C0},
     {0x1B74A0, 0x1B74C0}, {0x1BB4A0, 0x1BB4C0}, {0x1BF4A0, 0x1BF4C0}, {0x1C34A0, 0x1C34C0}, {0x1C74A0, 0x1C74C0},
     {0x1CB4A0, 0x1CB4C0}, {0x1CF4A0, 0x1CF4C0},
     {0x1A0003, 0x1A0004}, {0x1A4003, 0x1A4004}, {0x1A8003, 0x1A8004}, {0x1AC003, 0x1AC004}, {0x1B0003, 0x1B0004},
     {0x1B4003, 0x1B4004}, {0x1B8003, 0x1B8004}, {0x1BC003, 0x1BC004}, {0x1C0003, 0x1C0004}, {0x1C4003, 0x1C4004},
-    {0x1C8003, 0x1C8004}, {0x1CC003, 0x1CC004}};
+    {0x1C8003, 0x1C8004}, {0x1CC003, 0x1CC004},
+    {0x11CF83, 0x11CF84}}; // (the world's word kHeaderWorld: its bit 0 a cabinet's own, 0 on the master, 1 on a slave)
 
 inline std::vector<uint32_t> own_addresses() {
     std::vector<uint32_t> out;
@@ -184,6 +194,11 @@ inline std::vector<uint32_t> own_addresses() {
 // A player's object (0..3), an enemy's (0..7).
 constexpr uint32_t player_object(std::size_t seat) { return 0x1A0000 + 0x4000 * static_cast<uint32_t>(seat); }
 constexpr uint32_t character_object(uint32_t k) { return k < 4 ? 0x1A0000 + 0x4000 * k : 0x1B0000 + 0x4000 * (k - 4); }
+// A record's character entry's +4..+7 (0x74808, 0x74884): the low bytes of these fields of the character's object
+// (offset, size). Each cabinet keeps its own: +0x34FC is its logic count when the character was set up (0x1E938),
+// which differs between cabinets by as many counts as one had missed before (two in a bot game: 0x24F against
+// 0x251, an enemy set up long before one board a PC began).
+constexpr std::pair<uint32_t, uint32_t> kEntryFields[4] = {{0x3F02, 2}, {0x3F22, 2}, {0x34A0, 4}, {0x34FC, 4}};
 
 // A seat's buttons word (0x5094's held word: the system board's 0x04 under
 // select 0 in bits 0-7, 0x08 in 8-15, 0x0C in 16-23, 0x04 under select 1 in
@@ -221,9 +236,11 @@ public:
         : c_(c), bus_(bus), timing_(timing), local_(local_seat), held_(std::move(held)), write_at_(write_at), own_(own_addresses()),
           own_mask_(own_.size(), 0xFF) {
         // (a character's first word's low byte: only its view bits, 0x08 on screen and 0x10 near, are a cabinet's own; the rest every board's)
-        for (std::size_t k = 0; k < own_.size(); ++k)
+        for (std::size_t k = 0; k < own_.size(); ++k) {
             for (uint32_t ch = 0; ch < 12; ++ch)
                 if (own_[k] == character_object(ch) + 3) own_mask_[k] = 0x18;
+            if (own_[k] == kHeaderWorld + 3) own_mask_[k] = 0x01; // (the world's word: its bit 0 the cabinet's, 1 on a slave)
+        }
     }
 
     ~Cabinets() { stop_workers(); }
@@ -249,7 +266,7 @@ public:
         Remote* r = find(seat);
         if (!r) return;
         auto word = [&](uint32_t a) { return uint32_t(ram[a]) << 24 | uint32_t(ram[a + 1]) << 16 | uint32_t(ram[a + 2]) << 8 | ram[a + 3]; };
-        r->netboard = &netboard, r->making = true;
+        r->netboard = &netboard, r->making = true, r->working_at.clear(), r->game_at.clear();
         for (uint32_t i = 0; i < kBlockWords; ++i) r->block[i] = word(kBlock + 4 * i);
         r->link.assign(ram.begin() + kLinkMemory, ram.begin() + kLinkMemory + kLinkBytes);
         r->link_vars.clear();
@@ -259,6 +276,15 @@ public:
         for (std::size_t k = 0; k < own_.size(); ++k) r->state_own[k] = ram[own_[k]];
         r->logic = word(kLogicCounter), r->logic_frame = last, r->frame_at[r->logic] = last, r->flow_applied = r->logic;
         r->written_frame = last;
+        for (uint32_t k = 0; k < 12; ++k)
+            for (uint32_t j = 0; j < 4; ++j) {
+                const auto [off, size] = kEntryFields[j];
+                const uint32_t a = character_object(k) + off;
+                auto& kept = r->kept[k][j];
+                kept.theirs = size == 2 ? uint32_t{ram[a]} << 8 | ram[a + 1] : word(a);
+                kept.mine = field(a, size);
+                kept.on = (kept.theirs & 0xFF) != (kept.mine & 0xFF);
+            }
     }
     // Its main board's frame `frame` lost (its work ran past the next
     // wake-up): no block written that frame, so its network board sends
@@ -274,6 +300,10 @@ public:
     struct Shadow {
         std::vector<uint8_t> own, camera, link, link_vars, regions;
         std::array<uint32_t, 0x80> working{};
+        struct Field {
+            uint32_t addr, size, value;
+        };
+        std::vector<Field> fields; // (its characters' fields it keeps for itself (kEntryFields), where this board's differ)
     };
     bool shadow_state(std::size_t seat, uint32_t count, Shadow& out);
     // Whether shadow_state of `count` has what it needs now (nothing printed); and, if not, its link run of this frame
@@ -375,6 +405,13 @@ public:
     // characters' updates and animation, its camera, its shakes and events: all its own code), its own
     // variables, camera and regions kept from them, instead of the camera, shake and animation runs alone.
     void use_tasks(bool on) { tasks_mode_ = on; }
+    // Each record made, before it goes out (network play: tools::NodeCheck::fix_record, the bytes a cabinet keeps
+    // for itself from its real records): the seat, the block, the record's byte offset in it.
+    using RecordFix = std::function<void(std::size_t seat, Block& next, uint32_t rec)>;
+    void set_record_fix(RecordFix fix) { record_fix_ = std::move(fix); }
+    // And its block's header after its link run (tools::NodeCheck::fix_header): `put(offset in the node, byte)`.
+    using HeaderFix = std::function<void(std::size_t seat, const std::function<void(std::size_t, uint8_t)>& put)>;
+    void set_header_fix(HeaderFix fix) { header_fix_ = std::move(fix); }
 
     // In a side run (the board's other hooks are skipped then too).
     bool inside() const { return main_.inside; }
@@ -461,7 +498,21 @@ private:
         uint32_t logic = 0;
         uint64_t logic_frame = 0;
         std::map<uint32_t, uint64_t> frame_at;
+        // (its working record after its flow and tasks of a count, run here: its next count's record, as its link
+        // takes it; this board's own can come later in the frame than its link run)
+        std::map<uint32_t, std::array<uint32_t, 0x80>> working_at;
+        uint32_t viewed = 0; // (the count its own player's view was last tested for in its tasks' run)
+        // (the world's bytes in its link memory (kLinkGameBytes) after its run of a count: its next link sends them)
+        std::map<uint32_t, std::array<uint8_t, 32>> game_at;
         bool shadowed = false; // (a shadow board runs it: nothing here)
+        // (each character's fields its record's entry takes a byte of (kEntryFields), which each cabinet keeps for
+        // itself, as its main board had them when made here began, and this board's then: its own while this board's
+        // stays the same (the character not set up again since))
+        struct Kept {
+            uint32_t mine = 0, theirs = 0;
+            bool on = false;
+        };
+        std::array<std::array<Kept, 4>, 12> kept{};
         // (handing back from its shadow: asked; the count its shadow stops after; for a slave this board's world as
         // its dispatcher of the count after that started, to run that count on as it once handed back; the first
         // link run then takes its working record as its shadow left it)
@@ -566,6 +617,7 @@ private:
     // count while made here, missed frames skipped; before, this board's less its offset.
     uint64_t frame_for(const Remote& r, uint32_t logic) const;
     void make_record(Remote& r, Block& next, const Block& mine, uint32_t logic, uint64_t frame, uint32_t old);
+    uint32_t field(uint32_t a, uint32_t size) { return size == 2 ? uint32_t{bus_.read16(a)} : bus_.read32(a); }
     uint8_t get8(const Block& b, uint32_t byte) const { return static_cast<uint8_t>(b[byte / 4] >> (8 * (3 - byte % 4))); }
     void put8(Block& b, uint32_t byte, uint8_t v) const {
         uint32_t& w = b[byte / 4];
@@ -599,6 +651,8 @@ private:
     ppc::CpuState captured_cpu_{};
     uint32_t idle_msr_ = 0; // (this board's MSR at its last 0x36F24)
     bool tasks_mode_ = false;
+    RecordFix record_fix_;
+    HeaderFix header_fix_;
     uint64_t made_ = 0;
     mutable uint64_t side_runs_ = 0; // (the workers' added in as they settle)
     uint64_t journal_bytes_ = 0;
@@ -647,7 +701,20 @@ private:
         std::map<uint32_t, Prof> profile;
         std::string failed;
         std::vector<uint32_t> ahead;
+        std::vector<std::pair<Remote*, uint32_t>> lost; // (counts whose world step ran long: their cabinet's next frame lost)
     };
+    // A count's world step (its tasks) that ran over 4/5 of a frame: its cabinet's main board would have run past its
+    // next wake-up (its link, flow and drawing besides), so its frame after the one it reached the count in is lost
+    // (no link: the count held a frame, as a real board's). Every cabinet does the same step, so this board loses one
+    // too (2026-11-07: an area's set-up at count 0xC5C, 2.87 M cycles against ~160 k: the master held at 4132, this
+    // board at 4133; 0x265D's 1.71 M, no frame lost: half a frame (1.44 M) was too few; tools/onepc-diff.ps1). A
+    // guess from the step alone (the drawing's share unknown here): a wrong one shows in the real-block check.
+    void lose_after(Remote& r, uint32_t count) const {
+        const uint64_t frame = frame_for(r, count) + 1; // (a slave's step comes before its link reaches the count)
+        if (!missed(r, frame)) r.missed.push_back(frame);
+        if (std::getenv("ONEBOARD_LOST_LOG"))
+            std::printf("seat %zu: count %u's world step long: its frame %llu lost\n", r.seat, count, static_cast<unsigned long long>(frame));
+    }
     struct Exec {
         recomp::Context& c;
         m3::Bus& bus;
@@ -671,9 +738,11 @@ private:
     };
     // (its view of its own player after its tasks of `logic`, its camera's heading)
     void own_view(Exec& e, Remote& r, uint32_t logic) {
-        uint32_t flags = 0;
-        side_run(e, r, kViewTest, &flags, false, 0, player_object(r.seat));
-        r.view_at[{logic, player_object(r.seat)}] = flags;
+        if (r.viewed != logic) { // (else tested in its tasks' run, on their world)
+            uint32_t flags = 0;
+            side_run(e, r, kViewTest, &flags, false, 0, player_object(r.seat));
+            r.view_at[{logic, player_object(r.seat)}] = flags;
+        }
         r.heading_at[logic] = static_cast<uint16_t>(r.camera[kCameraHeading] << 8 | r.camera[kCameraHeading + 1]);
         while (!r.heading_at.empty() && r.heading_at.begin()->first + 16 < logic) r.heading_at.erase(r.heading_at.begin());
         while (!r.view_at.empty() && r.view_at.begin()->first.first + 16 < logic) r.view_at.erase(r.view_at.begin());
@@ -872,6 +941,8 @@ private:
                 if (!heavy_frames_ || s.first_heavy < first_heavy_) first_heavy_ = s.first_heavy;
                 heavy_frames_ += s.heavy;
             }
+            for (const auto& [r, count] : s.lost) lose_after(*r, count);
+            s.lost.clear();
             if (failed_.empty() && !s.failed.empty()) failed_ = s.failed;
             if (w->net->misses && failed_.empty())
                 failed_ = "a side run on a worker read the network board outside its copy (" + std::to_string(w->net->misses) + " reads)";
@@ -1022,13 +1093,38 @@ inline void Cabinets::side_run(Exec& e, Remote& r, uint32_t pc, uint32_t* flags,
                     }
                     e.in_drawing = false;
                 } else {
+                    // (its tasks walked as the main loop's walker (0x11DF4) does: from 0x110000, as many as the ROM's count
+                    // (0x8CF64), each with bit 0 of its +0 run (r12 its entry, its routine +12), on by +8; the drawing's
+                    // stops at its vblank wait and the walk goes on: the tasks after it (its 2D task and HUD, the
+                    // header's copy 0x5E9F4 at 0x11CF80, whose run bit is the cabinet's own) are its too (2026-11-07:
+                    // the walker itself stopped there with the drawing, those never ran). Its header's words as its own
+                    // last link left them first: its copy, if it makes one, over them)
+                    if (r.link.size() == kLinkBytes)
+                        for (uint32_t a : {0x150u, 0x151u, 0x152u, 0x153u, 0x15Cu, 0x15Du, 0x15Eu, 0x15Fu}) e.bus.write8(kLinkMemory + a, r.link[a]);
                     e.in_tasks = true;
                     const uint64_t t0 = e.c.cycles();
-                    try {
-                        e.c.call(kTasks);
-                    } catch (const TasksDrawing&) {
+                    const uint32_t task_count = e.bus.read32(kTaskCount);
+                    uint32_t entry = kTaskList;
+                    for (uint32_t i = 0; i < task_count && i < 1024; ++i) {
+                        if (e.bus.read32(entry) & 1u) {
+                            e.c.cpu = aside.cpu;
+                            e.c.cpu.msr &= ~recomp::Context::kMsrEE;
+                            e.c.cpu.gpr[12] = entry;
+                            try {
+                                e.c.call(e.bus.read32(entry + 12));
+                            } catch (const TasksDrawing&) {
+                            }
+                        }
+                        entry += e.bus.read32(entry + 8);
                     }
                     e.in_tasks = false;
+                    if (e.c.cycles() - t0 > 400'000 && std::getenv("ONEBOARD_LOST_LOG"))
+                        std::printf("seat %zu: count %u's world step %llu cycles\n", r.seat, count,
+                                    static_cast<unsigned long long>(e.c.cycles() - t0));
+                    if (e.c.cycles() - t0 > timing_.frame_cycles() * 4 / 5) {
+                        if (e.stats) e.stats->lost.emplace_back(&r, count);
+                        else lose_after(r, count);
+                    }
                     if (e.c.cycles() - t0 > kHeavyWork) {
                         if (e.stats) { if (!e.stats->heavy++) e.stats->first_heavy = e.at_frame; }
                         else if (!heavy_frames_++) first_heavy_ = timing_.frames();
@@ -1038,6 +1134,24 @@ inline void Cabinets::side_run(Exec& e, Remote& r, uint32_t pc, uint32_t* flags,
                 e.c.cpu.msr &= ~recomp::Context::kMsrEE;
                 e.c.cpu.gpr[12] = kCamera;
                 e.c.call(kCameraView);
+                if (!capture_ && count) { // (and its view test of its own player, on the world its tasks made, as its
+                                          // drawing's: a run of its own started from this board's world, a count behind,
+                                          // saw its player a count late (2026-11-07, tools/onepc-diff.ps1))
+                    e.c.cpu = aside.cpu;
+                    e.c.cpu.msr &= ~recomp::Context::kMsrEE;
+                    const uint32_t player = player_object(r.seat);
+                    e.c.cpu.gpr[14] = player;
+                    for (int k = 0; k < 12; ++k) {
+                        const uint32_t bits = e.bus.read32(kCamera + kViewMatrix + 4 * static_cast<uint32_t>(k));
+                        float f;
+                        std::memcpy(&f, &bits, 4);
+                        const double d = f;
+                        std::memcpy(&e.c.cpu.fpr[static_cast<std::size_t>(20 + k)], &d, 8);
+                    }
+                    e.c.call(kViewTest);
+                    r.view_at[{count, player}] = e.bus.read32(player);
+                    r.viewed = count;
+                }
             }
         }
     } catch (const std::exception& ex) {
@@ -1058,6 +1172,18 @@ inline void Cabinets::side_run(Exec& e, Remote& r, uint32_t pc, uint32_t* flags,
         std::vector<uint32_t>& ahead = e.stats ? e.stats->ahead : ahead_record_;
         ahead.resize(0x80);
         for (uint32_t i = 0; i < 0x80; ++i) ahead[i] = e.bus.read32(kWorkingRecord + 4 * i);
+        if (tasks && count) {
+            auto& w = r.working_at[count];
+            std::copy(ahead.begin(), ahead.end(), w.begin());
+            while (r.working_at.size() > 8) r.working_at.erase(r.working_at.begin());
+            // (and the world's bytes in its link memory, as its run left them: its 2D task's HUD (0x13654) copies the
+            // header's words (0x624F4, through the HUD object's routine 0x5E9F4) when it does, else they stay its own)
+            auto& g = r.game_at[count];
+            std::size_t n = 0;
+            for (const auto& [lo, hi] : kLinkGameBytes)
+                for (uint32_t a = lo; a < hi; ++a) g[n++] = e.bus.read8(a);
+            while (r.game_at.size() > 8) r.game_at.erase(r.game_at.begin());
+        }
         auto& d = r.flow_delta[count];
         d.clear();
         for (std::size_t k = 0; k < own_.size(); ++k)
@@ -1281,7 +1407,10 @@ inline void Cabinets::make_record(Remote& r, Block& next, const Block& mine, uin
     int from = -1;
     for (int s = 0; s < 4; ++s)
         if (mine[(0x100 + s * 0x200 + 0xDC) / 4] == logic) from = s;
-    if (from < 0 && logic == mine[0x1C / 4] + 2 && ahead_record_.size() == 0x80) // (two ahead: its own flow's, just run)
+    const auto worked = r.working_at.find(logic - 1);
+    if (from < 0 && worked != r.working_at.end()) // (its own, after its flow and tasks of the count before, run here)
+        for (uint32_t i = 0; i < 0x80; ++i) next[rec / 4 + i] = worked->second[i];
+    else if (from < 0 && logic == mine[0x1C / 4] + 2 && ahead_record_.size() == 0x80) // (two ahead: its own flow's, just run)
         for (uint32_t i = 0; i < 0x80; ++i) next[rec / 4 + i] = ahead_record_[i];
     else if (from < 0)
         for (uint32_t i = 0; i < 0x80; ++i) next[rec / 4 + i] = bus_.read32(kWorkingRecord + 4 * i);
@@ -1311,7 +1440,11 @@ inline void Cabinets::make_record(Remote& r, Block& next, const Block& mine, uin
         for (uint32_t at : {0x30u, 0x34u}) next[(rec + at) / 4] = r.block[(old + at) / 4];
     if (!(players & (0x80000000u >> 3)))
         for (uint32_t at : {0x3Cu, 0x40u}) next[(rec + at) / 4] = r.block[(old + at) / 4];
-    for (uint32_t byte : {0x47u, 0x5Fu, 0x6Bu, 0x77u}) put8(next, rec + byte, get8(r.block, old + byte));
+    // (an enemy's there only if it was in its block before: one just set up has the bits its set-up gave it (0x1E3FC),
+    // the same on every cabinet, until its cabinet's view tests change them (2026-11-07: enemy 1 at an area's set-up,
+    // 02 sent as 00, tools/onepc-diff.ps1))
+    for (uint32_t byte : {0x47u, 0x5Fu, 0x6Bu, 0x77u})
+        if (r.block[(old + byte - 3) / 4] & 0xFFFFFF00u) put8(next, rec + byte, get8(r.block, old + byte));
     // (every character's view bits, players 1-4 then enemies 1-8, from its camera's tests two counts before; none
     // for one gone since: this board's entry all zero)
     // (a character there only with flags above their low byte: this board's entry can keep its own on-screen bits
@@ -1320,9 +1453,31 @@ inline void Cabinets::make_record(Remote& r, Block& next, const Block& mine, uin
     for (uint32_t k = 0; k < 12; ++k) {
         const uint32_t entry = rec + 0x14 + 12 * k;
         const auto v = r.view_at.find({logic - 2, character_object(k)});
-        if (!(next[entry / 4] & 0xFFFFFF00u)) next[entry / 4] = 0;
-        else if (v != r.view_at.end()) put8(next, entry + 3, static_cast<uint8_t>(v->second));
+        // (its own bytes of the character's fields, kept while this board's record has them as they were (the record's
+        // byte, not the object's now: a character set up again between this board's record and this); a gone
+        // character's too: its flags word goes, its other bytes stay as each cabinet last wrote them)
+        for (uint32_t j = 0; j < 4; ++j) {
+            auto& kept = r.kept[k][j];
+            if (!kept.on) continue;
+            if (std::getenv("KEPT_DEBUG") && j == 3)
+                std::printf("kept: count %u frame %llu character %u: record %02x, here %02x, its %02x\n", logic,
+                            static_cast<unsigned long long>(frame), k, get8(next, entry + 4 + j), kept.mine & 0xFF, kept.theirs & 0xFF);
+            if (get8(next, entry + 4 + j) != static_cast<uint8_t>(kept.mine)) kept.on = false;
+            else put8(next, entry + 4 + j, static_cast<uint8_t>(kept.theirs));
+        }
+        if (!(next[entry / 4] & 0xFFFFFF00u)) {
+            next[entry / 4] = 0;
+            // (and its own bits of the character's first word gone with it, as its record says: kept from its last
+            // view test, a shadow started from them sent them (2026-11-07, tools/onepc-diff.ps1))
+            if (k >= 4)
+                for (std::size_t i = 0; i < own_.size(); ++i)
+                    if (own_[i] == character_object(k) + 3) {
+                        r.own[i] = static_cast<uint8_t>(r.own[i] & ~own_mask_[i]);
+                        if (i < r.state_own.size()) r.state_own[i] = static_cast<uint8_t>(r.state_own[i] & ~own_mask_[i]);
+                    }
+        } else if (v != r.view_at.end()) put8(next, entry + 3, static_cast<uint8_t>(v->second));
     }
+    if (record_fix_) record_fix_(r.seat, next, rec); // (the bytes its cabinet keeps for itself, from its real records)
 }
 
 inline uint64_t Cabinets::frame_for(const Remote& r, uint32_t logic) const {
@@ -1362,10 +1517,41 @@ inline void Cabinets::link_run(Remote& r, uint64_t frame) {
     bus_.journal(true);
     // (its link memory, its own variables as its last link left them, its flows since)
     const auto ram = bus_.ram();
+    // (the world's bytes there: as its own run of the count before left them (Remote::game_at); else this board's now.
+    // Not this board's by count or frame: cabinets a frame apart lose frames at different times, and one ahead has
+    // them before this board, 2026-11-07)
+    std::array<uint8_t, 32> game_bytes{};
+    const auto g = r.game_at.find(logic - 1);
+    if (g != r.game_at.end()) game_bytes = g->second;
+    // (the header's words, which a task after the drawing copies: a slave's link sends the copy of two counts before,
+    // its vblank (and the tasks after its drawing) coming after its next link in its frame (2026-11-07: one count
+    // early, tools/onepc-diff.ps1))
+    if (r.ahead < 0)
+        if (const auto h = r.game_at.find(logic - 2); h != r.game_at.end()) {
+            std::size_t n = 0;
+            for (const auto& [lo, hi] : kLinkGameBytes)
+                for (uint32_t a = lo; a < hi; ++a, ++n)
+                    if ((a >= kLinkMemory + 0x150 && a < kLinkMemory + 0x154) || (a >= kLinkMemory + 0x15C && a < kLinkMemory + 0x160))
+                        game_bytes[n] = h->second[n];
+        }
+    if (std::getenv("GAME_BYTES_LOG"))
+        std::printf("link_run: seat %zu frame %llu count %u: header %s %02x%02x%02x%02x\n", r.seat, static_cast<unsigned long long>(frame),
+                    logic, g != r.game_at.end() ? "made" : "this board's", game_bytes[7], game_bytes[8], game_bytes[9], game_bytes[10]);
+    else {
+        std::size_t n = 0;
+        for (const auto& [lo, hi] : kLinkGameBytes)
+            for (uint32_t a = lo; a < hi; ++a) game_bytes[n++] = ram[a];
+    }
     for (uint32_t at = 0; at < kLinkBytes; at += 64) { // (64 bytes at a time compared first, as put_regions)
         if (std::memcmp(&ram[kLinkMemory + at], &r.link[at], 64) == 0) continue;
         for (uint32_t i = at; i < at + 64; ++i)
             if (ram[kLinkMemory + i] != r.link[i]) bus_.write8(kLinkMemory + i, r.link[i]);
+    }
+    {
+        std::size_t n = 0;
+        for (const auto& [lo, hi] : kLinkGameBytes)
+            for (uint32_t a = lo; a < hi; ++a, ++n)
+                if (ram[a] != game_bytes[n]) bus_.write8(a, game_bytes[n]);
     }
     merge_own(r.state_own);
     if (r.regions.size() == kRegionBytes) put_regions(r.regions); // (its own areas: the entries it processes read its unused players' objects)
@@ -1434,6 +1620,10 @@ inline void Cabinets::link_run(Remote& r, uint64_t frame) {
     const auto ran_to = std::chrono::steady_clock::now();
     side_seconds_ += std::chrono::duration<double>(ran_to - started_at).count();
     ++side_runs_;
+    if (header_fix_) // (its block's header bytes its cabinet keeps for itself, from its real ones: into its network board's copy)
+        header_fix_(r.seat, [this](std::size_t p, uint8_t v) {
+            bus_.write8(kNetBlock + static_cast<uint32_t>((p & ~std::size_t{3}) + (3 - p % 4)), v);
+        });
     bus_.borrow_netboard(nullptr);
     bus_.hold_device_writes(false);
     main_.inside = in_link_ = false;
@@ -1480,7 +1670,7 @@ inline void Cabinets::hand_back(std::size_t seat, const Seed& seed, std::span<co
     r->state_own = seed.own;
     r->first_link_working = true;
     r->catch_up = r->ahead < 0 && !r->saved_world.empty();
-    r->own_snap.clear(), r->link_snap.clear(), r->flow_delta.clear(), r->heading_at.clear(), r->view_at.clear();
+    r->own_snap.clear(), r->link_snap.clear(), r->flow_delta.clear(), r->heading_at.clear(), r->view_at.clear(), r->working_at.clear(), r->game_at.clear();
     // (what its records of the counts to come take from its camera's runs of this one: its heading, its view bits)
     const uint32_t count = seed.own_logic;
     r->heading_at[count] = static_cast<uint16_t>(seed.camera[kCameraHeading] << 8 | seed.camera[kCameraHeading + 1]);
@@ -1517,6 +1707,13 @@ inline bool Cabinets::shadow_state(std::size_t seat, uint32_t count, Shadow& out
     ahead_record_.clear();
     make_record(*r, made, mine, count + 1, frame_for(*r, count + 1), 0x100 + 0x200 * static_cast<uint32_t>(newest(made)));
     for (uint32_t i = 0; i < 0x80; ++i) out.working[i] = made[(0x100 + 0x200 * ((count + 1) & 3)) / 4 + i];
+    out.fields.clear();
+    for (uint32_t k = 0; k < 12; ++k)
+        for (uint32_t j = 0; j < 4; ++j)
+            if (const auto& kept = r->kept[k][j]; kept.on) {
+                const uint32_t a = character_object(k) + kEntryFields[j].first;
+                if (field(a, kEntryFields[j].second) == kept.mine) out.fields.push_back({a, kEntryFields[j].second, kept.theirs});
+            }
     return true;
 }
 

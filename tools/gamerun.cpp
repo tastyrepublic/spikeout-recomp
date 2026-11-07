@@ -342,6 +342,9 @@ struct Options {
     std::vector<Poke> pokes;
     std::vector<Peek> peeks;
     const char* ram_dump = nullptr; // --ram-dump B:LO-HI@FRAME:N FILE
+    const char* ram_hashes = nullptr; // --ram-hashes B@FRAME FILE
+    int ram_hashes_board = 0;
+    uint64_t ram_hashes_from = 0;
     int ram_dump_board = 0;
     uint32_t ram_dump_lo = 0, ram_dump_hi = 0;
     uint64_t ram_dump_from = 0, ram_dump_frames = 0;
@@ -1035,7 +1038,18 @@ void set_up_one_board(std::vector<std::unique_ptr<Machine>>& machines, const Opt
         if (g_ring)
             g_ring->on_departure([net](std::size_t to, uint64_t seq, uint64_t at, const std::vector<uint8_t>& data) {
                 net->keeper().packet(to, seq, at, data);
+                net->node_check().departed(to, seq, at, data);
             });
+        s.record_fix = [net](std::size_t seat, tools::remote::Block& next, uint32_t rec) { net->node_check().fix_record(seat, next, rec); };
+        s.header_fix = [net](std::size_t seat, const std::function<void(std::size_t, uint8_t)>& put) { net->node_check().fix_header(seat, put); };
+        // (with rollback: a made packet sent as its real one once that has come; one come after, and different, gone
+        // back for (tools::NodeCheck, step 3); NODE_CORRECT=0: only told)
+        static const bool correct = !(std::getenv("NODE_CORRECT") && std::getenv("NODE_CORRECT")[0] == '0');
+        if (o.net_rollback && g_ring && correct) {
+            net->node_check().set_correcting([](uint64_t frame) { (*g_machines)[0]->inputs->run_again_from(frame); },
+                                             [stays = o.local_seat] { return (*g_machines)[stays]->timing.frames(); });
+            g_ring->on_patch([net](std::size_t from, uint64_t seq, std::vector<uint8_t>& data) { net->node_check().patch(from, seq, data); });
+        }
     }
     if (!s.net && g_presses) // (its --press list's: bank 0 and the controls)
         s.buttons = [](std::size_t seat, uint64_t frame) -> std::optional<tools::InputTable::Inputs> {
@@ -1966,6 +1980,44 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             std::fwrite(head, sizeof head, 1, file);
             std::fwrite(m.bus.ram().data() + o.ram_dump_lo, 1, o.ram_dump_hi - o.ram_dump_lo, file);
             if (frame + 1 == o.ram_dump_from + o.ram_dump_frames) std::fflush(file);
+        }
+        if (o.ram_hashes && m.index == static_cast<std::size_t>(o.ram_hashes_board) && frame >= o.ram_hashes_from) {
+            // --ram-hashes: the frame, the logic counter, then a hash of each 4 KB page of main RAM (dumped at the
+            // same point as --ram-dump, so two runs compare page for page: tools/onepc-diff.ps1)
+            static std::FILE* file = std::fopen(o.ram_hashes, "wb");
+            // (RAM_HASH_IGNORE=LO-HI,...: hex ranges left out, as zeros (bytes known to differ, to look past them))
+            static const std::vector<std::pair<uint32_t, uint32_t>> ignore = [] {
+                std::vector<std::pair<uint32_t, uint32_t>> v;
+                if (const char* s = std::getenv("RAM_HASH_IGNORE"))
+                    for (const char* p = s; *p;) {
+                        unsigned lo = 0, hi = 0;
+                        int used = 0;
+                        if (std::sscanf(p, "%x-%x%n", &lo, &hi, &used) != 2) break;
+                        v.emplace_back(lo, hi);
+                        p += used;
+                        if (*p == ',') ++p;
+                    }
+                return v;
+            }();
+            static std::vector<uint8_t> copy;
+            const uint8_t* ram = m.bus.ram().data();
+            if (!ignore.empty()) {
+                copy.assign(m.bus.ram().begin(), m.bus.ram().end());
+                for (const auto& [lo, hi] : ignore)
+                    if (hi <= copy.size() && lo < hi) std::fill(copy.begin() + lo, copy.begin() + hi, uint8_t{0});
+                ram = copy.data();
+            }
+            const std::size_t pages = m.bus.ram().size() / 4096;
+            std::vector<uint32_t> row(2 + pages);
+            row[0] = static_cast<uint32_t>(frame), row[1] = m.bus.read32(0x1000A8);
+            for (std::size_t p = 0; p < pages; ++p) {
+                uint64_t h = 0xcbf29ce484222325ull;
+                const uint64_t* w = reinterpret_cast<const uint64_t*>(ram + p * 4096);
+                for (std::size_t i = 0; i < 512; ++i) h = (h ^ w[i]) * 0x100000001b3ull, h ^= h >> 29;
+                row[2 + p] = static_cast<uint32_t>(h ^ (h >> 32));
+            }
+            std::fwrite(row.data(), sizeof(uint32_t), row.size(), file);
+            if (frame % 64 == 0) std::fflush(file);
         }
         for (const Peek& k : o.peeks)
             if (for_board(k.board, m.index) && frame >= k.frame && frame < k.frame + k.frames) {
@@ -3820,6 +3872,15 @@ int main(int argc_given, char** argv_given) {
             o.ram_dump_board = static_cast<int>(board), o.ram_dump_lo = lo, o.ram_dump_hi = hi;
             o.ram_dump_from = frame, o.ram_dump_frames = frames, o.ram_dump = argv[++i];
         }
+        else if (arg == "--ram-hashes" && i + 2 < argc) { // B@FRAME FILE
+            unsigned board = 0;
+            unsigned long long frame = 0;
+            if (std::sscanf(argv[++i], "%u@%llu", &board, &frame) != 2) {
+                std::fprintf(stderr, "gamerun: --ram-hashes B@FRAME FILE\n");
+                return 2;
+            }
+            o.ram_hashes_board = static_cast<int>(board), o.ram_hashes_from = frame, o.ram_hashes = argv[++i];
+        }
         else if (arg == "--peek" && i + 1 < argc) { // [B:]ADDR:LENGTH@FRAME[:N], hex address and length
             Peek k;
             const std::string spec = board_prefix(argv[++i], k.board);
@@ -4136,6 +4197,18 @@ int main(int argc_given, char** argv_given) {
         }
         // (a spectator: the board it watches stands for its own here, never played: Session::local_input takes nothing)
         if (o.net_spectate) o.local_seat = std::min<uint8_t>(o.net_spectate_seat, static_cast<uint8_t>(start->seats - 1));
+        // (the made packets' check (tools::NodeCheck): every machine sends its own board's, and compares the others' as
+        // it runs them (made by side runs, or whole: then always the same); a spectator sends none)
+        netplay->node_check().set(start->seats, o.net_spectate ? ~std::size_t{0} : o.local_seat);
+        netplay->node_check().set_making(true);
+        if (o.net_rollback) // (our own nodes sent once their frames are settled: none from a run on guesses)
+            netplay->node_check().set_settled(
+                [boards = start->seats](uint64_t frame) {
+                    if (!g_machines || g_machines->empty()) return false;
+                    tools::InputTable* t = (*g_machines)[0]->inputs;
+                    return t && t->all_set(frame, boards) && t->wrong_from() > frame;
+                },
+                recomp::FrameTiming().frame_cycles());
         o.clock = start->clock;
         for (std::size_t s = 0; s < start->seats && s < o.board_eeprom.size(); ++s) { // each board from its player's cabinet
             o.board_eeprom[s] = tools::seat_eeprom(*start, s);
@@ -4269,6 +4342,10 @@ int main(int argc_given, char** argv_given) {
             }
         }
         ring->set_latency(o.link_latency);
+        if (o.netplay) // (one board a PC's check: every packet; set_up_one_board's own adds the backups' keeper)
+            ring->on_departure([net = o.netplay](std::size_t to, uint64_t seq, uint64_t at, const std::vector<uint8_t>& data) {
+                net->node_check().departed(to, seq, at, data);
+            });
         if (o.link_trace)
             ring->on_send([left = o.link_trace](std::size_t from, uint64_t at, const std::vector<uint8_t>& data) mutable {
                 if (!left) return;
@@ -4336,6 +4413,11 @@ int main(int argc_given, char** argv_given) {
     if (ring && o.rb_frames) rollback.ring = ring.get();
     std::vector<std::unique_ptr<Machine>> machines;
     g_machines = &machines;
+    // (cleared as the boards go, before the network session stops: its thread's node check reads them (NodeCheck's
+    // settled test; a crash at the end of an internet test, 2026-11-07))
+    struct MachinesGone {
+        ~MachinesGone() { g_machines = nullptr; }
+    } machines_gone;
     auto make_turns = [&] {
         return std::make_unique<tools::Turns>(o.boards, parallel, parallel ? std::function<void()>([&ring, &linked, &rollback, &o, &machines] {
             ring->exchange();
@@ -4472,6 +4554,9 @@ int main(int argc_given, char** argv_given) {
     g_net_rb.reset();
     if (o.net_rollback && o.netplay && ring) { // (--net-rollback)
         g_net_rb = std::make_unique<tools::rollback::Linked>(o.boards, std::max(o.net_rollback, o.net_rollback_depth), ring.get(), inputs);
+        // (one board here correcting its made packets (tools::NodeCheck): every frame kept, a late real packet's frame
+        // there to go back to)
+        if (o.one_board >= 0 && !(std::getenv("NODE_CORRECT") && std::getenv("NODE_CORRECT")[0] == '0')) g_net_rb->keep_every(true);
         for (auto& m : machines)
             g_net_rb->attach(m->index, [mp = m.get()](m3::State& s) {
                 // (one board: the boards on side runs, made by this one's module, their network boards with it; first:
@@ -4663,6 +4748,7 @@ int main(int argc_given, char** argv_given) {
         }
         netplay->session().leave();
         std::printf("Network: %llu hash checks differed\n", static_cast<unsigned long long>(netplay->desyncs()));
+        std::printf("Node check: %s\n", netplay->node_check().report().c_str());
         if (g_net_rb) std::printf("Rollback: %s\n", g_net_rb->report().c_str());
         double wait_max = 0;
         uint64_t sync_waits = 0, long_waits = 0;
