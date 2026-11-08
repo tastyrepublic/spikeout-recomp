@@ -48,6 +48,25 @@ Read this first, then CLAUDE.md's "Latest" and docs/netplay.md "Three cabinets" 
 Everything here is about **one board a PC** (a machine runs only its own board; the other cabinets are "made" on
 it by side runs) in network play with rollback.
 
+## Everything left in the project (2026-11-08), in the owner's order
+
+1. Network play, the owner's plan: (a) the internet case `mixed` (below), (b) one shared network set-up for gamerun
+   and the window (recommended before more `mixed` digging), (c) window tests, then the whole test set.
+2. Network play, also open: the real-world test (the window alone on this PC, bots on the Codespaces; not run, steps
+   below); a gamerun bot's silent crash after being put back in step (below); **LAN one board can't correct a wrong
+   guess** (LAN games run without rollback: the plan is to give it the other cabinets' real link packets, as a cable
+   link (Mode A) would; the internet keeps prediction + rollback); the parallel rollback restore can probably come
+   back (its heap crash is fixed); a vanish in a no-rollback game holds the others 3 s; Codespace join stalls of
+   2-5 s; `tools/onepc-tests.ps1 -Only ONE_CASE` fails; bot longplays with 2-4 players through every area, the
+   finder on each checkpoint.
+3. Players and release: **GitHub issue #1 "8bitdo controller not detected"** (a player's report, 2026-11-08; not
+   looked at; answering on GitHub is public: ask the owner first); the JIT release track in CLAUDE.md "Latest"
+   (CI with LLVM, macOS on the owner's Mac (docs/building-macos.md), download size, Steam Deck, then the JIT the
+   default); the update check's step 2 (the game updating itself); the interpreter for iOS (the window, an iOS
+   build, speed).
+4. Later or optional: smooth motion's ghosts (off by default); the map screen's faces layer in widescreen; speed
+   (the sound's voice rendering, a 68000 idle skip); the owner's final goal after a first release: one shared world.
+
 ## Where things are
 
 - Worktree: `Z:\Emu\spikeout-recomp\.claude\worktrees\lan-play-f60b31`, branch `claude/window-jit`.
