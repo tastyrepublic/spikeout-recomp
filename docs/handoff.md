@@ -1,5 +1,49 @@
 # Hand-off, 2026-11-08 (one board a PC, network play)
 
+## The owner's rules: read before changing ANYTHING
+
+These are the owner's standing rules for this project (from CLAUDE.md, the memory notes and the owner's own words).
+Breaking one costs the owner's trust and time. When unsure, ASK the owner in one short question before acting.
+
+1. **Commit and push only when the owner says so**, each time ("commit and push"). Never on your own. A push goes to
+   the working branch and main is fast-forwarded to it (`git push origin HEAD:main`), as the owner has approved.
+   Never force-push, rebase pushed commits, delete branches, tags or releases, or rewrite history.
+2. **Never commit**: ROM data or anything made from it (dumps, extracted data, recompiled code in build/generated),
+   build folders (`build*/`), `.claude/`, the owner's files in the repo root (`net-log*.txt`, `readme-preview.html`,
+   `spikeout-*.png`, `*.state` save states), anything secret. Stage files by name, never `git add -A` or `.`.
+3. **Nothing public or outside the repo without asking**: no GitHub releases, issues, comments or PRs; no lobby
+   deploy (`npx wrangler deploy` in lobby/) and no Cloudflare changes; no new Codespaces (they cost the owner money;
+   only two run at once; stop them after use: `gh codespace stop`).
+4. **Change only what was asked** (scope discipline). No "while I'm here" refactors, renames, reformatting or
+   cleanups. Unrelated problems you notice: write them down and tell the owner; don't fix them.
+5. **Fidelity to the real Model 3 hardware**: Supermodel first, then MAME, then datasheets (docs/REFERENCES.md).
+   Change the game's behaviour only with evidence; keep the old behaviour selectable (an option or env switch);
+   enhancements default OFF. docs/fidelity.md records every such decision.
+6. **Prove "the same" with hashes**, never by eye: gamerun's RAM/frame/GPU hashes, replays, save states, the finder
+   (tools/onepc-diff.ps1). Say exactly what was tested and what wasn't.
+7. **Every network change passes the WHOLE test set before the owner is asked to commit** (memory network-test-suite):
+   `tools/onepc-tests.ps1` (14/14; 4 skipped without cam3.rec), `tools/onepc-net-tests.ps1` (all the same) and
+   `-Only leave3,vanish3 -LeaverFirst`, the internet cases (`tools/internet-tests.sh`, every case), and the window's
+   own tests for window changes. Bots press all the time in every test (the owner's rule). Report each result.
+8. **Fail fast**: every batch stops at its first failure; every run and every wait has a time limit; read a long
+   run's first lines within a minute or two; check the build is new before trusting a result (the finder prints it).
+9. **Don't rebuild `build\gamerun.exe` while a test uses it** (internet runs, suites): a half-written exe breaks it.
+10. **Explain in plain, simple words** to the owner (English is not their first language): the result first, no
+    invented jargon, short. Ask one question at a time when a decision is theirs.
+11. Things the owner decided (don't change them): network settings are automatic (no menu items for rollback/delay);
+    each player on their own board; one board a PC for weak devices; spectators must never slow the players; no
+    direct-IP option; "quads drawn whole" on; free play is the game's own setting; smooth motion off by default.
+12. Shell edits (sed/perl) mangle `\n` and backslashes in C strings and PowerShell paths: use the Edit tool.
+
+## A starting prompt for a new session (paste this)
+
+> You are continuing work on the Spikeout network play (one board a PC) in the worktree
+> `Z:\Emu\spikeout-recomp\.claude\worktrees\lan-play-f60b31` (branch claude/window-jit). First read
+> `docs/handoff.md` completely, especially "The owner's rules", and follow them exactly: never commit or push unless
+> I say so, change only what I ask, prove results with hashes, run the whole test set for network changes, stop
+> tests at the first failure, and explain to me in simple words. Then tell me in a few lines what you understood the
+> current state and the next step to be, and wait for my go-ahead before changing any file.
+
 Read this first, then CLAUDE.md's "Latest" and docs/netplay.md "Three cabinets" (the full history of this work).
 Everything here is about **one board a PC** (a machine runs only its own board; the other cabinets are "made" on
 it by side runs) in network play with rollback.
@@ -58,6 +102,26 @@ it by side runs) in network play with rollback.
   - So: **the window's own way of running one board differs from gamerun's** in something that matters (the window
     ran at 23 ms a frame then, late; input delay 0; its own rollback loop, its frame pacing, sound on its own thread).
     That is also why step 2 of the plan matters.
+
+### Later the same evening (after c95b0df)
+
+- The window now writes per-frame RAM hashes (SPIKEOUT_RAM_HASHES) and they compare cleanly with gamerun's (all the
+  same over 1,401 frames in a run that stayed in step): the comparison works.
+- But the window bug is **random**: after it failed 2 of 2 (the owner's play test, built 15:35 with all of
+  aa5a6ff's fixes; and autoplay seed 1), 7 automated runs in a row stayed in step
+  (`tools\debug\autoplay-until.ps1`, seeds 1-7, 6,000-8,000 frames, hand-backs in 6 of them, one of them
+  handing back only one cabinet). Re-running until it fails is slow (2 failures in 9 runs).
+- **Recommendation (agreed reasoning with the owner):** move to the plan's step 2, one shared network set-up for
+  gamerun and the window, so the window's one-board path runs in gamerun offline, where `--rollback-sim` and the
+  finder make it repeatable and find the first wrong byte (as they found the bugs fixed in aa5a6ff). Then come back
+  to `mixed` with that.
+- The frame drops the owner saw in these tests are mostly the test's own load: this PC ran the window plus two
+  gamerun bots, each running all three boards (~9 boards on 6 cores); before the hand-back the window itself runs
+  all three boards (held whole until calm): 18-22 ms a frame (12-16 running, 2-4 waiting at its board threads'
+  meetings) against 17.4; dips to 10-30 fps when a bot joins (the whole game's state packed and sent). The owner
+  asked for a real-world test (only the window on this PC, the bots on the Codespaces) to see the frame rate when
+  the PC runs only their game: that test was being set up when this was written (Codespaces synced with KEEP=1;
+  the window hosting 3 on one board, bots joining from UK and India with `tools/codespace.sh join CODE --bot N`).
 
 ### Next steps (exactly)
 
