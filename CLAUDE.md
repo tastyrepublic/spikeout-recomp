@@ -8,6 +8,12 @@
 - Build and test: `cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on-failure`.
   CI builds with warnings as errors on Linux and macOS.
 
+## Hand-off (2026-11-08): read docs/handoff.md FIRST
+
+The current state, the owner's plan (1. internet case `mixed`, 2. one shared network set-up for gamerun and the
+window, 3. window tests), the open one-board bug (the window reproduces it: tools/window-autoplay-test.ps1), what
+was fixed and proven, the new tools and the lessons are all in docs/handoff.md.
+
 ## Latest (2026-11-05)
 
 Read this first; the older hand-off below is history.

@@ -1311,6 +1311,30 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             // (--net-one-board: a shadow of another cabinet is exact in what it sends, not in all of its RAM)
             // (rollback: once every board's inputs up to that frame are in and none guessed wrong, and this board has
             // run it again if it went back: kept until then)
+            // (tests: SPIKEOUT_RAM_HASHES=B@FROM:FILE, board B's main RAM a hash a 4 KB page each frame from FROM, as gamerun
+            // --ram-hashes writes them: a row each time a frame runs (again, after a going back), compared with a gamerun's)
+            if (static const char* spec = std::getenv("SPIKEOUT_RAM_HASHES"); spec && *spec) {
+                static unsigned board_wanted = 0;
+                static unsigned long long from = 0;
+                static std::FILE* file = [&] {
+                    char path[512] = {};
+                    return std::sscanf(spec, "%u@%llu:%511[^\n]", &board_wanted, &from, path) == 3 ? std::fopen(path, "wb") : nullptr;
+                }();
+                if (file && index == board_wanted && frame >= from) {
+                    const auto ram = bus.ram();
+                    const std::size_t pages = ram.size() / 4096;
+                    std::vector<uint32_t> row(2 + pages);
+                    row[0] = static_cast<uint32_t>(frame), row[1] = bus.read32(0x1000A8);
+                    for (std::size_t p = 0; p < pages; ++p) {
+                        uint64_t h = 0xcbf29ce484222325ull;
+                        const uint64_t* w = reinterpret_cast<const uint64_t*>(ram.data() + p * 4096);
+                        for (std::size_t i = 0; i < 512; ++i) h = (h ^ w[i]) * 0x100000001b3ull, h ^= h >> 29;
+                        row[2 + p] = static_cast<uint32_t>(h ^ (h >> 32));
+                    }
+                    std::fwrite(row.data(), sizeof(uint32_t), row.size(), file);
+                    if (frame % 16 == 0) std::fflush(file);
+                }
+            }
             if (frame % 120 == 0 && !(goes && frame > shared.one_board_frame)) {
                 if (shared.rollback) hash_pending[frame] = tools::Recording::ram_hash(bus.ram());
                 else shared.netplay->hash(frame, index, tools::Recording::ram_hash(bus.ram()));
