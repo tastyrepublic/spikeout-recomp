@@ -16,7 +16,8 @@
 param([Parameter(Mandatory)][string]$State, [int]$Boards = 2, [int]$Stays = 1, [int]$From = 3810, [int]$Frames = 4600,
       [string]$Exe = "build\gamerun.exe", [string]$Rom = "Z:\Emu\spikeout-recomp\build\roms\spikeofe", [int]$BotSeed = 1,
       [string[]]$Extra = @(), [string[]]$OneBoard = @("--one-board-auto", "--one-board-held"), [int]$Watch = 3,
-      [string]$Out = "build\onepc-diff", [int]$MaxBytes = 40, [switch]$Build, [switch]$NoShadows, [string]$Ignore = "", [switch]$NoBot)
+      [string]$Out = "build\onepc-diff", [int]$MaxBytes = 40, [switch]$Build, [switch]$NoShadows, [string]$Ignore = "", [switch]$NoBot,
+      [int]$TimeoutMin = 15)
 if ($NoShadows) { $env:ONEBOARD_NO_SHADOWS = "1" } else { Remove-Item Env:ONEBOARD_NO_SHADOWS -ErrorAction SilentlyContinue }
 # (-Ignore "LO-HI,...": hex RAM ranges left out of the comparison, bytes known to differ, to look past them)
 if ($Ignore) { $env:RAM_HASH_IGNORE = $Ignore } else { Remove-Item Env:RAM_HASH_IGNORE -ErrorAction SilentlyContinue }
@@ -44,7 +45,13 @@ if (-not $NoBot) { $common += @("--bot", "$BotSeed") } # (-NoBot: the inputs fro
 
 function run($tag, [string[]]$more) {
     $a = $common + $more
-    $p = Start-Process -PassThru -NoNewWindow -Wait -FilePath $Exe -ArgumentList $a -RedirectStandardOutput "$Out\$tag.txt" -RedirectStandardError "$Out\$tag.err"
+    $p = Start-Process -PassThru -NoNewWindow -FilePath $Exe -ArgumentList $a -RedirectStandardOutput "$Out\$tag.txt" -RedirectStandardError "$Out\$tag.err"
+    # (a time limit: a run that hangs stopped and said, not waited on for hours)
+    if (-not $p.WaitForExit($TimeoutMin * 60000)) {
+        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+        Write-Host "STOPPED: $tag ran over $TimeoutMin minutes (hung?)"
+        exit 3
+    }
     if ($p.ExitCode -ne 0) { Write-Warning "$tag exited $($p.ExitCode): $(Get-Content "$Out\$tag.err" -Tail 3)" }
 }
 
@@ -52,18 +59,26 @@ Add-Type -TypeDefinition @"
 using System; using System.IO; using System.Collections.Generic;
 public static class OnePcDiff {
     // The first row (frame) whose page hashes differ: {frame, counterA, counterB, pages...}, or null.
+    // (each frame's last row: a frame run again after a going back (rollback) has a row each time)
+    static SortedDictionary<uint, int> Last(byte[] x, int row) {
+        var d = new SortedDictionary<uint, int>();
+        for (int o = 0; o + row <= x.Length; o += row) d[BitConverter.ToUInt32(x, o)] = o;
+        return d;
+    }
     public static long[] FirstRow(string a, string b, int pages) {
         int row = (2 + pages) * 4;
         byte[] x = File.ReadAllBytes(a), y = File.ReadAllBytes(b);
-        int n = Math.Min(x.Length, y.Length) / row;
-        for (int r = 0; r < n; ++r) {
-            int o = r * row;
-            if (BitConverter.ToUInt32(x, o) != BitConverter.ToUInt32(y, o)) throw new Exception("frames out of line at row " + r);
+        var lx = Last(x, row); var ly = Last(y, row);
+        int n = 0;
+        foreach (var kv in lx) {
+            int oy;
+            if (!ly.TryGetValue(kv.Key, out oy)) continue;
+            int ox = kv.Value; ++n;
             var diff = new List<long>();
             for (int p = 0; p < pages; ++p)
-                if (BitConverter.ToUInt32(x, o + 8 + 4 * p) != BitConverter.ToUInt32(y, o + 8 + 4 * p)) diff.Add(p);
-            if (diff.Count > 0 || BitConverter.ToUInt32(x, o + 4) != BitConverter.ToUInt32(y, o + 4)) {
-                diff.InsertRange(0, new long[] { BitConverter.ToUInt32(x, o), BitConverter.ToUInt32(x, o + 4), BitConverter.ToUInt32(y, o + 4) });
+                if (BitConverter.ToUInt32(x, ox + 8 + 4 * p) != BitConverter.ToUInt32(y, oy + 8 + 4 * p)) diff.Add(p);
+            if (diff.Count > 0 || BitConverter.ToUInt32(x, ox + 4) != BitConverter.ToUInt32(y, oy + 4)) {
+                diff.InsertRange(0, new long[] { kv.Key, BitConverter.ToUInt32(x, ox + 4), BitConverter.ToUInt32(y, oy + 4) });
                 return diff.ToArray();
             }
         }
@@ -73,9 +88,11 @@ public static class OnePcDiff {
     // The differing bytes of two --ram-dump files of one frame (8-byte header, then RAM from 0): address, a, b.
     public static List<uint[]> Bytes(string a, string b) {
         byte[] x = File.ReadAllBytes(a), y = File.ReadAllBytes(b);
+        const int row = 8 + 0x800000; // (the last of a frame's rows: one each time it ran, after a going back)
+        int ox = Math.Max(0, (x.Length / row - 1) * row), oy = Math.Max(0, (y.Length / row - 1) * row);
         var d = new List<uint[]>();
-        for (int i = 8; i < Math.Min(x.Length, y.Length); ++i)
-            if (x[i] != y[i]) d.Add(new uint[] { (uint)(i - 8), x[i], y[i] });
+        for (int i = 8; i < Math.Min(x.Length - ox, y.Length - oy); ++i)
+            if (x[ox + i] != y[oy + i]) d.Add(new uint[] { (uint)(i - 8), x[ox + i], y[oy + i] });
         return d;
     }
 }

@@ -145,6 +145,10 @@ public:
         bool keep_ram = true;            // the boards' RAM kept at each count (for shadows and hand-backs)
         uint32_t slice = 8;              // the lines between meetings
         bool net = false;                // network play: the buttons from each board's input table (Board::inputs), else from `buttons`
+        // (gamerun --rollback-sim: no network, but the buttons from the input table as network play's, the other seats'
+        // put in late (`feed`: one put in now, where it would be waited for: nothing else would)
+        bool table_inputs = false;
+        std::function<void(std::size_t seat, uint64_t frame)> feed;
         // (no network: a seat's buttons at a frame, bank 0 and controls (nothing: none given anywhere))
         std::function<std::optional<InputTable::Inputs>(std::size_t seat, uint64_t frame)> buttons;
         // (gamerun --one-board-camera: the other board's camera recording, by logic count)
@@ -206,7 +210,9 @@ public:
                 bool guessed = false; // (rollback: a guess where one may be, as a board's own inputs are)
                 if (!in && frame >= table->next(seat)) {
                     const auto waited = std::chrono::steady_clock::now(); // (held_wait_seconds)
-                    in = rolling() && may_guess(frame) ? table->guess(seat, frame, settings_.guess_ahead, guessed) : table->wait(seat, frame);
+                    const bool guess = rolling() && may_guess(frame);
+                    if (!guess && settings_.feed) settings_.feed(seat, frame);
+                    in = guess ? table->guess(seat, frame, settings_.guess_ahead, guessed) : table->wait(seat, frame);
                     held_wait_seconds_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - waited).count();
                     ++held_waits_;
                 }
@@ -233,7 +239,7 @@ public:
         // shadows'; 8 MB a count spared)
         m.keep_ram = settings_.keep_ram && !settings_.ask_board;
         m.one_board_auto = settings_.rules;
-        m.lookahead = settings_.lookahead, m.net_inputs = settings_.net;
+        m.lookahead = settings_.lookahead, m.net_inputs = settings_.net || settings_.table_inputs;
         m.hand_back_at = settings_.hand_back_at;
         m.slice = settings_.slice;
         const uint64_t from = settings_.frame >= 10 ? settings_.frame - 10 : 0;
@@ -858,8 +864,8 @@ private:
                     m.bus.read32(remote::kLogicCounter));
     }
     static void keep_ram(Board& m) { // (at 0x36E94, while wanted: this board's RAM after the count it finished)
+        std::lock_guard guard(m.cabinets_lock); // (keep_ram read with it held: shadow_own_bytes clears it on another thread)
         if (!m.keep_ram || !m.keeping) return;
-        std::lock_guard guard(m.cabinets_lock);
         auto ram = m.bus.ram();
         const uint32_t count = m.bus.read32(remote::kLogicCounter);
         m.ram_at.erase(m.ram_at.lower_bound(count), m.ram_at.end()); // (none from after it: as done_seed, a going back)

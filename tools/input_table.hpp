@@ -78,6 +78,13 @@ public:
         guessed = false;
         if (const auto in = find(b, frame)) return in;
         if (closed_) return std::nullopt;
+        // (guessed before: that guess again, until it is set or gone back over. A new one, from inputs come since, was
+        // what the frame was then compared with: one board here reads a frame's again in later frames (its side runs),
+        // and a frame run on 00 then guessed 1000 was never found wrong once 1000 came (2026-11-08, --rollback-sim 10))
+        if (const auto g = b.guesses.find(frame); g != b.guesses.end()) {
+            guessed = true;
+            return g->second;
+        }
         // (held for kGuessHeld frames past the last in; further: none, a player gone quiet as the drop will have it)
         const Inputs g = b.known && !b.frames.empty() && frame < b.next + kGuessHeld ? b.frames.back() : Inputs{};
         b.guesses[frame] = g;

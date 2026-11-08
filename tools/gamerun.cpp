@@ -293,6 +293,8 @@ struct Options {
     uint32_t watch_lo = 0, watch_hi = 0;      // --watch-write LO-HI@FRAME:N
     uint64_t watch_frame = 0, watch_frames = 1;
     uint64_t rb_from = 0, rb_frames = 0, rb_depth = 4, rb_every = 10; // --rollback-test FRAME:N[:DEPTH[:EVERY[:compare][:quiet][:timed]]]
+    uint64_t rb_force_depth = 0, rb_force_every = 0, rb_force_from = 0; // --rollback-force DEPTH:EVERY[:FROM]
+    uint64_t rb_sim_latency = 0; // --rollback-sim LATENCY
     bool rb_compare = false, rb_quiet = false, rb_timed = false;
     uint64_t host_trace_frame = 0, host_trace_frames = 0; // --net-host-trace FRAME:N
     uint64_t rollback_from = 0, rollback_frames = 0;      // --rollback-probe FRAME:N[:speed]
@@ -774,6 +776,15 @@ std::vector<uint8_t> g_clone_state;
 std::mutex g_clone_lock;
 const char* g_drop_buttons = nullptr; // --drop-buttons DUMP (for made_blocks)
 const std::vector<Press>* g_presses = nullptr; // --press (for made_blocks: a dropped seat's own buttons)
+// A seat's buttons at a frame from the --press list (bank 0 and the controls).
+tools::InputTable::Inputs press_inputs(std::size_t seat, uint64_t frame) {
+    uint8_t in[2] = {0xFF, 0xFF};
+    if (g_presses)
+        for (const Press& p : *g_presses)
+            if (for_board(p.board, seat) && frame >= p.frame && frame < p.frame + p.frames)
+                in[p.bank] = static_cast<uint8_t>(in[p.bank] & ~(1u << p.bit));
+    return tools::InputTable::Inputs{in[0], 0xFF, in[1], 0xFF};
+}
 int g_drop_board = -1; // --drop B (the side camera's buttons are that cabinet's)
 struct Cloned {};
 // --wait-seat B@FROM:UNTIL: thrown at board B's first block after FROM's end; run() holds its blocks
@@ -1043,20 +1054,47 @@ void set_up_one_board(std::vector<std::unique_ptr<Machine>>& machines, const Opt
         s.record_fix = [net](std::size_t seat, tools::remote::Block& next, uint32_t rec) { net->node_check().fix_record(seat, next, rec); };
         s.header_fix = [net](std::size_t seat, const std::function<void(std::size_t, uint8_t)>& put) { net->node_check().fix_header(seat, put); };
         // (with rollback: a made packet sent as its real one once that has come; one come after, and different, gone
-        // back for (tools::NodeCheck, step 3); NODE_CORRECT=0: only told)
-        static const bool correct = !(std::getenv("NODE_CORRECT") && std::getenv("NODE_CORRECT")[0] == '0');
+        // back for (tools::NodeCheck, step 3). Off by default (2026-11-08): with the made packets exact, it put real packets
+        // in that weren't theirs (three players, rollback: out of step at ~4,800 with it, the same over 7,000 frames without;
+        // the window never had it); NODE_CORRECT=1 brings it back)
+        static const bool correct = std::getenv("NODE_CORRECT") && std::getenv("NODE_CORRECT")[0] == '1';
         if (o.net_rollback && g_ring && correct) {
             net->node_check().set_correcting([](uint64_t frame) { (*g_machines)[0]->inputs->run_again_from(frame); },
                                              [stays = o.local_seat] { return (*g_machines)[stays]->timing.frames(); });
             g_ring->on_patch([net](std::size_t from, uint64_t seq, std::vector<uint8_t>& data) { net->node_check().patch(from, seq, data); });
         }
     }
+    if (!s.net && (o.rb_force_every || o.rb_sim_latency)) { // (--rollback-force, -sim: as network play's rollback sets them)
+        s.settled = [](uint64_t) { return true; }; // (forced: every input known)
+        if (o.rb_sim_latency) { // (simulated: the other seats' buttons from the table, put in late (below))
+            const std::size_t boards = o.boards;
+            s.settled = [boards](uint64_t frame) {
+                tools::InputTable* t = (*g_machines)[0]->inputs;
+                return t->all_set(frame, boards) && t->wrong_from() > frame;
+            };
+            s.table_inputs = true, s.guess_ahead = std::max<uint64_t>(12, o.rb_sim_latency + 4); // (past the latency: else waited for, and only this thread puts them in)
+            s.feed = [](std::size_t seat, uint64_t frame) { // (one waited for: come now)
+                tools::InputTable* t = (*g_machines)[0]->inputs;
+                for (uint64_t f = t->next(seat); f <= frame; ++f) t->set(seat, f, press_inputs(seat, f));
+            };
+        }
+        s.part_whole = [](std::size_t board, bool whole, uint64_t) {
+            if (g_net_rb) g_net_rb->set_active(board, whole);
+        };
+        s.rewound = [](std::size_t board) { return g_net_rb ? g_net_rb->rewound_to(board) : 0; };
+        s.pin = [](uint64_t frame) {
+            if (g_net_rb) g_net_rb->pin(frame);
+        };
+    }
     if (!s.net && g_presses) // (its --press list's: bank 0 and the controls)
-        s.buttons = [](std::size_t seat, uint64_t frame) -> std::optional<tools::InputTable::Inputs> {
+        s.buttons = [stays = s.stays](std::size_t seat, uint64_t frame) -> std::optional<tools::InputTable::Inputs> {
             uint8_t in[2] = {0xFF, 0xFF};
             for (const Press& p : *g_presses)
                 if (for_board(p.board, seat) && frame >= p.frame && frame < p.frame + p.frames)
                     in[p.bank] = static_cast<uint8_t>(in[p.bank] & ~(1u << p.bit));
+            // (--rollback-force: the other cabinets' buttons wrong in a frame's first run that will be gone back over, as
+            // a wrong guess's; right when run again)
+            if (seat != stays && g_net_rb && g_net_rb->forced_wrong(frame)) in[1] = static_cast<uint8_t>(in[1] ^ 0x55);
             return tools::InputTable::Inputs{in[0], 0xFF, in[1], 0xFF};
         };
     s.cameras = std::make_shared<std::map<uint32_t, std::vector<uint8_t>>>();
@@ -1640,7 +1678,10 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         if (one_board_goes(o, m.index) && frame >= o.one_board_frame && !m.one_board_handed && !o.one_board_late) { // --one-board B@FRAME
             m.one_board_handed = true;
             if (o.one_board_camera) throw Dropped{2400000, o.slice, true, o.one_board_shadow != 0 || o.one_board_auto};
-            g_one_board.hand_over(m.ob, o.one_board_held); // (--one-board-held: handed back when the rules find it calm)
+            // (tests: ONEBOARD_HOLD_BOARD=N: that board held whole, as a shadow the rules haven't handed back, while the
+            // others go to side runs: one board in a network game of three, one cabinet back, one not yet)
+            static const int hold = std::getenv("ONEBOARD_HOLD_BOARD") ? std::atoi(std::getenv("ONEBOARD_HOLD_BOARD")) : -1;
+            g_one_board.hand_over(m.ob, o.one_board_held || static_cast<int>(m.index) == hold); // (--one-board-held: handed back when the rules find it calm)
         }
         if (o.drop_frame && static_cast<int>(m.index) == o.drop_board && frame == o.drop_frame) // --drop B@FRAME: its PC gone here
             throw Dropped{o.link_standin_at ? o.link_standin_at : 2400000, o.slice};
@@ -2087,7 +2128,19 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             };
             if (g_input_delay && !m.inputs_started) put(frame, {}); // (until the first comes: none held)
             m.inputs_started = true;
-            put(frame + g_input_delay, source);
+            // (--rollback-sim: after the hand-over another seat's own come late, put in below, whole there or not: a
+            // board held whole here runs on its player's inputs from the network, guessed till they come)
+            if (!(o.rb_sim_latency && static_cast<int>(m.index) != o.one_board_stays && frame + g_input_delay > o.one_board_frame))
+                put(frame + g_input_delay, source);
+            // (--rollback-sim: the made seats' buttons, as their machines' would come, `rb_sim_latency` frames late)
+            // (on time in the run's last frames: none of them left on a guess still to be put right)
+            const uint64_t late = o.max_frames && frame + o.rb_sim_latency + 4 >= o.max_frames ? 0 : o.rb_sim_latency;
+            if (o.rb_sim_latency && static_cast<int>(m.index) == o.one_board_stays)
+                for (std::size_t seat = 0; seat < o.boards; ++seat)
+                    if (const uint64_t at = frame + g_input_delay; seat != m.index && one_board_goes(o, seat) && at > late &&
+                                                                   at - late > o.one_board_frame)
+                        for (uint64_t f = std::max(m.inputs->next(seat), o.one_board_frame + 1); f <= at - late; ++f)
+                            m.inputs->set(seat, f, press_inputs(seat, f));
         }
         // (--net-one-board: from the hand-over, only this machine's own board: a shadow of another is exact in what it
         // sends, not in all of its RAM)
@@ -2163,12 +2216,17 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             // (not while catching up (--net-catch-up), as the window: this seat's inputs, the host's until the cabinet is
             // taken, would make it look ahead of a far player while it is well behind them all)
             // (--pace: the window's way instead, a little slower or sooner each frame (below), as players have it)
-            if (g_net_rb && m.index == o.local_seat && !no_sync && !g_catching_up && !o.pace)
+            if (g_net_rb && o.netplay && m.index == o.local_seat && !no_sync && !g_catching_up && !o.pace)
                 for (int k = 0; k < 3000 && o.netplay->lead(m.index).ahead > 4; ++k) {
                     if (k == 0) ++m.sync_waits;
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
-            const auto got = g_net_rb && g_one_board.may_guess(frame) ? m.inputs->guess(m.index, frame, o.net_rollback, guessed, tools::rollback::quiet_ahead(o.net_rollback_depth))
+            // (--rollback-sim: a board here whose inputs come late, not to guess them now (a switch): come now; only the
+            // staying board's thread puts them in, which waits for this one at its meeting)
+            if (o.rb_sim_latency && static_cast<int>(m.index) != o.one_board_stays && g_net_rb && !g_one_board.may_guess(frame))
+                for (uint64_t f = m.inputs->next(m.index); f <= frame; ++f) m.inputs->set(m.index, f, press_inputs(m.index, f));
+            const auto got = g_net_rb && (o.netplay || o.rb_sim_latency) && g_one_board.may_guess(frame) ? // (--rollback-force: none guessed)
+                                  m.inputs->guess(m.index, frame, o.rb_sim_latency ? std::max<uint64_t>(12, o.rb_sim_latency + 4) : o.net_rollback, guessed, tools::rollback::quiet_ahead(o.net_rollback_depth))
                                                                       : m.inputs->wait(m.index, frame);
             if (o.netplay) { // (network play: the longest a frame waited for inputs, and how often over a frame, at the end)
                 const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waited).count();
@@ -2183,7 +2241,7 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             const tools::InputTable::Inputs in_table = *got;
             // (--rollback-test, --net-rollback: the frames it may run again keep theirs)
             // (one board here: a cabinet handed over to the module, which reads its frames around this one's)
-            const uint64_t keep = o.rb_frames ? o.rb_depth + 1 : g_net_rb ? std::max(o.net_rollback, o.net_rollback_depth) + 2 : o.one_board >= 0 ? 64 : 0;
+            const uint64_t keep = o.rb_frames ? o.rb_depth + 1 : o.rb_force_every || o.rb_sim_latency ? o.rb_force_depth + o.rb_sim_latency + 64 : g_net_rb ? std::max(o.net_rollback, o.net_rollback_depth) + 2 : o.one_board >= 0 ? 64 : 0;
             if (frame > keep) m.inputs->forget_before(m.index, frame - keep);
             m.bus.inputs.bank0 = in_table.bank0;
             m.bus.inputs.bank1 = in_table.bank1;
@@ -3637,6 +3695,15 @@ int main(int argc_given, char** argv_given) {
             if (*end == '@') o.watch_frame = std::strtoull(end + 1, &end, 0);
             if (*end == ':') o.watch_frames = std::strtoull(end + 1, &end, 0);
         }
+        else if (arg == "--rollback-sim" && i + 1 < argc) o.rb_sim_latency = std::strtoull(argv[++i], nullptr, 0); // LATENCY: frames
+        else if (arg == "--rollback-force" && i + 1 < argc) { // DEPTH:EVERY[:FROM]: network play's rollback, no network
+            unsigned long long d = 0, e = 0, f = 0;
+            if (std::sscanf(argv[++i], "%llu:%llu:%llu", &d, &e, &f) < 2 || !d || e <= d) {
+                std::fprintf(stderr, "gamerun: --rollback-force DEPTH:EVERY[:FROM] (EVERY over DEPTH)\n");
+                return 2;
+            }
+            o.rb_force_depth = d, o.rb_force_every = e, o.rb_force_from = f;
+        }
         else if (arg == "--rollback-test" && i + 1 < argc) { // FRAME:N[:DEPTH[:EVERY]]
             char* end = nullptr;
             o.rb_from = std::strtoull(argv[++i], &end, 0);
@@ -4556,11 +4623,16 @@ int main(int argc_given, char** argv_given) {
     std::printf("\n\n");
 
     g_net_rb.reset();
-    if (o.net_rollback && o.netplay && ring) { // (--net-rollback)
-        g_net_rb = std::make_unique<tools::rollback::Linked>(o.boards, std::max(o.net_rollback, o.net_rollback_depth), ring.get(), inputs);
+    if (((o.net_rollback && o.netplay) || o.rb_force_every || o.rb_sim_latency) && ring) { // (--net-rollback; --rollback-force, -sim)
+        const uint64_t depth = o.netplay ? std::max(o.net_rollback, o.net_rollback_depth)
+                             : std::max<uint64_t>({o.rb_force_depth + 4, o.rb_sim_latency + 8, 16});
+        const bool sim = o.rb_sim_latency != 0;
+        g_net_rb = std::make_unique<tools::rollback::Linked>(o.boards, depth, ring.get(), inputs);
+        if (o.rb_force_every) g_net_rb->force(o.rb_force_depth, o.rb_force_every, o.rb_force_from, o.max_frames ? o.max_frames : ~0ull), g_net_rb->keep_every(true);
+        if (sim && !std::getenv("ROLLBACK_SIM_LAZY")) g_net_rb->keep_every(true); // (ROLLBACK_SIM_LAZY=1: lazy snapshots, as network play without NODE_CORRECT)
         // (one board here correcting its made packets (tools::NodeCheck): every frame kept, a late real packet's frame
         // there to go back to)
-        if (o.one_board >= 0 && !(std::getenv("NODE_CORRECT") && std::getenv("NODE_CORRECT")[0] == '0')) g_net_rb->keep_every(true);
+        if (o.one_board >= 0 && std::getenv("NODE_CORRECT") && std::getenv("NODE_CORRECT")[0] == '1') g_net_rb->keep_every(true);
         for (auto& m : machines)
             g_net_rb->attach(m->index, [mp = m.get()](m3::State& s) {
                 // (one board: the boards on side runs, made by this one's module, their network boards with it; first:

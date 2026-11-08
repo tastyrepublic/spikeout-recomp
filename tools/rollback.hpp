@@ -28,6 +28,7 @@
 #include <exception>
 #include <functional>
 #include <map>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -142,6 +143,20 @@ public:
     // Every frame kept, whatever its inputs (one board a PC correcting its made packets, tools::NodeCheck: going back
     // for a real packet that came late, whose frame lazy snapshots would have let go).
     void keep_every(bool on) { always_ = on; }
+    // Tests (gamerun --rollback-force, no network): back DEPTH frames every EVERY from FROM, as a wrong guess would.
+    void force(uint64_t depth, uint64_t every, uint64_t from, uint64_t until = ~0ull) {
+        force_depth_ = depth, force_every_ = every, force_from_ = from, force_until_ = until;
+    }
+    // (and whether `frame` is one a forced going back will run again, not gone back over yet: its first run, as a wrong
+    // guess's, given other buttons; any thread)
+    bool forced_wrong(uint64_t frame) const {
+        if (!force_every_ || frame < force_from_) return false;
+        const uint64_t at = force_from_ + ((frame - force_from_) / force_every_) * force_every_ + force_every_ - 1; // (its going back)
+        if (at < force_from_ + force_depth_ || frame + force_depth_ <= at || at + 2 > force_until_) return false; // (none in a going back after the run ends)
+        static const bool always = std::getenv("ROLLBACK_FORCE_WRONG_ALWAYS") != nullptr; // (tests: wrong when run again too)
+        std::lock_guard guard(forced_lock_);
+        return always || !forced_.count(at);
+    }
     // The boards whose inputs this machine fills itself (its own; the empty cabinets when it's the authority): never
     // guessed, so not waited for by wants(). Set as it changes (a player taking a cabinet, one dropped).
     void set_local(std::vector<bool> local) {
@@ -203,11 +218,20 @@ public:
         if (cut) *cut = s.data();
         cuts_[frame] = std::move(s.data());
         if (frame > depth_ + 1) cuts_.erase(cuts_.begin(), cuts_.lower_bound(frame - depth_ - 1));
-        const uint64_t wrong = table_.wrong_from();
+        uint64_t wrong = table_.wrong_from();
+        // (tests, --rollback-force: back `force_depth_` frames every `force_every_`, every input right: what the frames
+        // run again make must be what they made the first time; each frame once)
+        if (force_every_ && frame >= force_from_ + force_depth_ && (frame - force_from_) % force_every_ == force_every_ - 1 &&
+            [&] { std::lock_guard guard(forced_lock_); return forced_.insert(frame).second; }())
+            wrong = std::min(wrong, frame - force_depth_ + 1);
         if (wrong > frame) return 0; // (none, or for a frame not saved yet: at a later meeting)
         // (the frame before it, or the nearest kept before that: kept sparsely further back, the frames between run
-        // again too)
-        const uint64_t back = first->snaps->kept_at_or_before(wrong - 1);
+        // again too. One board here, another made on side runs: one frame further. A made cabinet a frame ahead runs
+        // its frame of a count in this board's frame before, reading that frame's buttons then: the frame before the
+        // wrong one already holds the wrong guess (2026-11-08, gamerun --rollback-sim 10: the frame run again the
+        // same as the first time, out of step for good))
+        const bool making = std::any_of(parts_.begin(), parts_.end(), [](const Part& p) { return !p.active; });
+        const uint64_t back = first->snaps->kept_at_or_before(wrong - 1 - (making && wrong > 2 ? 1 : 0));
         if (back == ~0ull || !cuts_.count(back)) {
             std::fprintf(stderr, "rollback: frame %llu guessed wrong, too far back to go (at %llu)\n", (unsigned long long)wrong,
                          (unsigned long long)frame);
@@ -241,6 +265,8 @@ public:
             catch_t0_ = t0, catch_to_ = frame, catching_ = true; // (quiet(): the time from here to the frame after `frame`)
         }
         back_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (std::getenv("ROLLBACK_LOG")) std::printf("rollback: at frame %llu, wrong from %llu: back to %llu\n", (unsigned long long)frame,
+                                                    (unsigned long long)wrong, (unsigned long long)back);
         return back;
     }
     // A board leaving the meeting: true once after going back.
@@ -315,6 +341,9 @@ private:
     uint64_t kept_frames_ = 0, skipped_frames_ = 0;
     uint64_t backs_ = 0, frames_again_ = 0;
     std::atomic<bool> always_{false}; // (keep_every)
+    uint64_t force_depth_ = 0, force_every_ = 0, force_from_ = 0, force_until_ = ~0ull; // (force)
+    std::set<uint64_t> forced_;
+    mutable std::mutex forced_lock_;
     double back_ms_ = 0;
     // (going back's catching up: from going back to the frame after the one it was at, as the report has it)
     mutable std::mutex catch_lock_;

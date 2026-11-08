@@ -61,7 +61,12 @@ bool os_take_written(void* base, std::size_t bytes, std::vector<std::size_t>& pa
     pages.clear();
     if (!bytes) return true;
     const std::size_t total = (bytes + kPage - 1) / kPage;
-    static thread_local std::vector<void*> found;
+    // (each thread's own list, by pointer, never freed: MinGW's clean-up of a thread_local with a destructor at a
+    // thread's end damaged the heap (2026-11-08: gamerun crashed as its threads ended; the heap crash that dropped the
+    // parallel restore, 2026-11-06))
+    static thread_local std::vector<void*>* found_list = nullptr;
+    if (!found_list) found_list = new std::vector<void*>;
+    std::vector<void*>& found = *found_list;
     found.resize(total);
     ULONG_PTR n = total;
     DWORD granularity = 0;
@@ -390,7 +395,9 @@ Records& records(void* base) {
 
 // What the system has noted since, onto every reader's record (false: it couldn't say).
 bool pass_on(void* base, std::size_t bytes, Records& r) {
-    static thread_local std::vector<std::size_t> noted;
+    static thread_local std::vector<std::size_t>* noted_list = nullptr; // (by pointer, never freed: as os_take_written's)
+    if (!noted_list) noted_list = new std::vector<std::size_t>;
+    std::vector<std::size_t>& noted = *noted_list;
     if (!os_take_written(base, bytes, noted)) return false;
     for (auto& [reader, marks] : r.marks)
         for (const std::size_t p : noted)

@@ -3606,14 +3606,46 @@ frames): done_seed kept the four last counts, and after a going back the
 counts run before it were still there, the one just run let go at once.
 Now each count's seed (and ram_at's RAM) drops the ones from after it.
 
-OPEN: three cabinets, one board here, rollback: still out of step after the
-hand-back (frames 4,200-4,700 in that test). With input delay instead the
-same game stays the same. A frame first run the same as the host's, then
-run again after a going back of a frame or two, came out different, and the
-count stopped there (the link holding the frame: a packet never came). Not
-the side runs' workers (SPIKEOUT_SIDE_THREAD=0), not the made-packet
-correction (NODE_CORRECT=0); the made boards' network boards are in the
-staying board's walk. Next: the link's packets around that frame.
+Then, with rollback (2026-11-08), found with two new offline modes, each
+the same run every time, so the finder reaches the first wrong byte:
+gamerun --rollback-force DEPTH:EVERY[:FROM] (network play's rollback with
+no network: back DEPTH frames every EVERY, the other cabinets' buttons wrong
+in a first run that will be gone back over) and --rollback-sim LATENCY (the
+other seats' buttons put in LATENCY frames late: real guesses, real going
+back; ROLLBACK_SIM_LAZY=1 lazy snapshots as in play; ONEBOARD_HOLD_BOARD=N
+holds that board whole while the others go to side runs). Fixed:
+
+- InputTable::guess guessed a frame again from inputs come since; one
+  board here reads a frame's again in later frames (its side runs), so a
+  frame run on 00 was later guessed 1000, and when 1000 came nothing was
+  wrong: out of step for good. Now a frame's guess stays until it is set
+  or gone back over.
+- A made cabinet a frame ahead reads its buttons in this board's frame
+  before: with a board on side runs, rollback goes back one frame further.
+- The made-packet correction (NodeCheck step 3) put real packets in that
+  weren't theirs: off by default (NODE_CORRECT=1 brings it back; the window
+  never had it). With it, three players went out of step at ~4,800; without,
+  the same over 9,000 frames with ~800 goings back each.
+- Windows: gamerun crashed as its threads ended (1 run in 3, every time in
+  some set-ups): MinGW's clean-up of a thread_local with a destructor
+  freed watched_memory's lists twice. Now held by pointer, never freed.
+  Very likely the heap crash that dropped the parallel restore ("Tried and
+  dropped"). AddressSanitizer and ThreadSanitizer (WSL; TSan needs
+  setarch -R on this kernel) then found one race only, keep_ram read
+  outside its lock (fixed), and nothing else.
+- done_seed and ram_at kept counts from before a going back (above).
+
+Proved: --rollback-sim at 3, 6, 8, 10 and 12 frames with each of three
+staying, the same on every frame; the local suites; build-jit\rbbot.ps1
+-Seats 3 -OneBoard 1 the same on all three machines; every internet case
+but one.
+
+OPEN: the internet case mixed, now about one game in two. It fails when the
+one-board machine (India) hands one cabinet back to side runs and still
+holds the other whole (the host's); a game where both went back together
+passed. The same layout offline (ONEBOARD_HOLD_BOARD=0, --rollback-sim, lazy
+snapshots, the held board's buttons late too) stays the same: something
+only the live game has is still missing from the model.
 
 ### Rollback's cost with players pressing all the time: the input delay raised as needed (2026-11-06)
 
