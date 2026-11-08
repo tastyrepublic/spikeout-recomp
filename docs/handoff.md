@@ -63,7 +63,16 @@ it by side runs) in network play with rollback.
    looked at; answering on GitHub is public: ask the owner first); the JIT release track in CLAUDE.md "Latest"
    (CI with LLVM, macOS on the owner's Mac (docs/building-macos.md), download size, Steam Deck, then the JIT the
    default); the update check's step 2 (the game updating itself); the interpreter for iOS (the window, an iOS
-   build, speed).
+   build, speed). **Player reports (the owner's to-do, 2026-11-08)**: today the released window prints its log only
+   to stdout (lost: it is a GUI program), has no crash handler, and GitHub has no issue template. Planned, smallest
+   first: (1) always write the log to `spikeout.log` in the data folder (+ `spikeout-prev.log`, size capped);
+   (2) a crash report (Windows minidump + last log lines; Linux/macOS crash location in the log; each release keeps
+   its debug symbols on our side); (3) Esc menu "Report a problem": a zip of logs, crash file, settings.ini, version,
+   OS, GPU and controller names (never ROM files or game code), then GitHub's new-issue page with the version filled
+   in, the player attaching it (nothing sent automatically); (4) a "Detailed logging" switch, off by default;
+   (5) on a network desync, the session's inputs + a recent state saved to replay in gamerun; (6) an issue template.
+   Privacy: network logs hold IP addresses, room codes, names: remove addresses or show the player the contents.
+   Ask the owner when to schedule it.
 4. Later or optional: smooth motion's ghosts (off by default); the map screen's faces layer in widescreen; speed
    (the sound's voice rendering, a 68000 idle skip); the owner's final goal after a first release: one shared world.
 
