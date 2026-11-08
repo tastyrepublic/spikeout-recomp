@@ -44,10 +44,19 @@ cs() { timeout 180 gh codespace ssh -c "$1" -- "$2" 2>/dev/null; }
 sync() {
     for c in "$UK" "$IN"; do
         local base files
+        # (stopped at once if a Codespace can't be reached or its build fails: every case would run against nobody,
+        # 2026-11-07: a billing refusal (HTTP 402) ran all twelve that way)
+        local why
+        why=$(timeout 300 gh codespace ssh -c "$c" -- "echo ready" 2>&1 | tr -d '\r')
+        case "$why" in *ready*) ;; *) echo "STOPPED: $c can't be reached: $(echo "$why" | tail -1)"; exit 2 ;; esac
         base=$(cs "$c" "git -C /workspaces/spikeout-recomp rev-parse HEAD" | tr -d '\r')
+        [ -n "$base" ] || { echo "STOPPED: $c gave no commit (its checkout at /workspaces/spikeout-recomp?)"; exit 2; }
         files=$( (git diff --name-only "$base" -- src tools games CMakeLists.txt cmake; git ls-files --others --exclude-standard -- src tools games) | sort -u)
         for f in $files; do [ -f "$f" ] && timeout 120 gh codespace cp -c "$c" "$f" "remote:/workspaces/spikeout-recomp/$f" >/dev/null 2>&1; done
-        say "$c: $(echo $files | wc -w) files, $(cs "$c" "cd /workspaces/spikeout-recomp && sed -i 's/\r\$//' $(echo $files) 2>/dev/null; cmake --build build-codespace --target gamerun 2>&1 | grep -E 'error|Linking CXX executable|no work' | tail -1")"
+        local built
+        built=$(cs "$c" "cd /workspaces/spikeout-recomp && sed -i 's/\r\$//' $(echo $files) 2>/dev/null; cmake --build build-codespace --target gamerun 2>&1 | grep -E 'error|Linking CXX executable|no work' | tail -1")
+        say "$c: $(echo $files | wc -w) files, $built"
+        case "$built" in *error*|"") echo "STOPPED: $c's build failed or said nothing"; exit 2 ;; esac
     done
 }
 stop_all() { cs "$UK" "pkill gamerun; true" >/dev/null; cs "$IN" "pkill gamerun; true" >/dev/null; pkill -f "gamerun" 2>/dev/null; taskkill //F //IM gamerun.exe >/dev/null 2>&1; true; }
@@ -123,12 +132,15 @@ run_case() {
         cs_play "$IN" i-$name FRAMES=5600 -- join "$code" $rb $leave --press 1:coin@2400 --press 1:start@2500 --press 1:beat@2900
         seat_taken "$UK" h-$name 2
         pc_play pc-$name -- --frames 5400 $rb --net-join "$code" --net-catch-up --press 2:coin@3000 --press 2:start@3100
-        if [ "$name" = four ]; then seat_taken "$UK" h-$name 3; cs_play "$IN" j-$name FRAMES=5400 -- join "$code" $rb; fi
-        wait $PC_PID; cs_done "$UK" h-$name; cs_done "$IN" i-$name
+        # (four: the fourth player on this PC too, a second process (the Codespaces run two at most at once, Pro included,
+        # 2026-11-08): each Codespace one player, 4 cores not enough for two)
+        local pc3=$PC_PID
+        if [ "$name" = four ]; then seat_taken "$UK" h-$name 3; pc_play pc-$name-4p -- --frames 5200 $rb --net-join "$code" --net-catch-up; wait $PC_PID; fi
+        wait $pc3; cs_done "$UK" h-$name; cs_done "$IN" i-$name
         local max=0; [ "$name" = vanish ] && max=500 # (the others go on as it vanishes: no hold)
         judge "UK (host)" "$(cs_text "$UK" h-$name)" $max; judge "this PC" "$(cat "$out/pc-$name.txt")" $max
         [ "$name" = vanish ] || judge "India" "$(cs_text "$IN" i-$name)"
-        if [ "$name" = four ]; then cs_done "$IN" j-$name; judge "India, 4P" "$(cs_text "$IN" j-$name)"; fi ;;
+        if [ "$name" = four ]; then judge "this PC, 4P" "$(cat "$out/pc-$name-4p.txt")"; fi ;;
     stall) # (this PC sends nothing for 1.5 s while pressing buttons, then is back: the host goes back for them, no hold)
         cs_play "$UK" h-$name FRAMES=4800 -- host 2 $rb
         local code; code=$(room_of "$UK" h-$name)

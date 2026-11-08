@@ -40,7 +40,11 @@ if ($Mode -eq 'oneboard') {
     $windows += Start-Window 'joiner' ('esc,down,enter' + (',F13' * 8) + ',enter,enter,enter') 'coin@2600,start@2700,beat@3300,beat@3650,coin@6100' $Frames '--net-every-board'
     Start-Sleep -Seconds 1
     # (the spectator, on one board: Watch; Right after the hand-over (about frame 5,300: the other cabinet on side runs): player 2)
-    $windows += Start-Window 'spectator' ('esc,down,enter' + (',F13' * 8) + ',enter,enter,down,enter' + (',F13' * 420) + ',right') '' ($Frames - 400) '--net-one-board'
+    # (the game full by then (the joiner in): its page's Join is "Full", not to be chosen, and the cursor starts on
+    # Watch; Down from there went past it and the spectator stayed in the lobby, 2026-11-07)
+    # (and a second between the game's page opening and Watch: pressed at once, the page wasn't up yet)
+    # (Network play; Join a game; the game; Watch)
+    $windows += Start-Window 'spectator' ('esc,down,enter' + (',F13' * 16) + ',enter' + (',F13' * 4) + ',enter' + (',F13' * 4) + ',enter' + (',F13' * 420) + ',right') '' ($Frames - 400) '--net-one-board'
 } else {
     # (the spectator: Watch; then F12, Right (seat 2), F12, Left (seat 1), F12, a few seconds apart)
     $windows += Start-Window 'spectator' ('esc,down,enter' + (',F13' * 8) + ',enter,enter,down,enter' + $wait + ',F12' + $wait + ',right' + $wait + ',F12' + $wait + ',left' + $wait + ',F12') '' ($Frames - 300) '--net-every-board'

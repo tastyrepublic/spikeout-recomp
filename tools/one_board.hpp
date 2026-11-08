@@ -861,7 +861,9 @@ private:
         if (!m.keep_ram || !m.keeping) return;
         std::lock_guard guard(m.cabinets_lock);
         auto ram = m.bus.ram();
-        m.ram_at[m.bus.read32(remote::kLogicCounter)].assign(ram.begin(), ram.end());
+        const uint32_t count = m.bus.read32(remote::kLogicCounter);
+        m.ram_at.erase(m.ram_at.lower_bound(count), m.ram_at.end()); // (none from after it: as done_seed, a going back)
+        m.ram_at[count].assign(ram.begin(), ram.end());
         while (m.ram_at.size() > 3) m.ram_at.erase(m.ram_at.begin());
     }
 
@@ -1066,6 +1068,10 @@ private:
             seed.own_logic = m.bus.read32(remote::kLogicCounter);
             const uint32_t count = seed.own_logic;
             std::lock_guard guard(m.cabinets_lock);
+            // (none from after it: a going back runs counts again, and the ones it had run before, kept, were the four
+            // last, the one just run the first let go: a shadow then never found its seed, never handed back, the
+            // staying board holding its frames for its packets (three cabinets, rollback, 2026-11-08))
+            m.done_seed.erase(m.done_seed.lower_bound(count), m.done_seed.end());
             m.done_seed[count] = std::move(seed);
             while (m.done_seed.size() > 4) m.done_seed.erase(m.done_seed.begin());
             if (m.shadowing) { // (a shadow: stopped here when the module wants it back, after this count (0: not asked yet,

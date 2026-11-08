@@ -792,6 +792,12 @@ bool Menu::handle_event(const SDL_Event& e) {
         case SDL_SCANCODE_RETURN:
         case SDL_SCANCODE_KP_ENTER:
         case SDL_SCANCODE_SPACE:
+            if (static const bool tell = std::getenv("SPIKEOUT_MENU_KEYS") != nullptr; tell && !stack_.empty()) { // (tests driving it)
+                std::printf("spikeout: menu: Enter on \"%s\" (item %d of %zu on \"%s\")%s\n",
+                            static_cast<size_t>(selected_) < stack_.back().items.size() ? stack_.back().items[static_cast<size_t>(selected_)].label.c_str() : "?",
+                            selected_, stack_.back().items.size(), stack_.back().name.c_str(), e.key.repeat ? " (a repeat)" : "");
+                std::fflush(stdout);
+            }
             if (!e.key.repeat) activate();
             break;
         case SDL_SCANCODE_ESCAPE:

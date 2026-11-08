@@ -2174,6 +2174,10 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
                 const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waited).count();
                 m.input_wait_max = std::max(m.input_wait_max, ms);
                 if (ms > 1000.0 / recomp::FrameTiming::kRefreshHz) ++m.input_waits_long;
+                if (ms > 500) // (a long one: when, and whether guesses were allowed then (a hand-back's switch stops them))
+                    std::printf("net: board %zu frame %llu waited %.0f ms for its inputs (%s)\n", m.index,
+                                static_cast<unsigned long long>(frame), ms,
+                                !g_net_rb ? "no rollback" : g_one_board.may_guess(frame) ? "guesses allowed" : "no guesses: a switch");
             }
             if (!got) throw recomp::OutOfBudget(m.c.cpu.pc); // (the session ended)
             const tools::InputTable::Inputs in_table = *got;

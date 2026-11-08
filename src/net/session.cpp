@@ -18,7 +18,10 @@ using Clock = std::chrono::steady_clock;
 // (2026-11-06) a one-board player's reliable goodbye, sent in one burst as it quit, never came (2 pieces queued, so
 // not its window), and the others held kDropInGame for it; with this datagram too it came. A build without it
 // ignores the type.)
-enum Type : uint8_t { kBeacon = 1, kJoin = 2, kReliable = 3, kInput = 4, kRefuse = 5, kPunch = 6, kGoodbye = 7, kNodeData = 8 };
+// (kUrgent: a drop's messages (kSuspect, kHave, kIdle) as datagrams too, beside the reliable ones: in internet tests a
+// player's goodbye held the others 2-5 s, those waiting behind one-board backups' pieces in the reliable channel,
+// 2026-11-07; each harmless twice)
+enum Type : uint8_t { kBeacon = 1, kJoin = 2, kReliable = 3, kInput = 4, kRefuse = 5, kPunch = 6, kGoodbye = 7, kNodeData = 8, kUrgent = 9 };
 constexpr uint8_t kNoSeat = 0xFF;
 
 // Control messages, on the reliable channel.
@@ -561,6 +564,17 @@ struct Session::Impl {
     void send_all(const std::vector<uint8_t>& message, uint8_t except = kNoSeat) {
         for (uint8_t s = 0; s < kMaxSeats; ++s)
             if (s != except && s != my_seat && peers[s].present && peers[s].connected) send_reliable(s, message);
+    }
+    // (a drop's message: reliable, and three datagrams of its own that no queued piece holds back)
+    void send_urgent(uint8_t seat, const std::vector<uint8_t>& message) {
+        send_reliable(seat, message);
+        Writer w = header(kUrgent, session, me());
+        w.bytes(message);
+        for (int k = 0; k < 3; ++k) send_peer(peers[seat], w);
+    }
+    void send_all_urgent(const std::vector<uint8_t>& message, uint8_t except = kNoSeat) {
+        for (uint8_t s = 0; s < kMaxSeats; ++s)
+            if (s != except && s != my_seat && peers[s].present && peers[s].connected) send_urgent(s, message);
     }
 
     // Spectator traffic's speed (the owner's rules, 2026-11-04): never before the players' own, held to a rate shared by
@@ -1155,7 +1169,10 @@ struct Session::Impl {
         if (type == kReliable) on_reliable(from, p, r);
         else if (type == kInput) on_inputs(from, p, r);
         else if (type == kGoodbye && !said_bye[from]) on_bye(from);
-        else if (type == kNodeData && cb.node) { // (a node, as its own datagram: Session::send_node)
+        else if (type == kUrgent) { // (a drop's message, as its own datagram: send_urgent)
+            std::vector<uint8_t> m = r.bytes();
+            if (r.ok() && !m.empty() && (m[0] == kSuspect || m[0] == kHave || m[0] == kIdle)) on_message(from, m);
+        } else if (type == kNodeData && cb.node) { // (a node, as its own datagram: Session::send_node)
             const uint64_t seq = r.u64();
             std::vector<uint8_t> node = r.bytes();
             if (r.ok()) cb.node(from, seq, std::move(node));
@@ -1488,7 +1505,7 @@ struct Session::Impl {
             d.suspected = true;
             Writer w;
             w.u8(kHave), w.u8(s), w.u64(streams[s].next());
-            send_reliable(from, w.out);
+            send_urgent(from, w.out);
             break;
         }
         case kHave: {
@@ -1705,7 +1722,7 @@ struct Session::Impl {
                 d.answers.clear();
                 Writer w;
                 w.u8(kSuspect), w.u8(s);
-                send_all(w.out, s);
+                send_all_urgent(w.out, s);
             }
             uint64_t x = streams[s].next();
             bool all = true;
@@ -1719,7 +1736,7 @@ struct Session::Impl {
             d.announced = true;
             Writer w;
             w.u8(kIdle), w.u8(s), w.u64(x);
-            send_all(w.out, s);
+            send_all_urgent(w.out, s);
             set_idle(s, x);
         }
     }

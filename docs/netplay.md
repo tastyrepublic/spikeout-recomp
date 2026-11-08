@@ -3573,6 +3573,48 @@ packets, 5 differed (one byte, a record's +0x05). Tools: gamerun
 (-NoShadows, -Ignore), tools/onepc-fuzz.ps1, tools/hash-first-diff.ps1
 (two machines' --ram-hashes in network play: each frame's last row).
 
+#### Three cabinets (2026-11-08)
+
+The internet cases mixed and mixed-host1 (three players, one machine on one
+board, two cabinets made there) went out of step. The finder on three
+cabinets (three-6000.state, side runs alone, -OneBoard --one-board-tasks as
+network play runs) found, in order:
+
+- A made link's world bytes (kLinkGameBytes) were always this board's: the
+  fallback to this board's RAM sat in the else of the GAME_BYTES_LOG print,
+  so the made cabinet's own (Remote::game_at) were used only while logging
+  (a slip in 116b566). The rule taking a slave's header words from two counts
+  back had only ever run that way; once in force it was wrong (a master
+  staying: one link late), and is gone: every made link sends what its run
+  of the count before left.
+- The header task's entry (0x11CF80-0x11CFFF: the HUD object whose flags
+  word 0x624F4 copies into the header's +0x50) is each cabinet's own: a
+  third cabinet changed it 9 frames after the other two. It was the world's
+  but for bit 0 of its word; now in kCabinetOwn whole.
+- A hand-back seeded its view bits of the count it stopped after, not of
+  the one before, which the next made record carries: that one took this
+  board's. Now from the shadow's working record (filled as the count ran).
+
+The finder: the same on every frame, 6,010-9,000, with each of the three
+staying, and on two cabinets with each staying (no shadows; with shadows,
+offline's approximation, from 8,950).
+
+Then, in network play with rollback (build-jit\rbbot.ps1 -Seats 3 -OneBoard 1):
+a shadow handed back after a going back found no seed of its count ("no
+seed of count N: a shadow still", for ever, the staying board holding its
+frames): done_seed kept the four last counts, and after a going back the
+counts run before it were still there, the one just run let go at once.
+Now each count's seed (and ram_at's RAM) drops the ones from after it.
+
+OPEN: three cabinets, one board here, rollback: still out of step after the
+hand-back (frames 4,200-4,700 in that test). With input delay instead the
+same game stays the same. A frame first run the same as the host's, then
+run again after a going back of a frame or two, came out different, and the
+count stopped there (the link holding the frame: a packet never came). Not
+the side runs' workers (SPIKEOUT_SIDE_THREAD=0), not the made-packet
+correction (NODE_CORRECT=0); the made boards' network boards are in the
+staying board's walk. Next: the link's packets around that frame.
+
 ### Rollback's cost with players pressing all the time: the input delay raised as needed (2026-11-06)
 
 With the rollback fix the owner's three-player game (the window, two bot

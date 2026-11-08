@@ -28,6 +28,7 @@ if ($Build) { # (-Build: gamerun built first; stops on a failed build)
     if ($LASTEXITCODE) { $log | Select-String "error" | Select-Object -First 5 | Write-Host; throw "build failed" }
 }
 New-Item -ItemType Directory -Force $Out | Out-Null
+$Out = (Resolve-Path $Out).Path # (whole: .NET's file calls read paths from the process's folder, not PowerShell's)
 # (which build: the exe's time against the newest source's, so a run on an old one shows at once)
 $newest = Get-ChildItem tools\*.hpp, tools\*.cpp, src -Recurse -File -Include *.hpp, *.cpp | Sort-Object LastWriteTime | Select-Object -Last 1
 $built = (Get-Item $Exe).LastWriteTime

@@ -158,6 +158,9 @@ foreach ($t in $leaves) {
     }
     if ($how -eq 'vanish') { # (each other machine's replay of the board, where the board itself ran: the same)
         $leaverBoard = if ($LeaverFirst -and $seats -gt 2) { 1 } else { $leaver } # (-LeaverFirst: its board, seat 2)
+        # (the seat it got, as its own output says: the joins race, a leaver joining first gets seat 2 anyway)
+        $seatLine = Select-String -Path "$out/$name-$leaver.txt" -Pattern 'joined .*, seat (\d+)' | Select-Object -First 1
+        if ($seatLine) { $leaverBoard = [int]$seatLine.Matches[0].Groups[1].Value - 1 }
         for ($k = 0; $k -lt $leaver; $k++) {
             $r = @(Select-String -Path "$out/$name-$k.txt" -Pattern "^replay board $leaverBoard frame").Count
             if (-not $r) { $failed++; "$name : machine $k didn't run board $leaverBoard on from its backup" }

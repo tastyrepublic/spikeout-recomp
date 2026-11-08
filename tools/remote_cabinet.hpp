@@ -176,14 +176,16 @@ constexpr std::pair<uint32_t, uint32_t> kCabinetOwn[] = {
     {0x104083, 0x104084}, {0x104090, 0x104094}, {0x1040B0, 0x1040BC}, {0x1040C7, 0x1040C8}, {0x1040F0, 0x1040FC},
     {0x104103, 0x104104}, {0x10065B, 0x10065C}, {0x106004, 0x10600C}, {0x106180, 0x106181}, {0x1061B7, 0x1061BB},
     {0x1061CD, 0x1061E6}, {0x106242, 0x10624D}, {0x106268, 0x10626C}, {0x106295, 0x1062A4}, {0x1062AD, 0x1062AE},
-    {0x1062C7, 0x1062C8}, {0x1062DC, 0x1062DD}, {0x100100, 0x100120}, {0x140104, 0x140108}, {0x140154, 0x140157}, {0x11CFD4, 0x11CFD6}, {0x140300, 0x140304},
+    {0x1062C7, 0x1062C8}, {0x1062DC, 0x1062DD}, {0x100100, 0x100120}, {0x140104, 0x140108}, {0x140154, 0x140157}, {0x140300, 0x140304},
     {0x1A34A0, 0x1A34C0}, {0x1A74A0, 0x1A74C0}, {0x1AB4A0, 0x1AB4C0}, {0x1AF4A0, 0x1AF4C0}, {0x1B34A0, 0x1B34C0},
     {0x1B74A0, 0x1B74C0}, {0x1BB4A0, 0x1BB4C0}, {0x1BF4A0, 0x1BF4C0}, {0x1C34A0, 0x1C34C0}, {0x1C74A0, 0x1C74C0},
     {0x1CB4A0, 0x1CB4C0}, {0x1CF4A0, 0x1CF4C0},
     {0x1A0003, 0x1A0004}, {0x1A4003, 0x1A4004}, {0x1A8003, 0x1A8004}, {0x1AC003, 0x1AC004}, {0x1B0003, 0x1B0004},
     {0x1B4003, 0x1B4004}, {0x1B8003, 0x1B8004}, {0x1BC003, 0x1BC004}, {0x1C0003, 0x1C0004}, {0x1C4003, 0x1C4004},
     {0x1C8003, 0x1C8004}, {0x1CC003, 0x1CC004},
-    {0x11CF83, 0x11CF84}}; // (the world's word kHeaderWorld: its bit 0 a cabinet's own, 0 on the master, 1 on a slave)
+    // (the header task kHeaderWorld's fields: its HUD object, each cabinet's own (its flags word changes with its own timing:
+    // a third cabinet's 9 frames after the others', 2026-11-07, tools/onepc-diff.ps1); bit 0 of its word 0 on the master, 1 on a slave)
+    {0x11CF80, 0x11D000}};
 
 inline std::vector<uint32_t> own_addresses() {
     std::vector<uint32_t> out;
@@ -239,7 +241,6 @@ public:
         for (std::size_t k = 0; k < own_.size(); ++k) {
             for (uint32_t ch = 0; ch < 12; ++ch)
                 if (own_[k] == character_object(ch) + 3) own_mask_[k] = 0x18;
-            if (own_[k] == kHeaderWorld + 3) own_mask_[k] = 0x01; // (the world's word: its bit 0 the cabinet's, 1 on a slave)
         }
     }
 
@@ -1523,25 +1524,17 @@ inline void Cabinets::link_run(Remote& r, uint64_t frame) {
     std::array<uint8_t, 32> game_bytes{};
     const auto g = r.game_at.find(logic - 1);
     if (g != r.game_at.end()) game_bytes = g->second;
-    // (the header's words, which a task after the drawing copies: a slave's link sends the copy of two counts before,
-    // its vblank (and the tasks after its drawing) coming after its next link in its frame (2026-11-07: one count
-    // early, tools/onepc-diff.ps1))
-    if (r.ahead < 0)
-        if (const auto h = r.game_at.find(logic - 2); h != r.game_at.end()) {
-            std::size_t n = 0;
-            for (const auto& [lo, hi] : kLinkGameBytes)
-                for (uint32_t a = lo; a < hi; ++a, ++n)
-                    if ((a >= kLinkMemory + 0x150 && a < kLinkMemory + 0x154) || (a >= kLinkMemory + 0x15C && a < kLinkMemory + 0x160))
-                        game_bytes[n] = h->second[n];
-        }
-    if (std::getenv("GAME_BYTES_LOG"))
-        std::printf("link_run: seat %zu frame %llu count %u: header %s %02x%02x%02x%02x\n", r.seat, static_cast<unsigned long long>(frame),
-                    logic, g != r.game_at.end() ? "made" : "this board's", game_bytes[7], game_bytes[8], game_bytes[9], game_bytes[10]);
     else {
         std::size_t n = 0;
         for (const auto& [lo, hi] : kLinkGameBytes)
             for (uint32_t a = lo; a < hi; ++a) game_bytes[n++] = ram[a];
     }
+    // (the header's words with them, as every cabinet's link sends the copy its drawing made the count before (a rule
+    // taking a slave's from two counts before was only ever in force with GAME_BYTES_LOG set, a slip: wrong once in
+    // force, three cabinets, 2026-11-07))
+    if (std::getenv("GAME_BYTES_LOG"))
+        std::printf("link_run: seat %zu frame %llu count %u: header %s %02x%02x%02x%02x\n", r.seat, static_cast<unsigned long long>(frame),
+                    logic, g != r.game_at.end() ? "made" : "this board's", game_bytes[7], game_bytes[8], game_bytes[9], game_bytes[10]);
     for (uint32_t at = 0; at < kLinkBytes; at += 64) { // (64 bytes at a time compared first, as put_regions)
         if (std::memcmp(&ram[kLinkMemory + at], &r.link[at], 64) == 0) continue;
         for (uint32_t i = at; i < at + 64; ++i)
@@ -1677,6 +1670,10 @@ inline void Cabinets::hand_back(std::size_t seat, const Seed& seed, std::span<co
     for (uint32_t k = 0; k < 12; ++k) {
         const uint32_t ch = character_object(k);
         r->view_at[{count, ch}] = uint32_t(ram[ch]) << 24 | uint32_t(ram[ch + 1]) << 16 | uint32_t(ram[ch + 2]) << 8 | ram[ch + 3];
+        // (and the count before's, which its next record carries: its working record, filled as this count ran, has
+        // them; without, that record kept this board's own view bits (three cabinets, 2026-11-07, tools/onepc-diff.ps1))
+        const uint32_t w = kWorkingRecord + 0x14 + 12 * k;
+        r->view_at[{count - 1, ch}] = uint32_t(ram[w]) << 24 | uint32_t(ram[w + 1]) << 16 | uint32_t(ram[w + 2]) << 8 | ram[w + 3];
     }
 }
 
