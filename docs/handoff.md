@@ -122,6 +122,16 @@ it by side runs) in network play with rollback.
   asked for a real-world test (only the window on this PC, the bots on the Codespaces) to see the frame rate when
   the PC runs only their game: that test was being set up when this was written (Codespaces synced with KEEP=1;
   the window hosting 3 on one board, bots joining from UK and India with `tools/codespace.sh join CODE --bot N`).
+  **It was NOT run**: the session ended while the Codespaces were building; their build was stopped half-way and
+  both Codespaces were stopped (nothing left running). To run it (ask the owner first; it uses Codespace time):
+  1. `KEEP=1 bash tools/internet-tests.sh sync-only` (copies this checkout's changed sources to both Codespaces and
+     builds there; "(no such case)" at the end is expected; KEEP=1 leaves them on).
+  2. `tools\window-play-test.ps1 -LocalBots 0` (the window hosts 3 on one board with sound; prints the room code).
+  3. Each Codespace joins it (UK and India, names from `gh api user/codespaces`):
+     `gh codespace ssh -c NAME -- "cd /workspaces/spikeout-recomp && (nohup tools/codespace.sh join CODE
+     --net-rollback 12 --input-delay auto --bot 11 > ~/w.log 2>&1 &)"` (another seed, e.g. 12, for the second).
+  4. The owner plays; afterwards stop the bots (`gh codespace ssh -c NAME -- pkill gamerun`) and the Codespaces
+     (`gh codespace stop -c NAME`). The window's log: build-jit\shots\play3\window.txt (frames a second, "differs").
 
 ### Next steps (exactly)
 
