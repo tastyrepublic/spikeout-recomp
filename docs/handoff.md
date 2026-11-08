@@ -7,9 +7,10 @@ it by side runs) in network play with rollback.
 ## Where things are
 
 - Worktree: `Z:\Emu\spikeout-recomp\.claude\worktrees\lan-play-f60b31`, branch `claude/window-jit`.
-- Pushed: **main = claude/window-jit = aa5a6ff** (after 2663956 and 116b566, all today and yesterday).
+- Pushed: **main = claude/window-jit = c95b0df** (this hand-off and its tools) after aa5a6ff (the fixes), 2663956 and
+  116b566.
   The owner pushes main as a fast-forward of this branch (`git push origin HEAD:main`) when they ask to commit.
-- Not committed when this was written (commit only when the owner asks):
+- Committed with this hand-off (c95b0df); nothing else was left uncommitted:
   - `tools/spikeout.cpp`: `SPIKEOUT_RAM_HASHES=B@FROM:FILE` (the window writes board B's RAM page hashes every
     frame, the same format as gamerun `--ram-hashes`, a row each time a frame runs).
   - `tools/window-play-test.ps1`, `tools/window-autoplay-test.ps1` (below), `tools/debug/*` (helper scripts, below),
