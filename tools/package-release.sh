@@ -15,6 +15,8 @@ version=$1 platform=$2 exe=$3 build=$4 out=$5
 repo=$(cd "$(dirname "$0")/.." && pwd)
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
+exe=$(cd "$(dirname "$exe")" && pwd)/$(basename "$exe") # (whole paths: the steps below change folder)
+build=$(cd "$build" && pwd)
 name="spikeout-$version-$platform"
 stage="$out/$name"
 rm -rf "$stage" && mkdir -p "$stage"
@@ -126,7 +128,7 @@ EOF
 case $platform in
 windows-*)
     cp "$exe" "$stage/spikeout.exe"
-    (cd "$out" && 7z a -tzip -bso0 "$name-debug-symbols.zip" "$(cygpath -w "$(cd "$(dirname "$exe")" && pwd)/$(basename "$exe")")" >/dev/null)
+    (cd "$out" && 7z a -tzip -bso0 "$name-debug-symbols.zip" "$(cygpath -w "$exe")" >/dev/null)
     strip "$stage/spikeout.exe"
     for f in LICENSE.txt THIRD-PARTY-NOTICES.txt README.txt; do sed -i 's/$/\r/' "$stage/$f"; done
     (cd "$stage" && 7z a -tzip -bso0 "$out/$name.zip" ./* >/dev/null) ;;

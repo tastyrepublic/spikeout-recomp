@@ -7,6 +7,11 @@ project(spikeout-recomp
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# Apple's libc++ keeps C++20's std::jthread and std::stop_token (the network code's threads) behind its experimental
+# switch; they are in its headers only (nothing more to link).
+if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fexperimental-library>)
+endif()
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
