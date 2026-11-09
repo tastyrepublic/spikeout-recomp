@@ -184,12 +184,21 @@ if(SPIKEOUT_LOBBY)
     endif()
 endif()
 if(SPIKEOUT_LOBBY AND TARGET CURL::libcurl)
-    target_sources(m3net PRIVATE src/net/lobby.cpp src/net/update.cpp)
+    target_sources(m3net PRIVATE src/net/lobby.cpp src/net/update.cpp src/net/report.cpp)
     target_link_libraries(m3net PUBLIC CURL::libcurl)
     target_compile_definitions(m3net PUBLIC SPIKEOUT_LOBBY SPIKEOUT_LOBBY_URL="${SPIKEOUT_LOBBY_URL}"
                                SPIKEOUT_RELEASES_URL="${SPIKEOUT_RELEASES_URL}")
+    # Bug reports to GitHub (src/net/report.hpp): the repository's issues, through the lobby (its /v1/report, the
+    # lobby's own address with that path) or, logged in, as the player: the project's GitHub App's client ID (public;
+    # empty: no login offered).
+    string(REGEX REPLACE "^wss://([^/]+)/.*$" "https://\\1/v1/report" _report_url "${SPIKEOUT_LOBBY_URL}")
+    set(SPIKEOUT_REPORT_URL "${_report_url}" CACHE STRING "Where the game sends a bug report (the lobby's /v1/report)")
+    set(SPIKEOUT_REPORT_REPO "tastyrepublic/spikeout-recomp" CACHE STRING "The GitHub repository the reports become issues on")
+    set(SPIKEOUT_GITHUB_CLIENT_ID "" CACHE STRING "The project's GitHub App's client ID (logging in from the game; empty: none)")
+    target_compile_definitions(m3net PUBLIC SPIKEOUT_REPORT_URL="${SPIKEOUT_REPORT_URL}"
+                               SPIKEOUT_REPORT_REPO="${SPIKEOUT_REPORT_REPO}" SPIKEOUT_GITHUB_CLIENT_ID="${SPIKEOUT_GITHUB_CLIENT_ID}")
 else()
-    target_sources(m3net PRIVATE src/net/lobby_none.cpp)
+    target_sources(m3net PRIVATE src/net/lobby_none.cpp src/net/report_none.cpp)
     message(STATUS "No libcurl: the internet lobby is left out (LAN play only)")
 endif()
 

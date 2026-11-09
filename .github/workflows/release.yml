@@ -64,7 +64,7 @@ jobs:
         run: >
           gcc --version && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DSPIKEOUT_WARNINGS_AS_ERRORS=OFF -DSPIKEOUT_BUILD_TESTS=OFF
-          -DSPIKEOUT_LLVM_JIT=ON "-DSPIKEOUT_LLVM_ROOT=$LLVM_ROOT" "-DSPIKEOUT_VERSION=$VERSION"
+          -DSPIKEOUT_LLVM_JIT=ON "-DSPIKEOUT_LLVM_ROOT=$LLVM_ROOT" "-DSPIKEOUT_VERSION=$VERSION" "-DSPIKEOUT_GITHUB_CLIENT_ID=${{ vars.REPORTS_APP_CLIENT_ID }}"
       - name: LLVM's build logs (when it failed)
         if: failure()
         run: tail -n 80 "$LLVM_ROOT"/*.log || true
@@ -135,7 +135,7 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release --toolchain /usr/share/steamrt/cmake/gcc-14.cmake
           -DSPIKEOUT_WARNINGS_AS_ERRORS=OFF -DSPIKEOUT_BUILD_TESTS=OFF
           "-DOPENSSL_ROOT_DIR=$SSL_ROOT" -DOPENSSL_USE_STATIC_LIBS=TRUE
-          -DSPIKEOUT_LLVM_JIT=ON "-DSPIKEOUT_LLVM_ROOT=$LLVM_ROOT" "-DSPIKEOUT_VERSION=$VERSION"
+          -DSPIKEOUT_LLVM_JIT=ON "-DSPIKEOUT_LLVM_ROOT=$LLVM_ROOT" "-DSPIKEOUT_VERSION=$VERSION" "-DSPIKEOUT_GITHUB_CLIENT_ID=${{ vars.REPORTS_APP_CLIENT_ID }}"
       - name: LLVM's build logs (when it failed)
         if: failure()
         run: tail -n 80 "$LLVM_ROOT"/*.log || true
@@ -197,7 +197,7 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           -DSPIKEOUT_WARNINGS_AS_ERRORS=OFF -DSPIKEOUT_BUILD_TESTS=OFF
           "-DOPENSSL_ROOT_DIR=$SSL_ROOT" -DOPENSSL_USE_STATIC_LIBS=TRUE
-          -DSPIKEOUT_LLVM_JIT=ON "-DSPIKEOUT_LLVM_ROOT=$LLVM_ROOT" "-DSPIKEOUT_VERSION=$VERSION"
+          -DSPIKEOUT_LLVM_JIT=ON "-DSPIKEOUT_LLVM_ROOT=$LLVM_ROOT" "-DSPIKEOUT_VERSION=$VERSION" "-DSPIKEOUT_GITHUB_CLIENT_ID=${{ vars.REPORTS_APP_CLIENT_ID }}"
       - name: LLVM's build logs (when it failed)
         if: failure()
         run: tail -n 80 "$LLVM_ROOT"/*.log || true

@@ -10,6 +10,8 @@
 // where the output went before: a console, a script's file), each line with the seconds since the start.
 #pragma once
 
+#include "net/report.hpp"
+
 #include <SDL3/SDL.h>
 
 #ifdef _WIN32
@@ -627,6 +629,70 @@ inline std::filesystem::path make_report(const std::string& folder, const std::s
     }
     const fs::path zip = detail::utf8(folder + "spikeout-report-" + detail::stamp() + ".zip");
     return detail::write_zip(zip, files) ? zip : fs::path();
+}
+
+// The same report as a GitHub issue (src/net/report.hpp; sent by the player, or by the lobby's bot): the player's
+// words, the version, the computer and its controllers, the newest crash's first lines in the issue; the logs, the
+// crash report and the settings in its comments, each its last kCommentLimit characters. Everything scrubbed as the
+// zip's. `about`: the version and what the window knows (its pads).
+inline net::report::Report github_report(const std::string& folder, const std::string& about, const std::string& words,
+                                         const std::string& version) {
+    namespace fs = std::filesystem;
+    std::fflush(stdout);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100)); // (the log's thread: the last lines in the file)
+    auto fenced = [](std::string text) {
+        for (std::size_t at; (at = text.find("```")) != std::string::npos;) text.replace(at, 3, "'''");
+        return "```text\n" + text + (text.empty() || text.back() == '\n' ? "" : "\n") + "```\n";
+    };
+    auto tail = [](std::string text, std::size_t limit) {
+        if (text.size() <= limit) return text;
+        text.erase(0, text.size() - limit);
+        if (const auto nl = text.find('\n'); nl != std::string::npos) text.erase(0, nl + 1); // (from a whole line)
+        return "(the start left out: too long for GitHub)\n" + text;
+    };
+    net::report::Report r;
+    std::string first = words.substr(0, words.find('\n'));
+    while (!first.empty() && (first.back() == ' ' || first.back() == '\r')) first.pop_back();
+    if (first.size() > 70) first = first.substr(0, 67) + "...";
+    std::string platform = os_name();
+    platform = platform.substr(0, platform.find(" ("));
+    r.title = (first.empty() ? std::string("A report from the game") : first) + " (" + version + ", " + platform + ")";
+    // (the newest crash report, if any)
+    fs::path crash;
+    std::error_code ec;
+    for (const auto& f : fs::directory_iterator(detail::utf8(folder), ec)) {
+        const std::string name = f.path().filename().string();
+        if (name.rfind("crash-", 0) == 0 && f.path().extension() == ".txt" && (crash.empty() || name > crash.filename().string()))
+            crash = f.path();
+    }
+    const std::string crash_text = crash.empty() ? std::string() : detail::scrubbed(detail::read_all(crash));
+    std::string said = detail::scrubbed(words);
+    for (std::size_t at = 0; (at = said.find('@', at)) != std::string::npos; at += 4) said.insert(at + 1, "\xE2\x80\x8B"); // (no one notified)
+    for (std::size_t at = 0; (at = r.title.find('@', at)) != std::string::npos; at += 4) r.title.insert(at + 1, "\xE2\x80\x8B");
+    std::string body = (said.empty() ? std::string("(no description)") : said) + "\n\n";
+    body += "**Version** " + version + "\n\n";
+    body += "<details><summary>The computer and its controllers</summary>\n\n" +
+            fenced(detail::scrubbed(about + system_lines() + controllers_now())) + "\n</details>\n\n";
+    if (!crash_text.empty()) {
+        std::string head;
+        std::istringstream in(crash_text);
+        int n = 0;
+        for (std::string line; n < 40 && std::getline(in, line); ++n) head += line + "\n";
+        body += "**The newest crash report** (" + crash.filename().string() + "):\n\n" + fenced(head) + "\n";
+    }
+    body += "_Sent from the game (Esc > Game > Report a problem). Its logs are in the comments below._\n";
+    r.body = tail(body, net::report::kCommentLimit);
+    auto add = [&](const std::string& title, const fs::path& p) {
+        if (r.comments.size() >= net::report::kComments || !fs::exists(p, ec)) return;
+        const std::string text = detail::scrubbed(detail::read_all(p));
+        if (text.empty()) return;
+        r.comments.push_back("**" + title + "**\n\n" + fenced(tail(text, net::report::kCommentLimit - title.size() - 40)));
+    };
+    add("spikeout.log (this run)", detail::utf8(folder + "spikeout.log"));
+    add("spikeout-prev.log (the run before)", detail::utf8(folder + "spikeout-prev.log"));
+    if (!crash.empty()) add(crash.filename().string(), crash);
+    add("settings.ini", detail::utf8(folder + "settings.ini"));
+    return r;
 }
 
 } // namespace tools::report

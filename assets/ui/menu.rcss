@@ -150,6 +150,22 @@ div { display: block; }
 	white-space: nowrap;
 }
 
+/* A text page (ui::TextInput): the text typed so far, wrapped, a cursor at its end. */
+#textbox {
+	margin: 6dp 16dp 14dp 16dp;
+	padding: 8dp 12dp;
+	min-height: 40dp;
+	font-size: 26dp;
+	color: #ffe0c0;
+	background-color: #00000080;
+	border-bottom: 3dp #ff6a1f;
+	white-space: pre-wrap;
+}
+
+#textbox.multi { min-height: 180dp; font-size: 22dp; }
+
+.tcursor { color: #ff9a3c; }
+
 /* A code page (ui::CodeInput): the code's box, then an on-screen keyboard
    of 8 keys a row (8 x 50dp) and a row of Delete and Join. */
 #codebox {

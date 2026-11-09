@@ -434,6 +434,7 @@ void Menu::close() {
     impl_->doc->Hide();
     open_ = false;
     stack_.clear();
+    if (text_input_on_) SDL_StopTextInput(impl_->window), text_input_on_ = false;
     SDL_HideCursor();
 }
 
@@ -465,6 +466,13 @@ void Menu::build() {
     std::string crumb;
     for (size_t i = 1; i < stack_.size(); i++) crumb += (i > 1 ? "  /  " : "") + stack_[i].name;
     impl_->doc->GetElementById("crumb")->SetInnerRML(escape(crumb));
+    // (SDL's text input on only on a text page: elsewhere a key is a key; on a Steam Deck it brings up the keyboard)
+    if (p.text && !text_input_on_) SDL_StartTextInput(impl_->window), text_input_on_ = true;
+    else if (!p.text && text_input_on_) SDL_StopTextInput(impl_->window), text_input_on_ = false;
+    if (p.text) {
+        build_text();
+        return;
+    }
     if (p.code) {
         build_code();
         return;
@@ -570,6 +578,88 @@ void Menu::code_press(int k) {
         f(c->text);
     } else {
         build_code();
+    }
+}
+
+// ---- A text page (MenuPage::text) ----
+void Menu::build_text() {
+    const TextInput& t = *stack_.back().text;
+    std::string shown = escape(t.text);
+    if (t.multiline)
+        for (std::size_t at; (at = shown.find('\n')) != std::string::npos;) shown.replace(at, 1, "<br/>");
+    impl_->doc->GetElementById("rows")->SetInnerRML(std::string("<div id=\"textbox\"") + (t.multiline ? " class=\"multi\"" : "") +
+                                                    ">" + shown + "<span class=\"tcursor\">|</span></div>");
+    impl_->doc->GetElementById("note")->SetInnerRML(escape(stack_.back().note));
+}
+
+void Menu::text_type(const std::string& typed) {
+    TextInput& t = *stack_.back().text;
+    for (std::size_t i = 0; i < typed.size();) { // (a character at a time: UTF-8's lead byte says how long)
+        const unsigned char lead = static_cast<unsigned char>(typed[i]);
+        const std::size_t n = lead < 0x80 ? 1 : lead >> 5 == 6 ? 2 : lead >> 4 == 14 ? 3 : lead >> 3 == 30 ? 4 : 1;
+        std::string ch = typed.substr(i, n);
+        i += n;
+        if (ch == "\r") continue;
+        if (ch == "\n" && !t.multiline) continue;
+        if (ch == "\t") ch = " ";
+        if (!t.allowed.empty() && (ch.size() != 1 || t.allowed.find(ch[0]) == std::string::npos)) continue;
+        if (t.text.size() + ch.size() > t.max_bytes) break;
+        t.text += ch;
+    }
+    build_text();
+}
+
+bool Menu::text_event(const SDL_Event& e) {
+    TextInput& t = *stack_.back().text;
+    switch (e.type) {
+    case SDL_EVENT_TEXT_INPUT: text_type(e.text.text); return true;
+    case SDL_EVENT_KEY_DOWN:
+        switch (e.key.scancode) {
+        case SDL_SCANCODE_ESCAPE: if (!e.key.repeat) pop(); return true;
+        case SDL_SCANCODE_BACKSPACE:
+            while (!t.text.empty() && (static_cast<unsigned char>(t.text.back()) & 0xC0) == 0x80) t.text.pop_back(); // (a whole character)
+            if (!t.text.empty()) t.text.pop_back();
+            build_text();
+            return true;
+        case SDL_SCANCODE_RETURN:
+        case SDL_SCANCODE_KP_ENTER:
+            if (e.key.repeat) return true;
+            if (t.multiline && (e.key.mod & SDL_KMOD_SHIFT)) {
+                text_type("\n");
+            } else if (t.done) {
+                auto f = t.done;
+                const std::string typed = t.text; // (a copy: done may close the page)
+                f(typed);
+            }
+            return true;
+        default: break;
+        }
+        if ((e.key.mod & SDL_KMOD_CTRL) && e.key.key == SDLK_V)
+            if (char* clip = SDL_GetClipboardText()) {
+                text_type(clip);
+                SDL_free(clip);
+            }
+        return true; // (other keys: their text comes as text input)
+    case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+        switch (e.gbutton.button) {
+        case SDL_GAMEPAD_BUTTON_SOUTH:
+        case SDL_GAMEPAD_BUTTON_START:
+            if (t.done) {
+                auto f = t.done;
+                const std::string typed = t.text;
+                f(typed);
+            }
+            break;
+        case SDL_GAMEPAD_BUTTON_EAST: pop(); break;
+        case SDL_GAMEPAD_BUTTON_BACK:
+        case SDL_GAMEPAD_BUTTON_GUIDE: close(); break;
+        default: break;
+        }
+        return true;
+    case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+    case SDL_EVENT_MOUSE_WHEEL:
+    case SDL_EVENT_KEY_UP: return true;
+    default: return false;
     }
 }
 
@@ -781,6 +871,7 @@ bool Menu::handle_event(const SDL_Event& e) {
         default: break;
         }
     }
+    if (!stack_.empty() && stack_.back().text && text_event(e)) return true;
     if (!stack_.empty() && stack_.back().code && code_event(e)) return true;
     switch (e.type) {
     case SDL_EVENT_KEY_DOWN:

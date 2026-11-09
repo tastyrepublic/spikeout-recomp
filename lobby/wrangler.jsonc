@@ -2,15 +2,23 @@
 // machine (the tests use that); `npx wrangler deploy` puts it on the
 // owner's Cloudflare account. The TURN relay's key goes in as secrets,
 // never in the repo: `npx wrangler secret put TURN_KEY_ID` and
-// `TURN_KEY_API_TOKEN` (locally: a .dev.vars file, git-ignored).
+// `TURN_KEY_API_TOKEN` (locally: a .dev.vars file, git-ignored). Bug reports
+// (/v1/report) need the bot's token: `npx wrangler secret put REPORT_TOKEN`.
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "spikeout-lobby",
 	"main": "src/index.js",
 	"compatibility_date": "2026-10-01",
 	"durable_objects": {
-		"bindings": [{ "name": "LOBBY", "class_name": "Lobby" }]
+		"bindings": [
+			{ "name": "LOBBY", "class_name": "Lobby" },
+			{ "name": "REPORTS", "class_name": "Reports" }
+		]
 	},
-	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["Lobby"] }],
+	"migrations": [
+		{ "tag": "v1", "new_sqlite_classes": ["Lobby"] },
+		{ "tag": "v2", "new_sqlite_classes": ["Reports"] }
+	],
+	"vars": { "REPORT_REPO": "tastyrepublic/spikeout-recomp" },
 	"observability": { "enabled": true }
 }
