@@ -478,6 +478,7 @@ void Menu::build() {
     std::string crumb;
     for (size_t i = 1; i < stack_.size(); i++) crumb += (i > 1 ? "  /  " : "") + stack_[i].name;
     impl_->doc->GetElementById("crumb")->SetInnerRML(escape(crumb));
+    impl_->doc->GetElementById("qrbox")->SetInnerRML(""); // (a page with one fills it below)
     // (SDL's text input on only on a text page: elsewhere a key is a key; on a Steam Deck it brings up the keyboard)
     if (p.text && !text_input_on_) SDL_StartTextInput(impl_->window), text_input_on_ = true;
     else if (!p.text && text_input_on_) SDL_StopTextInput(impl_->window), text_input_on_ = false;
@@ -514,16 +515,18 @@ void Menu::build() {
         }
         rml += "</div>";
     }
-    if (!p.qr.empty()) { // (a QR code: its modules as squares, a light border of two around them)
+    // (a QR code beside the rows, never under them (a short window would cut it): its modules as squares, a light
+    // border of two around them)
+    std::string qr;
+    if (!p.qr.empty()) {
         const qrcodegen::QrCode code = qrcodegen::QrCode::encodeText(p.qr.c_str(), qrcodegen::QrCode::Ecc::MEDIUM);
-        rml += "<div id=\"qr\">";
         for (int y = -2; y < code.getSize() + 2; ++y) {
-            rml += "<div class=\"qrrow\">";
-            for (int x = -2; x < code.getSize() + 2; ++x) rml += code.getModule(x, y) ? "<span class=\"qm\"></span>" : "<span class=\"ql\"></span>";
-            rml += "</div>";
+            qr += "<div class=\"qrrow\">";
+            for (int x = -2; x < code.getSize() + 2; ++x) qr += code.getModule(x, y) ? "<span class=\"qm\"></span>" : "<span class=\"ql\"></span>";
+            qr += "</div>";
         }
-        rml += "</div>";
     }
+    impl_->doc->GetElementById("qrbox")->SetInnerRML(qr);
     impl_->doc->GetElementById("rows")->SetInnerRML(rml);
     scroll_to_selected();
     show_help();

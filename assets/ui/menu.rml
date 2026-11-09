@@ -11,6 +11,7 @@
 		<div id="title">PAUSED</div>
 		<div id="crumb"></div>
 		<div id="rows"></div>
+		<div id="qrbox"></div><!-- a page's QR code (MenuPage::qr), beside the rows -->
 		<div id="note"></div>
 		<div id="hint">
 			<span class="key">Arrows</span> / <span class="key">D-pad</span> choose

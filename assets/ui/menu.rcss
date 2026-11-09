@@ -150,10 +150,11 @@ div { display: block; }
 	white-space: nowrap;
 }
 
-/* A page's QR code (ui::MenuPage::qr): black squares on white, for a phone's camera. */
-#qr { margin: 10dp 0 6dp 16dp; }
-.qrrow { display: block; height: 5dp; }
-.qm, .ql { display: inline-block; width: 5dp; height: 5dp; }
+/* A page's QR code (ui::MenuPage::qr): black squares on white, for a phone's camera; to the right of the panel,
+   level with the rows (never under them: a short window would cut it). */
+#qrbox { position: absolute; left: 548dp; top: 96dp; }
+.qrrow { display: block; height: 6dp; }
+.qm, .ql { display: inline-block; width: 6dp; height: 6dp; }
 .qm { background-color: #000000; }
 .ql { background-color: #ffffff; }
 
