@@ -585,9 +585,19 @@ inline std::string scrubbed(std::string text) {
         }
         out += text[i++];
     }
+    // (the user name only where folder paths have it: Users\NAME, /home/NAME, /Users/NAME)
     for (const char* var : {"USERNAME", "USER"})
-        if (const char* user = std::getenv(var); user && std::strlen(user) >= 3)
-            for (std::size_t at; (at = out.find(user)) != std::string::npos;) out.replace(at, std::strlen(user), "<user>");
+        if (const char* user = std::getenv(var); user && *user)
+            for (const char* folder : {"Users\\", "Users/", "home/"}) {
+                const std::string from = std::string(folder) + user, to = std::string(folder) + "<user>";
+                for (std::size_t at = 0; (at = out.find(from, at)) != std::string::npos; at += to.size()) {
+                    const std::size_t end = at + from.size();
+                    if (end < out.size() && out[end] != '\\' && out[end] != '/' && out[end] != '"' && out[end] != ' ' &&
+                        out[end] != '\n' && out[end] != '\r')
+                        continue; // (a longer name that starts with it)
+                    out.replace(at, from.size(), to);
+                }
+            }
     return out;
 }
 } // namespace detail
