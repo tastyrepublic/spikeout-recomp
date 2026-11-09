@@ -794,9 +794,12 @@ public:
             std::vector<uint32_t> tracked = other.cabinets->own_addresses_list();
             // (and the characters' fields each cabinet keeps for itself: their kept values below (own.fields), dropped
             // once a character is set up again; as they were at the hand-over, they came back stale (2026-11-07))
-            for (uint32_t k = 0; k < 12; ++k)
+            for (uint32_t k = 0; k < 12; ++k) {
                 for (const auto& [off, size] : remote::kEntryFields)
                     for (uint32_t b = 0; b < size; ++b) tracked.push_back(remote::character_object(k) + off + b);
+                for (const auto& [off, size] : remote::kSumFields) // (its entries' +8 sums' fields the same way)
+                    for (uint32_t b = 0; b < size; ++b) tracked.push_back(remote::character_object(k) + off + b);
+            }
             std::sort(tracked.begin(), tracked.end());
             for (uint32_t at : m.shadow_own)
                 if (!std::binary_search(tracked.begin(), tracked.end(), at)) ram[at] = m.shadow_base[at];

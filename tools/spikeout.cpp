@@ -1210,6 +1210,26 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             // run it again if it went back: kept until then)
             // (tests: SPIKEOUT_RAM_HASHES=B@FROM:FILE, board B's main RAM a hash a 4 KB page each frame from FROM, as gamerun
             // --ram-hashes writes them: a row each time a frame runs (again, after a going back), compared with a gamerun's)
+            // (tests: SPIKEOUT_RAM_DUMP_RANGE=B:LO-HI@FROM:N:FILE, board B's RAM LO-HI (hex) each frame for N frames from
+            // FROM, a row each time a frame runs: the frame, the logic counter (0x1000A8), the bytes; gamerun
+            // --ram-dump's rows, for tools/debug/dumpcmp.ps1 and dumpruns.ps1)
+            if (static const char* spec = std::getenv("SPIKEOUT_RAM_DUMP_RANGE"); spec && *spec) {
+                static unsigned dump_board = 0, lo = 0, hi = 0;
+                static unsigned long long dump_from = 0, dump_frames = 0;
+                static std::FILE* file = [&] {
+                    char path[512] = {};
+                    return std::sscanf(spec, "%u:%x-%x@%llu:%llu:%511[^\n]", &dump_board, &lo, &hi, &dump_from, &dump_frames, path) == 6 &&
+                                   hi > lo
+                               ? std::fopen(path, "wb")
+                               : nullptr;
+                }();
+                if (file && index == dump_board && frame >= dump_from && frame < dump_from + dump_frames) {
+                    const uint32_t head[2] = {static_cast<uint32_t>(frame), bus.read32(0x1000A8)};
+                    std::fwrite(head, sizeof head, 1, file);
+                    std::fwrite(bus.ram().data() + lo, 1, hi - lo, file);
+                    std::fflush(file);
+                }
+            }
             if (static const char* spec = std::getenv("SPIKEOUT_RAM_HASHES"); spec && *spec) {
                 static unsigned board_wanted = 0;
                 static unsigned long long from = 0;

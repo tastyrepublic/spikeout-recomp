@@ -1,7 +1,7 @@
 # The play test without a person: the window hosts a private 3-player game on one board (as play3.ps1), its own
 # player a random press list in the bot's way (SPIKEOUT_TEST_PRESS: moves, beats, jumps, charges, shifts; coin and
 # start at 1,200), two gamerun bots join; the window stops after -Frames. Reports each process's "differs" lines.
-param([int]$Frames = 6000, [int]$Seed = 1, [string[]]$Extra = @('--net-one-board'), [string]$Tag = 'auto', [int]$HashFrom = 0)
+param([int]$Frames = 6000, [int]$Seed = 1, [string[]]$Extra = @('--net-one-board'), [string]$Tag = 'auto', [int]$HashFrom = 0, [string]$Dump = "", [string[]]$BotDump = @()) # (-Dump B:LO-HI@FROM:N: board B's RAM bytes each frame, window and bots: *.dump)
 $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
 $root = "Z:\Emu\spikeout-recomp\.claude\worktrees\lan-play-f60b31"
 $dir = "$root\build-jit\shots\$Tag"
@@ -27,9 +27,10 @@ $env:SPIKEOUT_TEST_PRESS = $p -join ','
 $env:SPIKEOUT_TEST_HOST = '3'
 $env:SPIKEOUT_NET_DEBUG = '1'
 if ($HashFrom) { $env:SPIKEOUT_RAM_HASHES = "0@${HashFrom}:$dir\window.hashes" } # (-HashFrom: board 0's RAM each frame, here and in each bot)
+if ($Dump) { $env:SPIKEOUT_RAM_DUMP_RANGE = "${Dump}:$dir\window.dump" }
 $w = Start-Process "$dir\spikeout.exe" -ArgumentList (@('Z:\Emu\spikeout-recomp\build\roms\spikeofe', '--mute', '--frames', "$Frames") + $Extra) `
     -WorkingDirectory $dir -RedirectStandardOutput "$dir\window.txt" -RedirectStandardError "$dir\window.err" -PassThru
-Remove-Item Env:SPIKEOUT_TEST_HOST, Env:SPIKEOUT_TEST_PRESS, Env:SPIKEOUT_RAM_HASHES -ErrorAction SilentlyContinue
+Remove-Item Env:SPIKEOUT_TEST_HOST, Env:SPIKEOUT_TEST_PRESS, Env:SPIKEOUT_RAM_HASHES, Env:SPIKEOUT_RAM_DUMP_RANGE -ErrorAction SilentlyContinue
 $code = $null
 for ($i = 0; $i -lt 60 -and -not $code; $i++) {
     Start-Sleep 1
@@ -45,6 +46,8 @@ foreach ($s in 1, 2) {
     $a = @('Z:\Emu\spikeout-recomp\build\roms\spikeofe', '--blocks', '900000000000', '--no-sound', '--no-2d', '--pace', '--frames', "$($Frames - 300 * $s)",
            '--lobby', $lobby, '--net-rollback', '12', '--input-delay', 'auto', '--net-join', $code, '--net-catch-up', '--bot', "$($Seed * 10 + $s)")
     if ($HashFrom) { $a += @('--ram-hashes', "0@$HashFrom", (Join-Path $dir "bot$s.hashes")) }
+    $spec = if ($BotDump.Count -ge $s) { $BotDump[$s - 1] } else { $Dump } # (-BotDump SPEC1,SPEC2: each bot its own board, say)
+    if ($spec) { $a += @('--ram-dump', $spec, (Join-Path $dir "bot$s.dump")) }
     $bots += Start-Process -PassThru -WindowStyle Hidden -FilePath "$root\build\gamerun.exe" -ArgumentList $a `
         -RedirectStandardOutput "$dir\bot$s.txt" -RedirectStandardError "$dir\bot$s.err"
 }

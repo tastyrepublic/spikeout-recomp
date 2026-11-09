@@ -146,7 +146,20 @@ same) plus `-Only leave3,vanish3 -LeaverFirst`, stopping at the first failure:
   54.2 frames a second on average, stutters 117-175 both, rollback back in 41-61 ms both, 0 differs in all 12. The
   49 was this PC's slow minutes. Piece 7's suites: onepc-tests 14/14, onepc-net-tests all the same, -LeaverFirst all
   the same, rbbot 0 differs.
-- **THE ONE-BOARD BUG, NOW REPRODUCED EVERY TIME (2026-11-09)**: window-autoplay-test.ps1 (the window hosting on
+- **THE ONE-BOARD BUG: FOUND AND FIXED (2026-11-09)**. Traced with the window's new
+  per-frame dump (SPIKEOUT_RAM_DUMP_RANGE=B:LO-HI@FROM:N:FILE, gamerun --ram-dump's rows; window-autoplay-test.ps1
+  -Dump, -BotDump SPEC1,SPEC2) and -HashFrom: first wrong at frame 4368 (5 after a hand-back at 4363), 4 bytes of
+  each made cabinet's record: entry 5's +8 (0x140558, 0x140858; received at 0x142758, 0x143058). 0x747DC (called
+  from 0x742CC) fills the record's character table at 0x140214, 12 bytes an object (players 0x1A0000+0x4000k,
+  enemies 0x1B0000+0x4000k): +0 the first word, +4..+7 low bytes (kEntryFields, already kept per cabinet), +8 THE
+  SUM of the object's +0x74, +0x76, +0x3C, +0x3E (u16) and +0x380, +0x384, +0x388 (words). Enemy 1's object was
+  empty (+0 zero) and those fields its leftovers, different on each cabinet (master +0x74 63ac, slaves 3245, 3107):
+  the made cabinets sent the staying board's sum. Fix: kSumFields and Remote::kept_sum (remote_cabinet.hpp), kept
+  as kEntryFields are: at start_making each cabinet's own sum and the staying board's; make_record puts its own in
+  while this board's record still has this board's sum of then; shadow_state and one_board.hpp's tracked list carry
+  the seven fields for a shadow. window-autoplay-test seed 1 (x2), 2, 3: 0 differs (two hand-backs at 4355-4359,
+  4317), where every run went out of step at 4440 before. The whole test set then passed: onepc-tests 14/14, onepc-net-tests, -LeaverFirst, rbbot (no differences), the 13 window tests (all the same; SLOW as before: several windows on one PC) and all 12 internet cases, mixed and mixed-host1 included (0 hash checks differed on every machine; slow seconds as before the fix, e.g. oneboard 122/106/88).
+- (history) **THE ONE-BOARD BUG, NOW REPRODUCED EVERY TIME (2026-11-09)**: window-autoplay-test.ps1 (the window hosting on
   one board, two gamerun bots, seed 1, 6000 frames): once the window hands the other cabinets back to side runs
   (frame ~4331-4395), every process differs from frame **4440** on ("node check: seat 2 packet 4137...: the whole
   packet differs" from ~4137). 4 of 4 runs: new/new, new window + old bots, OLD window + new bots (so not pieces
@@ -190,6 +203,23 @@ cabinet, `Remote::kept_sum` in remote_cabinet.hpp; NOT proven: the window bug is
 and a git stash (a "late inputs" print in the window, window-autoplay-test.ps1 -BotDelay/-BotsLow/-BotsOneBoard).
 The frame drops in window-autoplay-test are the test's own load (docs/netplay.md "Rollback's cost with players pressing
 all the time"): don't measure them again on one PC.
+
+## The LAN to-do list (the owner's grouping, 2026-11-09)
+
+Where LAN stands: every board is exact (inputs only, a small input delay); spectators (found by LAN discovery,
+tools/spectate-tests.ps1) and late joins (onepc-net-tests late0/late1, coin0/coin1, fourauto) work. The open risk is
+a one-board PC on a LAN, alone or in a mixed game: no rollback, so a wrong side-run guess can't be undone (only a
+resync from the host's state puts it back). Left:
+1. **One board on a LAN from the real link packets** (Mode A, as a cable link): each PC feeds the other cabinets'
+   real packets into its own link, with a small input delay; exact, no side runs, no rollback; prediction again only
+   when the delay goes over about a frame. Fixes the one-board and mixed LAN risk. (Memory: lan-one-board-real-packets.)
+2. **LAN rollback switched on by itself** on a PC with CPU to spare, the first snapshot copied in slices over a few
+   frames (no pause, proved byte for byte); one-board hosts and joiners too. Deferred by the owner until after
+   another release. (Memory: netplay-all-auto.)
+3. **The parallel rollback restore back** (every board put back at once, ~1 ms a rollback; its crash, MinGW's
+   thread_local double free, fixed in aa5a6ff): bring it back only with the whole test set. Rollback in general,
+   listed here at the owner's word. (Memory: parallel-restore-todo.)
+4. **A vanished player holds a no-rollback (LAN) game 3 s** before the others go on (a normal quit doesn't).
 
 ## Everything left in the project (2026-11-08), in the owner's order
 

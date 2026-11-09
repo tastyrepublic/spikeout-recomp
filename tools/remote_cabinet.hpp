@@ -201,6 +201,12 @@ constexpr uint32_t character_object(uint32_t k) { return k < 4 ? 0x1A0000 + 0x40
 // which differs between cabinets by as many counts as one had missed before (two in a bot game: 0x24F against
 // 0x251, an enemy set up long before one board a PC began).
 constexpr std::pair<uint32_t, uint32_t> kEntryFields[4] = {{0x3F02, 2}, {0x3F22, 2}, {0x34A0, 4}, {0x34FC, 4}};
+// A record's character entry's +8 (0x74808, 0x74884): the sum of these fields of the character's object (offset,
+// size). An object a character has left keeps them as its cabinet last wrote them, which differ between cabinets
+// (2026-11-09: enemy 1 gone, the master's +0x74 63ac against 3245 and 3107 on the slaves): each cabinet's own sum,
+// kept as its fields are (Remote::kept_sum); a one-board game went out of step 5 frames after a hand-back with
+// every made cabinet sending the staying board's (tools/window-autoplay-test.ps1, frame 4440).
+constexpr std::pair<uint32_t, uint32_t> kSumFields[7] = {{0x74, 2}, {0x76, 2}, {0x3C, 2}, {0x3E, 2}, {0x380, 4}, {0x384, 4}, {0x388, 4}};
 
 // A seat's buttons word (0x5094's held word: the system board's 0x04 under
 // select 0 in bits 0-7, 0x08 in 8-15, 0x0C in 16-23, 0x04 under select 1 in
@@ -286,6 +292,18 @@ public:
                 kept.mine = field(a, size);
                 kept.on = (kept.theirs & 0xFF) != (kept.mine & 0xFF);
             }
+        for (uint32_t k = 0; k < 12; ++k) { // (each character's entry +8: kSumFields' sum, its and this board's)
+            auto& kept = r->kept_sum[k];
+            kept.mine = kept.theirs = 0;
+            for (uint32_t j = 0; j < 7; ++j) {
+                const auto [off, size] = kSumFields[j];
+                const uint32_t a = character_object(k) + off;
+                kept.their_fields[j] = size == 2 ? uint32_t{ram[a]} << 8 | ram[a + 1] : word(a);
+                kept.mine_fields[j] = field(a, size);
+                kept.theirs += kept.their_fields[j], kept.mine += kept.mine_fields[j];
+            }
+            kept.on = kept.theirs != kept.mine;
+        }
     }
     // Its main board's frame `frame` lost (its work ran past the next
     // wake-up): no block written that frame, so its network board sends
@@ -514,6 +532,14 @@ private:
             bool on = false;
         };
         std::array<std::array<Kept, 4>, 12> kept{};
+        // (and each character's entry +8, the sum of its kSumFields: its own as its main board had them when made here
+        // began, kept while this board's record has this board's sum of then; the fields themselves for a shadow)
+        struct KeptSum {
+            uint32_t mine = 0, theirs = 0;
+            std::array<uint32_t, 7> mine_fields{}, their_fields{};
+            bool on = false;
+        };
+        std::array<KeptSum, 12> kept_sum{};
         // (handing back from its shadow: asked; the count its shadow stops after; for a slave this board's world as
         // its dispatcher of the count after that started, to run that count on as it once handed back; the first
         // link run then takes its working record as its shadow left it)
@@ -1466,6 +1492,11 @@ inline void Cabinets::make_record(Remote& r, Block& next, const Block& mine, uin
             if (get8(next, entry + 4 + j) != static_cast<uint8_t>(kept.mine)) kept.on = false;
             else put8(next, entry + 4 + j, static_cast<uint8_t>(kept.theirs));
         }
+        // (its own entry +8, kSumFields' sum, the same way: while this board's record sends this board's sum of then)
+        if (auto& kept = r.kept_sum[k]; kept.on) {
+            if (next[(entry + 8) / 4] != kept.mine) kept.on = false;
+            else next[(entry + 8) / 4] = kept.theirs;
+        }
         if (!(next[entry / 4] & 0xFFFFFF00u)) {
             next[entry / 4] = 0;
             // (and its own bits of the character's first word gone with it, as its record says: kept from its last
@@ -1710,6 +1741,13 @@ inline bool Cabinets::shadow_state(std::size_t seat, uint32_t count, Shadow& out
             if (const auto& kept = r->kept[k][j]; kept.on) {
                 const uint32_t a = character_object(k) + kEntryFields[j].first;
                 if (field(a, kEntryFields[j].second) == kept.mine) out.fields.push_back({a, kEntryFields[j].second, kept.theirs});
+            }
+    for (uint32_t k = 0; k < 12; ++k) // (and the fields of its entries' +8 sums, its own where this board's are as then)
+        if (const auto& kept = r->kept_sum[k]; kept.on)
+            for (uint32_t j = 0; j < 7; ++j) {
+                const auto [off, size] = kSumFields[j];
+                const uint32_t a = character_object(k) + off;
+                if (field(a, size) == kept.mine_fields[j]) out.fields.push_back({a, size, kept.their_fields[j]});
             }
     return true;
 }
