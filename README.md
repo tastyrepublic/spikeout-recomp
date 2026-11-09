@@ -9,7 +9,7 @@ four-player co-op over the internet, one player a PC, as four linked cabinets pl
 <p align="center">
   <a href="https://github.com/tastyrepublic/spikeout-recomp/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/tastyrepublic/spikeout-recomp?include_prereleases&label=release"></a>
   <a href="LICENSE"><img alt="Licence: GPL-3.0" src="https://img.shields.io/badge/licence-GPL--3.0-blue"></a>
-  <img alt="Platforms" src="https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%2F%20Steam%20Deck-informational">
+  <img alt="Platforms" src="https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%2F%20Steam%20Deck%20%7C%20macOS-informational">
   <a href="https://buymeacoffee.com/donfy"><img alt="Buy me a coffee" src="https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?logo=buymeacoffee&logoColor=black"></a>
 </p>
 
@@ -19,7 +19,7 @@ four-player co-op over the internet, one player a PC, as four linked cabinets pl
   <a href="#controls">Controls</a> ·
   <a href="#online-play">Online play</a> ·
   <a href="#faq">FAQ</a> ·
-  <a href="https://github.com/tastyrepublic/spikeout-recomp/issues">Report a bug</a> ·
+  <a href="#reporting-a-problem">Report a bug</a> ·
   <a href="https://buymeacoffee.com/donfy">Buy me a coffee</a>
 </p>
 
@@ -56,19 +56,22 @@ translation is checked against the project's own ahead-of-time build by recordin
 | Sound and music | Working: the cabinet's front and rear speakers apart, on four channels or two outputs |
 | Online play: up to four players, each on their own PC | Working, experimental: an internet lobby with room codes, games on your own network found automatically, rollback, spectators (see [Online play](#online-play)) |
 | Save states | Working (one player, not in network games) |
+| Reporting a problem from the game | Working: a GitHub issue sent from the menu, or a zip (see [Reporting a problem](#reporting-a-problem)) |
 | Windows 10 / 11 (64-bit) | Working |
-| Linux / Steam Deck (x86-64) | Working on Ubuntu 24.04; the Steam Deck not tried yet |
-| macOS | Not yet: it needs the translator's macOS work |
+| Linux / Steam Deck (x86-64) | Working; built in Valve's Steam Runtime SDK, for Linux from about 2020 on; the Steam Deck not tried yet |
+| macOS 13.3 or later (Apple silicon and Intel) | First builds: not tried on a Mac yet, please report how they run |
 
-**This is a preview.** Please report anything that looks or plays differently from the arcade in
-[Issues](https://github.com/tastyrepublic/spikeout-recomp/issues).
+**This is a preview.** Please report anything that looks or plays differently from the arcade: see
+[Reporting a problem](#reporting-a-problem).
 
 ## Play
 
 | System | Download |
 | --- | --- |
 | Windows 10 or 11 (64-bit) | `spikeout-<version>-windows-x64.zip` |
-| Linux / Steam Deck (x86-64: glibc 2.38 or later, OpenSSL 3) | `spikeout-<version>-linux-x64.tar.gz` |
+| Linux / Steam Deck (x86-64: glibc 2.31 or later, most Linux from 2020 on) | `spikeout-<version>-linux-x64.tar.gz` |
+| macOS 13.3 or later, Apple silicon (M1 and later) | `spikeout-<version>-macos-arm64.zip` |
+| macOS 13.3 or later, Intel | `spikeout-<version>-macos-x64.zip` |
 
 **Windows**
 
@@ -91,9 +94,17 @@ translation is checked against the project's own ahead-of-time build by recordin
    tool" off: it's a native Linux game.
 3. Start it once in Desktop Mode to choose your `spikeofe.zip`; after that, play it from Game Mode.
 
-**Where things are kept:** your settings, the cabinets' settings and rankings and the translated game are in your
-user data folder (Windows `%APPDATA%\spikeout-recomp\Spikeout`, Linux `~/.local/share/spikeout-recomp/Spikeout`).
-Put an empty file named `portable.txt` next to the program and they're kept in its folder instead. Save states
+**macOS**
+
+1. Unzip it and move `Spikeout` to Applications (or anywhere).
+2. The app isn't signed: the first time, right-click it and choose Open (or open it, then System Settings > Privacy &
+   Security > Open Anyway).
+3. Choose your `spikeofe.zip` when it asks.
+
+**Where things are kept:** your settings, the cabinets' settings and rankings, the translated game and the game's
+log (`spikeout.log`) are in your user data folder (Windows `%APPDATA%\spikeout-recomp\Spikeout`, Linux
+`~/.local/share/spikeout-recomp/Spikeout`, macOS `~/Library/Application Support/spikeout-recomp/Spikeout`). Put an
+empty file named `portable.txt` next to the program and they're kept in its folder instead. Save states
 (<kbd>F9</kbd>) and screenshots (<kbd>F12</kbd>) go in the folder the game was started from.
 
 ## Controls
@@ -167,9 +178,29 @@ and only the players' inputs travel, so the game is the same on every screen.
 What it took to get there is written up in [docs/netplay.md](docs/netplay.md): the linked cabinets running in slow
 motion until the network board's ring was modelled, four boards on one PC, and keeping every PC's game identical.
 
+## Reporting a problem
+
+In the game: **Esc > Game > Report a problem**.
+
+1. **What happened**: write what you did, what you expected and what happened (any language).
+2. **Detailed logging**: for network or speed problems, turn it on, start the game again and make the problem
+   happen first.
+3. Then either:
+   - **Log in to GitHub** and **Send to GitHub**: the report becomes an issue on this page, as you, so you see the
+     answers. Logging in shows a code and a QR code for your phone; GitHub's own page asks for your password, never
+     the game. The game may only open issues here (the "Spikeout reports" app). **Last report** then shows the issue
+     and its answers in the game.
+   - **Save as a zip**, and attach it to a [new issue](https://github.com/tastyrepublic/spikeout-recomp/issues/new/choose)
+     yourself.
+
+A report holds the game's log, its settings, your computer's details and controllers, and any crash report; internet
+addresses, your user name and game files are left out. Reports sent from the game are public on GitHub.
+
+If the game crashes, it writes a crash report in its data folder, and says so at the next start.
+
 ## Roadmap
 
-- macOS (Apple silicon and Intel)
+- macOS: signed and notarized apps
 - Smooth motion: pictures made between the game's frames, for high-refresh screens
 - A direct cable mode: each PC runs only its own cabinet, the link over your network, for handhelds on one hotspot
 - Maybe direct connections by address
@@ -186,8 +217,11 @@ accepted: MAME's and Supermodel's `spikeofe`.
 **Why does the first start take a while?** The game's program is translated from your ROM set, using every core;
 it's kept, so that happens once (and again after an update or with another ROM set).
 
-**Can I play with someone on another system?** Yes: Windows and Linux play together, as long as both have the same
-version.
+**Can I play with someone on another system?** Yes: Windows, Linux and macOS play together, as long as all have the
+same version.
+
+**My controller isn't seen.** Send a report (Esc > Game > Report a problem): the log says which controllers the game
+found and whether it can read them.
 
 **How do I know a new version is out?** At start the game asks GitHub whether there's a newer release, and the menu
 says so, with a link to its page; the lobby also tells you when a game is on another version. The game doesn't update
@@ -222,7 +256,9 @@ sudo apt-get install libasound2-dev libpulse-dev libaudio-dev libfribidi-dev lib
 **The game as the downloads have it** (translated at start, nothing from the ROM in the program):
 `-DSPIKEOUT_LLVM_JIT=ON` builds `spikeout-jit` (the window) and `gamerun-jit`. The first configure downloads LLVM
 18.1.8's source and builds it once with your compiler, into `%LOCALAPPDATA%/spikeout-llvm` or
-`~/.cache/spikeout-llvm` (about 40 minutes on six cores). `tools/make-release.ps1` packages the downloads.
+`~/.cache/spikeout-llvm` (about 40 minutes on six cores). The downloads are built on GitHub by the Release workflow
+(`.github/workflows/release.yml`: Windows with MinGW GCC, Linux in Valve's Steam Runtime "sniper" SDK, macOS for
+Apple silicon and Intel) and packed by `tools/package-release.sh`.
 
 **The game compiled ahead of time** (for development and the proofs): point CMake at your unzipped ROM set,
 `-DSPIKEOUT_ROM_DIR=path/to/spikeofe`, and the build recompiles the game into `build/generated/` and builds
@@ -258,7 +294,8 @@ hashes (pictures, sound, RAM, recordings, save states), as the docs record. Each
 - [LLVM](https://llvm.org) (Apache 2.0 with LLVM exceptions): translates the game's program at start.
 - [SDL 3](https://github.com/libsdl-org/SDL) (zlib licence): the window, the GPU, sound and pads.
 - [RmlUi](https://github.com/mikke89/RmlUi) (MIT) and [FreeType](https://freetype.org) (FTL): the in-game menu; RmlUi's SDL GPU renderer is in `third_party/rmlui_sdl_gpu` (MIT).
-- [curl](https://curl.se) (curl licence) and [Zstandard](https://github.com/facebook/zstd) (BSD): the lobby's connection, and the network game's state compressed.
+- [curl](https://curl.se) (curl licence), [OpenSSL](https://www.openssl.org) (Apache 2.0, built into the Linux and macOS downloads) and [Zstandard](https://github.com/facebook/zstd) (BSD): the lobby's connection, and the network game's state compressed.
+- [QR Code generator](https://www.nayuki.io/page/qr-code-generator-library) by Project Nayuki (MIT, in `third_party/qrcodegen`): the GitHub login's QR code.
 - [glslang](https://github.com/KhronosGroup/glslang) (BSD-3-Clause and others) and [SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross) (Apache-2.0), at build time, to compile the GPU shaders.
 - [vf3-recomp](https://github.com/mr-finster/vf3-recomp) by mr-finster (MIT): the menu's design and style (`src/ui/menu.cpp`, `assets/ui`), and this page's.
 - [Barlow Condensed](https://github.com/jpt/barlow) by the Barlow Project Authors (SIL Open Font License, `assets/fonts`): the menu's typeface.
@@ -286,10 +323,9 @@ Not in a position to donate? That helps too:
 
 - **Star the repository**, so more Spikeout players find it.
 - **Play online and tell others**: a beat 'em up made for four is best with four.
-- **Report what looks or plays differently** from the arcade, in
-  [Issues](https://github.com/tastyrepublic/spikeout-recomp/issues): every report makes it closer to the real
-  cabinet.
-- **Try it on your device** (a Steam Deck, another Linux, a laptop) and say how it runs.
+- **Report what looks or plays differently** from the arcade ([Reporting a problem](#reporting-a-problem)): every
+  report makes it closer to the real cabinet.
+- **Try it on your device** (a Steam Deck, a Mac, another Linux, a laptop) and say how it runs.
 
 ## Licence
 

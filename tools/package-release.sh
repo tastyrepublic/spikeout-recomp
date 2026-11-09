@@ -98,11 +98,15 @@ To keep them next to the program instead, put an empty file called portable.txt
 beside it. Save states (F9) and screenshots (F12) go in the folder the game was
 started from.
 
-Something wrong? Esc > Game > Report a problem makes one zip of the game's log, any
-crash reports, the settings and your computer's details (no game files; internet
-addresses and your user name taken out) and opens GitHub's bug report page: attach
-the zip there. For network or speed problems, turn on Esc > Game > Detailed logging
-first, start the game again and make the problem happen.
+Something wrong? Esc > Game > Report a problem: write what happened, then log in to
+GitHub (a code and a QR code for your phone; GitHub's own page asks your password)
+and send it as an issue on the project's page, where you see the answers (also in
+the game: Last report). Or save it as a zip and attach it to a new issue yourself:
+https://github.com/tastyrepublic/spikeout-recomp/issues
+A report holds the game's log, the settings, your computer's details and any crash
+report (no game files; internet addresses and your user name taken out). For network
+or speed problems, turn on Detailed logging there first, start the game again and
+make the problem happen.
 
 New versions: at start the game asks GitHub whether a newer one is out, and the menu
 says so (Esc > Game > Check for updates turns that off). Players need the same

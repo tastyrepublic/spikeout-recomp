@@ -5,10 +5,11 @@ body:
     attributes:
       value: |
         Thank you for the report. Please never attach ROM files or anything made from them.
-        In the game: **Esc > Game > Report a problem** makes a zip of the game's log, crash reports, settings and
-        your computer's details (internet addresses and your user name are taken out). Attach that zip below.
-        For network or speed problems, turn on **Esc > Game > Detailed logging**, start the game again, make the
-        problem happen, then make the report.
+        Easiest: in the game, **Esc > Game > Report a problem**, log in to GitHub there and **Send to GitHub**: the
+        issue is made for you, with the game's log. Or **Save as a zip** there (the game's log, crash reports,
+        settings and your computer's details; internet addresses and your user name taken out) and attach it below.
+        For network or speed problems, turn on **Detailed logging** on that page, start the game again, make the
+        problem happen, then report it.
   - type: input
     id: version
     attributes:
