@@ -3486,6 +3486,7 @@ int main(int argc_given, char** argv_given) {
     bool blocks_given = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
+        bool taken = true; // (the options in two chains: one of over 128 branches is too deep for MSVC, C1061)
         if (arg == "--blocks" && i + 1 < argc) o.blocks = std::strtoll(argv[++i], nullptr, 0), blocks_given = true;
         else if (arg == "--inputs" && i + 1 < argc) { // FILE (spikebot --record-inputs; with --load-state, the state it began from)
             if (input_log.load(argv[++i])) {
@@ -3657,7 +3658,9 @@ int main(int argc_given, char** argv_given) {
             o.renderer = r == "gpu" ? Options::Renderer::Gpu : r == "compare" ? Options::Renderer::Compare
                                                                              : Options::Renderer::Software;
         }
-        else if (arg == "--midi-burst") o.midi_burst = true;
+        else taken = false;
+        if (taken) continue;
+        if (arg == "--midi-burst") o.midi_burst = true;
         else if (arg == "--dma-instant") o.dma_instant = true;
         else if (arg == "--sound-volume" && i + 1 < argc) o.sound_volume = std::atoi(argv[++i]);
         else if (arg == "--music-volume" && i + 1 < argc) o.music_volume = std::atoi(argv[++i]);
