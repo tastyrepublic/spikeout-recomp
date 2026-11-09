@@ -1331,7 +1331,7 @@ void camera_hook(recomp::Context& c, uint32_t pc, void* user) {
 // --rollback-test: what a snapshot walks (:quiet: not the sound board, which
 // hears each frame once).
 std::function<void(m3::State&)> rollback_walk(Machine& m, const Options& o) {
-    return [&m, &o, sound = o.rb_quiet ? std::function<void(m3::State&)>() : sound_state(m, o)](m3::State& s) {
+    return [&m, sound = o.rb_quiet ? std::function<void(m3::State&)>() : sound_state(m, o)](m3::State& s) {
         tools::board_state(s, m.c, m.timing, sound);
     };
 }
