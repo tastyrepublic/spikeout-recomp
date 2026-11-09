@@ -3600,7 +3600,7 @@ int main(int argc, char** argv) {
             // (only logged in and with something written: else shown, not chosen, with what it needs first)
             const bool ready = !login.empty() && !words.empty();
             if (!ready) {
-                const std::string why = login.empty() ? "log in first" : "write what happened first";
+                const std::string why = login.empty() ? "log in first" : "as @" + login + ": write what happened first";
                 p.items.push_back({"Send to GitHub", "", [why] { return why; }, {}, {}, true});
             } else {
                 p.items.push_back({"Send to GitHub", "Opens the report as your issue on the project's page: you get the answers there.",
