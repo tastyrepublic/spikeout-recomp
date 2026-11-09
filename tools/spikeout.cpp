@@ -2578,10 +2578,22 @@ int main(int argc, char** argv) {
     // Pads: players 1 and 2 each the one chosen in Controls (settings.pads, by GUID) when it's connected, else the
     // first connected that no player has.
     std::vector<SDL_Gamepad*> gamepads;
-    { // (the log: the pads SDL has now, and the game's own list, filled as each one is announced (SDL_EVENT_GAMEPAD_ADDED))
+    auto add_pad = [&](SDL_JoystickID id) { // (once each: a pad already in the list announced again is left alone)
+        for (SDL_Gamepad* pad : gamepads)
+            if (SDL_GetGamepadID(pad) == id) return;
+        if (SDL_Gamepad* pad = SDL_OpenGamepad(id)) {
+            gamepads.push_back(pad);
+            std::printf("controller %u: in the game's list of pads (%zu now)\n", static_cast<unsigned>(id), gamepads.size());
+        }
+    };
+    { // Pads already connected: their SDL_EVENT_GAMEPAD_ADDED came at SDL_Init and the start-up screens' event loops
+      // (the ROM set's, PREPARING THE GAME) took it, so they're added here (a pad plugged in before the game started
+      // was never in the list: issue #1). Later ones come with their event in the main loop.
         int n = 0;
-        SDL_free(SDL_GetGamepads(&n));
-        std::printf("spikeout: the game starts: %d gamepad(s) connected to SDL, the game's list of pads empty until each is announced\n", n);
+        SDL_JoystickID* ids = SDL_GetGamepads(&n);
+        std::printf("spikeout: the game starts: %d gamepad(s) connected to SDL\n", n);
+        for (int i = 0; i < n; ++i) add_pad(ids[i]);
+        SDL_free(ids);
     }
     auto pad_guid = [](SDL_Gamepad* pad) {
         char text[64] = {};
@@ -4215,12 +4227,7 @@ int main(int argc, char** argv) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_EVENT_QUIT) running = false;
-            if (e.type == SDL_EVENT_GAMEPAD_ADDED) {
-                if (SDL_Gamepad* pad = SDL_OpenGamepad(e.gdevice.which)) {
-                    gamepads.push_back(pad);
-                    std::printf("controller %u: in the game's list of pads (%zu now)\n", static_cast<unsigned>(e.gdevice.which), gamepads.size());
-                }
-            }
+            if (e.type == SDL_EVENT_GAMEPAD_ADDED) add_pad(e.gdevice.which);
             if (e.type == SDL_EVENT_GAMEPAD_REMOVED) {
                 for (auto it = gamepads.begin(); it != gamepads.end(); ++it)
                     if (SDL_GetGamepadID(*it) == e.gdevice.which) {

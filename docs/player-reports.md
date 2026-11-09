@@ -8,6 +8,8 @@ How a player tells us about a problem, and what the owner sets up once for it.
   the run before kept as `spikeout-prev.log`; 20 MB at most. Its first lines: the version, the system, the CPU, the
   displays and every controller SDL sees (name, maker and product IDs, GUID, whether SDL can read it as a gamepad,
   its mapping), then each one as it comes and goes, and when the game takes it into its list of pads.
+  (The first report, issue #1, found with it: a pad plugged in before the game started was never in the list, its
+  "added" event taken by the start-up screens; now every pad connected at the start is added there.)
 - A crash writes `crash-<time>.txt` (what, where as module+offset, the stack, the log's last 400 lines; Windows
   also `crash-<time>.dmp`, a minidump); the next start says so at the bottom.
 - Esc > Game > **Report a problem** (the owner's design: GitHub for players logged in, a zip for the others):
