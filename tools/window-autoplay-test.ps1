@@ -57,3 +57,6 @@ foreach ($n in 'window', 'bot1', 'bot2') {
     $hb = @(Select-String -Path "$dir\$n.txt" -Pattern 'handed back to side runs from' | ForEach-Object Line)
     "${n}: $($diffs.Count) differs$(if ($diffs) { '; first: ' + $diffs[0] }); hand-backs: $($hb.Count)$(if ($hb) { ' first: ' + $hb[0] })"
 }
+# How smoothly each ran (tools/speed-check.ps1: the window's and the bots' speed lines; SLOW: exit code 2)
+& "$PSScriptRoot\speed-check.ps1" "$dir\window.txt", "$dir\bot1.txt", "$dir\bot2.txt"
+if ($LASTEXITCODE -eq 1) { 'SLOW (the speed lines above)'; exit 2 }

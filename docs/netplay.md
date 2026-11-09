@@ -2663,7 +2663,8 @@ the leaving board's thread waits for it at the top of that frame (the
 staying board at its first meeting meanwhile: 0.5-0.7 s on this machine,
 a pause), loads it whole and runs on as the shadow. Exact by construction:
 the module's guesses at the other cabinet go no further than the blocks it
-makes. gamerun `--one-board-local-shadows` keeps the old way (and one
+makes. gamerun `--one-board-local-shadows` kept the old way (removed 2026-11-09:
+network play in gamerun is the window's one board only, tools/net_frame.hpp; one
 process has no other machine: unchanged there).
 
 Getting it exact (the tools: `GAMERUN_PARTS_FRAMES=FROM:TO`, each part of a

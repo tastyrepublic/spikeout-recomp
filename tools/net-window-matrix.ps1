@@ -26,6 +26,7 @@ $flag = @{ every = '--net-every-board'; one = '--net-one-board'; auto = '--net-a
 $presses = @('coin@1200,start@1300,beat@1700', 'coin@2600,start@2700,beat@3300,beat@3650', 'coin@4600,start@4700,beat@5300',
     'coin@5600,start@5700,beat@6300')
 $env:SPIKEOUT_TEST_LATENCY = $Latency
+$env:SPIKEOUT_NET_DEBUG = '1' # (each window's speed lines, for tools/speed-check.ps1)
 $windows = @()
 for ($s = 0; $s -lt $seats; $s++) {
     # (the host: Network play, Host a game, Players (Right for each over 2), Start hosting, Start game once all have
@@ -37,7 +38,7 @@ for ($s = 0; $s -lt $seats; $s++) {
     $windows += Start-Process $exe -ArgumentList @($roms, '--frames', "$Frames", $flag[$Modes[$s]]) -WorkingDirectory $out -RedirectStandardOutput "$out/seat$($s + 1).txt" -RedirectStandardError "$out/seat$($s + 1).err" -PassThru
     Start-Sleep -Seconds 1
 }
-Remove-Item Env:SPIKEOUT_MENU_KEYS, Env:SPIKEOUT_TEST_PRESS, Env:SPIKEOUT_TEST_LATENCY -ErrorAction SilentlyContinue
+Remove-Item Env:SPIKEOUT_MENU_KEYS, Env:SPIKEOUT_TEST_PRESS, Env:SPIKEOUT_TEST_LATENCY, Env:SPIKEOUT_NET_DEBUG -ErrorAction SilentlyContinue
 $windows | ForEach-Object { $_.WaitForExit() }
 $failed = $false
 for ($s = 1; $s -le $seats; $s++) {
@@ -48,5 +49,8 @@ for ($s = 1; $s -le $seats; $s++) {
     if (-not (Select-String -Path $file -Pattern 'network game, seat' -Quiet)) { "  seat $s never played"; $failed = $true }
 }
 if (Select-String -Path "$out/seat*.txt" -Pattern 'differs from seat' -Quiet) { $failed = $true }
+# How smoothly each window ran (tools/speed-check.ps1): SLOW, exit code 2
+& "$PSScriptRoot\speed-check.ps1" (1..$seats | ForEach-Object { "$out/seat$_.txt" }); $slowRun = $LASTEXITCODE -eq 1
 if ($failed) { 'FAILED'; exit 1 }
+if ($slowRun) { 'the same, but SLOW'; exit 2 }
 'the same'

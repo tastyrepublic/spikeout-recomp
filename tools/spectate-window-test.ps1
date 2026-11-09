@@ -26,8 +26,9 @@ if ($Frames -eq 0) { $Frames = if ($Mode -eq 'oneboard') { 8000 } else { 3000 } 
 function Start-Window($name, $keys, $presses, $frames, $board) {
     $env:SPIKEOUT_MENU_KEYS = $keys
     $env:SPIKEOUT_TEST_PRESS = $presses
+    $env:SPIKEOUT_NET_DEBUG = '1' # (its speed lines, for tools/speed-check.ps1)
     $p = Start-Process $exe -ArgumentList @($roms, '--frames', "$frames", $board) -WorkingDirectory $out -RedirectStandardOutput "$out/$name.txt" -RedirectStandardError "$out/$name.err" -PassThru
-    Remove-Item Env:SPIKEOUT_MENU_KEYS, Env:SPIKEOUT_TEST_PRESS -ErrorAction SilentlyContinue
+    Remove-Item Env:SPIKEOUT_MENU_KEYS, Env:SPIKEOUT_TEST_PRESS, Env:SPIKEOUT_NET_DEBUG -ErrorAction SilentlyContinue
     $p
 }
 $wait = ',F13' * 40
@@ -66,5 +67,8 @@ if ($Mode -eq 'oneboard') {
     if (@(Select-String -Path "$out/spectator.txt" -Pattern 'run on from its backup').Count -lt 2) { "not a shadow from a backup at each coin"; $failed = $true }
     if (Select-String -Path "$out/host.txt", "$out/joiner.txt" -Pattern 'differs from seat' -Quiet) { "the players' boards differed"; $failed = $true }
 }
+# How smoothly each window ran (tools/speed-check.ps1): SLOW, exit code 2
+& "$PSScriptRoot\speed-check.ps1" (@('host', 'joiner', 'spectator') | Where-Object { Test-Path "$out/$_.txt" } | ForEach-Object { "$out/$_.txt" }); $slowRun = $LASTEXITCODE -eq 1
 if ($failed) { 'FAILED'; exit 1 }
+if ($slowRun) { 'watched, but SLOW'; exit 2 }
 'watched'

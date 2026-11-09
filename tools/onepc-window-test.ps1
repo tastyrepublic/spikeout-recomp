@@ -103,5 +103,8 @@ if ($expect -and -not $rollback) { # (rollback: every board here, no one board y
 } elseif (Select-String -Path "$out/host.txt", "$out/joiner.txt" -Pattern 'one board here' -Quiet) {
     'a window went to one board'; $failed = $true
 }
+# How smoothly each window ran (tools/speed-check.ps1, their speed lines: SPIKEOUT_NET_DEBUG): SLOW, exit code 2
+& "$PSScriptRoot\speed-check.ps1" "$out/host.txt", "$out/joiner.txt"; $slowRun = $LASTEXITCODE -eq 1
 if ($failed) { 'FAILED'; exit 1 }
+if ($slowRun) { 'the same, but SLOW'; exit 2 }
 'the same'

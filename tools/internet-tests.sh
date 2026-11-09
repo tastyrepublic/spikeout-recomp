@@ -101,14 +101,19 @@ judge() { # NAME FILE-TEXT [MAX_GAP_MS]
     local name=$1 text=$2 max=${3:-0}
     local diff gap
     diff=$(printf '%s\n' "$text" | grep -oE 'Network: [0-9]+ hash checks differed' | grep -oE '[0-9]+' | head -1)
-    gap=$(printf '%s\n' "$text" | grep -oE 'the longest gap [0-9]+ ms' | grep -oE '[0-9]+' | head -1)
+    gap=$(printf '%s\n' "$text" | grep -E '^Pace:' | grep -oE 'the longest gap [0-9]+ ms' | grep -oE '[0-9]+' | head -1)
+    # (how smoothly, as tools/speed-check.ps1 judges it: its seconds after the first 5 under 56.5 frames or with a
+    # stutter (tools/speed_report.hpp's lines); SLOW is said, not a failure: a Codespace is a small shared machine)
+    local slow
+    slow=$(printf '%s\n' "$text" | grep -E '^speed: frames' | awk -F'[ :,]+' 'NR > 5 { for (i = 1; i < NF; i++) { if ($(i+1) == "a" && $(i+2) == "second") r = $i; if ($(i+1) == "stutters") s = $i } if (r < 56.5 || s > 0) n++ } END { print n + 0 }')
     local verdict=ok
     [ "$diff" = 0 ] || verdict=FAILED
     if [ "$max" -gt 0 ] && [ -n "$gap" ] && [ "$gap" -gt "$max" ]; then verdict="FAILED (a gap over $max ms)"; fi
     [ "$verdict" = ok ] || failed=$((failed + 1))
+    [ "${slow:-0}" -gt 0 ] && verdict="$verdict, SLOW ($slow seconds under 56.5 frames or with a stutter)"
     say "  $name: $verdict; ${diff:-?} hash checks differed; longest gap ${gap:-?} ms; $(printf '%s\n' "$text" | grep -oE '^Network: links:.*' | head -1 | sed 's/^Network: //'); $(printf '%s\n' "$text" | grep -oE '(caught up at frame [0-9]+: [^)]*\)?|seat [0-9] taken from frame [0-9]+)' | head -1)"
 }
-cs_text() { cs "$1" "grep -E '^Network|^Pace|caught up|seat [0-9] taken|^Rollback: went' ~/$2.log"; }
+cs_text() { cs "$1" "grep -E '^Network|^Pace|^speed:|caught up|seat [0-9] taken|^Rollback: went' ~/$2.log"; }
 
 rb="--net-rollback 12 --input-delay auto" # (as the window's Auto: tools::DelayTuner)
 run_case() {
