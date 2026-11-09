@@ -263,7 +263,7 @@ resync from the host's state puts it back). Left:
    `release-build/<version>`: Windows (WinLibs GCC 16.2.0 r2), Linux (Steam Runtime sniper SDK, GCC 14, SDL and
    OpenSSL 3 built in), macOS arm64 and x64 (13.3+; `-fexperimental-library` for jthread), LLVM cached per runner;
    packed by tools/package-release.sh with debug symbols; a DRAFT release, the owner publishes. Version
-   0.1.0-preview2: PUBLISHED 2026-11-09 13:24 UTC (owner), tag v0.1.0-preview2 at 2c41815 (8 files: 4 downloads + debug symbols, release notes on it), Windows and Linux
+   0.1.0-preview2: PUBLISHED 2026-11-09 13:24 UTC (owner), tag v0.1.0-preview2 at 2c41815 (4 downloads, release notes on it; its 4 debug-symbol files moved on 2026-11-09 to the draft release "symbols-v0.1.0-preview2", never to be published: releases now put them there, the owner's choice), Windows and Linux
    downloads tried as players get them (clean PATH; WSL): translated, ran, closed normally, and each one's recording
    replayed 30/30 hashes in the reference build. The Macs built but are untried (no Mac here). README and the
    downloads' readme updated (README on main only when the branch is merged).

@@ -257,5 +257,11 @@ jobs:
           if state=$(gh release view "v$VERSION" --json isDraft --jq .isDraft 2>/dev/null); then
             if [ "$state" = "true" ]; then gh release delete "v$VERSION" --yes; else echo "v$VERSION is published already" >&2; exit 1; fi
           fi
-          gh release create "v$VERSION" files/* --draft --prerelease --target "$GITHUB_SHA" \
+          # (the players' downloads only; the debug symbols, for reading crash reports (the owner, 2026-11-09), in a
+          # draft of their own that stays a draft: seen by the repo's owner only, kept as long as wanted)
+          gh release create "v$VERSION" $(ls files/* | grep -v -- '-debug-symbols\.') --draft --prerelease --target "$GITHUB_SHA" \
             --title "$VERSION (test build)" --notes "A test build, made by the Release workflow from $GITHUB_SHA. Not published yet."
+          if [ "$(gh release view "symbols-v$VERSION" --json isDraft --jq .isDraft 2>/dev/null)" = "true" ]; then gh release delete "symbols-v$VERSION" --yes; fi
+          gh release create "symbols-v$VERSION" files/*-debug-symbols.* --draft --target "$GITHUB_SHA" \
+            --title "Debug symbols for $VERSION (never publish)" \
+            --notes "The debug symbols of v$VERSION's downloads ($GITHUB_SHA), to read crash reports. Keep this a draft: it is not for players."
