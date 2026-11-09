@@ -106,6 +106,7 @@
 #include "delay_tuner.hpp"
 #include "speed_report.hpp"
 #include "settings.hpp"
+#include "player_report.hpp" // (spikeout.log, crash reports, Report a problem)
 #include "ui/assets.hpp" // (the app's icon)
 #ifdef SPIKEOUT_JIT
 #include "jit/jit.hpp" // (spikeout-jit: the game translated from the ROM set at the first start, LLVM)
@@ -1850,10 +1851,22 @@ int main(int argc, char** argv) {
 
     const int cols = grid_columns(boards), rows = grid_rows(boards);
     const int width = kWidth * cols, height = kHeight * rows;
+    // Player reports (tools/player_report.hpp): what the window prints kept in spikeout.log in the data folder (the run
+    // before in spikeout-prev.log), a crash report there if it crashes. SPIKEOUT_LOG=0: no log file (tests running
+    // several windows from one folder).
+    const std::string report_folder = tools::data_folder();
+    const char* log_env = std::getenv("SPIKEOUT_LOG");
+    if (!(log_env && log_env[0] == '0')) tools::report::start_log(report_folder);
+    tools::report::catch_crashes(report_folder, net::kVersion);
+    const std::string last_crash = tools::report::last_crash(report_folder);
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
         std::fprintf(stderr, "spikeout: SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
+    tools::report::watch_controllers(); // (each controller as SDL finds it: the log says what it is, and if SDL can read it)
+    std::printf("spikeout: version %s\n%s%s", net::kVersion, tools::report::system_lines().c_str(),
+                tools::report::controllers_now().c_str());
+    if (!last_crash.empty()) std::printf("spikeout: the last run crashed: %s.txt in the data folder\n", last_crash.c_str());
     // Tests: SPIKEOUT_TEST_VIRTUAL_PAD=1 connects a pad that isn't there (SDL's virtual joystick: no buttons
     // pressed), for the menu's pad pages on a computer with none.
     if (std::getenv("SPIKEOUT_TEST_VIRTUAL_PAD")) {
@@ -1876,7 +1889,15 @@ int main(int argc, char** argv) {
     net::UpdateCheck update_check;
     std::optional<net::Release> newer_version;
     bool update_told = false;
-    std::printf("spikeout: version %s\n", net::kVersion);
+    // Detailed logging (the menu's, from the next start): the network and timing lines (SPIKEOUT_NET_DEBUG) in the log
+    if (settings.detailed_log && !std::getenv("SPIKEOUT_NET_DEBUG")) {
+#ifdef _WIN32
+        _putenv_s("SPIKEOUT_NET_DEBUG", "1");
+#else
+        setenv("SPIKEOUT_NET_DEBUG", "1", 0);
+#endif
+        std::printf("spikeout: detailed logging on\n");
+    }
     if (settings.check_updates && !net::dev_build(version)) update_check.start(version);
     if (cli_render_scale) settings.render_scale = cli_render_scale;
     if (cli_quads) settings.quads = true;
@@ -2064,6 +2085,7 @@ int main(int argc, char** argv) {
     }
 
     Shared shared;
+    if (!last_crash.empty()) shared.say("THE LAST RUN CRASHED: ESC > GAME > REPORT A PROBLEM", 12);
     shared.boards = boards;
     shared.roms = &roms;
     shared.max_frames = max_frames;
@@ -2349,6 +2371,23 @@ int main(int argc, char** argv) {
     // Pads: players 1 and 2 each the one chosen in Controls (settings.pads, by GUID) when it's connected, else the
     // first connected that no player has.
     std::vector<SDL_Gamepad*> gamepads;
+    auto add_pad = [&](SDL_JoystickID id) { // (once each: a pad already in the list announced again is left alone)
+        for (SDL_Gamepad* pad : gamepads)
+            if (SDL_GetGamepadID(pad) == id) return;
+        if (SDL_Gamepad* pad = SDL_OpenGamepad(id)) {
+            gamepads.push_back(pad);
+            std::printf("controller %u: in the game's list of pads (%zu now)\n", static_cast<unsigned>(id), gamepads.size());
+        }
+    };
+    { // Pads already connected: their SDL_EVENT_GAMEPAD_ADDED came at SDL_Init and the start-up screens' event loops
+      // (the ROM set's, PREPARING THE GAME) took it, so they're added here (a pad plugged in before the game started
+      // was never in the list: issue #1). Later ones come with their event in the main loop.
+        int n = 0;
+        SDL_JoystickID* ids = SDL_GetGamepads(&n);
+        std::printf("spikeout: the game starts: %d gamepad(s) connected to SDL\n", n);
+        for (int i = 0; i < n; ++i) add_pad(ids[i]);
+        SDL_free(ids);
+    }
     auto pad_guid = [](SDL_Gamepad* pad) {
         char text[64] = {};
         SDL_GUIDToString(SDL_GetJoystickGUID(SDL_GetGamepadJoystick(pad)), text, sizeof text);
@@ -3146,6 +3185,356 @@ int main(int argc, char** argv) {
         p.items.push_back(back_item());
         return p;
     };
+    // Report a problem (src/net/report.hpp, tools/player_report.hpp; the owner's design, 2026-11-09): a GitHub issue on
+    // the project's repository, the player's words and the computer's details in it, the logs in its comments. Logged in
+    // to GitHub from here: the player's own issue; else the lobby's bot opens it ("Reported by @name" if they gave
+    // one). Or the old way: a zip, attached by hand. Sending and logging in run on threads of their own; the menu is
+    // brought up to date when they say something (`changed`).
+    struct ReportState {
+        std::mutex lock;
+        std::string words;              // what the player wrote
+        std::string status;             // the last sent report ("Issue #12"; "" none yet)
+        std::string failed;             // a send that failed: why (said at the bottom, once)
+        std::string sent_url;           // the sent issue's page
+        int sent_number = 0;            // its number
+        net::report::Issue view;        // the sent issue as GitHub has it now (the game's page of it)
+        std::atomic<bool> viewing{false}; // (its fetch under way)
+        std::string login, token;       // logged in to GitHub
+        std::string login_code, login_page, login_status; // the device flow, under way
+        std::atomic<bool> busy{false}, logging_in{false}, changed{false};
+    };
+    auto report_state = std::make_shared<ReportState>();
+    const std::string login_file = report_folder + "github-login.txt"; // (the login's GitHub name, then its token)
+    if (std::FILE* f = tools::report::detail::open(login_file, "rb")) {
+        auto trimmed = [](std::string s) {
+            while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
+            return s;
+        };
+        char line[512];
+        if (std::fgets(line, sizeof line, f)) report_state->login = trimmed(line);
+        if (std::fgets(line, sizeof line, f)) report_state->token = trimmed(line);
+        std::fclose(f);
+        if (report_state->token.empty()) report_state->login.clear();
+    }
+    auto report_about = [&] { // (what only the window knows: its own list of pads)
+        std::string about = "Spikeout " + std::string(net::kVersion) + "\n";
+        about += "pads in the game's list: " + std::to_string(gamepads.size()) + "\n";
+        for (SDL_Gamepad* pad : gamepads) {
+            const char* name = SDL_GetGamepadName(pad);
+            about += "  " + std::string(name ? name : "?") + "\n";
+        }
+        return about;
+    };
+    // A report saved as a zip: said on a page of its own (no window of the system's: the same on every device), its
+    // name and folder; the path can be copied, and on a computer the folder opened.
+    auto saved_page = [&](const std::filesystem::path& zip) {
+        ui::MenuPage p{"Report saved",
+                       "Attach the zip to a bug report on the project's GitHub page (Issues > New issue), and say what "
+                       "happened.",
+                       {}};
+        const std::string name = path_utf8(zip.filename()), folder = path_utf8(zip.parent_path());
+        p.items.push_back({"File", "", [name] { return name; }, {}, {}, true});
+        p.items.push_back({"In", "", [folder] { return short_path(tools::report::detail::utf8(folder)); }, {}, {}, true});
+        p.items.push_back({"Copy its path", "The zip's whole path, to paste where you attach it.", {}, {}, [&, path = path_utf8(zip)] {
+                               SDL_SetClipboardText(path.c_str());
+                               shared.say("THE ZIP'S PATH COPIED", 4);
+                           }});
+#if defined(_WIN32) || defined(__APPLE__) || defined(__linux__)
+        p.items.push_back({"Open its folder", "In the system's file manager.", {}, {}, [folder] {
+                               std::string url = folder;
+                               std::replace(url.begin(), url.end(), '\\', '/');
+                               SDL_OpenURL(((url.starts_with('/') ? "file://" : "file:///") + url).c_str());
+                           }});
+#endif
+        p.items.push_back(back_item());
+        return p;
+    };
+    auto save_report_zip = [&] {
+        std::string words;
+        {
+            std::lock_guard guard(report_state->lock);
+            words = report_state->words;
+        }
+        const std::filesystem::path zip = tools::report::make_report(report_folder, report_about(), words);
+        if (zip.empty()) {
+            shared.say("CAN'T WRITE THE REPORT IN THE DATA FOLDER", 6);
+            return;
+        }
+        std::printf("spikeout: report written: %s\n", path_utf8(zip).c_str());
+        menu.push(saved_page(zip));
+    };
+    // GitHub's device flow, on a page: the address and the code; back to the report by itself once logged in.
+    auto login_page = [&] {
+        ui::MenuPage p{"Log in to GitHub",
+                       "On your phone: scan the code below, or go to the address, then type the code and say yes. GitHub's "
+                       "own page asks you: the game never sees your password, and may only open issues on this project's "
+                       "page, as you.",
+                       {}};
+        {
+            std::lock_guard guard(report_state->lock);
+            p.qr = report_state->login_page; // (once GitHub has given it: the page made again, the main loop)
+        }
+        p.items.push_back({"Go to", "", [st = report_state] {
+                               std::lock_guard guard(st->lock);
+                               return st->login_page.empty() ? std::string("...") : st->login_page;
+                           },
+                           {}, {}, true});
+        p.items.push_back({"Type the code", "", [st = report_state] {
+                               std::lock_guard guard(st->lock);
+                               return st->login_code.empty() ? std::string("...") : st->login_code;
+                           },
+                           {}, {}, true});
+        p.items.push_back({"Open the page here", "Opens GitHub's page in your browser, the code copied (paste it there). Or: "
+                           "the address above on your phone, and type the code.",
+                           {}, {}, [st = report_state] {
+                               std::lock_guard guard(st->lock);
+                               if (st->login_page.empty()) return;
+                               SDL_SetClipboardText(st->login_code.c_str());
+                               SDL_OpenURL(st->login_page.c_str());
+                           }});
+        p.items.push_back({"", "", [st = report_state] {
+                               std::lock_guard guard(st->lock);
+                               return st->login_status;
+                           },
+                           {}, {}, true});
+        p.items.push_back(back_item());
+        if (!report_state->logging_in.exchange(true)) // (asked for a code, then GitHub asked until the player says yes)
+            std::thread([st = report_state, login_file] {
+                auto say = [&](const std::string& s) {
+                    std::lock_guard guard(st->lock);
+                    st->login_status = s;
+                    st->changed = true;
+                };
+                say("Asking GitHub for a code...");
+                const net::report::DeviceCode d = net::report::login_start();
+                if (!d.error.empty()) {
+                    say("Can't log in: " + d.error);
+                    st->logging_in = false;
+                    return;
+                }
+                {
+                    std::lock_guard guard(st->lock);
+                    st->login_code = d.user_code, st->login_page = d.verification_uri;
+                }
+                say("Waiting for you to say yes on GitHub's page...");
+                int interval = std::max(d.interval, 5);
+                const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(d.expires_in);
+                while (std::chrono::steady_clock::now() < until) {
+                    std::this_thread::sleep_for(std::chrono::seconds(interval));
+                    const net::report::Poll poll = net::report::login_poll(d.device_code);
+                    using State = net::report::Poll::State;
+                    if (poll.state == State::pending) continue;
+                    if (poll.state == State::slow_down) {
+                        interval += 5;
+                        continue;
+                    }
+                    if (poll.state != State::done) {
+                        say(poll.state == State::denied ? "You said no on GitHub's page: not logged in."
+                            : poll.state == State::expired ? "The code ran out: open this page again."
+                                                           : "Can't log in: " + poll.error);
+                        break;
+                    }
+                    std::string why;
+                    const std::string name = net::report::login_name(poll.token, &why);
+                    if (name.empty()) {
+                        say("Can't log in: " + why);
+                        break;
+                    }
+                    if (std::FILE* f = tools::report::detail::open(login_file, "wb")) {
+                        std::fprintf(f, "%s\n%s\n", name.c_str(), poll.token.c_str());
+                        std::fclose(f);
+                    }
+                    {
+                        std::lock_guard guard(st->lock);
+                        st->login = name, st->token = poll.token;
+                        st->login_code.clear(), st->login_page.clear(), st->login_status.clear();
+                    }
+                    std::printf("spikeout: logged in to GitHub as %s\n", name.c_str());
+                    st->changed = true;
+                    break;
+                }
+                st->logging_in = false;
+            }).detach();
+        return p;
+    };
+    // The sent report as GitHub has it, on a page of the game's own (no browser): open or closed, its title, each
+    // answer (who, its first words; selected: more of it below), fetched with the player's login when the page opens
+    // and on Refresh. Named "Report #N": made again when the fetch comes (the main loop).
+    auto fetch_view = [&] {
+        if (report_state->viewing.exchange(true)) return;
+        int number = 0;
+        std::string token;
+        {
+            std::lock_guard guard(report_state->lock);
+            number = report_state->sent_number, token = report_state->token;
+        }
+        std::thread([st = report_state, number, token] {
+            net::report::Issue issue = net::report::fetch_issue(number, token);
+            {
+                std::lock_guard guard(st->lock);
+                st->view = std::move(issue);
+            }
+            st->viewing = false;
+            st->changed = true;
+        }).detach();
+    };
+    std::function<ui::MenuPage()> view_page;
+    view_page = [&] {
+        net::report::Issue issue;
+        int number = 0;
+        {
+            std::lock_guard guard(report_state->lock);
+            issue = report_state->view, number = report_state->sent_number;
+        }
+        ui::MenuPage p{"Report #" + std::to_string(number), "The answers on the project's GitHub page. Select one: more of it below.", {}};
+        const bool busy = report_state->viewing;
+        if (!issue.ok) {
+            p.items.push_back({"", "", [why = busy || issue.error.empty() ? std::string("Asking GitHub...") : "Can't read it: " + issue.error] {
+                                   return why;
+                               },
+                               {}, {}, true});
+        } else {
+            p.items.push_back({"State", "", [s = issue.state == "closed" ? std::string("Closed") : std::string("Open")] { return s; }, {}, {}, true});
+            // (a long title cut to the row's width, "..." at its end; whole characters, as UTF-8 has them)
+            std::string title = issue.title;
+            if (title.size() > 58) {
+                std::size_t cut = 55;
+                while (cut > 0 && (static_cast<unsigned char>(title[cut]) & 0xC0) == 0x80) --cut;
+                title = title.substr(0, cut) + "...";
+            }
+            p.items.push_back({"", "", [title] { return title; }, {}, {}, true});
+            if (issue.answers.empty()) p.items.push_back({"", "", [] { return std::string("No answers yet."); }, {}, {}, true});
+            for (const net::report::Answer& a : issue.answers) {
+                std::string flat = a.body; // (one line for its row; the help below: up to 700 characters)
+                for (char& c : flat)
+                    if (c == '\n' || c == '\r') c = ' ';
+                const std::string first = flat.size() > 34 ? flat.substr(0, 31) + "..." : flat;
+                p.items.push_back({"@" + a.author, flat.size() > 700 ? flat.substr(0, 697) + "..." : flat, [first] { return first; }, {}, [] {}});
+            }
+            if (issue.logs) p.items.push_back({"The game's logs", "", [n = issue.logs] { return std::to_string(n) + " comments"; }, {}, {}, true});
+        }
+        p.items.push_back({"Refresh", "Asks GitHub again.", {}, {}, [&] {
+                               fetch_view();
+                               menu.replace(view_page());
+                           }});
+        p.items.push_back(back_item());
+        return p;
+    };
+    // Report a problem: what happened, detailed logging, then sent to GitHub (logged in) or saved as a zip. Built anew
+    // as the login or a send changes it (report_changed, in the main loop).
+    std::function<ui::MenuPage()> report_page;
+    report_page = [&] {
+        ui::MenuPage p{"Report a problem",
+                       "Logged in to GitHub, the report becomes a public issue on the project's page (internet addresses, "
+                       "your user name and game files left out). Or save it as a zip and attach it yourself.",
+                       {}};
+        std::string login, status, sent_url, words;
+        {
+            std::lock_guard guard(report_state->lock);
+            login = report_state->login, status = report_state->status, sent_url = report_state->sent_url;
+            words = report_state->words;
+        }
+        p.items.push_back({"What happened",
+                           "What you did, what you expected and what happened. Enter: write it.",
+                           [st = report_state] {
+                               std::lock_guard guard(st->lock);
+                               if (st->words.empty()) return std::string("(not written)");
+                               std::string first = st->words.substr(0, st->words.find('\n'));
+                               return first.size() > 28 ? first.substr(0, 25) + "..." : first;
+                           },
+                           {}, [&] {
+                               ui::MenuPage t{"What happened", "Type it. Enter: done (Shift+Enter: a new line). Ctrl+V: paste. Esc: back.", {}};
+                               t.text = std::make_shared<ui::TextInput>();
+                               t.text->multiline = true;
+                               t.text->max_bytes = 4000;
+                               {
+                                   std::lock_guard guard(report_state->lock);
+                                   t.text->text = report_state->words;
+                               }
+                               t.text->done = [&](const std::string& typed) {
+                                   {
+                                       std::lock_guard guard(report_state->lock);
+                                       report_state->words = typed;
+                                   }
+                                   menu.pop();
+                                   menu.replace(report_page()); // (Send can be chosen now, or not)
+                               };
+                               menu.push(std::move(t));
+                           }});
+        p.items.push_back({"Detailed logging",
+                           "The network and timing lines in the game's log too. Turn it on, start the game again, make the "
+                           "problem happen, then report it.",
+                           [&] { return on_off(settings.detailed_log); },
+                           [&](int) {
+                               settings.detailed_log = !settings.detailed_log;
+                               changed();
+                           }});
+        if (net::report::available() && net::report::can_log_in()) {
+            if (login.empty())
+                p.items.push_back({"Log in to GitHub", "To send the report from here (a GitHub account, free).", {}, {},
+                                   [&] { menu.push(login_page()); }});
+            // (only logged in and with something written: else shown, not chosen, with what it needs first)
+            const bool ready = !login.empty() && !words.empty();
+            if (!ready) {
+                const std::string why = login.empty() ? "log in first" : "as @" + login + ": write what happened first";
+                p.items.push_back({"Send to GitHub", "", [why] { return why; }, {}, {}, true});
+            } else {
+                p.items.push_back({"Send to GitHub", "Opens the report as your issue on the project's page: you get the answers there.",
+                                   [st = report_state] {
+                                       std::lock_guard guard(st->lock);
+                                       return st->busy ? std::string("Sending...") : "as @" + st->login;
+                                   },
+                                   {}, [&] {
+                                       if (report_state->busy.exchange(true)) return;
+                                       std::string said, token;
+                                       {
+                                           std::lock_guard guard(report_state->lock);
+                                           said = report_state->words, token = report_state->token;
+                                       }
+                                       net::report::Report r =
+                                           tools::report::github_report(report_folder, report_about(), said, net::kVersion);
+                                       menu.refresh();
+                                       std::thread([st = report_state, r = std::move(r), token] {
+                                           const net::report::Sent s = net::report::send_as_user(r, token);
+                                           {
+                                               std::lock_guard guard(st->lock);
+                                               if (s.ok) {
+                                                   st->status = "Issue #" + std::to_string(s.number) + (s.error.empty() ? "" : " (" + s.error + ")");
+                                                   st->sent_url = s.url, st->sent_number = s.number, st->view = {};
+                                                   st->words.clear();
+                                               } else {
+                                                   st->failed = s.error; // (said at the bottom; nothing kept)
+                                               }
+                                           }
+                                           std::printf("spikeout: report: %s%s\n", s.ok ? "sent as issue #" : "not sent: ",
+                                                       s.ok ? std::to_string(s.number).c_str() : s.error.c_str());
+                                           st->busy = false;
+                                           st->changed = true;
+                                       }).detach();
+                                   }});
+            }
+        }
+        p.items.push_back({"Save as a zip", "The same files, and a crash's full record, in one zip in the game's data folder.",
+                           {}, {}, [&] { save_report_zip(); }});
+        if (!sent_url.empty()) // (only once one was sent)
+            p.items.push_back({"Last report", "Enter: it and its answers, as GitHub has them now.", [status] { return status; }, {},
+                               [&] {
+                                   fetch_view();
+                                   menu.push(view_page());
+                               }});
+        if (!login.empty())
+            p.items.push_back({"Log out of GitHub", "Forgets your GitHub login on this computer.", {}, {}, [&] {
+                                   {
+                                       std::lock_guard guard(report_state->lock);
+                                       report_state->login.clear(), report_state->token.clear();
+                                   }
+                                   std::error_code ec;
+                                   std::filesystem::remove(tools::report::detail::utf8(login_file), ec);
+                                   menu.replace(report_page());
+                               }});
+        p.items.push_back(back_item());
+        return p;
+    };
     auto game_page = [&] {
         ui::MenuPage p{"Game", "", {}};
         p.items.push_back({"Reset game", "Restarts the game, as switching the arcade off and on.", {}, {}, [&] {
@@ -3178,6 +3567,10 @@ int main(int argc, char** argv) {
                                    settings.check_updates = !settings.check_updates;
                                    changed();
                                }});
+        p.items.push_back({"Report a problem",
+                           "A bug report: what happened, the game's log and settings, this computer's details. Sent to the "
+                           "project's GitHub page, or saved as a zip.",
+                           {}, {}, [&] { menu.push(report_page()); }});
         p.items.push_back(back_item());
         return p;
     };
@@ -3627,9 +4020,7 @@ int main(int argc, char** argv) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_EVENT_QUIT) running = false;
-            if (e.type == SDL_EVENT_GAMEPAD_ADDED) {
-                if (SDL_Gamepad* pad = SDL_OpenGamepad(e.gdevice.which)) gamepads.push_back(pad);
-            }
+            if (e.type == SDL_EVENT_GAMEPAD_ADDED) add_pad(e.gdevice.which);
             if (e.type == SDL_EVENT_GAMEPAD_REMOVED) {
                 for (auto it = gamepads.begin(); it != gamepads.end(); ++it)
                     if (SDL_GetGamepadID(*it) == e.gdevice.which) {
@@ -3835,6 +4226,26 @@ int main(int argc, char** argv) {
         // lobby told of players joining; the menu's lobby page kept up to
         // date; the controls let go while the menu is open (the game goes on).
         static auto net_refreshed = now;
+        // A report sent, or a GitHub login moving on (their threads): the menu's page up to date
+        if (report_state->changed.exchange(false) && menu_ready && menu.is_open()) {
+            bool logged_in = false;
+            std::string failed;
+            {
+                std::lock_guard guard(report_state->lock);
+                logged_in = !report_state->login.empty();
+                failed = std::exchange(report_state->failed, {});
+            }
+            if (!failed.empty()) {
+                std::string upper = "NOT SENT: " + failed;
+                for (char& c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                shared.say(upper, 8);
+            }
+            if (menu.top_name() == "Log in to GitHub" && logged_in) menu.pop(); // (logged in: back to the report)
+            else if (menu.top_name() == "Log in to GitHub") menu.replace(login_page()); // (the code come: its QR code)
+            if (menu.top_name() == "Report a problem") menu.replace(report_page()); // (its items as they are now)
+            else if (menu.top_name().rfind("Report #", 0) == 0) menu.replace(view_page()); // (GitHub's answer come)
+            else menu.refresh();
+        }
         // The update check answered: a newer version said once at the bottom (the menu's first items say it from now on).
         if (!update_told && update_check.done()) {
             update_told = true;
@@ -4396,5 +4807,6 @@ int main(int argc, char** argv) {
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
+    std::printf("spikeout: closed normally\n");
     return 0;
 }

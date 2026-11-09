@@ -1,6 +1,7 @@
 // The update check (src/net/update.hpp): GitHub's release list over HTTPS
 // through libcurl.
 #include "net/update.hpp"
+#include "net/ca_file.hpp"
 
 #include <cstdlib>
 #include <curl/curl.h>
@@ -60,6 +61,7 @@ void UpdateCheck::run(std::shared_ptr<State> state, std::string current, std::st
         curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 10L);
         curl_easy_setopt(c, CURLOPT_TIMEOUT, 20L);
         curl_easy_setopt(c, CURLOPT_SSL_OPTIONS, static_cast<long>(CURLSSLOPT_REVOKE_BEST_EFFORT | CURLSSLOPT_NATIVE_CA));
+        set_ca_file(c);
         curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, keep);
         curl_easy_setopt(c, CURLOPT_WRITEDATA, &text);
         long status = 0;

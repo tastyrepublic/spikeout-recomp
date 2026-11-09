@@ -7,6 +7,11 @@ project(spikeout-recomp
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# Apple's libc++ keeps C++20's std::jthread and std::stop_token (the network code's threads) behind its experimental
+# switch; they are in its headers only (nothing more to link).
+if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fexperimental-library>)
+endif()
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -184,12 +189,18 @@ if(SPIKEOUT_LOBBY)
     endif()
 endif()
 if(SPIKEOUT_LOBBY AND TARGET CURL::libcurl)
-    target_sources(m3net PRIVATE src/net/lobby.cpp src/net/update.cpp)
+    target_sources(m3net PRIVATE src/net/lobby.cpp src/net/update.cpp src/net/report.cpp)
     target_link_libraries(m3net PUBLIC CURL::libcurl)
     target_compile_definitions(m3net PUBLIC SPIKEOUT_LOBBY SPIKEOUT_LOBBY_URL="${SPIKEOUT_LOBBY_URL}"
                                SPIKEOUT_RELEASES_URL="${SPIKEOUT_RELEASES_URL}")
+    # Bug reports to GitHub (src/net/report.hpp): the repository's issues, opened by the player logged in to GitHub
+    # from the game: the project's GitHub App's client ID (public; empty: no login offered, a zip only).
+    set(SPIKEOUT_REPORT_REPO "tastyrepublic/spikeout-recomp" CACHE STRING "The GitHub repository the reports become issues on")
+    set(SPIKEOUT_GITHUB_CLIENT_ID "Iv23lix0ed2ATx6BOHJC" CACHE STRING "The project's GitHub App's client ID (public; the owner's app \"Spikeout reports\"; empty: no login)")
+    target_compile_definitions(m3net PUBLIC SPIKEOUT_REPORT_REPO="${SPIKEOUT_REPORT_REPO}"
+                               SPIKEOUT_GITHUB_CLIENT_ID="${SPIKEOUT_GITHUB_CLIENT_ID}")
 else()
-    target_sources(m3net PRIVATE src/net/lobby_none.cpp)
+    target_sources(m3net PRIVATE src/net/lobby_none.cpp src/net/report_none.cpp)
     message(STATUS "No libcurl: the internet lobby is left out (LAN play only)")
 endif()
 
@@ -302,6 +313,7 @@ function(spikeout_window_app target)
     set_target_properties(${target} PROPERTIES WIN32_EXECUTABLE ON)
     if(WIN32)
         target_sources(${target} PRIVATE ${CMAKE_SOURCE_DIR}/assets/icon/spikeout.rc)
+        target_link_libraries(${target} PRIVATE dbghelp) # (tools/player_report.hpp: a crash's minidump)
     endif()
 endfunction()
 
@@ -431,9 +443,17 @@ if(SPIKEOUT_GPU)
     else()
         target_compile_options(rmlui_sdl_gpu PRIVATE -w)
     endif()
+    # (Project Nayuki's QR Code generator, MIT, third_party/qrcodegen: the GitHub login page's code for a phone)
+    add_library(qrcodegen STATIC third_party/qrcodegen/qrcodegen.cpp)
+    target_include_directories(qrcodegen SYSTEM PUBLIC third_party/qrcodegen)
+    if(MSVC)
+        target_compile_options(qrcodegen PRIVATE /w)
+    else()
+        target_compile_options(qrcodegen PRIVATE -w)
+    endif()
     add_library(m3ui src/ui/menu.cpp ${ui_sources})
     target_include_directories(m3ui PUBLIC src)
-    target_link_libraries(m3ui PUBLIC SDL3::SDL3 PRIVATE rmlui_sdl_gpu RmlUi::RmlUi spikeout_warnings)
+    target_link_libraries(m3ui PUBLIC SDL3::SDL3 PRIVATE rmlui_sdl_gpu RmlUi::RmlUi qrcodegen spikeout_warnings)
 
     add_library(m3gpu src/gpu/present.cpp src/gpu/real3d_gpu.cpp ${shader_sources})
     target_include_directories(m3gpu PUBLIC src)

@@ -75,6 +75,17 @@ struct CodeInput {
     std::function<void(const std::string&)> done; // the done key (Enter, Start), the text long enough
 };
 
+// A page of free text (a bug report's description, a GitHub name): typed through the system's text input (any
+// language, its input methods; the Steam Deck's on-screen keyboard), pasted with Ctrl+V. Enter / Start: done
+// (Shift+Enter: a new line, where it may have them); Backspace deletes; Esc / B: back without it.
+struct TextInput {
+    std::string text;              // so far (UTF-8)
+    std::size_t max_bytes = 2000;
+    bool multiline = false;
+    std::string allowed;           // if not empty, only these characters (a GitHub name's)
+    std::function<void(const std::string&)> done;
+};
+
 struct MenuPage {
     MenuPage(std::string name_ = {}, std::string note_ = {}, std::vector<MenuItem> items_ = {})
         : name(std::move(name_)), note(std::move(note_)), items(std::move(items_)) {}
@@ -83,6 +94,8 @@ struct MenuPage {
     std::string note; // under the items when the selected one has no help
     std::vector<MenuItem> items;
     std::shared_ptr<CodeInput> code; // a code page instead of items
+    std::shared_ptr<TextInput> text; // a text page instead of items
+    std::string qr;                  // shown as a QR code under the items (an address for a phone; "": none)
 };
 
 class Menu {
@@ -120,6 +133,8 @@ public:
     void close();
     void push(MenuPage page); // a sub-page
     void pop();               // back a page; closes at the top
+    void replace(MenuPage page); // the top page made again (its items changed), the same row selected where it can be
+    const std::string& top_name() const { static const std::string none; return stack_.empty() ? none : stack_.back().name; }
     std::size_t depth() const { return stack_.size(); } // pages open (0: closed)
     void refresh();           // the values again (changed from outside)
     // Waits for a key or pad button: on_event sees each input event until it
@@ -151,6 +166,11 @@ private:
     void code_move(int dx, int dy);
     void code_press(int key);
     void code_type(const std::string& letters);
+    // A text page (MenuPage::text).
+    void build_text();
+    bool text_event(const SDL_Event& e);
+    void text_type(const std::string& typed);
+    bool text_input_on_ = false; // (SDL's text input started for a text page)
 
     std::unique_ptr<Impl> impl_;
     std::string error_;
