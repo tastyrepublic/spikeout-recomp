@@ -3,34 +3,17 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createServer } from "node:http";
-import { generateKeyPairSync, createVerify } from "node:crypto";
 
-const PORT = 8794;        // (the lobby with a plain token)
-const APP_PORT = 8795;    // (the lobby as a GitHub App: its private key)
-const GITHUB_PORT = 8796; // (a GitHub of the tests' own: the reports' issues, kept here)
-let dev, appDev, github;
-const seen = []; // (what the fake GitHub was asked: {method, path, auth, body})
-const users = new Set(["realplayer"]);
-// (the app's key, as GitHub gives it: PKCS#1)
-const { publicKey, privateKey } = generateKeyPairSync("rsa", {
-	modulusLength: 2048,
-	publicKeyEncoding: { type: "spki", format: "pem" },
-	privateKeyEncoding: { type: "pkcs1", format: "pem" },
-});
-const jwtValid = (auth) => { // (signed with the app's key, by app 4242, not run out)
-	const [h, p, s] = (auth || "").replace(/^Bearer /, "").split(".");
-	if (!s) return false;
-	const ok = createVerify("RSA-SHA256").update(`${h}.${p}`).verify(publicKey, Buffer.from(s, "base64url"));
-	const claims = JSON.parse(Buffer.from(p, "base64url"));
-	return ok && claims.iss === "4242" && claims.exp > Date.now() / 1000;
-};
+const PORT = 8790;
+let dev;
 
-function startDev(port, vars) {
-	const args = ["wrangler", "dev", "--port", String(port), "--ip", "127.0.0.1", "--persist-to", `.wrangler/test-${port}`, "--var", `GITHUB_API:http://127.0.0.1:${GITHUB_PORT}`];
-	for (const v of vars) args.push("--var", v);
-	const p = spawn("npx", args, { cwd: new URL("..", import.meta.url), shell: true, stdio: ["ignore", "pipe", "pipe"] });
-	return [p, new Promise((resolve, reject) => {
+before(async () => {
+	dev = spawn("npx", ["wrangler", "dev", "--port", String(PORT), "--ip", "127.0.0.1"], {
+		cwd: new URL("..", import.meta.url),
+		shell: true,
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	await new Promise((resolve, reject) => {
 		const timer = setTimeout(() => reject(new Error("wrangler dev didn't start")), 60000);
 		const look = (chunk) => {
 			if (/Ready on/.test(chunk.toString())) {
@@ -38,116 +21,14 @@ function startDev(port, vars) {
 				resolve();
 			}
 		};
-		p.stdout.on("data", look);
-		p.stderr.on("data", look);
-	})];
-}
-
-before(async () => {
-	let issues = 0;
-	github = createServer((req, res) => {
-		let body = "";
-		req.on("data", (d) => (body += d));
-		req.on("end", () => {
-			seen.push({ method: req.method, path: req.url, auth: req.headers.authorization, body: body ? JSON.parse(body) : null });
-			const reply = (status, j) => (res.writeHead(status, { "Content-Type": "application/json" }), res.end(JSON.stringify(j)));
-			if (req.url === "/repos/tastyrepublic/spikeout-recomp/installation")
-				return jwtValid(req.headers.authorization) ? reply(200, { id: 77 }) : reply(401, { message: "bad JWT" });
-			if (req.method === "POST" && req.url === "/app/installations/77/access_tokens")
-				return jwtValid(req.headers.authorization) ? reply(201, { token: "installation-token" }) : reply(401, { message: "bad JWT" });
-			const user = req.url.match(/^\/users\/([^/]+)$/);
-			if (user) return users.has(user[1].toLowerCase()) ? reply(200, { login: "RealPlayer" }) : reply(404, { message: "Not Found" });
-			if (req.method === "POST" && /\/issues$/.test(req.url)) {
-				issues += 1;
-				return reply(201, { number: 1000 + issues, html_url: `https://github.example/issues/${1000 + issues}` });
-			}
-			if (req.method === "POST" && /\/comments$/.test(req.url)) return reply(201, { id: 1 });
-			reply(404, { message: "Not Found" });
-		});
-	}).listen(GITHUB_PORT, "127.0.0.1");
-	let ready, appReady;
-	[dev, ready] = startDev(PORT, ["REPORT_TOKEN:test-token"]);
-	[appDev, appReady] = startDev(APP_PORT, ["APP_ID:4242", `APP_PRIVATE_KEY:${Buffer.from(privateKey).toString("base64")}`]);
-	await Promise.all([ready, appReady]);
+		dev.stdout.on("data", look);
+		dev.stderr.on("data", look);
+	});
 });
 
 after(() => {
-	for (const p of [dev, appDev])
-		if (process.platform === "win32") spawn("taskkill", ["/pid", String(p.pid), "/T", "/F"]);
-		else p.kill();
-	github.close();
-});
-
-test("as the GitHub App: a token made from its key, the issue opened with it", async () => {
-	seen.length = 0;
-	const res = await fetch(`http://127.0.0.1:${APP_PORT}/v1/report`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json", "CF-Connecting-IP": "10.1.0.1" },
-		body: JSON.stringify({
-			title: "As the app", comments: ["log"],
-			body: "words\n\n_Sent from the game (Esc > Game > Report a problem)._\n",
-		}),
-	});
-	assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
-	const issue = seen.find((s) => s.method === "POST" && s.path.endsWith("/issues"));
-	assert.equal(issue.auth, "Bearer installation-token");
-	assert.ok(seen.some((s) => s.path.endsWith("/comments") && s.auth === "Bearer installation-token"));
-});
-
-// Bug reports: as the game sends them (src/net/report.cpp), to the fake GitHub.
-const sendReport = (r, ip = "1.2.3.4") =>
-	fetch(`http://127.0.0.1:${PORT}/v1/report`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json", "CF-Connecting-IP": ip },
-		body: JSON.stringify(r),
-	});
-const aReport = (more = {}) => ({
-	title: "My pad isn't seen (0.1.0-preview3, Windows 11 Pro)",
-	body: "It doesn't work, ask @someone\n\n_Sent from the game (Esc > Game > Report a problem). Its logs are in the comments below._\n",
-	comments: ["**spikeout.log (this run)**\n\n```text\nhello\n```\n", "**settings.ini**\n\n```text\nvolume = 100\n```\n"],
-	github_name: "",
-	...more,
-});
-
-test("a report becomes an issue with its logs as comments, no one notified", async () => {
-	seen.length = 0;
-	const res = await sendReport(aReport(), "10.0.0.1");
-	assert.equal(res.status, 200);
-	const answer = await res.json();
-	assert.ok(answer.number > 1000);
-	const issue = seen.find((s) => s.method === "POST" && /\/repos\/tastyrepublic\/spikeout-recomp\/issues$/.test(s.path));
-	assert.ok(issue);
-	assert.equal(issue.auth, "Bearer test-token");
-	assert.deepEqual(issue.body.labels, ["player report"]);
-	assert.ok(issue.body.body.includes("@​someone")); // (the player's @: a mention of nobody)
-	assert.ok(!issue.body.body.includes("Reported by"));
-	const comments = seen.filter((s) => s.path.endsWith(`/issues/${answer.number}/comments`));
-	assert.equal(comments.length, 2);
-	assert.ok(comments[0].body.body.includes("spikeout.log"));
-});
-
-test("a report with a GitHub name mentions it; a name that doesn't exist is refused", async () => {
-	seen.length = 0;
-	const res = await sendReport(aReport({ github_name: "realplayer" }), "10.0.0.2");
-	assert.equal(res.status, 200);
-	const issue = seen.find((s) => s.method === "POST" && s.path.endsWith("/issues"));
-	assert.ok(issue.body.body.includes("Reported by @RealPlayer"));
-	const bad = await sendReport(aReport({ github_name: "nobody-here" }), "10.0.0.2");
-	assert.equal(bad.status, 400);
-	assert.match((await bad.json()).why, /no GitHub user called nobody-here/);
-	const wrong = await sendReport(aReport({ github_name: "not a name!" }), "10.0.0.2");
-	assert.equal(wrong.status, 400);
-});
-
-test("only the game's reports, not too big, a few an hour from one address", async () => {
-	assert.equal((await sendReport({ title: "spam", body: "buy things", comments: [] }, "10.0.0.3")).status, 400);
-	assert.equal((await sendReport(aReport({ comments: ["x".repeat(70000)] }), "10.0.0.3")).status, 400);
-	assert.equal((await sendReport(aReport({ comments: ["a", "b", "c", "d", "e"] }), "10.0.0.3")).status, 400);
-	const statuses = [];
-	for (let i = 0; i < 6; i++) statuses.push((await sendReport(aReport(), "10.0.0.4")).status);
-	assert.deepEqual(statuses, [200, 200, 200, 200, 200, 429]);
-	assert.equal((await sendReport(aReport(), "10.0.0.5")).status, 200); // (another address: its own count)
-	assert.equal((await fetch(`http://127.0.0.1:${PORT}/v1/report`)).status, 405);
+	if (process.platform === "win32") spawn("taskkill", ["/pid", String(dev.pid), "/T", "/F"]);
+	else dev.kill();
 });
 
 // A player: send, and wait for the next message of a type.

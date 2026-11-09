@@ -5,7 +5,6 @@ namespace net::report {
 
 bool available() { return false; }
 bool can_log_in() { return false; }
-Sent send_via_lobby(const Report&, std::string) { return {false, 0, {}, "this build has no internet connection"}; }
 DeviceCode login_start() { return {{}, {}, {}, "this build has no internet connection"}; }
 Poll login_poll(const std::string&) { return {}; }
 std::string login_name(const std::string&, std::string* error) {

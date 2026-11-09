@@ -67,7 +67,6 @@ std::string web() { return env_or("SPIKEOUT_GITHUB_WEB", "https://github.com"); 
 std::string answer_error(const Answer& a, const char* who) {
     if (!a.error.empty()) return "no connection to " + std::string(who) + " (" + a.error + ")";
     if (const auto j = Json::parse(a.text); j && j->is_object()) {
-        if (const std::string& why = (*j)["why"].as_string(); !why.empty()) return why; // (the lobby's)
         if (const std::string& m = (*j)["message"].as_string(); !m.empty()) return std::string(who) + ": " + m; // (GitHub's)
     }
     return std::string(who) + " answered " + std::to_string(a.status);
@@ -77,35 +76,6 @@ std::string answer_error(const Answer& a, const char* who) {
 
 bool available() { return true; }
 bool can_log_in() { return kClientId[0] != '\0' || std::getenv("SPIKEOUT_GITHUB_CLIENT_ID"); }
-
-Sent send_via_lobby(const Report& r, std::string url) {
-    if (const char* e = std::getenv("SPIKEOUT_REPORT_URL"); e && *e) url = e;
-#ifdef SPIKEOUT_REPORT_URL
-    if (url.empty()) url = SPIKEOUT_REPORT_URL;
-#endif
-    Sent s;
-    if (url.empty()) {
-        s.error = "this build has no report address";
-        return s;
-    }
-    Json j = Json::object();
-    j.set("title", r.title);
-    j.set("body", r.body);
-    Json comments = Json::array();
-    for (const std::string& c : r.comments) comments.push(c);
-    j.set("comments", std::move(comments));
-    j.set("github_name", r.github_name);
-    const Answer a = request("POST", url, j.dump(), "application/json", {});
-    const auto answer = Json::parse(a.text);
-    if (a.error.empty() && a.status == 200 && answer && answer->is_object() && (*answer)["number"].as_number() > 0) {
-        s.ok = true;
-        s.number = static_cast<int>((*answer)["number"].as_number());
-        s.url = (*answer)["url"].as_string();
-    } else {
-        s.error = answer_error(a, "the lobby");
-    }
-    return s;
-}
 
 DeviceCode login_start() {
     DeviceCode d;

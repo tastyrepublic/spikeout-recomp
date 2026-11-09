@@ -71,7 +71,6 @@ struct Settings {
     int volume = 100, sound_volume = 100, music_volume = 100;
     // Network play: the name the others see (clean_name's; empty: this computer's user name)
     std::string player_name;
-    std::string github_name; // a bug report sent without logging in: the player's GitHub name, if they gave it (mentioned in the issue)
     // The ROM set: its zip (spikeofe.zip) or the folder of its files, in UTF-8 (empty: not chosen yet; chosen at the
     // first start and in the menu; a folder on the command line goes over it)
     std::string rom_path;
@@ -158,7 +157,6 @@ inline Settings load_settings(const std::string& path) {
     if (auto it = v.find("front_output"); it != v.end()) s.front_output = it->second;
     if (auto it = v.find("rear_output"); it != v.end()) s.rear_output = it->second;
     if (auto it = v.find("player_name"); it != v.end()) s.player_name = clean_name(it->second);
-    if (auto it = v.find("github_name"); it != v.end()) s.github_name = it->second.substr(0, 39);
     if (auto it = v.find("rom_path"); it != v.end()) s.rom_path = it->second;
     if (auto it = v.find("jit_cache"); it != v.end()) s.jit_cache = it->second;
     get("screen_filter", s.screen_filter, 0, 2);
@@ -197,7 +195,6 @@ inline bool save_settings(const std::string& path, const Settings& s) {
     o << "front_output = " << s.front_output << "\n";
     o << "rear_output = " << s.rear_output << "\n";
     o << "player_name = " << s.player_name << "\n";
-    o << "github_name = " << s.github_name << "\n";
     o << "rom_path = " << s.rom_path << "\n";
     o << "jit_cache = " << s.jit_cache << "\n";
     o << "crt_colours = " << s.crt_colours << "\n";

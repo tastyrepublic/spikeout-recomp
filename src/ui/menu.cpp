@@ -457,6 +457,17 @@ void Menu::pop() {
     build();
 }
 
+void Menu::replace(MenuPage page) {
+    if (stack_.empty()) return;
+    stack_.back() = std::move(page);
+    const MenuPage& p = stack_.back();
+    const int rows = static_cast<int>(p.items.size());
+    if (selected_ >= rows) selected_ = rows - 1;
+    while (selected_ > 0 && p.items[static_cast<std::size_t>(selected_)].info) --selected_; // (a row that can be chosen)
+    if (selected_ < 0 || (rows && p.items[static_cast<std::size_t>(selected_)].info)) selected_ = first_selectable(p);
+    if (open_) build();
+}
+
 void Menu::refresh() {
     if (open_) build();
 }

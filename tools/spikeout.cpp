@@ -3388,7 +3388,8 @@ int main(int argc, char** argv) {
     struct ReportState {
         std::mutex lock;
         std::string words;              // what the player wrote
-        std::string status;             // the last send's ("" none yet)
+        std::string status;             // the last sent report ("Issue #12"; "" none yet)
+        std::string failed;             // a send that failed: why (said at the bottom, once)
         std::string sent_url;           // the sent issue's page
         std::string login, token;       // logged in to GitHub
         std::string login_code, login_page, login_status; // the device flow, under way
@@ -3416,21 +3417,45 @@ int main(int argc, char** argv) {
         }
         return about;
     };
+    // A report saved as a zip: said on a page of its own (no window of the system's: the same on every device), its
+    // name and folder; the path can be copied, and on a computer the folder opened.
+    auto saved_page = [&](const std::filesystem::path& zip) {
+        ui::MenuPage p{"Report saved",
+                       "Attach the zip to a bug report on the project's GitHub page (Issues > New issue), and say what "
+                       "happened.",
+                       {}};
+        const std::string name = path_utf8(zip.filename()), folder = path_utf8(zip.parent_path());
+        p.items.push_back({"File", "", [name] { return name; }, {}, {}, true});
+        p.items.push_back({"In", "", [folder] { return short_path(tools::report::detail::utf8(folder)); }, {}, {}, true});
+        p.items.push_back({"Copy its path", "The zip's whole path, to paste where you attach it.", {}, {}, [&, path = path_utf8(zip)] {
+                               SDL_SetClipboardText(path.c_str());
+                               shared.say("THE ZIP'S PATH COPIED", 4);
+                           }});
+#if defined(_WIN32) || defined(__APPLE__) || defined(__linux__)
+        p.items.push_back({"Open its folder", "In the system's file manager.", {}, {}, [folder] {
+                               std::string url = folder;
+                               std::replace(url.begin(), url.end(), '\\', '/');
+                               SDL_OpenURL(((url.starts_with('/') ? "file://" : "file:///") + url).c_str());
+                           }});
+#endif
+        p.items.push_back(back_item());
+        return p;
+    };
     auto save_report_zip = [&] {
-        const std::filesystem::path zip = tools::report::make_report(report_folder, report_about());
+        std::string words;
+        {
+            std::lock_guard guard(report_state->lock);
+            words = report_state->words;
+        }
+        const std::filesystem::path zip = tools::report::make_report(report_folder, report_about(), words);
         if (zip.empty()) {
             shared.say("CAN'T WRITE THE REPORT IN THE DATA FOLDER", 6);
             return;
         }
         std::printf("spikeout: report written: %s\n", path_utf8(zip).c_str());
-        std::string folder = path_utf8(zip.parent_path());
-        std::replace(folder.begin(), folder.end(), '\\', '/');
-        SDL_OpenURL(((folder.starts_with('/') ? "file://" : "file:///") + folder).c_str());
-        SDL_OpenURL(("https://github.com/" + std::string(net::report::kRepo) + "/issues/new?template=bug_report.yml&version=" +
-                     std::string(net::kVersion))
-                        .c_str());
-        shared.say("REPORT SAVED: " + path_utf8(zip.filename()), 8);
+        menu.push(saved_page(zip));
     };
+    // GitHub's device flow, on a page: the address and the code; back to the report by itself once logged in.
     auto login_page = [&] {
         ui::MenuPage p{"Log in to GitHub",
                        "GitHub's own page asks you: the game never sees your password. It may only open issues on this "
@@ -3446,8 +3471,8 @@ int main(int argc, char** argv) {
                                return st->login_code.empty() ? std::string("...") : st->login_code;
                            },
                            {}, {}, true});
-        p.items.push_back({"Open the page", "Opens GitHub's page in your browser, the code copied (paste it there). On another "
-                           "device: go to the address above and type the code.",
+        p.items.push_back({"Open the page here", "Opens GitHub's page in your browser, the code copied (paste it there). Or: "
+                           "the address above on your phone, and type the code.",
                            {}, {}, [st = report_state] {
                                std::lock_guard guard(st->lock);
                                if (st->login_page.empty()) return;
@@ -3509,26 +3534,32 @@ int main(int argc, char** argv) {
                     {
                         std::lock_guard guard(st->lock);
                         st->login = name, st->token = poll.token;
-                        st->login_code.clear(), st->login_page.clear();
+                        st->login_code.clear(), st->login_page.clear(), st->login_status.clear();
                     }
                     std::printf("spikeout: logged in to GitHub as %s\n", name.c_str());
-                    say("Logged in as @" + name + ". Back: send the report.");
+                    st->changed = true;
                     break;
                 }
                 st->logging_in = false;
             }).detach();
         return p;
     };
-    auto report_page = [&] {
-        ui::MenuPage p{"Report a problem", "", {}};
-        p.items.push_back({"", "", [] {
-                               return std::string("Public on GitHub: what you write, the game's log and settings, this "
-                                                  "computer's details (internet addresses, your user name and game files "
-                                                  "left out).");
-                           },
-                           {}, {}, true});
+    // Report a problem: what happened, detailed logging, then sent to GitHub (logged in) or saved as a zip. Built anew
+    // as the login or a send changes it (report_changed, in the main loop).
+    std::function<ui::MenuPage()> report_page;
+    report_page = [&] {
+        ui::MenuPage p{"Report a problem",
+                       "Logged in to GitHub, the report becomes a public issue on the project's page (internet addresses, "
+                       "your user name and game files left out). Or save it as a zip and attach it yourself.",
+                       {}};
+        std::string login, status, sent_url, words;
+        {
+            std::lock_guard guard(report_state->lock);
+            login = report_state->login, status = report_state->status, sent_url = report_state->sent_url;
+            words = report_state->words;
+        }
         p.items.push_back({"What happened",
-                           "What you did, what you expected and what happened. Enter: write it (Shift+Enter: a new line).",
+                           "What you did, what you expected and what happened. Enter: write it.",
                            [st = report_state] {
                                std::lock_guard guard(st->lock);
                                if (st->words.empty()) return std::string("(not written)");
@@ -3550,101 +3581,78 @@ int main(int argc, char** argv) {
                                        report_state->words = typed;
                                    }
                                    menu.pop();
+                                   menu.replace(report_page()); // (Send can be chosen now, or not)
                                };
                                menu.push(std::move(t));
                            }});
-        if (net::report::can_log_in())
-            p.items.push_back({"GitHub",
-                               "Logged in, the report is your own issue: you get the answers, and can add to it. Enter: log "
-                               "in, or out.",
-                               [st = report_state] {
-                                   std::lock_guard guard(st->lock);
-                                   return st->login.empty() ? std::string("Not logged in") : "@" + st->login;
-                               },
-                               {}, [&] {
-                                   bool in = false;
+        p.items.push_back({"Detailed logging",
+                           "The network and timing lines in the game's log too. Turn it on, start the game again, make the "
+                           "problem happen, then report it.",
+                           [&] { return on_off(settings.detailed_log); },
+                           [&](int) {
+                               settings.detailed_log = !settings.detailed_log;
+                               changed();
+                           }});
+        if (net::report::available() && net::report::can_log_in()) {
+            if (login.empty())
+                p.items.push_back({"Log in to GitHub", "To send the report from here (a GitHub account, free).", {}, {},
+                                   [&] { menu.push(login_page()); }});
+            // (only logged in and with something written: else shown, not chosen, with what it needs first)
+            const bool ready = !login.empty() && !words.empty();
+            if (!ready) {
+                const std::string why = login.empty() ? "log in first" : "write what happened first";
+                p.items.push_back({"Send to GitHub", "", [why] { return why; }, {}, {}, true});
+            } else {
+                p.items.push_back({"Send to GitHub", "Opens the report as your issue on the project's page: you get the answers there.",
+                                   [st = report_state] {
+                                       std::lock_guard guard(st->lock);
+                                       return st->busy ? std::string("Sending...") : "as @" + st->login;
+                                   },
+                                   {}, [&] {
+                                       if (report_state->busy.exchange(true)) return;
+                                       std::string said, token;
+                                       {
+                                           std::lock_guard guard(report_state->lock);
+                                           said = report_state->words, token = report_state->token;
+                                       }
+                                       net::report::Report r =
+                                           tools::report::github_report(report_folder, report_about(), said, net::kVersion);
+                                       menu.refresh();
+                                       std::thread([st = report_state, r = std::move(r), token] {
+                                           const net::report::Sent s = net::report::send_as_user(r, token);
+                                           {
+                                               std::lock_guard guard(st->lock);
+                                               if (s.ok) {
+                                                   st->status = "Issue #" + std::to_string(s.number) + (s.error.empty() ? "" : " (" + s.error + ")");
+                                                   st->sent_url = s.url;
+                                                   st->words.clear();
+                                               } else {
+                                                   st->failed = s.error; // (said at the bottom; nothing kept)
+                                               }
+                                           }
+                                           std::printf("spikeout: report: %s%s\n", s.ok ? "sent as issue #" : "not sent: ",
+                                                       s.ok ? std::to_string(s.number).c_str() : s.error.c_str());
+                                           st->busy = false;
+                                           st->changed = true;
+                                       }).detach();
+                                   }});
+            }
+        }
+        p.items.push_back({"Save as a zip", "The same files, and a crash's full record, in one zip in the game's data folder.",
+                           {}, {}, [&] { save_report_zip(); }});
+        if (!sent_url.empty()) // (only once one was sent)
+            p.items.push_back({"Last report", "Enter: its page on GitHub, in your browser: add to it there, or see the answers.",
+                               [status] { return status; }, {}, [sent_url] { SDL_OpenURL(sent_url.c_str()); }});
+        if (!login.empty())
+            p.items.push_back({"Log out of GitHub", "Forgets your GitHub login on this computer.", {}, {}, [&] {
                                    {
                                        std::lock_guard guard(report_state->lock);
-                                       in = !report_state->login.empty();
-                                       if (in) report_state->login.clear(), report_state->token.clear();
+                                       report_state->login.clear(), report_state->token.clear();
                                    }
-                                   if (in) { // (logged out: the login forgotten here)
-                                       std::error_code ec;
-                                       std::filesystem::remove(tools::report::detail::utf8(login_file), ec);
-                                       menu.refresh();
-                                       return;
-                                   }
-                                   menu.push(login_page());
+                                   std::error_code ec;
+                                   std::filesystem::remove(tools::report::detail::utf8(login_file), ec);
+                                   menu.replace(report_page());
                                }});
-        p.items.push_back({"Your GitHub name",
-                           "Not logged in: your GitHub name, if you have one, so that you are told of the answers "
-                           "(optional).",
-                           [&] {
-                               {
-                                   std::lock_guard guard(report_state->lock);
-                                   if (!report_state->login.empty()) return std::string("(logged in)");
-                               }
-                               return settings.github_name.empty() ? std::string("(none)") : settings.github_name;
-                           },
-                           {}, [&] {
-                               ui::MenuPage t{"Your GitHub name", "Type it (letters, digits, -). Enter: done. Esc: back.", {}};
-                               t.text = std::make_shared<ui::TextInput>();
-                               t.text->max_bytes = 39;
-                               t.text->allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-";
-                               t.text->text = settings.github_name;
-                               t.text->done = [&](const std::string& typed) {
-                                   settings.github_name = typed;
-                                   changed();
-                                   menu.pop();
-                               };
-                               menu.push(std::move(t));
-                           }});
-        if (net::report::available())
-        p.items.push_back({"Send the report", "Sends it to GitHub now (it needs the internet).", {}, {}, [&] {
-                               if (report_state->busy.exchange(true)) return;
-                               std::string words, token;
-                               {
-                                   std::lock_guard guard(report_state->lock);
-                                   words = report_state->words, token = report_state->token;
-                                   report_state->status = "Sending...";
-                               }
-                               net::report::Report r =
-                                   tools::report::github_report(report_folder, report_about(), words, net::kVersion);
-                               if (token.empty()) r.github_name = settings.github_name;
-                               menu.refresh();
-                               std::thread([st = report_state, r = std::move(r), token] {
-                                   const net::report::Sent s =
-                                       token.empty() ? net::report::send_via_lobby(r) : net::report::send_as_user(r, token);
-                                   {
-                                       std::lock_guard guard(st->lock);
-                                       if (s.ok) {
-                                           st->status = "Sent: issue #" + std::to_string(s.number) + (s.error.empty() ? "" : " (" + s.error + ")");
-                                           st->sent_url = s.url;
-                                           st->words.clear();
-                                       } else {
-                                           st->status = "Not sent: " + s.error;
-                                       }
-                                   }
-                                   std::printf("spikeout: report: %s%s\n", s.ok ? "sent as issue #" : "not sent: ",
-                                               s.ok ? std::to_string(s.number).c_str() : s.error.c_str());
-                                   st->busy = false;
-                                   st->changed = true;
-                               }).detach();
-                           }});
-        p.items.push_back({"", "", [st = report_state] {
-                               std::lock_guard guard(st->lock);
-                               return st->status;
-                           },
-                           {}, {}, true});
-        p.items.push_back({"Open the sent report", "Its page on GitHub, in your browser: add to it there, or see the answers.",
-                           {}, {}, [st = report_state] {
-                               std::lock_guard guard(st->lock);
-                               if (!st->sent_url.empty()) SDL_OpenURL(st->sent_url.c_str());
-                           }});
-        p.items.push_back({"Save as a zip instead",
-                           "Makes one zip of the same files and opens GitHub's page for a new bug report: attach the zip "
-                           "there yourself.",
-                           {}, {}, [&] { save_report_zip(); }});
         p.items.push_back(back_item());
         return p;
     };
@@ -3680,18 +3688,9 @@ int main(int argc, char** argv) {
                                    settings.check_updates = !settings.check_updates;
                                    changed();
                                }});
-        // A bug report's files (tools/player_report.hpp): nothing is sent, the player attaches the zip on GitHub
-        p.items.push_back({"Detailed logging",
-                           "Also writes the network and timing lines into the game's log (spikeout.log), for a bug report. "
-                           "Used from the next start.",
-                           [&] { return on_off(settings.detailed_log); },
-                           [&](int) {
-                               settings.detailed_log = !settings.detailed_log;
-                               changed();
-                           }});
         p.items.push_back({"Report a problem",
-                           "Sends a bug report to the project's GitHub page: what you write, the game's log and settings, and "
-                           "this computer's details. Or saves them as a zip.",
+                           "A bug report: what happened, the game's log and settings, this computer's details. Sent to the "
+                           "project's GitHub page, or saved as a zip.",
                            {}, {}, [&] { menu.push(report_page()); }});
         p.items.push_back(back_item());
         return p;
@@ -4354,7 +4353,23 @@ int main(int argc, char** argv) {
         // date; the controls let go while the menu is open (the game goes on).
         static auto net_refreshed = now;
         // A report sent, or a GitHub login moving on (their threads): the menu's page up to date
-        if (report_state->changed.exchange(false) && menu_ready && menu.is_open()) menu.refresh();
+        if (report_state->changed.exchange(false) && menu_ready && menu.is_open()) {
+            bool logged_in = false;
+            std::string failed;
+            {
+                std::lock_guard guard(report_state->lock);
+                logged_in = !report_state->login.empty();
+                failed = std::exchange(report_state->failed, {});
+            }
+            if (!failed.empty()) {
+                std::string upper = "NOT SENT: " + failed;
+                for (char& c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                shared.say(upper, 8);
+            }
+            if (menu.top_name() == "Log in to GitHub" && logged_in) menu.pop(); // (logged in: back to the report)
+            if (menu.top_name() == "Report a problem") menu.replace(report_page()); // (its items as they are now)
+            else menu.refresh();
+        }
         // The update check answered: a newer version said once at the bottom (the menu's first items say it from now on).
         if (!update_told && update_check.done()) {
             update_told = true;

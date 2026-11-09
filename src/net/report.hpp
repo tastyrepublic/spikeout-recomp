@@ -1,10 +1,7 @@
 // A bug report sent from the game to GitHub (the owner's design, 2026-11-09): an issue on the project's repository,
-// the report's text in it and the game's logs in comments under it. Two ways, the same issue:
-//   - logged in to GitHub from the game (GitHub's device flow: a code the player types on github.com/login/device;
-//     the project's GitHub App, its only permission "Issues: write" on the project's repository): the issue is the
-//     player's own, sent straight to GitHub;
-//   - not logged in: sent to the lobby (lobby/src/index.js, /v1/report), which opens it with the project's bot token,
-//     "Reported by @name" if the player gave a GitHub name. The lobby keeps nothing.
+// the report's text in it and the game's logs in comments under it, opened by the player, logged in to GitHub from the
+// game (GitHub's device flow: a code the player types on github.com/login/device; the project's GitHub App, its only
+// permission "Issues: read and write", installed on the project's repository). Not logged in: a zip, attached by hand.
 // Each call blocks (the window runs it on a thread of its own).
 #pragma once
 
@@ -27,10 +24,9 @@ constexpr const char* kRepo = "tastyrepublic/spikeout-recomp";
 struct Report {
     std::string title, body;           // the issue (Markdown)
     std::vector<std::string> comments; // the logs, each a comment (GitHub takes 65,536 characters a comment)
-    std::string github_name;           // not logged in: the player's GitHub name, if given (mentioned in the issue)
 };
 constexpr std::size_t kCommentLimit = 60000; // (characters: under GitHub's 65,536, room for the fences)
-constexpr std::size_t kComments = 4;         // (the lobby takes at most this many)
+constexpr std::size_t kComments = 4;         // (the logs, the run before, the crash report, the settings)
 
 struct Sent {
     bool ok = false;
@@ -41,9 +37,6 @@ struct Sent {
 
 bool available(); // built with libcurl (the internet)
 bool can_log_in(); // a GitHub App's client ID built in
-
-// Through the lobby (`url`: SPIKEOUT_REPORT_URL if set, else the build's).
-Sent send_via_lobby(const Report& report, std::string url = {});
 
 // GitHub's device flow: the code the player types on the page given, then asked for every `interval` seconds until
 // they have said yes (or no), or it ran out.

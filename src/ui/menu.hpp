@@ -132,6 +132,8 @@ public:
     void close();
     void push(MenuPage page); // a sub-page
     void pop();               // back a page; closes at the top
+    void replace(MenuPage page); // the top page made again (its items changed), the same row selected where it can be
+    const std::string& top_name() const { static const std::string none; return stack_.empty() ? none : stack_.back().name; }
     std::size_t depth() const { return stack_.size(); } // pages open (0: closed)
     void refresh();           // the values again (changed from outside)
     // Waits for a key or pad button: on_event sees each input event until it

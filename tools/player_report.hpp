@@ -606,11 +606,12 @@ inline std::string scrubbed(std::string text) {
 
 // The zip, in the data folder: the logs, the newest crash reports, settings.ini, and system.txt (`about`: the
 // version, what the window knows: its GPU, and so on). Returns its path ("" if it couldn't be written).
-inline std::filesystem::path make_report(const std::string& folder, const std::string& about) {
+inline std::filesystem::path make_report(const std::string& folder, const std::string& about, const std::string& words = {}) {
     namespace fs = std::filesystem;
     std::fflush(stdout);
     std::vector<std::pair<std::string, std::string>> files;
     files.push_back({"system.txt", detail::scrubbed(about + system_lines() + controllers_now())});
+    if (!words.empty()) files.push_back({"what-happened.txt", detail::scrubbed(words)}); // (the player's words)
     for (const char* name : {"spikeout.log", "spikeout-prev.log", "settings.ini"}) {
         const fs::path p = detail::utf8(folder + name);
         std::error_code ec;

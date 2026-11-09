@@ -10,63 +10,49 @@ How a player tells us about a problem, and what the owner sets up once for it.
   its mapping), then each one as it comes and goes, and when the game takes it into its list of pads.
 - A crash writes `crash-<time>.txt` (what, where as module+offset, the stack, the log's last 400 lines; Windows
   also `crash-<time>.dmp`, a minidump); the next start says so at the bottom.
-- Esc > Game > Detailed logging: the network and timing lines too (`SPIKEOUT_NET_DEBUG`), from the next start.
-- Esc > Game > Report a problem:
+- Esc > Game > **Report a problem** (the owner's design: GitHub for players logged in, a zip for the others):
   - **What happened**: free text (any language through the system's input; Steam Deck: its on-screen keyboard; the
-    menu's font shows Latin letters only, other scripts are sent fine).
-  - **GitHub**: log in (GitHub's device flow: a code typed on github.com/login/device; the game never sees the
-    password). Logged in, the report is the player's own issue: they get the answers and can add to it.
-  - **Your GitHub name** (not logged in, optional): mentioned in the issue, so they're told of the answers. The
-    lobby checks the name exists.
-  - **Send the report**: a public issue on tastyrepublic/spikeout-recomp, label `player report`: the player's words,
-    the version, the computer and its controllers, the newest crash's first lines; the logs, the crash report and the
+    menu's font shows Latin letters only, other scripts are sent fine). Shift+Enter: a new line; Ctrl+V: paste.
+  - **Detailed logging**: the network and timing lines (`SPIKEOUT_NET_DEBUG`) in the log too, from the next start.
+  - **Log in to GitHub** (not logged in): GitHub's device flow, a code typed on github.com/login/device; the game
+    never sees the password. Back to the report by itself once logged in.
+  - **Send to GitHub**: chosen only logged in and with something written (else shown greyed: "log in first",
+    "write what happened first"). A public issue on tastyrepublic/spikeout-recomp as the player: their words, the
+    version, the computer and its controllers, the newest crash's first lines; the logs, the crash report and the
     settings as comments (each its last 60,000 characters). Internet addresses and the user name (in folder paths)
-    are taken out; an `@` the player typed mentions nobody.
-  - **Save as a zip instead**: the same files and the minidump in one zip, and GitHub's bug form opened
-    (.github/ISSUE_TEMPLATE/bug_report.yml) to attach it by hand.
+    are taken out; an `@` the player typed mentions nobody. A send that fails says why at the bottom.
+  - **Save as a zip**: the same files, the words (what-happened.txt) and the minidump, in the data folder; a page of
+    the game's own says its name and folder, **Copy its path**, and on a computer **Open its folder** (no window of
+    the system's: the same on every device; a phone's or tablet's share sheet can come there later).
+  - **Last report** (only once one was sent): its number; Enter opens its page.
+  - **Log out of GitHub** (logged in): the login (github-login.txt in the data folder) forgotten.
 
-Logged in: the game sends to GitHub itself. Not logged in: to the lobby (`/v1/report`, lobby/src/index.js), which
-opens the issue as the project's GitHub App (shown as its bot) and keeps nothing; 5 reports an hour from one
-address, 300 a day in all, 1 MB at most, only the game's format.
+Code: tools/player_report.hpp (log, crash reports, zip, the issue's text), src/net/report.{hpp,cpp} (logging in,
+sending), src/ui/menu.cpp (the text page, Menu::replace), tools/spikeout.cpp (the pages).
 
-Code: tools/player_report.hpp (log, crash reports, zip, the issue's text), src/net/report.{hpp,cpp} (sending,
-logging in), src/ui/menu.cpp (the text page), lobby/src/index.js (`report`, `appToken`, `Reports`).
+## What the owner sets up once: a GitHub App (only for the login)
 
-## What the owner sets up once
-
-One GitHub App does both: the players' login, and the lobby's issues.
-
-1. GitHub > Settings > Developer settings > GitHub Apps > **New GitHub App**:
+1. GitHub > Settings > Developer settings > GitHub Apps > **New GitHub App** (https://github.com/settings/apps/new):
    - Name: e.g. `Spikeout reports`. Homepage URL: https://github.com/tastyrepublic/spikeout-recomp
-   - Callback URL: leave empty. **Enable Device Flow**: on.
-   - Webhook: **Active off**.
-   - Permissions > Repository permissions > **Issues: Read and write** (nothing else; Metadata read-only comes with it).
+   - Callback URL: empty. **Expire user authorization tokens: off** (a player's login stays). **Enable Device
+     Flow: on**. Webhook: **Active off**.
+   - Permissions > Repository permissions > **Issues: Read and write** (nothing else).
    - Where can this GitHub App be installed: **Only on this account**. Create.
-2. On the app's page (General):
-   - Optional features: **User-to-server token expiration: Opt-out** (a player's login then stays; they can log out
-     in the game, or remove the app from their GitHub settings).
-   - Copy the **Client ID** (Iv23...: public, not a secret).
-   - Private keys > **Generate a private key**: a .pem file downloads (a secret: never into the repo or a chat).
-   - Note the **App ID** (a number).
-3. Install App (left menu) > your account > **Only select repositories: spikeout-recomp**.
-4. The lobby's secrets, in `lobby/` (each asks for the value):
-   ```
-   npx wrangler secret put APP_ID            (the number)
-   npx wrangler secret put APP_PRIVATE_KEY   (paste the whole .pem file's text)
-   ```
-   Then the lobby deployed (`npx wrangler deploy` in lobby/: owner's OK each time).
-5. The builds: repository Settings > Secrets and variables > Actions > Variables > **REPORTS_APP_CLIENT_ID** = the
-   Client ID (the release workflow builds it in; locally: `cmake -DSPIKEOUT_GITHUB_CLIENT_ID=...`). Without it the
-   game offers no login (reports still go through the lobby).
+2. Copy the **Client ID** (Iv23...: public, not a secret). No private key is needed.
+3. Install App (left menu) > your account > **Only select repositories: spikeout-recomp** (a player's login can
+   open issues only where the app is installed).
+4. Repository Settings > Secrets and variables > Actions > Variables > **REPORTS_APP_CLIENT_ID** = the Client ID
+   (the release workflow builds it in; locally: `cmake -DSPIKEOUT_GITHUB_CLIENT_ID=...`). Without it the game offers
+   no login: a zip only.
+
+The lobby is not involved.
 
 ## Tests (no real GitHub)
 
-- `npm test` in lobby/: a fake GitHub; a report with a plain token and as the app (a real RSA key, the signature
-  checked), a GitHub name checked, the format, sizes and the hourly limit.
-- The window against the lobby and a fake GitHub (2026-11-09, both ways passed): `node fake-github.mjs` (port
-  8791: users, issues, comments, the device flow), `npx wrangler dev --port 8790 --var GITHUB_API:http://127.0.0.1:8791
-  --var REPORT_TOKEN:x`, then the window with `SPIKEOUT_REPORT_URL=http://127.0.0.1:8790/v1/report`
-  (`SPIKEOUT_GITHUB_CLIENT_ID=test-id SPIKEOUT_GITHUB_WEB=http://127.0.0.1:8791 SPIKEOUT_GITHUB_API=...` for the
-  login). Env switches: SPIKEOUT_LOG=0 (no log file), SPIKEOUT_REPORT_REPO.
+- The window against a fake GitHub (2026-11-09): `node fake-github.mjs` (port 8791: users, issues, comments, the
+  device flow, approving by itself on its second ask), then the window with `SPIKEOUT_GITHUB_CLIENT_ID=test-id
+  SPIKEOUT_GITHUB_WEB=http://127.0.0.1:8791 SPIKEOUT_GITHUB_API=http://127.0.0.1:8791`: logged in by the device flow,
+  the issue and its comments sent with the player's token; Save as a zip: the zip and the game's own page.
+  Env switches: SPIKEOUT_LOG=0 (no log file), SPIKEOUT_REPORT_REPO.
 - Measured (Windows, 3,600 frames each, twice): no log / log / log + detailed logging: CPU 25-27 / 24 / 24-25 s, every
   second at full speed with detailed logging, every recording 60 of 60 hashes in gamerun.
