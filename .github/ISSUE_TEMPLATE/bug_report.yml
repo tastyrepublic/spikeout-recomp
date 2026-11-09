@@ -1,0 +1,48 @@
+name: Bug report
+description: Something doesn't work (a controller, the picture, the sound, a crash, network play)
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for the report. Please never attach ROM files or anything made from them.
+        In the game: **Esc > Game > Report a problem** makes a zip of the game's log, crash reports, settings and
+        your computer's details (internet addresses and your user name are taken out). Attach that zip below.
+        For network or speed problems, turn on **Esc > Game > Detailed logging**, start the game again, make the
+        problem happen, then make the report.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Shown at the bottom of the Esc menu.
+      placeholder: 0.1.0-preview2
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows
+        - Linux
+        - Steam Deck
+        - macOS
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: controller
+    attributes:
+      label: Controller (if it's about one)
+      description: Its name, and how it is connected (USB cable, a USB receiver, Bluetooth) and in which mode.
+  - type: textarea
+    id: report
+    attributes:
+      label: The report zip
+      description: Drag the spikeout-report-....zip file here.

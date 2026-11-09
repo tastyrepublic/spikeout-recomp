@@ -1,4 +1,5 @@
 #include "net/lobby.hpp"
+#include "net/ca_file.hpp"
 
 #include <chrono>
 #include <curl/curl.h>
@@ -99,6 +100,7 @@ void LobbyClient::run(std::string url, std::string hello) {
     curl_easy_setopt(c, CURLOPT_CONNECT_ONLY, 2L); // (a WebSocket, sent and received by hand)
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 10L);
     curl_easy_setopt(c, CURLOPT_SSL_OPTIONS, static_cast<long>(CURLSSLOPT_REVOKE_BEST_EFFORT | CURLSSLOPT_NATIVE_CA));
+    set_ca_file(c);
     curl_easy_setopt(c, CURLOPT_USERAGENT, "spikeout-recomp");
     if (const CURLcode r = curl_easy_perform(c); r != CURLE_OK) {
         curl_easy_cleanup(c);

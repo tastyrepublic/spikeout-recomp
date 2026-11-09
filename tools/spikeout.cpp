@@ -104,6 +104,7 @@
 #include "rollback.hpp"
 #include "delay_tuner.hpp"
 #include "settings.hpp"
+#include "player_report.hpp" // (spikeout.log, crash reports, Report a problem)
 #include "ui/assets.hpp" // (the app's icon)
 #ifdef SPIKEOUT_JIT
 #include "jit/jit.hpp" // (spikeout-jit: the game translated from the ROM set at the first start, LLVM)
@@ -2057,10 +2058,22 @@ int main(int argc, char** argv) {
 
     const int cols = grid_columns(boards), rows = grid_rows(boards);
     const int width = kWidth * cols, height = kHeight * rows;
+    // Player reports (tools/player_report.hpp): what the window prints kept in spikeout.log in the data folder (the run
+    // before in spikeout-prev.log), a crash report there if it crashes. SPIKEOUT_LOG=0: no log file (tests running
+    // several windows from one folder).
+    const std::string report_folder = tools::data_folder();
+    const char* log_env = std::getenv("SPIKEOUT_LOG");
+    if (!(log_env && log_env[0] == '0')) tools::report::start_log(report_folder);
+    tools::report::catch_crashes(report_folder, net::kVersion);
+    const std::string last_crash = tools::report::last_crash(report_folder);
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
         std::fprintf(stderr, "spikeout: SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
+    tools::report::watch_controllers(); // (each controller as SDL finds it: the log says what it is, and if SDL can read it)
+    std::printf("spikeout: version %s\n%s%s", net::kVersion, tools::report::system_lines().c_str(),
+                tools::report::controllers_now().c_str());
+    if (!last_crash.empty()) std::printf("spikeout: the last run crashed: %s.txt in the data folder\n", last_crash.c_str());
     // Tests: SPIKEOUT_TEST_VIRTUAL_PAD=1 connects a pad that isn't there (SDL's virtual joystick: no buttons
     // pressed), for the menu's pad pages on a computer with none.
     if (std::getenv("SPIKEOUT_TEST_VIRTUAL_PAD")) {
@@ -2083,7 +2096,15 @@ int main(int argc, char** argv) {
     net::UpdateCheck update_check;
     std::optional<net::Release> newer_version;
     bool update_told = false;
-    std::printf("spikeout: version %s\n", net::kVersion);
+    // Detailed logging (the menu's, from the next start): the network and timing lines (SPIKEOUT_NET_DEBUG) in the log
+    if (settings.detailed_log && !std::getenv("SPIKEOUT_NET_DEBUG")) {
+#ifdef _WIN32
+        _putenv_s("SPIKEOUT_NET_DEBUG", "1");
+#else
+        setenv("SPIKEOUT_NET_DEBUG", "1", 0);
+#endif
+        std::printf("spikeout: detailed logging on\n");
+    }
     if (settings.check_updates && !net::dev_build(version)) update_check.start(version);
     if (cli_render_scale) settings.render_scale = cli_render_scale;
     if (cli_quads) settings.quads = true;
@@ -2271,6 +2292,7 @@ int main(int argc, char** argv) {
     }
 
     Shared shared;
+    if (!last_crash.empty()) shared.say("THE LAST RUN CRASHED: ESC > GAME > REPORT A PROBLEM", 12);
     shared.boards = boards;
     shared.roms = &roms;
     shared.max_frames = max_frames;
@@ -2556,6 +2578,11 @@ int main(int argc, char** argv) {
     // Pads: players 1 and 2 each the one chosen in Controls (settings.pads, by GUID) when it's connected, else the
     // first connected that no player has.
     std::vector<SDL_Gamepad*> gamepads;
+    { // (the log: the pads SDL has now, and the game's own list, filled as each one is announced (SDL_EVENT_GAMEPAD_ADDED))
+        int n = 0;
+        SDL_free(SDL_GetGamepads(&n));
+        std::printf("spikeout: the game starts: %d gamepad(s) connected to SDL, the game's list of pads empty until each is announced\n", n);
+    }
     auto pad_guid = [](SDL_Gamepad* pad) {
         char text[64] = {};
         SDL_GUIDToString(SDL_GetJoystickGUID(SDL_GetGamepadJoystick(pad)), text, sizeof text);
@@ -3385,6 +3412,40 @@ int main(int argc, char** argv) {
                                    settings.check_updates = !settings.check_updates;
                                    changed();
                                }});
+        // A bug report's files (tools/player_report.hpp): nothing is sent, the player attaches the zip on GitHub
+        p.items.push_back({"Detailed logging",
+                           "Also writes the network and timing lines into the game's log (spikeout.log), for a bug report. "
+                           "Used from the next start.",
+                           [&] { return on_off(settings.detailed_log); },
+                           [&](int) {
+                               settings.detailed_log = !settings.detailed_log;
+                               changed();
+                           }});
+        p.items.push_back({"Report a problem",
+                           "Makes one zip of the game's log, any crash reports, the settings and this computer's details (no "
+                           "game files; internet addresses and your user name taken out), shows it in its folder and opens "
+                           "GitHub's page for a new bug report: attach the zip there and say what happened.",
+                           {}, {}, [&] {
+                               std::string about = "Spikeout " + std::string(net::kVersion) + "\n";
+                               about += "pads in the game's list: " + std::to_string(gamepads.size()) + "\n";
+                               for (SDL_Gamepad* pad : gamepads) {
+                                   const char* name = SDL_GetGamepadName(pad);
+                                   about += "  " + std::string(name ? name : "?") + "\n";
+                               }
+                               const std::filesystem::path zip = tools::report::make_report(report_folder, about);
+                               if (zip.empty()) {
+                                   shared.say("CAN'T WRITE THE REPORT IN THE DATA FOLDER", 6);
+                                   return;
+                               }
+                               std::printf("spikeout: report written: %s\n", path_utf8(zip).c_str());
+                               std::string folder = path_utf8(zip.parent_path());
+                               std::replace(folder.begin(), folder.end(), '\\', '/');
+                               SDL_OpenURL(((folder.starts_with('/') ? "file://" : "file:///") + folder).c_str());
+                               SDL_OpenURL(("https://github.com/tastyrepublic/spikeout-recomp/issues/new?template=bug_report.yml&version=" +
+                                            std::string(net::kVersion))
+                                               .c_str());
+                               shared.say("REPORT SAVED: " + path_utf8(zip.filename()), 8);
+                           }});
         p.items.push_back(back_item());
         return p;
     };
@@ -3835,7 +3896,10 @@ int main(int argc, char** argv) {
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_EVENT_QUIT) running = false;
             if (e.type == SDL_EVENT_GAMEPAD_ADDED) {
-                if (SDL_Gamepad* pad = SDL_OpenGamepad(e.gdevice.which)) gamepads.push_back(pad);
+                if (SDL_Gamepad* pad = SDL_OpenGamepad(e.gdevice.which)) {
+                    gamepads.push_back(pad);
+                    std::printf("controller %u: in the game's list of pads (%zu now)\n", static_cast<unsigned>(e.gdevice.which), gamepads.size());
+                }
             }
             if (e.type == SDL_EVENT_GAMEPAD_REMOVED) {
                 for (auto it = gamepads.begin(); it != gamepads.end(); ++it)
@@ -4603,5 +4667,6 @@ int main(int argc, char** argv) {
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
+    std::printf("spikeout: closed normally\n");
     return 0;
 }

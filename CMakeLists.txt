@@ -302,6 +302,7 @@ function(spikeout_window_app target)
     set_target_properties(${target} PROPERTIES WIN32_EXECUTABLE ON)
     if(WIN32)
         target_sources(${target} PRIVATE ${CMAKE_SOURCE_DIR}/assets/icon/spikeout.rc)
+        target_link_libraries(${target} PRIVATE dbghelp) # (tools/player_report.hpp: a crash's minidump)
     endif()
 endfunction()
 

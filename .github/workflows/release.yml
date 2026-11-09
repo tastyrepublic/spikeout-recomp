@@ -1,0 +1,244 @@
+name: Release
+
+# The downloads, built here instead of on the owner's PC (owner, 2026-11-09): the window with the JIT (spikeout-jit:
+# the game translated from the player's own ROM set at its first start, nothing made from the ROM inside) for
+# Windows (MinGW GCC, as built and tested on the owner's PC), Linux (Valve's Steam Runtime "sniper" SDK: Linux from
+# about 2020 on and the Steam Deck) and macOS (Apple silicon), packed by tools/package-release.sh, then a DRAFT
+# release with them (published by the owner, by hand). CI has no ROM: the downloads are started on real machines
+# before publishing.
+#
+# Started by pushing a branch release-build/VERSION (e.g. release-build/0.1.0-preview2), or by hand (Actions > Release
+# > Run workflow) once this file is on main. LLVM, and OpenSSL where it is built in, are built once per system and
+# kept in the cache (the first run takes a few hours; later ones 30-60 minutes).
+
+on:
+  push:
+    branches: ['release-build/**']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The version, without v (e.g. 0.1.0-preview2)
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  VERSION: ${{ inputs.version || github.ref_name }}
+  OPENSSL_VERSION: 3.5.9
+  OPENSSL_SHA256: 603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 330
+    defaults:
+      run:
+        shell: bash
+    env:
+      LLVM_ROOT: ${{ github.workspace }}/.llvm
+    steps:
+      - uses: actions/checkout@v4
+      - name: The version
+        run: echo "VERSION=${VERSION#release-build/}" >> "$GITHUB_ENV"
+      # (the owner's compiler: WinLibs GCC 16.2.0 r2, POSIX threads, UCRT; its runtime linked in: SPIKEOUT_STATIC_RUNTIME)
+      - name: GCC (WinLibs) and Ninja
+        run: |
+          curl -fsSL -o winlibs.zip https://github.com/brechtsanders/winlibs_mingw/releases/download/16.2.0posix-14.0.0-ucrt-r2/winlibs-x86_64-posix-seh-gcc-16.2.0-mingw-w64ucrt-14.0.0-r2.zip
+          echo "d5dbafc4a170e762ca6143151ec918fb9e2c72736fb14cd704abebc6bdd5276a  winlibs.zip" | sha256sum -c
+          7z x -bso0 -oC:/winlibs winlibs.zip
+          curl -fsSL -o ninja.zip https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-win.zip
+          echo "07fc8261b42b20e71d1720b39068c2e14ffcee6396b76fb7a795fb460b78dc65  ninja.zip" | sha256sum -c
+          7z x -bso0 -oC:/ninja ninja.zip
+          echo "C:/winlibs/mingw64/bin" >> "$GITHUB_PATH"
+          echo "C:/ninja" >> "$GITHUB_PATH"
+      - name: LLVM from the cache
+        id: llvm
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.LLVM_ROOT }}
+          key: llvm-windows-winlibs-16.2.0-r2-${{ hashFiles('cmake/llvm.cmake') }}
+      - name: Configure (LLVM built here when not in the cache)
+        run: >
+          gcc --version && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DSPIKEOUT_WARNINGS_AS_ERRORS=OFF -DSPIKEOUT_BUILD_TESTS=OFF
+          -DSPIKEOUT_LLVM_JIT=ON "-DSPIKEOUT_LLVM_ROOT=$LLVM_ROOT" "-DSPIKEOUT_VERSION=$VERSION"
+      - name: LLVM's build logs (when it failed)
+        if: failure()
+        run: tail -n 80 "$LLVM_ROOT"/*.log || true
+      - name: LLVM into the cache
+        if: steps.llvm.outputs.cache-hit != 'true'
+        run: rm -rf "$LLVM_ROOT"/*.tar.xz "$LLVM_ROOT"/work-* "$LLVM_ROOT"/*.log
+      - if: steps.llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.LLVM_ROOT }}
+          key: ${{ steps.llvm.outputs.cache-primary-key }}
+      - name: Build
+        run: cmake --build build --parallel 4 --target spikeout-jit
+      - name: Pack
+        run: tools/package-release.sh "$VERSION" windows-x64 build/spikeout-jit.exe build out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: out/*.zip
+
+  linux:
+    runs-on: ubuntu-24.04
+    container: registry.gitlab.steamos.cloud/steamrt/sniper/sdk:latest
+    timeout-minutes: 330
+    defaults:
+      run:
+        shell: bash
+    env:
+      LLVM_ROOT: ${{ github.workspace }}/.llvm
+      SSL_ROOT: ${{ github.workspace }}/.openssl
+    steps:
+      - uses: actions/checkout@v4
+      - name: The version
+        run: echo "VERSION=${VERSION#release-build/}" >> "$GITHUB_ENV"
+      # (the SDK's CMake is older than LLVM 18 wants: Kitware's)
+      - name: CMake
+        run: |
+          curl -fsSL -o cmake.tar.gz https://github.com/Kitware/CMake/releases/download/v4.4.5/cmake-4.4.5-linux-x86_64.tar.gz
+          echo "ed85135c5a5135b45e50423cb406dea04ca3338da0b8ef3c9ede963559680be0  cmake.tar.gz" | sha256sum -c
+          mkdir -p /opt/cmake && tar -xzf cmake.tar.gz -C /opt/cmake --strip-components=1
+          echo "/opt/cmake/bin" >> "$GITHUB_PATH"
+          command -v ninja || { curl -fsSL -o ninja.zip https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-linux.zip &&
+            echo "5749cbc4e668273514150a80e387a957f933c6ed3f5f11e03fb30955e2bbead6  ninja.zip" | sha256sum -c &&
+            python3 -c "import zipfile; zipfile.ZipFile('ninja.zip').extractall('/usr/local/bin')" && chmod +x /usr/local/bin/ninja; }
+      # (OpenSSL 3 built in: the SDK's is 1.1, which current Linux systems no longer have)
+      - name: OpenSSL from the cache
+        id: ssl
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SSL_ROOT }}
+          key: openssl-${{ env.OPENSSL_VERSION }}-sniper-gcc14
+      - name: OpenSSL
+        if: steps.ssl.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL -o ssl.tar.gz "https://github.com/openssl/openssl/releases/download/openssl-$OPENSSL_VERSION/openssl-$OPENSSL_VERSION.tar.gz"
+          echo "$OPENSSL_SHA256  ssl.tar.gz" | sha256sum -c
+          tar -xzf ssl.tar.gz && cd "openssl-$OPENSSL_VERSION"
+          CC=gcc-14 ./Configure linux-x86_64 no-shared no-tests no-docs "--prefix=$SSL_ROOT" --libdir=lib
+          make -j4 && make install_sw && cp LICENSE.txt "$SSL_ROOT/"
+      - name: LLVM from the cache
+        id: llvm
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.LLVM_ROOT }}
+          key: llvm-linux-sniper-gcc14-${{ hashFiles('cmake/llvm.cmake') }}
+      - name: Configure (LLVM built here when not in the cache)
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release --toolchain /usr/share/steamrt/cmake/gcc-14.cmake
+          -DSPIKEOUT_WARNINGS_AS_ERRORS=OFF -DSPIKEOUT_BUILD_TESTS=OFF
+          "-DOPENSSL_ROOT_DIR=$SSL_ROOT" -DOPENSSL_USE_STATIC_LIBS=TRUE
+          -DSPIKEOUT_LLVM_JIT=ON "-DSPIKEOUT_LLVM_ROOT=$LLVM_ROOT" "-DSPIKEOUT_VERSION=$VERSION"
+      - name: LLVM's build logs (when it failed)
+        if: failure()
+        run: tail -n 80 "$LLVM_ROOT"/*.log || true
+      - name: LLVM into the cache
+        if: steps.llvm.outputs.cache-hit != 'true'
+        run: rm -rf "$LLVM_ROOT"/*.tar.xz "$LLVM_ROOT"/work-* "$LLVM_ROOT"/*.log
+      - if: steps.llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.LLVM_ROOT }}
+          key: ${{ steps.llvm.outputs.cache-primary-key }}
+      - name: Build
+        run: cmake --build build --parallel 4 --target spikeout-jit
+      - name: What it needs from the system
+        run: objdump -p build/spikeout-jit | grep -E 'NEEDED|GLIBC_2\.[0-9]+' | sort -u | tail -n 40
+      - name: Pack
+        run: OPENSSL_LICENSE="$SSL_ROOT/LICENSE.txt" tools/package-release.sh "$VERSION" linux-x64 build/spikeout-jit build out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: out/*.tar.gz
+
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 330
+    env:
+      LLVM_ROOT: ${{ github.workspace }}/.llvm
+      SSL_ROOT: ${{ github.workspace }}/.openssl
+      MACOSX_DEPLOYMENT_TARGET: '12.0'
+    steps:
+      - uses: actions/checkout@v4
+      - name: The version
+        run: echo "VERSION=${VERSION#release-build/}" >> "$GITHUB_ENV"
+      - name: Ninja
+        run: brew install ninja
+      - name: OpenSSL from the cache
+        id: ssl
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SSL_ROOT }}
+          key: openssl-${{ env.OPENSSL_VERSION }}-macos-arm64-12.0
+      # (built in: Homebrew's, which CMake would find, isn't on the players' Macs)
+      - name: OpenSSL
+        if: steps.ssl.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL -o ssl.tar.gz "https://github.com/openssl/openssl/releases/download/openssl-$OPENSSL_VERSION/openssl-$OPENSSL_VERSION.tar.gz"
+          echo "$OPENSSL_SHA256  ssl.tar.gz" | shasum -a 256 -c
+          tar -xzf ssl.tar.gz && cd "openssl-$OPENSSL_VERSION"
+          ./Configure darwin64-arm64-cc no-shared no-tests no-docs "--prefix=$SSL_ROOT" --libdir=lib
+          make -j3 && make install_sw && cp LICENSE.txt "$SSL_ROOT/"
+      - name: LLVM from the cache
+        id: llvm
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.LLVM_ROOT }}
+          key: llvm-macos-15-arm64-12.0-${{ hashFiles('cmake/llvm.cmake') }}
+      - name: Configure (LLVM built here when not in the cache)
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DSPIKEOUT_WARNINGS_AS_ERRORS=OFF -DSPIKEOUT_BUILD_TESTS=OFF
+          "-DOPENSSL_ROOT_DIR=$SSL_ROOT" -DOPENSSL_USE_STATIC_LIBS=TRUE
+          -DSPIKEOUT_LLVM_JIT=ON "-DSPIKEOUT_LLVM_ROOT=$LLVM_ROOT" "-DSPIKEOUT_VERSION=$VERSION"
+      - name: LLVM's build logs (when it failed)
+        if: failure()
+        run: tail -n 80 "$LLVM_ROOT"/*.log || true
+      - name: LLVM into the cache
+        if: steps.llvm.outputs.cache-hit != 'true'
+        run: rm -rf "$LLVM_ROOT"/*.tar.xz "$LLVM_ROOT"/work-* "$LLVM_ROOT"/*.log
+      - if: steps.llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.LLVM_ROOT }}
+          key: ${{ steps.llvm.outputs.cache-primary-key }}
+      - name: Build
+        run: cmake --build build --parallel 3 --target spikeout-jit
+      - name: What it needs from the system
+        run: otool -L build/spikeout-jit
+      - name: Pack
+        run: OPENSSL_LICENSE="$SSL_ROOT/LICENSE.txt" tools/package-release.sh "$VERSION" macos-arm64 build/spikeout-jit build out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: out/*.zip
+
+  # A draft release with what was built (the Mac's only if it built: it's the first Mac build). Published by the owner.
+  release:
+    needs: [windows, linux, macos]
+    if: ${{ !cancelled() && needs.windows.result == 'success' && needs.linux.result == 'success' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: The version
+        run: echo "VERSION=${VERSION#release-build/}" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        with:
+          path: files
+          merge-multiple: true
+      - name: The draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l files
+          # (a DRAFT of this version made before: replaced; a published release is never touched: stop)
+          if state=$(gh release view "v$VERSION" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$state" = "true" ]; then gh release delete "v$VERSION" --yes; else echo "v$VERSION is published already" >&2; exit 1; fi
+          fi
+          gh release create "v$VERSION" files/* --draft --prerelease --target "$GITHUB_SHA" \
+            --title "$VERSION (test build)" --notes "A test build, made by the Release workflow from $GITHUB_SHA. Not published yet."

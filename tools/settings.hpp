@@ -55,6 +55,7 @@ struct Settings {
     bool show_fps = false; // the frames shown a second, in a corner
     bool show_net = true;  // a network game's seats (players, their connection) under it
     bool check_updates = true; // at each start, ask GitHub whether a newer version is out (src/net/update.hpp)
+    bool detailed_log = false; // the network and timing lines in spikeout.log too (SPIKEOUT_NET_DEBUG), from the next start
     // Smooth motion: a picture each refresh of the screen (up to 120 a
     // second), the 3D placed between the arcade's last two frames, a frame
     // behind them (m3::interpolate). Off: the arcade's own frames. Still
@@ -150,6 +151,7 @@ inline Settings load_settings(const std::string& path) {
     get_bool("show_fps", s.show_fps);
     get_bool("show_net", s.show_net);
     get_bool("check_updates", s.check_updates);
+    get_bool("detailed_log", s.detailed_log);
     get("crt_colours", s.crt_colours, 0, 5);
     get("speakers", s.speakers, 0, 2);
     if (auto it = v.find("front_output"); it != v.end()) s.front_output = it->second;
@@ -188,6 +190,7 @@ inline bool save_settings(const std::string& path, const Settings& s) {
     o << "show_fps = " << (s.show_fps ? 1 : 0) << "\n";
     o << "show_net = " << (s.show_net ? 1 : 0) << "\n";
     o << "check_updates = " << (s.check_updates ? 1 : 0) << "\n";
+    o << "detailed_log = " << (s.detailed_log ? 1 : 0) << "\n";
     o << "speakers = " << s.speakers << "\n";
     o << "front_output = " << s.front_output << "\n";
     o << "rear_output = " << s.rear_output << "\n";
