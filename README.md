@@ -175,6 +175,34 @@ and only the players' inputs travel, so the game is the same on every screen.
 - **If the host leaves**, the game goes on and another player hosts it, under the same room code.
 - **Weaker PCs** (a handheld, an older laptop) automatically run only their own cabinet in full; there is no setting for it.
 
+### Every board and one board
+
+A real Spikeout game is up to four cabinets, each a full Model 3 board, linked by their network boards. Each PC in a
+network game runs those boards in one of two ways, chosen for it automatically (Auto), so one game can have both:
+
+- **Every board**: the PC runs every player's cabinet, all of them, from the same inputs. Only the button presses
+  travel between the PCs, so every PC has exactly the same game, frame for frame. Nothing is guessed except, over the
+  internet, the other players' latest presses, which rollback corrects (the game goes back a few frames and runs
+  them again with the real presses, too quick to see).
+- **One board**: the PC runs only its own player's cabinet in full. The other cabinets aren't run there; what they
+  would send over the link is worked out from the game's own code, run on the side for just those parts, and checked
+  against the real cabinets' messages.
+
+**Why one board is needed.** Each cabinet is a whole arcade board: its game, its 2D and 3D, its sound. Running four of
+them at full speed takes a fast desktop PC. A handheld, a tablet or an older laptop can run one board but not four,
+and without one board it couldn't play a four-player game at all. One board is also the base for later: phones and
+tablets, and a direct cable mode where each device runs only its own cabinet.
+
+**Where each one stands** (the version on this page):
+
+| | On your own network (LAN) | Over the internet |
+|---|---|---|
+| Every board | **Stable.** No guessing at all: each PC waits a moment for the others' presses. | **Stable.** Rollback corrects the guesses; tested between this project's PC and machines in the UK and India. |
+| One board | **Still needs work.** A LAN game uses no rollback, so if a one-board PC's guess about another cabinet is ever wrong, it can't undo it; the game puts that PC back in step from the host's copy instead (a short pause). The plan: feed the other cabinets' real link messages in directly, as a cable between cabinets would, so nothing is guessed. | **Working, newer.** Rollback corrects a wrong guess, and the tests over the internet pass, including games mixing every-board and one-board PCs. It has had less play than every board. |
+
+Auto only puts a PC on one board when it is too slow for every board, so on a capable PC you get every board.
+Spectators and players joining a game already started work in both modes, on a LAN and over the internet.
+
 What it took to get there is written up in [docs/netplay.md](docs/netplay.md): the linked cabinets running in slow
 motion until the network board's ring was modelled, four boards on one PC, and keeping every PC's game identical.
 
