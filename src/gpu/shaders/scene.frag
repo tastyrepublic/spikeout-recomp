@@ -27,14 +27,19 @@ layout(location = 2) in vec3 normal;
 layout(location = 3) flat in uint polygon;
 layout(location = 4) flat in uint quad;
 
-// (SDL's fragment set 2: the textures, then the storage buffers.)
+// (SDL's fragment set 2: the textures, then the storage buffers. Metal
+// numbers its buffers on their own: the uniform buffer, then the storage
+// buffers, whatever the textures; METAL is set for the source made for it,
+// whose binding numbers are its slots.)
 layout(set = 2, binding = 0) uniform usampler2D texture_ram; // 2048 x 2048, 16 bits a texel
-#ifdef OPAQUE
+#if defined(OPAQUE) || defined(METAL)
 #define kStorage 1
 #else
+#define kStorage 2
+#endif
+#ifndef OPAQUE
 // The opaque pass's depth: a translucent pixel only in front of it.
 layout(set = 2, binding = 1) uniform sampler2D opaque_depth;
-#define kStorage 2
 #endif
 layout(std430, set = 2, binding = kStorage) readonly buffer Polygons { Polygon polygons[]; };
 layout(std430, set = 2, binding = kStorage + 1) readonly buffer Viewports { Viewport viewports[]; };
