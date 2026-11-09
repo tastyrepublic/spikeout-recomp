@@ -216,9 +216,8 @@ resync from the host's state puts it back). Left:
 2. **LAN rollback switched on by itself** on a PC with CPU to spare, the first snapshot copied in slices over a few
    frames (no pause, proved byte for byte); one-board hosts and joiners too. Deferred by the owner until after
    another release. (Memory: netplay-all-auto.)
-3. **The parallel rollback restore back** (every board put back at once, ~1 ms a rollback; its crash, MinGW's
-   thread_local double free, fixed in aa5a6ff): bring it back only with the whole test set. Rollback in general,
-   listed here at the owner's word. (Memory: parallel-restore-todo.)
+3. DONE (2026-11-09): **the parallel rollback restore back** (threads kept for the game, tools::rollback::Crew;
+   going back 3.1-3.9 ms against 4.6-5.0; the whole test set and every internet case passed; docs/netplay.md).
 4. **A vanished player holds a no-rollback (LAN) game 3 s** before the others go on (a normal quit doesn't).
 
 ## Everything left in the project (2026-11-08), in the owner's order

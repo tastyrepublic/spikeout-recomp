@@ -74,6 +74,78 @@ inline uint64_t free_for_window() {
     return m3::memory_free_bytes();
 }
 
+// Threads kept for a game's whole length that run jobs 1..n-1 of run(n, job) while the caller runs job 0, all
+// done when it returns. Kept, never one a time: a thread ending frees (or, since aa5a6ff, leaks) its thread_local
+// buffers (watched_memory's lists), and the first try of the parallel restore (2026-11-06) died there on MinGW.
+class Crew {
+public:
+    explicit Crew(std::size_t threads) {
+        for (std::size_t i = 0; i < threads; ++i) threads_.emplace_back([this, i] { work(i + 1); });
+    }
+    ~Crew() {
+        {
+            std::lock_guard guard(lock_);
+            stop_ = true;
+        }
+        wake_.notify_all();
+        for (std::thread& t : threads_) t.join();
+    }
+    Crew(const Crew&) = delete;
+    Crew& operator=(const Crew&) = delete;
+    std::size_t size() const { return threads_.size() + 1; }
+    // job(i) for i in [0, n), n <= size(); an exception from a job is thrown here, after every job has finished.
+    void run(std::size_t n, const std::function<void(std::size_t)>& job) {
+        if (n == 0) return;
+        {
+            std::lock_guard guard(lock_);
+            job_ = &job, jobs_ = n, left_ = n - 1, error_ = nullptr, ++round_;
+        }
+        wake_.notify_all();
+        std::exception_ptr mine;
+        try {
+            job(0);
+        } catch (...) {
+            mine = std::current_exception();
+        }
+        std::unique_lock guard(lock_);
+        done_.wait(guard, [&] { return left_ == 0; });
+        job_ = nullptr;
+        if (mine) std::rethrow_exception(mine);
+        if (error_) std::rethrow_exception(error_);
+    }
+
+private:
+    void work(std::size_t index) {
+        uint64_t seen = 0;
+        for (;;) {
+            std::unique_lock guard(lock_);
+            wake_.wait(guard, [&] { return stop_ || round_ != seen; });
+            if (stop_) return;
+            seen = round_;
+            if (index >= jobs_) continue; // (not wanted this round)
+            const auto* job = job_;
+            guard.unlock();
+            std::exception_ptr error;
+            try {
+                (*job)(index);
+            } catch (...) {
+                error = std::current_exception();
+            }
+            guard.lock();
+            if (error && !error_) error_ = error;
+            if (--left_ == 0) done_.notify_one();
+        }
+    }
+    std::vector<std::thread> threads_;
+    std::mutex lock_;
+    std::condition_variable wake_, done_;
+    const std::function<void(std::size_t)>* job_ = nullptr;
+    std::size_t jobs_ = 0, left_ = 0;
+    uint64_t round_ = 0;
+    bool stop_ = false;
+    std::exception_ptr error_;
+};
+
 class Linked {
 public:
     // `depth`: frames a guess may run ahead (InputTable::guess's `ahead`); kept one more than that.
@@ -83,6 +155,11 @@ public:
             p.snaps = std::make_unique<m3::Snapshots>(depth + 1);
             if (!std::getenv("ROLLBACK_EVERY_FRAME")) p.snaps->set_sparse(kDense, kEvery); // (every frame for the newest few, every 8th beyond; tests: all)
         }
+        // (the boards put back at once, each by a thread of the crew: one less than the boards, at most the cores
+        // less one; ROLLBACK_SERIAL=1 one after another, as before 2026-11-09)
+        const std::size_t cores = std::max(1u, std::thread::hardware_concurrency());
+        const std::size_t helpers = std::min(boards, cores) - 1;
+        if (helpers && !std::getenv("ROLLBACK_SERIAL")) crew_ = std::make_unique<Crew>(helpers);
     }
     uint64_t depth() const { return depth_; }
     // Each board's state as its snapshots walk it (tools::board_state, without the sound board: it hears a frame once).
@@ -239,16 +316,25 @@ public:
             return 0;
         }
         const auto t0 = std::chrono::steady_clock::now();
-        // (one board after another. Tried, 2026-11-06: each on a thread of its own, at once (1.8 ms against 2.8 for
-        // three boards), but the heap was found damaged (by a thread ending, freeing its thread_local buffers) in
-        // internet games of three and four, with threads started each time and with threads kept alike, never
-        // one after another; the cause not found: dropped, the gain ~1 ms)
-        for (Part& p : parts_) { // (each board's walk marks its ring port saved: the ring's load after clears it)
+        // (the boards' snapshots put back at once, by the crew: 1.8 ms against 2.8 one after another for three boards,
+        // 2026-11-06. Dropped then for a heap found damaged as a thread ended (freeing its thread_local buffers), in
+        // internet games of three and four: MinGW's thread_local clean-up freeing watched_memory's lists twice, fixed
+        // in aa5a6ff; back 2026-11-09 with threads kept for the game. Each board's walk marks its own ring port saved:
+        // the ring's load after clears it)
+        std::vector<Part*> restoring;
+        for (Part& p : parts_)
+            if (p.active && !p.fresh) restoring.push_back(&p);
+        const std::size_t ways = crew_ ? std::min(crew_->size(), restoring.size()) : 1;
+        const std::function<void(std::size_t)> restore = [&](std::size_t i) {
+            for (std::size_t k = i; k < restoring.size(); k += ways) restoring[k]->snaps->restore(back, restoring[k]->walk);
+        };
+        if (ways > 1) crew_->run(ways, restore);
+        else restore(0);
+        for (Part& p : parts_) {
             if (!p.active || p.fresh) { // (its network board put back in the staying board's)
                 p.back_to = back;
                 continue;
             }
-            p.snaps->restore(back, p.walk);
             if (p.put_back && p.kept.count(back)) p.put_back(p.kept.at(back).get());
             p.kept.erase(p.kept.upper_bound(back), p.kept.end());
             p.rewind = true;
@@ -343,6 +429,7 @@ private:
     std::atomic<bool> always_{false}; // (keep_every)
     uint64_t force_depth_ = 0, force_every_ = 0, force_from_ = 0, force_until_ = ~0ull; // (force)
     std::set<uint64_t> forced_;
+    std::unique_ptr<Crew> crew_; // (between: the boards put back at once; none: one after another)
     mutable std::mutex forced_lock_;
     double back_ms_ = 0;
     // (going back's catching up: from going back to the frame after the one it was at, as the report has it)

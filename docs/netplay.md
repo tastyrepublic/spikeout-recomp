@@ -3707,6 +3707,17 @@ found; the gain ~1 ms; one after another again. What's left of a going
 back is the frames run again (~8 ms each here, three players' boards on
 six cores; ~4 on a PC playing alone): the game's own code.
 
+BACK (2026-11-09): the boards put back at once again, by threads kept for
+the game (tools::rollback::Crew: one less than the boards, at most the
+cores less one; ROLLBACK_SERIAL=1 one after another). The crash was
+MinGW's thread_local clean-up (fixed in aa5a6ff); kept threads also leak
+nothing (watched_memory's per-thread lists now never freed). Three bot
+players on this PC, back to back (rbbot -Seats 3, 6,000 frames): going
+back 3.1-3.9 ms against 4.6-5.0 one after another, 0 differences.
+Passed: onepc-tests, onepc-net-tests, -LeaverFirst, rbbot, the 13 window
+tests and all 12 internet cases (three and four players included, where
+it had crashed): 0 hash checks differed on every machine.
+
 ## Plan
 
 1. Single board, single player (milestones 1–4).
