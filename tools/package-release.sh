@@ -37,7 +37,9 @@ notices="$stage/THIRD-PARTY-NOTICES.txt"
 {
     echo "Spikeout: Final Edition recomp $version: the libraries and files built into it, and their licences."
     echo "The program itself is under the GNU GPL version 3 (LICENSE.txt)."
-    part() { echo; printf '=%.0s' {1..78}; echo; echo "$1"; printf '=%.0s' {1..78}; echo; cat "$2"; }
+    part() { # (a licence file missing: the build took that library from the system, not built in: said, and stopped)
+        [ -f "$2" ] || { echo "package-release.sh: no licence file for: $1 ($2): is it built in?" >&2; exit 1; }
+        echo; printf '=%.0s' {1..78}; echo; echo "$1"; printf '=%.0s' {1..78}; echo; cat "$2"; }
     part "SDL 3 (zlib licence)" "$(dep sdl3)/LICENSE.txt"
     part "RmlUi (MIT)" "$(dep rmlui)/LICENSE.txt"
     part "RmlUi's SDL GPU renderer" "$repo/third_party/rmlui_sdl_gpu/LICENSE.txt"
@@ -47,6 +49,7 @@ notices="$stage/THIRD-PARTY-NOTICES.txt"
     [ -n "${OPENSSL_LICENSE:-}" ] && part "OpenSSL (Apache 2.0)" "$OPENSSL_LICENSE"
     part "Zstandard (BSD)" "$(dep zstd)/LICENSE"
     part "minimp3 (CC0)" "$repo/third_party/minimp3/LICENSE"
+    part "QR Code generator, Project Nayuki (MIT)" "$repo/third_party/qrcodegen/LICENSE"
     part "Moira" "$repo/third_party/moira/LICENSE"
     part "Barlow Condensed font (SIL Open Font License)" "$repo/assets/fonts/OFL.txt"
     part "Country flags" "$repo/assets/ui/flags-LICENSE.txt"
@@ -111,7 +114,8 @@ EOF
         echo "your file manager doesn't." ;;
     macos-*)
         echo
-        echo "macOS (Apple silicon), not signed: the first time, right-click Spikeout and choose Open,"
+        [ "$platform" = macos-arm64 ] && kind="Apple silicon: M1 and later" || kind="Intel processors"
+        echo "macOS 13.3 or later, for Macs with $kind. Not signed: the first time, right-click Spikeout and choose Open,"
         echo "or open it, then System Settings > Privacy & Security > Open Anyway. This is the first Mac"
         echo "build: please report how it goes." ;;
     esac
@@ -150,7 +154,7 @@ macos-*)
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$version</string>
     <key>CFBundleVersion</key><string>$version</string>
-    <key>LSMinimumSystemVersion</key><string>12.0</string>
+    <key>LSMinimumSystemVersion</key><string>13.3</string>
     <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>

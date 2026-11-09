@@ -150,6 +150,13 @@ div { display: block; }
 	white-space: nowrap;
 }
 
+/* A page's QR code (ui::MenuPage::qr): black squares on white, for a phone's camera. */
+#qr { margin: 10dp 0 6dp 16dp; }
+.qrrow { display: block; height: 5dp; }
+.qm, .ql { display: inline-block; width: 5dp; height: 5dp; }
+.qm { background-color: #000000; }
+.ql { background-color: #ffffff; }
+
 /* A text page (ui::TextInput): the text typed so far, wrapped, a cursor at its end. */
 #textbox {
 	margin: 6dp 16dp 14dp 16dp;

@@ -7,6 +7,7 @@
 #include "ui/assets.hpp"
 
 #include "RmlUi_Renderer_SDL_GPU.h"
+#include "qrcodegen.hpp"
 
 #include <RmlUi/Core.h>
 
@@ -510,6 +511,16 @@ void Menu::build() {
             rml += escape(it.value());
             if (it.change) rml += "<span class=\"arrow\">&nbsp;&nbsp;&gt;</span>";
             rml += "</span>";
+        }
+        rml += "</div>";
+    }
+    if (!p.qr.empty()) { // (a QR code: its modules as squares, a light border of two around them)
+        const qrcodegen::QrCode code = qrcodegen::QrCode::encodeText(p.qr.c_str(), qrcodegen::QrCode::Ecc::MEDIUM);
+        rml += "<div id=\"qr\">";
+        for (int y = -2; y < code.getSize() + 2; ++y) {
+            rml += "<div class=\"qrrow\">";
+            for (int x = -2; x < code.getSize() + 2; ++x) rml += code.getModule(x, y) ? "<span class=\"qm\"></span>" : "<span class=\"ql\"></span>";
+            rml += "</div>";
         }
         rml += "</div>";
     }

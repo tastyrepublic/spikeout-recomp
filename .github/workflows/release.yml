@@ -62,9 +62,9 @@ jobs:
           key: llvm-windows-winlibs-16.2.0-r2-${{ hashFiles('cmake/llvm.cmake') }}
       - name: Configure (LLVM built here when not in the cache)
         run: >
-          gcc --version && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          gcc --version && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_DISABLE_FIND_PACKAGE_SDL3=TRUE
           -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DSPIKEOUT_WARNINGS_AS_ERRORS=OFF -DSPIKEOUT_BUILD_TESTS=OFF
-          -DSPIKEOUT_LLVM_JIT=ON "-DSPIKEOUT_LLVM_ROOT=$LLVM_ROOT" "-DSPIKEOUT_VERSION=$VERSION" "-DSPIKEOUT_GITHUB_CLIENT_ID=${{ vars.REPORTS_APP_CLIENT_ID }}"
+          -DSPIKEOUT_LLVM_JIT=ON "-DSPIKEOUT_LLVM_ROOT=$LLVM_ROOT" "-DSPIKEOUT_VERSION=$VERSION"
       - name: LLVM's build logs (when it failed)
         if: failure()
         run: tail -n 80 "$LLVM_ROOT"/*.log || true
@@ -132,10 +132,10 @@ jobs:
           key: llvm-linux-sniper-gcc14-${{ hashFiles('cmake/llvm.cmake') }}
       - name: Configure (LLVM built here when not in the cache)
         run: >
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release --toolchain /usr/share/steamrt/cmake/gcc-14.cmake
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release --toolchain /usr/share/steamrt/cmake/gcc-14.cmake -DCMAKE_DISABLE_FIND_PACKAGE_SDL3=TRUE
           -DSPIKEOUT_WARNINGS_AS_ERRORS=OFF -DSPIKEOUT_BUILD_TESTS=OFF
           "-DOPENSSL_ROOT_DIR=$SSL_ROOT" -DOPENSSL_USE_STATIC_LIBS=TRUE
-          -DSPIKEOUT_LLVM_JIT=ON "-DSPIKEOUT_LLVM_ROOT=$LLVM_ROOT" "-DSPIKEOUT_VERSION=$VERSION" "-DSPIKEOUT_GITHUB_CLIENT_ID=${{ vars.REPORTS_APP_CLIENT_ID }}"
+          -DSPIKEOUT_LLVM_JIT=ON "-DSPIKEOUT_LLVM_ROOT=$LLVM_ROOT" "-DSPIKEOUT_VERSION=$VERSION"
       - name: LLVM's build logs (when it failed)
         if: failure()
         run: tail -n 80 "$LLVM_ROOT"/*.log || true
@@ -158,13 +158,28 @@ jobs:
           name: linux
           path: out/*.tar.gz
 
+  # (two Macs: Apple silicon and Intel, each its own download; the first Mac builds, untested here: no Mac)
   macos:
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            platform: macos-arm64
+            ssl: darwin64-arm64-cc
+            cache: macos-arm64-12.0       # (the keys the first builds were cached under)
+            llvm: macos-15-arm64-12.0
+          - runner: macos-15-intel
+            platform: macos-x64
+            ssl: darwin64-x86_64-cc
+            cache: macos-x64-13.3
+            llvm: macos-15-intel-x64-13.3
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 330
     env:
       LLVM_ROOT: ${{ github.workspace }}/.llvm
       SSL_ROOT: ${{ github.workspace }}/.openssl
-      MACOSX_DEPLOYMENT_TARGET: '12.0'
+      MACOSX_DEPLOYMENT_TARGET: '13.3' # (libc++'s std::format of floats: 13.3; LLVM and OpenSSL in the cache were built for 12.0, which runs there)
     steps:
       - uses: actions/checkout@v4
       - name: The version
@@ -176,7 +191,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.SSL_ROOT }}
-          key: openssl-${{ env.OPENSSL_VERSION }}-macos-arm64-12.0
+          key: openssl-${{ env.OPENSSL_VERSION }}-${{ matrix.cache }}
       # (built in: Homebrew's, which CMake would find, isn't on the players' Macs)
       - name: OpenSSL
         if: steps.ssl.outputs.cache-hit != 'true'
@@ -184,20 +199,20 @@ jobs:
           curl -fsSL -o ssl.tar.gz "https://github.com/openssl/openssl/releases/download/openssl-$OPENSSL_VERSION/openssl-$OPENSSL_VERSION.tar.gz"
           echo "$OPENSSL_SHA256  ssl.tar.gz" | shasum -a 256 -c
           tar -xzf ssl.tar.gz && cd "openssl-$OPENSSL_VERSION"
-          ./Configure darwin64-arm64-cc no-shared no-tests no-docs "--prefix=$SSL_ROOT" --libdir=lib
+          ./Configure ${{ matrix.ssl }} no-shared no-tests no-docs "--prefix=$SSL_ROOT" --libdir=lib
           make -j3 && make install_sw && cp LICENSE.txt "$SSL_ROOT/"
       - name: LLVM from the cache
         id: llvm
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.LLVM_ROOT }}
-          key: llvm-macos-15-arm64-12.0-${{ hashFiles('cmake/llvm.cmake') }}
+          key: llvm-${{ matrix.llvm }}-${{ hashFiles('cmake/llvm.cmake') }}
       - name: Configure (LLVM built here when not in the cache)
         run: >
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_DISABLE_FIND_PACKAGE_SDL3=TRUE
           -DSPIKEOUT_WARNINGS_AS_ERRORS=OFF -DSPIKEOUT_BUILD_TESTS=OFF
           "-DOPENSSL_ROOT_DIR=$SSL_ROOT" -DOPENSSL_USE_STATIC_LIBS=TRUE
-          -DSPIKEOUT_LLVM_JIT=ON "-DSPIKEOUT_LLVM_ROOT=$LLVM_ROOT" "-DSPIKEOUT_VERSION=$VERSION" "-DSPIKEOUT_GITHUB_CLIENT_ID=${{ vars.REPORTS_APP_CLIENT_ID }}"
+          -DSPIKEOUT_LLVM_JIT=ON "-DSPIKEOUT_LLVM_ROOT=$LLVM_ROOT" "-DSPIKEOUT_VERSION=$VERSION"
       - name: LLVM's build logs (when it failed)
         if: failure()
         run: tail -n 80 "$LLVM_ROOT"/*.log || true
@@ -214,10 +229,10 @@ jobs:
       - name: What it needs from the system
         run: otool -L build/spikeout-jit
       - name: Pack
-        run: OPENSSL_LICENSE="$SSL_ROOT/LICENSE.txt" tools/package-release.sh "$VERSION" macos-arm64 build/spikeout-jit build out
+        run: OPENSSL_LICENSE="$SSL_ROOT/LICENSE.txt" tools/package-release.sh "$VERSION" ${{ matrix.platform }} build/spikeout-jit build out
       - uses: actions/upload-artifact@v4
         with:
-          name: macos
+          name: ${{ matrix.platform }}
           path: out/*.zip
 
   # A draft release with what was built (the Mac's only if it built: it's the first Mac build). Published by the owner.

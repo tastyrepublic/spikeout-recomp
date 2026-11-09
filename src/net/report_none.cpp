@@ -12,5 +12,10 @@ std::string login_name(const std::string&, std::string* error) {
     return {};
 }
 Sent send_as_user(const Report&, const std::string&) { return {false, 0, {}, "this build has no internet connection"}; }
+Issue fetch_issue(int, const std::string&) {
+    Issue i;
+    i.error = "this build has no internet connection";
+    return i;
+}
 
 } // namespace net::report

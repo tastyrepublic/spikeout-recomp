@@ -3391,6 +3391,9 @@ int main(int argc, char** argv) {
         std::string status;             // the last sent report ("Issue #12"; "" none yet)
         std::string failed;             // a send that failed: why (said at the bottom, once)
         std::string sent_url;           // the sent issue's page
+        int sent_number = 0;            // its number
+        net::report::Issue view;        // the sent issue as GitHub has it now (the game's page of it)
+        std::atomic<bool> viewing{false}; // (its fetch under way)
         std::string login, token;       // logged in to GitHub
         std::string login_code, login_page, login_status; // the device flow, under way
         std::atomic<bool> busy{false}, logging_in{false}, changed{false};
@@ -3458,9 +3461,14 @@ int main(int argc, char** argv) {
     // GitHub's device flow, on a page: the address and the code; back to the report by itself once logged in.
     auto login_page = [&] {
         ui::MenuPage p{"Log in to GitHub",
-                       "GitHub's own page asks you: the game never sees your password. It may only open issues on this "
-                       "project's page, as you.",
+                       "On your phone: scan the code below, or go to the address, then type the code and say yes. GitHub's "
+                       "own page asks you: the game never sees your password, and may only open issues on this project's "
+                       "page, as you.",
                        {}};
+        {
+            std::lock_guard guard(report_state->lock);
+            p.qr = report_state->login_page; // (once GitHub has given it: the page made again, the main loop)
+        }
         p.items.push_back({"Go to", "", [st = report_state] {
                                std::lock_guard guard(st->lock);
                                return st->login_page.empty() ? std::string("...") : st->login_page;
@@ -3544,6 +3552,62 @@ int main(int argc, char** argv) {
             }).detach();
         return p;
     };
+    // The sent report as GitHub has it, on a page of the game's own (no browser): open or closed, its title, each
+    // answer (who, its first words; selected: more of it below), fetched with the player's login when the page opens
+    // and on Refresh. Named "Report #N": made again when the fetch comes (the main loop).
+    auto fetch_view = [&] {
+        if (report_state->viewing.exchange(true)) return;
+        int number = 0;
+        std::string token;
+        {
+            std::lock_guard guard(report_state->lock);
+            number = report_state->sent_number, token = report_state->token;
+        }
+        std::thread([st = report_state, number, token] {
+            net::report::Issue issue = net::report::fetch_issue(number, token);
+            {
+                std::lock_guard guard(st->lock);
+                st->view = std::move(issue);
+            }
+            st->viewing = false;
+            st->changed = true;
+        }).detach();
+    };
+    std::function<ui::MenuPage()> view_page;
+    view_page = [&] {
+        net::report::Issue issue;
+        int number = 0;
+        {
+            std::lock_guard guard(report_state->lock);
+            issue = report_state->view, number = report_state->sent_number;
+        }
+        ui::MenuPage p{"Report #" + std::to_string(number), "The answers on the project's GitHub page. Select one: more of it below.", {}};
+        const bool busy = report_state->viewing;
+        if (!issue.ok) {
+            p.items.push_back({"", "", [why = busy || issue.error.empty() ? std::string("Asking GitHub...") : "Can't read it: " + issue.error] {
+                                   return why;
+                               },
+                               {}, {}, true});
+        } else {
+            p.items.push_back({"State", "", [s = issue.state == "closed" ? std::string("Closed") : std::string("Open")] { return s; }, {}, {}, true});
+            p.items.push_back({"", "", [t = issue.title] { return t; }, {}, {}, true});
+            if (issue.answers.empty()) p.items.push_back({"", "", [] { return std::string("No answers yet."); }, {}, {}, true});
+            for (const net::report::Answer& a : issue.answers) {
+                std::string flat = a.body; // (one line for its row; the help below: up to 700 characters)
+                for (char& c : flat)
+                    if (c == '\n' || c == '\r') c = ' ';
+                const std::string first = flat.size() > 34 ? flat.substr(0, 31) + "..." : flat;
+                p.items.push_back({"@" + a.author, flat.size() > 700 ? flat.substr(0, 697) + "..." : flat, [first] { return first; }, {}, [] {}});
+            }
+            if (issue.logs) p.items.push_back({"The game's logs", "", [n = issue.logs] { return std::to_string(n) + " comments"; }, {}, {}, true});
+        }
+        p.items.push_back({"Refresh", "Asks GitHub again.", {}, {}, [&] {
+                               fetch_view();
+                               menu.replace(view_page());
+                           }});
+        p.items.push_back(back_item());
+        return p;
+    };
     // Report a problem: what happened, detailed logging, then sent to GitHub (logged in) or saved as a zip. Built anew
     // as the login or a send changes it (report_changed, in the main loop).
     std::function<ui::MenuPage()> report_page;
@@ -3624,7 +3688,7 @@ int main(int argc, char** argv) {
                                                std::lock_guard guard(st->lock);
                                                if (s.ok) {
                                                    st->status = "Issue #" + std::to_string(s.number) + (s.error.empty() ? "" : " (" + s.error + ")");
-                                                   st->sent_url = s.url;
+                                                   st->sent_url = s.url, st->sent_number = s.number, st->view = {};
                                                    st->words.clear();
                                                } else {
                                                    st->failed = s.error; // (said at the bottom; nothing kept)
@@ -3641,8 +3705,11 @@ int main(int argc, char** argv) {
         p.items.push_back({"Save as a zip", "The same files, and a crash's full record, in one zip in the game's data folder.",
                            {}, {}, [&] { save_report_zip(); }});
         if (!sent_url.empty()) // (only once one was sent)
-            p.items.push_back({"Last report", "Enter: its page on GitHub, in your browser: add to it there, or see the answers.",
-                               [status] { return status; }, {}, [sent_url] { SDL_OpenURL(sent_url.c_str()); }});
+            p.items.push_back({"Last report", "Enter: it and its answers, as GitHub has them now.", [status] { return status; }, {},
+                               [&] {
+                                   fetch_view();
+                                   menu.push(view_page());
+                               }});
         if (!login.empty())
             p.items.push_back({"Log out of GitHub", "Forgets your GitHub login on this computer.", {}, {}, [&] {
                                    {
@@ -4367,7 +4434,9 @@ int main(int argc, char** argv) {
                 shared.say(upper, 8);
             }
             if (menu.top_name() == "Log in to GitHub" && logged_in) menu.pop(); // (logged in: back to the report)
+            else if (menu.top_name() == "Log in to GitHub") menu.replace(login_page()); // (the code come: its QR code)
             if (menu.top_name() == "Report a problem") menu.replace(report_page()); // (its items as they are now)
+            else if (menu.top_name().rfind("Report #", 0) == 0) menu.replace(view_page()); // (GitHub's answer come)
             else menu.refresh();
         }
         // The update check answered: a newer version said once at the bottom (the menu's first items say it from now on).

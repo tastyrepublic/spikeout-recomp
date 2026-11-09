@@ -14,8 +14,10 @@ How a player tells us about a problem, and what the owner sets up once for it.
   - **What happened**: free text (any language through the system's input; Steam Deck: its on-screen keyboard; the
     menu's font shows Latin letters only, other scripts are sent fine). Shift+Enter: a new line; Ctrl+V: paste.
   - **Detailed logging**: the network and timing lines (`SPIKEOUT_NET_DEBUG`) in the log too, from the next start.
-  - **Log in to GitHub** (not logged in): GitHub's device flow, a code typed on github.com/login/device; the game
-    never sees the password. Back to the report by itself once logged in.
+  - **Log in to GitHub** (not logged in): GitHub's device flow: the game shows the address, the code and a QR code
+    of the address (Project Nayuki's QR Code generator, third_party/qrcodegen, MIT) for a phone; "Open the page here"
+    opens this computer's browser only if chosen. GitHub's own page asks for the password (GitHub allows no other
+    way); the game never sees it. Back to the report by itself once logged in.
   - **Send to GitHub**: chosen only logged in and with something written (else shown greyed: "log in first",
     "write what happened first"). A public issue on tastyrepublic/spikeout-recomp as the player: their words, the
     version, the computer and its controllers, the newest crash's first lines; the logs, the crash report and the
@@ -24,7 +26,8 @@ How a player tells us about a problem, and what the owner sets up once for it.
   - **Save as a zip**: the same files, the words (what-happened.txt) and the minidump, in the data folder; a page of
     the game's own says its name and folder, **Copy its path**, and on a computer **Open its folder** (no window of
     the system's: the same on every device; a phone's or tablet's share sheet can come there later).
-  - **Last report** (only once one was sent): its number; Enter opens its page.
+  - **Last report** (only once one was sent): its number; Enter: a page of the game's own (no browser): open or
+    closed, its title, each answer (who, its first words; selected: up to 700 characters of it below), Refresh.
   - **Log out of GitHub** (logged in): the login (github-login.txt in the data folder) forgotten.
 
 Code: tools/player_report.hpp (log, crash reports, zip, the issue's text), src/net/report.{hpp,cpp} (logging in,
@@ -41,9 +44,9 @@ sending), src/ui/menu.cpp (the text page, Menu::replace), tools/spikeout.cpp (th
 2. Copy the **Client ID** (Iv23...: public, not a secret). No private key is needed.
 3. Install App (left menu) > your account > **Only select repositories: spikeout-recomp** (a player's login can
    open issues only where the app is installed).
-4. Repository Settings > Secrets and variables > Actions > Variables > **REPORTS_APP_CLIENT_ID** = the Client ID
-   (the release workflow builds it in; locally: `cmake -DSPIKEOUT_GITHUB_CLIENT_ID=...`). Without it the game offers
-   no login: a zip only.
+4. The Client ID is in CMakeLists.txt as SPIKEOUT_GITHUB_CLIENT_ID's default (public, as the lobby's address is):
+   the owner's app "Spikeout reports", App ID 5678845, Client ID Iv23lix0ed2ATx6BOHJC (made 2026-11-09). Empty: the
+   game offers no login, a zip only.
 
 The lobby is not involved.
 

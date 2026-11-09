@@ -95,6 +95,7 @@ struct MenuPage {
     std::vector<MenuItem> items;
     std::shared_ptr<CodeInput> code; // a code page instead of items
     std::shared_ptr<TextInput> text; // a text page instead of items
+    std::string qr;                  // shown as a QR code under the items (an address for a phone; "": none)
 };
 
 class Menu {

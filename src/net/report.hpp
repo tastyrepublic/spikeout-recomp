@@ -55,4 +55,17 @@ std::string login_name(const std::string& token, std::string* error = nullptr); 
 // As the logged-in player, straight to GitHub.
 Sent send_as_user(const Report& report, const std::string& token);
 
+// A sent report as it is on GitHub now, for the game's own page of it: open or closed, and the answers (the game's
+// own log comments left out: `logs` counts them).
+struct Answer {
+    std::string author, body;
+};
+struct Issue {
+    bool ok = false;
+    std::string title, state, error; // state: "open" or "closed"
+    std::vector<Answer> answers;
+    int logs = 0;
+};
+Issue fetch_issue(int number, const std::string& token);
+
 } // namespace net::report

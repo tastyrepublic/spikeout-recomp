@@ -10,7 +10,7 @@ namespace net::report {
 
 namespace {
 
-struct Answer {
+struct Http {
     long status = 0;
     std::string text, error;
 };
@@ -21,11 +21,11 @@ std::size_t keep(char* data, std::size_t size, std::size_t n, void* user) {
 }
 
 // One request: `body` sent if not empty (`type` its Content-Type), `token` as GitHub's Bearer if not empty.
-Answer request(const std::string& method, const std::string& url, const std::string& body, const std::string& type,
+Http request(const std::string& method, const std::string& url, const std::string& body, const std::string& type,
                const std::string& token) {
     static const bool ready = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK;
     (void)ready;
-    Answer a;
+    Http a;
     CURL* c = curl_easy_init();
     if (!c) {
         a.error = "no connection";
@@ -64,7 +64,7 @@ std::string env_or(const char* name, const char* otherwise) { // (tests: a GitHu
 std::string api() { return env_or("SPIKEOUT_GITHUB_API", "https://api.github.com"); }
 std::string web() { return env_or("SPIKEOUT_GITHUB_WEB", "https://github.com"); }
 
-std::string answer_error(const Answer& a, const char* who) {
+std::string answer_error(const Http& a, const char* who) {
     if (!a.error.empty()) return "no connection to " + std::string(who) + " (" + a.error + ")";
     if (const auto j = Json::parse(a.text); j && j->is_object()) {
         if (const std::string& m = (*j)["message"].as_string(); !m.empty()) return std::string(who) + ": " + m; // (GitHub's)
@@ -80,7 +80,7 @@ bool can_log_in() { return kClientId[0] != '\0' || std::getenv("SPIKEOUT_GITHUB_
 DeviceCode login_start() {
     DeviceCode d;
     const std::string id = env_or("SPIKEOUT_GITHUB_CLIENT_ID", kClientId);
-    const Answer a = request("POST", web() + "/login/device/code", "client_id=" + id, "application/x-www-form-urlencoded", {});
+    const Http a = request("POST", web() + "/login/device/code", "client_id=" + id, "application/x-www-form-urlencoded", {});
     const auto j = Json::parse(a.text);
     if (a.error.empty() && a.status == 200 && j && !(*j)["device_code"].as_string().empty()) {
         d.device_code = (*j)["device_code"].as_string();
@@ -97,7 +97,7 @@ DeviceCode login_start() {
 Poll login_poll(const std::string& device_code) {
     Poll p;
     const std::string id = env_or("SPIKEOUT_GITHUB_CLIENT_ID", kClientId);
-    const Answer a = request("POST", web() + "/login/oauth/access_token",
+    const Http a = request("POST", web() + "/login/oauth/access_token",
                              "client_id=" + id + "&device_code=" + device_code +
                                  "&grant_type=urn:ietf:params:oauth:grant-type:device_code",
                              "application/x-www-form-urlencoded", {});
@@ -121,7 +121,7 @@ Poll login_poll(const std::string& device_code) {
 }
 
 std::string login_name(const std::string& token, std::string* error) {
-    const Answer a = request("GET", api() + "/user", {}, {}, token);
+    const Http a = request("GET", api() + "/user", {}, {}, token);
     const auto j = Json::parse(a.text);
     if (a.error.empty() && a.status == 200 && j) return (*j)["login"].as_string();
     if (error) *error = answer_error(a, "GitHub");
@@ -133,7 +133,7 @@ Sent send_as_user(const Report& r, const std::string& token) {
     Json issue = Json::object();
     issue.set("title", r.title);
     issue.set("body", r.body);
-    const Answer a = request("POST", api() + "/repos/" + env_or("SPIKEOUT_REPORT_REPO", kRepo) + "/issues", issue.dump(),
+    const Http a = request("POST", api() + "/repos/" + env_or("SPIKEOUT_REPORT_REPO", kRepo) + "/issues", issue.dump(),
                              "application/json", token);
     const auto j = Json::parse(a.text);
     if (!a.error.empty() || a.status != 201 || !j || (*j)["number"].as_number() <= 0) {
@@ -146,12 +146,42 @@ Sent send_as_user(const Report& r, const std::string& token) {
     for (const std::string& c : r.comments) { // (the logs; a failed one leaves the issue, said in the error)
         Json comment = Json::object();
         comment.set("body", c);
-        const Answer ca = request("POST", api() + "/repos/" + env_or("SPIKEOUT_REPORT_REPO", kRepo) + "/issues/" +
+        const Http ca = request("POST", api() + "/repos/" + env_or("SPIKEOUT_REPORT_REPO", kRepo) + "/issues/" +
                                               std::to_string(s.number) + "/comments",
                                   comment.dump(), "application/json", token);
         if (!ca.error.empty() || ca.status != 201) s.error = "the issue was opened, but a log couldn't be added: " + answer_error(ca, "GitHub");
     }
     return s;
+}
+
+Issue fetch_issue(int number, const std::string& token) {
+    Issue issue;
+    const std::string base = api() + "/repos/" + env_or("SPIKEOUT_REPORT_REPO", kRepo) + "/issues/" + std::to_string(number);
+    const Http a = request("GET", base, {}, {}, token);
+    const auto j = Json::parse(a.text);
+    if (!a.error.empty() || a.status != 200 || !j || !j->is_object()) {
+        issue.error = answer_error(a, "GitHub");
+        return issue;
+    }
+    issue.title = (*j)["title"].as_string();
+    issue.state = (*j)["state"].as_string();
+    const Http c = request("GET", base + "/comments?per_page=100", {}, {}, token);
+    const auto list = Json::parse(c.text);
+    if (!c.error.empty() || c.status != 200 || !list || !list->is_array()) {
+        issue.error = answer_error(c, "GitHub");
+        return issue;
+    }
+    for (const Json& comment : list->items()) {
+        const std::string& body = comment["body"].as_string();
+        // (the game's own: a log, the settings, as tools/player_report.hpp writes them)
+        if (body.rfind("**", 0) == 0 && body.find("```text\n") != std::string::npos) {
+            ++issue.logs;
+            continue;
+        }
+        issue.answers.push_back({comment["user"]["login"].as_string(), body});
+    }
+    issue.ok = true;
+    return issue;
 }
 
 } // namespace net::report
