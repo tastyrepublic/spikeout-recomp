@@ -3590,7 +3590,14 @@ int main(int argc, char** argv) {
                                {}, {}, true});
         } else {
             p.items.push_back({"State", "", [s = issue.state == "closed" ? std::string("Closed") : std::string("Open")] { return s; }, {}, {}, true});
-            p.items.push_back({"", "", [t = issue.title] { return t; }, {}, {}, true});
+            // (a long title cut to the row's width, "..." at its end; whole characters, as UTF-8 has them)
+            std::string title = issue.title;
+            if (title.size() > 58) {
+                std::size_t cut = 55;
+                while (cut > 0 && (static_cast<unsigned char>(title[cut]) & 0xC0) == 0x80) --cut;
+                title = title.substr(0, cut) + "...";
+            }
+            p.items.push_back({"", "", [title] { return title; }, {}, {}, true});
             if (issue.answers.empty()) p.items.push_back({"", "", [] { return std::string("No answers yet."); }, {}, {}, true});
             for (const net::report::Answer& a : issue.answers) {
                 std::string flat = a.body; // (one line for its row; the help below: up to 700 characters)
