@@ -54,7 +54,7 @@ translation is checked against the project's own ahead-of-time build by recordin
 | The 3D on the GPU (Vulkan) or in software | Working: render scale up to 6x, antialiasing, quads drawn whole |
 | Widescreen (16:10, 16:9, 21:9) | Working: the fights see more to the sides; the 2D screens (the intro, the title and its doors, the fighter select, the linking screen) widened from the game's own art |
 | Sound and music | Working: the cabinet's front and rear speakers apart, on four channels or two outputs |
-| Online play: up to four players, each on their own PC | Working, experimental: an internet lobby with room codes, games on your own network found automatically, rollback, spectators (see [Online play](#online-play)) |
+| Online play: up to four players, each on their own PC | Working, being tested (help wanted; expect some lag and stutters): an internet lobby with room codes, games on your own network found automatically, rollback, spectators (see [Online play](#online-play)) |
 | Save states | Working (one player, not in network games) |
 | Reporting a problem from the game | Working: a GitHub issue sent from the menu, or a zip (see [Reporting a problem](#reporting-a-problem)) |
 | Windows 10 / 11 (64-bit) | Working |
@@ -84,6 +84,7 @@ translation is checked against the project's own ahead-of-time build by recordin
 
 1. Unpack it anywhere: `tar -xzf spikeout-<version>-linux-x64.tar.gz`.
 2. Run `./spikeout` in its folder, and choose your `spikeofe.zip` when it asks.
+3. Optional: `./add-to-menu.sh` puts it in your desktop's applications menu, with its icon (`spikeout.png`).
 
 **Steam Deck**
 
@@ -92,7 +93,10 @@ translation is checked against the project's own ahead-of-time build by recordin
 2. Steam > Games > Add a Non-Steam Game to My Library > Browse, set the file type to "All files", pick `spikeout` in
    its folder, Add Selected Programs. Leave Compatibility's "Force the use of a specific Steam Play compatibility
    tool" off: it's a native Linux game.
-3. Start it once in Desktop Mode to choose your `spikeofe.zip`; after that, play it from Game Mode.
+3. Start it once in Desktop Mode to choose your `spikeofe.zip`; after that, play it from Game Mode. The game's menu on
+   the Deck: View + Menu together.
+
+The full guide, step by step (controls, the picture, online play, updating): [docs/steam-deck.md](docs/steam-deck.md).
 
 **macOS**
 
@@ -160,6 +164,13 @@ setting: Esc > Game > Arcade settings.
 Each player plays on their own PC, as each player had their own cabinet. Every PC runs all the cabinets of the game
 and only the players' inputs travel, so the game is the same on every screen.
 
+> [!IMPORTANT]
+> **Network play is still being tested, and we need your help.** Please play it with friends, on your own network
+> and over the internet, and tell us how it went. Expect some rough edges while it's tested: moments of lag, a
+> stutter now and then (more often with players far apart), and a short pause when someone joins a game in
+> progress. If something goes wrong, or feels worse than that, use **Esc > Game > Report a problem** in the game:
+> it collects the logs we need (see [Reporting a problem](#reporting-a-problem)).
+
 <p align="center">
   <img src="docs/images/network-play.jpg" alt="A three-player network game: the seat list with each player's connection" width="800">
   <br><sub>Three players, one PC each: the seat list shows who's in the game and each one's connection</sub>
@@ -175,10 +186,52 @@ and only the players' inputs travel, so the game is the same on every screen.
 - **If the host leaves**, the game goes on and another player hosts it, under the same room code.
 - **Weaker PCs** (a handheld, an older laptop) automatically run only their own cabinet in full; there is no setting for it.
 
+### How the arcade linked its cabinets, and why that makes online play hard
+
+**In the arcade**, up to four Spikeout cabinets stood side by side, joined by cables into a ring. Each cabinet is a
+whole Model 3 board: its own PowerPC running its own copy of the game, its own 3D, 2D and sound. Each also has a
+network board, a separate little computer (a 68000 with its own program) that passes data around the ring. Every
+frame, 57.5 times a second, each cabinet's game writes a block of what its player is doing (position, moves, hits,
+the camera) to its network board. The ring carries every cabinet's block to all the others, and each game reads
+them before it runs its next frame. The four games stay together only because those blocks arrive every frame,
+exactly, and within a fraction of a millisecond: that is what a cable between cabinets gives.
+
+**Modern online games are built for the internet** from the start. Each PC runs its own game and sends the others
+what matters (where you are, what you hit) a few times a second. The game is designed so that a late or lost message
+is fine: the other players' characters are smoothed, predicted or corrected, and a server usually decides who hit
+whom. Small differences between the PCs don't matter.
+
+**Spikeout was never built for that.** Over the internet a message takes 10 to 150 ms, not a fraction of one, and
+sometimes it's lost. If a block is late, a real cabinet waits for it (the game slows down); if the data in it were
+even slightly different from what the other cabinet sent, the games drift apart (enemies in different places,
+different hits) and never come back together. We can't change how the game links: we run its own code.
+
+**What we do instead:**
+
+- **Only the buttons travel.** Every PC runs every cabinet's board, network board included, and the ring between them
+  is simulated inside the PC. The game always gives the same result for the same buttons, so if every PC has every
+  player's buttons for each frame, every PC has exactly the same game, and the blocks on the ring never have to
+  cross the internet at all. A frame's buttons are a few bytes.
+- **Rollback hides the distance.** A far player's buttons arrive late, so the game doesn't wait: it guesses they're
+  still pressing what they pressed last. When their real buttons arrive and the guess was wrong, the game goes back
+  to that frame and runs every frame since again with the right buttons, in a few milliseconds, before the next
+  picture is shown. You see the right result, a moment late; usually nothing at all.
+- **One board for weaker PCs.** Running four whole arcade boards (below) is a lot. A PC that can't keep up runs only
+  its own player's board, and works out what the other cabinets would send from their buttons, running just those
+  parts of the game's own code on the side (below, "Every board and one board").
+
+**Why speed matters so much.** On every board, a PC runs four complete arcade boards at once: four copies of the game,
+four network boards, and the sound and pictures of the one you watch, all within a frame's 17.4 ms. Then rollback
+asks for more: when a guess was wrong, several of those frames have to be run again, inside the time of one frame,
+before the next picture. A PC that only just keeps up runs fine until the first wrong guess, then stutters. So every
+millisecond saved means smoother games with players far apart, more PCs that can run every board, and smaller
+devices (handhelds, tablets, later phones) that can play at all. A lot of this project's work goes into it, and it
+goes on.
+
 ### Every board and one board
 
-A real Spikeout game is up to four cabinets, each a full Model 3 board, linked by their network boards. Each PC in a
-network game runs those boards in one of two ways, chosen for it automatically (Auto), so one game can have both:
+Each PC in a network game runs the cabinets' boards in one of two ways, chosen for it automatically (Auto), so one
+game can have both:
 
 - **Every board**: the PC runs every player's cabinet, all of them, from the same inputs. Only the button presses
   travel between the PCs, so every PC has exactly the same game, frame for frame. Nothing is guessed except, over the
@@ -187,6 +240,16 @@ network game runs those boards in one of two ways, chosen for it automatically (
 - **One board**: the PC runs only its own player's cabinet in full. The other cabinets aren't run there; what they
   would send over the link is worked out from the game's own code, run on the side for just those parts, and checked
   against the real cabinets' messages.
+
+**Which one is my PC on?** The seat list on the right of the screen says it (it's on by default: Esc > Display >
+Network status). Under each player's name is a line of badges, that player's PC's own:
+
+| Badge | What it means |
+|---|---|
+| **ALL BOARDS** or **1 BOARD** | Every board, or one board, on that player's PC |
+| **RB** or **WAIT** | Rollback (over the internet: it guesses the others' latest presses and corrects them), or waiting for every press (on your own network) |
+| **AUTO 2** or **DELAY 2** | Its input delay in frames: your presses are used that many frames later, so they reach the other PCs in time. AUTO: set automatically from the furthest player |
+| **RB 3** (another player's row) | How often that player's presses were guessed wrong on your PC in the last 10 seconds: green is fine, yellow and red mean many corrections (more chance of stutters) |
 
 **Why one board is needed.** Each cabinet is a whole arcade board: its game, its 2D and 3D, its sound. Running four of
 them at full speed takes a fast desktop PC. A handheld, a tablet or an older laptop can run one board but not four,

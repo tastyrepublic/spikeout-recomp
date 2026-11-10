@@ -117,7 +117,10 @@ EOF
         echo
         echo "Linux: built in Valve's Steam Runtime (sniper) SDK: runs on Linux from about 2020 on"
         echo "(glibc 2.31 or later), the Steam Deck included. Make it runnable (chmod +x spikeout) if"
-        echo "your file manager doesn't." ;;
+        echo "your file manager doesn't."
+        echo "The icon is spikeout.png (for Steam's artwork, as a non-Steam game). ./add-to-menu.sh adds"
+        echo "Spikeout to your desktop's applications menu, with the icon (again if you move the folder)."
+        echo "The Steam Deck, step by step: https://github.com/tastyrepublic/spikeout-recomp/blob/main/docs/steam-deck.md" ;;
     macos-*)
         echo
         [ "$platform" = macos-arm64 ] && kind="Apple silicon: M1 and later" || kind="Intel processors"
@@ -141,6 +144,32 @@ linux-*)
     (cd "$(dirname "$exe")" && tar -czf "$out/$name-debug-symbols.tar.gz" "$(basename "$exe")")
     strip "$stage/spikeout"
     chmod +x "$stage/spikeout"
+    # (the icon beside it: a Linux program carries none inside itself; Steam's artwork (a non-Steam game on the Deck)
+    # and the menu entry below take it from here)
+    cp "$repo/assets/icon/icon.png" "$stage/spikeout.png"
+    # (and the menu entry, made on the player's machine: a desktop entry needs this folder's full path)
+    cat > "$stage/add-to-menu.sh" <<'MENU'
+#!/bin/sh
+# Spikeout in your desktop's applications menu, with its icon, from this folder (run it again if you move the folder).
+here=$(cd "$(dirname "$0")" && pwd)
+dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+mkdir -p "$dir"
+cat > "$dir/spikeout-recomp.desktop" <<ENTRY
+[Desktop Entry]
+Type=Application
+Name=Spikeout: Final Edition
+Comment=The arcade game, recompiled
+Exec="$here/spikeout"
+Path=$here
+Icon=$here/spikeout.png
+Terminal=false
+Categories=Game;ActionGame;
+ENTRY
+chmod +x "$dir/spikeout-recomp.desktop"
+command -v update-desktop-database >/dev/null && update-desktop-database "$dir" >/dev/null 2>&1
+echo "Spikeout added to the applications menu ($dir/spikeout-recomp.desktop)."
+MENU
+    chmod +x "$stage/add-to-menu.sh"
     (cd "$out" && tar -czf "$name.tar.gz" --owner=0 --group=0 "$name") ;;
 macos-*)
     app="$stage/Spikeout.app/Contents"

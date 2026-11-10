@@ -204,6 +204,29 @@ and a git stash (a "late inputs" print in the window, window-autoplay-test.ps1 -
 The frame drops in window-autoplay-test are the test's own load (docs/netplay.md "Rollback's cost with players pressing
 all the time"): don't measure them again on one PC.
 
+## The slowness round (2026-11-09/10)
+
+Tools: SPIKEOUT_STUTTER_LOG=1 (window and gamerun: every stutter with its frame), gamerun GAMERUN_RB_PROFILE=1 (the
+local board's own work a frame: run first or again, before or after the hand-back, and the one-board module's parts),
+WSL perf on the real network path (the host in WSL under perf, a gamerun joining from Windows; perf there names no
+functions: addresses resolved with addr2line; gamerun's OFFLINE --one-board goes through the drop stand-in, not the
+network path: don't profile one board offline). Found and fixed (uncommitted until the full test set):
+- The 5 s hitch: gone (the real-world test again, stutter log: none before the first join).
+- A 6.2 s freeze at a join: the joiner's catch-up counted itself caught up on inputs older than its state (the newer
+  queued behind the state): tools/net_frame.hpp CatchUp (not until an input from past the state, 10 s at most).
+- Auto counted the waits at meetings (a board waiting for one waiting for a player's inputs) as work: 16-17 ms
+  "running" of which 12-14 waiting; a fast PC sent to one board by chance (onepc-window plain failed once). Now
+  tools/net_frame.hpp AutoBoard: each board's own work, the busiest's; the window and gamerun (--net-auto-board, new)
+  the same code (the owner's rule: gamerun = window).
+- One board lost the game's idle skip: 0x36F24 is both the module's kBeforeIdle and the game's kDecLoop; the
+  module's hook said "handled", the game's never ran: up to 200,000 turns of the wait a frame. Before the hand-back
+  one board now costs as every board (2.88 vs 2.98 ms own work a frame).
+- One board's keep_ram allocated a new 8 MB copy each frame: buffers reused (after the hand-back 6.8 -> 5.4 ms).
+Left: one board after the hand-back still ~2.5 ms a frame over every board, mostly memcpy in the side runs' set-up
+and put-back (LATER, the owner: memory note one-board-state-copying); the host's stutters for ~5 s after a far
+player's join; Auto's keep check compares every board measured early (attract) with one board later (play);
+gamerun --renderer gpu crashes at exit (Real3dGpu's destructor after the device is gone; on main before too).
+
 ## The LAN to-do list (the owner's grouping, 2026-11-09)
 
 Where LAN stands: every board is exact (inputs only, a small input delay); spectators (found by LAN discovery,
