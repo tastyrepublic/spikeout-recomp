@@ -22,6 +22,21 @@ git checkout -q -- .
 git checkout -q $(if ($Commit -eq 'master') { 'origin/master' } else { $Commit })
 git apply --whitespace=nowarn $patch
 if ($LASTEXITCODE) { Pop-Location; throw "frame-dump.patch doesn't apply to Supermodel ${Commit}: update the patch (their code moved)" }
+# Model3.h's two lines put in by matching one line, not the patch's context: that part of the file changes between
+# Supermodel versions (their IEmulator overrides), its line endings too
+$h = [IO.File]::ReadAllText("$Work\src\Src\Model3\Model3.h")
+$at = [regex]::Match($h, '(?m)^[ \t]*void AttachRenderers\(')
+if (-not $at.Success) { Pop-Location; throw "Model3.h: no AttachRenderers line in Supermodel ${Commit}: update build.ps1" }
+$nl = if ($h.Contains("`r`n")) { "`r`n" } else { "`n" }
+$add = "  // spikeout-recomp's comparison tool (its tools/supermodel/): the Real3D, and one frame drawn from what its memories hold$nl" +
+       "  // now (a 3D frame dump loaded into them), without running the game$nl" +
+       "  CReal3D &GetReal3D(void) { return GPU; }$nl  void DrawLoadedFrame(void) { gpusReady = true; RenderFrame(); }$nl"
+[IO.File]::WriteAllText("$Work\src\Src\Model3\Model3.h", $h.Insert($at.Index, $add))
+# Main.cpp's emulator is named Model3 up to 77d28ee, Emu since: the patch's one use of it follows the name there
+$m = [IO.File]::ReadAllText("$Work\src\Src\OSD\SDL\Main.cpp")
+if ($m -match 'int Supermodel\([^)]*IEmulator \*Emu[,)]') {
+    [IO.File]::WriteAllText("$Work\src\Src\OSD\SDL\Main.cpp", $m.Replace('dynamic_cast<CModel3 *>(Model3)', 'dynamic_cast<CModel3 *>(Emu)'))
+}
 "Supermodel $(git log --oneline -1), patched"
 Pop-Location
 

@@ -57,6 +57,16 @@ the nesting (children), up to 1024 (Model.cpp, `StackLimit`). Fixed: siblings wa
 nodes when the node's word 3 has bit 29, else models (it went by the child pointer's bit 24). After both, the model
 lists matched Supermodel's one for one in every scene tried (four: the slope, the car park, two of the owner's states).
 
+## Over the whole game, and Supermodel's newest (2026-11-10)
+
+197 scenes (our save states and the bot's runs through every stage, one and two players; a state of linked boards is
+run as 2-4 of them, board 0's dump) drawn by ours and by Supermodel 77d28ee, then again by Supermodel's master
+(65ec91d, built with `-Commit master -Work Z:\Emu\supermodel-master`): the model lists the same in every scene, with
+both. Master changed how a four-level detail table's entries are told apart (a8297d4: the child pointer's bit 24, where
+77d28ee and ours read the node's word 3 bit 29); in these scenes it makes no difference, and master's pictures are
+77d28ee's (0.001% of the picture on average). The share of the picture that differs (7% on average, 25% at most) is
+the sky behind the 3D (no 2D in a dump) and thin edges.
+
 ## Next: our save states in Supermodel's format (planned)
 
 So that Supermodel can be put at any of our save points without playing there. A converter, `tools/state2supermodel`,

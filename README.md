@@ -295,6 +295,8 @@ If the game crashes, it writes a crash report in its data folder, and says so at
 
 - macOS: signed and notarized apps
 - Smooth motion: pictures made between the game's frames, for high-refresh screens
+- HD texture packs: the game's textures replaced by sharper ones you make or share (off by default; packs are never
+  part of the downloads)
 - A direct cable mode: each PC runs only its own cabinet, the link over your network, for handhelds on one hotspot
 - Maybe direct connections by address
 - The menu in Chinese and Japanese

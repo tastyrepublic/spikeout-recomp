@@ -581,6 +581,19 @@ inline std::string scrubbed(std::string text) {
                 i = j;
                 continue;
             }
+            // (an IPv4 address with its port, "61.93.179.122:61078" as the log writes ours: the address out, the port
+            // kept; the colon hid it from the test above, and a player's address went into a public issue, #8 and #9)
+            if (colons == 1 && dots == 3) {
+                const std::size_t colon = token.find(':');
+                const std::string address = token.substr(0, colon), port = token.substr(colon + 1);
+                const bool digits_dots = !address.empty() && address.back() != '.' &&
+                                         std::all_of(address.begin(), address.end(), [&](char c) { return is_digit(c) || c == '.'; });
+                if (digits_dots && std::all_of(port.begin(), port.end(), is_digit)) { // (or none: "1.2.3.4: ...")
+                    out += "x.x.x.x:" + port;
+                    i = j;
+                    continue;
+                }
+            }
             out += token;
             i = j;
             continue;

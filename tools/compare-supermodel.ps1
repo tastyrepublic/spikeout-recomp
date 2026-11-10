@@ -10,7 +10,7 @@
 param([string[]]$Dumps = @(), [string[]]$Scenes = @(), [string]$Out = 'build\compare', [string]$Renderer = 'gpu',
       [string]$Roms = 'Z:\Emu\spikeout-recomp\build\roms\spikeofe', [string]$SupermodelRoms = 'Z:\Emu\Sega Supermodel 3\ROMs\spikeofe.zip',
       [string]$Work = 'Z:\Emu\supermodel-build', [int]$Threshold = 24)
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Continue' # (a scene that fails is skipped, the rest go on)
 $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
 $root = Split-Path $PSScriptRoot
 $build = Join-Path $root 'build'
@@ -22,11 +22,16 @@ $all = @($Dumps | ForEach-Object { (Resolve-Path $_).Path })
 foreach ($s in $Scenes) {
     $parts = $s -split '@'
     $state = $parts[0]; $frame = [uint64]$parts[1]
-    $name = "$([IO.Path]::GetFileNameWithoutExtension($state))-$frame"
+    $name = "$(Split-Path (Split-Path $state -Parent) -Leaf)-$([IO.Path]::GetFileNameWithoutExtension($state))-$frame" # (its folder too: bot runs share names)
     $dump = Join-Path $Out "$name.m3d"
+    if (Test-Path $dump) { $all += $dump; continue } # (made by an earlier run)
     $a = @($Roms, '--load-state', $state, '--frames', "$($frame + 1)", '--blocks', '900000000000', '--no-sound', '--dump-3d', "$dump@$frame")
     if ($parts.Count -ge 3) { $a += @('--inputs', $parts[2]) }
     $null = & "$build\gamerun.exe" @a 2>&1
+    foreach ($n in 2..4) { # (a state of linked boards: tried as 2, 3, 4 of them; board 0's dump)
+        if (Test-Path $dump) { break }
+        $null = & "$build\gamerun.exe" @('--boards', "$n", '--parallel') @a 2>&1
+    }
     if (-not (Test-Path $dump)) { "no dump for $s"; continue }
     $all += $dump
 }

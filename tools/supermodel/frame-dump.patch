@@ -18,30 +18,6 @@ index 7db69c6..8b50c25 100644
  	const UINT32* const modelAddress = TranslateModelAddress(modelAddr);
  
  	// create a new model to push onto the vector
-diff --git a/Src/Model3/Model3.h b/Src/Model3/Model3.h
-index 405a0d9..be3e401 100644
---- a/Src/Model3/Model3.h
-+++ b/Src/Model3/Model3.h
-@@ -90,6 +90,11 @@ public:
-   void RenderFrame(void);
-   void Reset(void);
-   const Game &GetGame(void) const;
-+
-+  // spikeout-recomp's comparison tool (its tools/supermodel/): the Real3D, and one frame drawn from what its memories hold
-+  // now (a 3D frame dump loaded into them), without running the game
-+  CReal3D &GetReal3D(void) { return GPU; }
-+  void DrawLoadedFrame(void) { gpusReady = true; RenderFrame(); }
-   void AttachRenderers(CRender2D *Render2DPtr, IRender3D *Render3DPtr, SuperAA *superAA);
-   void AttachInputs(CInputs *InputsPtr);
-   void AttachOutputs(COutputs *OutputsPtr);
-@@ -322,4 +327,4 @@ private:
- };
- 
- 
--#endif  // INCLUDED_MODEL3_H
-\ No newline at end of file
-+#endif  // INCLUDED_MODEL3_H
-\ No newline at end of file
 diff --git a/Src/Model3/Real3D.cpp b/Src/Model3/Real3D.cpp
 index dac1335..e290a7e 100644
 --- a/Src/Model3/Real3D.cpp

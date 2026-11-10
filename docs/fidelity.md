@@ -896,3 +896,25 @@ Network play gives the same pictures (docs/netplay.md, "Joining in
 progress: the wait"). Not known: whether a real pair of cabinets does this
 or the link's emulation (the network board model) does. Needs the arcade,
 or Supermodel with two linked instances, on the same timing.
+
+## Controls (the window)
+
+**Input delay (2026-11-10).** A player's report: the controls didn't feel like the arcade's, Supermodel's or
+Model 3-Vulkan's. Measured in the window: each frame ran with the keys and pads read after the frame before was
+shown, about 15 ms earlier, and each finished frame was then held until its time before it was shown (about 12 ms):
+about 1.5 frames (25-30 ms) more than Supermodel, Model 3-Vulkan and vf3-recomp, which read the inputs, run the
+frame and show it at once. Now the window reads them just before each frame starts (`Shared::next_due`, 1.5 ms
+ahead: measured 1.6 ms old when the game takes them) and each frame is shown as soon as it is made, then held; the
+game's speed is the same 57.524 Hz (57.52 measured), the sound's commands sent at the frame's time as before.
+`SPIKEOUT_EARLY_INPUTS=1` brings the old order back (tests: the picture held, then shown, the inputs read after it). Supermodel's own default (GPUMultiThreaded)
+draws each frame during the next, a frame later again; with it off it is as ours. Not changed: mailbox presenting.
+Measured (the owner's PC, 99.9 Hz screen, the same build both ways, 30 presses each): the test menu's cursor moved
+on screen 39 ms (29-54) after F1 reached the window, against 77 ms (59-83) in the old order; the keys sent as window
+messages to the game's window only, its pixels read from the screen about every millisecond. Supermodel wasn't
+measured (it reads the keyboard itself, not the window's messages; it ran at 47 frames a second there).
+Network play: the inputs of each frame go to the session the same way (nothing out of step), a frame sooner.
+
+**The left stick (2026-11-10).** Each axis counted past half its reach (diagonals over 31 degrees of the circle,
+straight directions over 59); Supermodel's axes as switches need two-thirds (diagonals over 5 degrees on a round
+stick). Now the stick is an 8-way lever: past a round dead zone of 30%, eight equal 45-degree slices
+(`stick_directions` in tools/spikeout.cpp), as an arcade lever's gate. The d-pad and keys are unchanged.

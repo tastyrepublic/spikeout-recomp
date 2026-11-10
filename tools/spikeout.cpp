@@ -184,6 +184,9 @@ struct Shared {
     std::array<Screen, kMaxBoards> screens;
     std::size_t boards = 1;
     std::atomic<bool> quit{false}, fast{false}, paused{false};
+    // When the shown board's next frame starts (steady clock, ns; 0: not known): the window reads the keys and pads
+    // just before it, so the frame runs with them fresh
+    std::atomic<int64_t> next_due{0};
     uint64_t max_frames = 0; // 0: run until the window is closed
     // --record FILE: board 0's run recorded (tools::Recording), from power-on;
     // each restart a file of its own (FILE, then FILE-2 ...)
@@ -337,6 +340,26 @@ constexpr std::array<InputBit, tools::kActions> kActionBits = {{
 // An axis past this counts as pressed (a stick's direction, a trigger).
 constexpr int kAxisPressed = 16000;
 
+// The left stick as the cabinet's 8-way lever: past a round dead zone (kStickDeadZone of the stick's reach), the
+// direction is one of eight equal 45-degree slices, as an arcade lever's gate gives (each axis past a half before:
+// diagonals over 31 degrees of the circle, straight ones over 59; Supermodel's two-thirds leave diagonals 5).
+constexpr double kStickDeadZone = 0.30;
+struct StickDirections {
+    bool up = false, down = false, left = false, right = false;
+};
+StickDirections stick_directions(int x, int y) {
+    const double fx = x / 32767.0, fy = -y / 32767.0; // (up positive)
+    if (fx * fx + fy * fy < kStickDeadZone * kStickDeadZone) return {};
+    const double turns = std::atan2(fy, fx) / (2 * 3.14159265358979323846); // -0.5 .. 0.5
+    const int slice = (static_cast<int>(std::lround(turns * 8)) + 8) % 8;     // 0 right, 1 up-right, 2 up ... 7 down-right
+    StickDirections d;
+    d.right = slice == 7 || slice == 0 || slice == 1;
+    d.up = slice >= 1 && slice <= 3;
+    d.left = slice >= 3 && slice <= 5;
+    d.down = slice >= 5 && slice <= 7;
+    return d;
+}
+
 // A player's pad: which of the actions it holds, by their buttons (tools::Settings::pad_buttons).
 // The left stick moves too, unless one of the actions is set to one of its axes.
 std::array<bool, tools::kActions> pad_actions(SDL_Gamepad* pad, const std::array<int, tools::kActions>& buttons) {
@@ -355,13 +378,13 @@ std::array<bool, tools::kActions> pad_actions(SDL_Gamepad* pad, const std::array
         }
     }
     if (!stick_used) {
-        const int x = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX), y = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
+        const auto d = stick_directions(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX), SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY));
         using A = tools::Action;
         auto set = [&](A a, bool on) { held[static_cast<std::size_t>(a)] = held[static_cast<std::size_t>(a)] || on; };
-        set(A::Up, y < -kAxisPressed);
-        set(A::Down, y > kAxisPressed);
-        set(A::Left, x < -kAxisPressed);
-        set(A::Right, x > kAxisPressed);
+        set(A::Up, d.up);
+        set(A::Down, d.down);
+        set(A::Left, d.left);
+        set(A::Right, d.right);
     }
     return held;
 }
@@ -876,6 +899,7 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
         // and one frame in twenty then ran 15-27 ms instead of 5, showing as
         // a hitch. --sleep-pacing sleeps (saves power; sleeping also wakes up
         // to a millisecond or two late, so the last of it is waited out).
+        shared.next_due = std::chrono::duration_cast<std::chrono::nanoseconds>(due.time_since_epoch()).count();
         if (shared.sleep_pacing && due - now > std::chrono::milliseconds(2))
             std::this_thread::sleep_until(due - std::chrono::milliseconds(2));
         while (clock::now() < due) std::this_thread::yield();
@@ -936,6 +960,9 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
         const bool quiet = shared.rollback && shared.rollback->quiet(index, timing.frames());
         // (and catching up with the others, run on from a state: nobody looks; the sound still plays, so the music goes on)
         const bool unseen = quiet || shared.catching_up;
+        bool paced_after = false; // (a picture: held after it is shown, below)
+        // (tests: SPIKEOUT_EARLY_INPUTS=1, the old order: the picture held before it is shown, the inputs read after it)
+        static const bool early_inputs = std::getenv("SPIKEOUT_EARLY_INPUTS") != nullptr;
         tools::one_board::Game::end_frame(part); // (one board: the other cabinet's frame ends with this board's)
         auto_board.frame_end(index, std::chrono::duration<double, std::milli>(clock::now() - run_started).count()); // (Auto)
         // (One board, Auto: tools/net_frame.hpp's AutoBoard, below, as gamerun --net-auto-board)
@@ -1017,7 +1044,7 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
                     rows.push_back({first, count, std::vector<uint16_t>(from, from + static_cast<std::ptrdiff_t>(size_t{count} * m3::Real3d::kTextureWidth))});
                 }
             }
-            pace();
+            if (early_inputs) pace(); else paced_after = true;
             std::lock_guard<std::mutex> guard(shared.lock);
             std::swap(shared.gpu_frame, gpu_frame);
             for (auto& r : rows) shared.texture_rows.push_back(std::move(r));
@@ -1027,7 +1054,7 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             real3d.render(bus.real3d());
             tilegen.composite(screen, real3d.image());
             textures_whole = true; // (the GPU, if turned on again, takes texture RAM afresh)
-            pace();
+            if (early_inputs) pace(); else paced_after = true;
             std::lock_guard<std::mutex> guard(shared.lock);
             out.frame.swap(screen);
             out.frame_number = timing.frames();
@@ -1039,6 +1066,11 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             }
             shared.frame_done.notify_one();
         }
+        // A frame with a picture: shown as soon as it is made (above), then held here until the next is due, its
+        // inputs read by the window just before (Shared::next_due): as Supermodel, the pad read, the frame run and
+        // its picture shown at once. (It was held before it was shown, its inputs read after: 1.5 frames later.)
+        // The sound's commands still go at the frame's time, as before.
+        if (paced_after) pace();
         if (shared.sound && index == shown && !quiet) shared.sound->send(bus.midi_out());
         else bus.midi_out().clear();
         if (linked && timing.frames() < tools::kLinkSettingFrames) bus.write8(tools::kLinkSettingAddr, link_setting);
@@ -3033,7 +3065,9 @@ int main(int argc, char** argv) {
     std::array<uint16_t, 64> arcade_words{};
     bool arcade_changed = false;
     auto arcade_page = [&] {
-        {
+        // (a change not yet applied, the page opened again before the menu closed: kept, not read again from the
+        // game: it was lost, the page showing the old value and the game restarting with it; issue #8)
+        if (!arcade_changed) {
             std::lock_guard<std::mutex> guard(shared.lock);
             if (m3::Bus* b = shared.screens[0].bus)
                 std::copy(b->eeprom().words().begin(), b->eeprom().words().end(), arcade_words.begin());
@@ -3953,6 +3987,22 @@ int main(int argc, char** argv) {
             std::lock_guard<std::mutex> guard(shared.lock);
             frames_seen = shared.frames_done;
         } else {
+            // The keys and pads read just before the game's next frame starts (Shared::next_due; a little before: the
+            // read takes a moment, and one late is the last one's), so it runs with them fresh, as Supermodel reads
+            // them before each frame. (The menu open: read below, as before.)
+            static const bool late_read = std::getenv("SPIKEOUT_EARLY_INPUTS") == nullptr; // (tests: the old order, read after each frame)
+            if (const int64_t due = shared.next_due.load(); late_read && due > 0 && !shared.paused) {
+                const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                constexpr int64_t kReadLead = 1'500'000; // ns
+                const int64_t wait = due - kReadLead - now;
+                if (wait > 0 && wait < 25'000'000) {
+                    SDL_DelayPrecise(static_cast<Uint64>(wait));
+                    SDL_PumpEvents();
+                    const auto at = std::chrono::steady_clock::now();
+                    read_inputs(shared, focus, settings, player_pads(), at < test_until, at < service_until);
+                }
+            }
             std::unique_lock<std::mutex> guard(shared.lock);
             shared.frame_done.wait_for(guard, std::chrono::milliseconds(20),
                                        [&] { return shared.frames_done != frames_seen; });
