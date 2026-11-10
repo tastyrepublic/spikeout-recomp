@@ -172,8 +172,10 @@ and only the players' inputs travel, so the game is the same on every screen.
 > it collects the logs we need (see [Reporting a problem](#reporting-a-problem)).
 
 <p align="center">
-  <img src="docs/images/network-play.jpg" alt="A three-player network game: the seat list with each player's connection" width="800">
-  <br><sub>Three players, one PC each: the seat list shows who's in the game and each one's connection</sub>
+  <img src="docs/images/network-play.jpg" alt="A three-player network game: the seat list with each player's connection and board mode" width="800">
+  <br><sub>Three players, one PC each, about 80 ms apart: the seat list on the right shows each player's connection and
+  how their PC runs the game (ALL BOARDS or 1 BOARD, RB: rollback), and for the others how often their presses were
+  guessed wrong here (RB 0, RB 4)</sub>
 </p>
 
 - **Host a game** (Esc > Network play): on the internet lobby, or only on your own network. You get a six-character room
