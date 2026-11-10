@@ -230,6 +230,9 @@ public:
     // its cabinet is its own from a frame the authority chooses (until
     // then, none; Callbacks::taken).
     void take_seat();
+    // Joined in progress: the frame our cabinet is ours from, once the authority has said (0: not yet, or not joined
+    // in progress).
+    uint64_t seat_from() const;
     // Seat `seat`'s inputs are in up to (not including) this frame.
     uint64_t inputs_known(uint8_t seat) const;
     // Whether this machine makes seat `seat`'s inputs of `frame` itself (its own; an empty cabinet's, as the

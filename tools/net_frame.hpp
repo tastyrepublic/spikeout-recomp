@@ -18,6 +18,7 @@
 #include "runtime/state.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -257,6 +258,95 @@ struct Capture {
     }
 };
 
+// Auto, the board mode by this PC's speed (the window's default; gamerun --net-auto-board, the same): each board's own
+// work a frame, its running less its waits at the meetings (where it waits for another board, which may itself be
+// waiting for a player's inputs: 2026-11-09, those waits were counted, 12-14 ms of a two-board host's 16-17 "running",
+// and a fast PC went to one board by chance), the busiest board's over 300 frames: over 97% of a frame, this PC can't
+// run every board at full speed: one board from the next meeting. Then, once the other cabinets are made by side runs,
+// timed again: one board kept if it keeps up, or else if 5% faster than every board was; otherwise every board again
+// for the rest of the game (a PC with cores to spare runs every board faster; one busy with something else, neither
+// helps). Not while running
+// free or catching up, nor in the first 600 frames (the boot's loads). Each board's thread calls wait() and
+// frame_end() for its own; the shown board's decide().
+class AutoBoard {
+public:
+    enum class Verdict { none, one_board, kept, every_board_again };
+    static constexpr std::size_t kBoards = 4;
+    static constexpr uint64_t kFrames = 300, kAfterBoot = 600;
+
+    // A board's wait at a meeting, in its frame.
+    void wait(std::size_t board, double ms) {
+        if (board < kBoards) waits_[board] += ms;
+    }
+    // A board's frame done, `ran_ms` from the end of its last frame's waits for inputs to here.
+    void frame_end(std::size_t board, double ran_ms) {
+        if (board >= kBoards) return;
+        work_us_[board] += static_cast<uint64_t>(std::max(0.0, ran_ms - waits_[board]) * 1000);
+        waits_[board] = 0;
+    }
+    // The shown board's frame end. `switched`: one board set up; `timed`: a frame to count (one board: the others on
+    // side runs; every board: one board not asked for yet); `skip`: running free or catching up. `ms` (out): the
+    // busiest board's work a frame, when a verdict is given.
+    Verdict decide(uint64_t frame, bool switched, bool timed, bool skip, double& ms) {
+        if (decided_) return Verdict::none;
+        if (!started_) started_ = true, from_ = frame;
+        if (!timed || skip || frame < from_ + kAfterBoot) {
+            restart();
+            return Verdict::none;
+        }
+        if (++frames_ < kFrames) return Verdict::none;
+        uint64_t busiest = 0;
+        for (std::size_t b = 0; b < kBoards; ++b) busiest = std::max(busiest, work_us_[b] - work_from_[b]);
+        ms = static_cast<double>(busiest) / 1000 / kFrames;
+        restart();
+        const double budget = 1000.0 / recomp::FrameTiming::kRefreshHz;
+        // (tests: SPIKEOUT_TEST_AUTO_MS=N, one board once frames take over N ms: a PC too slow, played)
+        static const char* test_ms = std::getenv("SPIKEOUT_TEST_AUTO_MS");
+        const double limit = test_ms ? std::atof(test_ms) : 0.97 * budget;
+        if (!switched) {
+            if (ms <= limit) return Verdict::none;
+            every_ms_ = ms;
+            return Verdict::one_board;
+        }
+        // (one board kept when it keeps up: every board didn't. Only when it doesn't either, the faster of the two:
+        // every board's time was measured earlier, in another part of the game (attract or a light moment, one board
+        // in play: 2026-11-09, one board sent back for being slower than every board's 1.4 ms of attract mode))
+        decided_ = true;
+        return ms <= limit || ms < 0.95 * every_ms_ ? Verdict::kept : Verdict::every_board_again;
+    }
+    double every_board_ms() const { return every_ms_; }
+
+private:
+    void restart() {
+        frames_ = 0;
+        for (std::size_t b = 0; b < kBoards; ++b) work_from_[b] = work_us_[b];
+    }
+    std::array<double, kBoards> waits_{};                 // (each board's own thread's)
+    std::array<std::atomic<uint64_t>, kBoards> work_us_{}; // (each board's own work so far, microseconds)
+    std::array<uint64_t, kBoards> work_from_{};
+    uint64_t frames_ = 0, from_ = 0;
+    double every_ms_ = 0;
+    bool started_ = false, decided_ = false;
+};
+// (what Auto decided, in the log: the same words from the window and gamerun)
+inline void auto_board_said(AutoBoard::Verdict v, double ms, double every_ms, const char* tag) {
+    const double budget = 1000.0 / recomp::FrameTiming::kRefreshHz;
+    if (v == AutoBoard::Verdict::one_board)
+        std::printf("%s: every board takes %.2f ms a frame here (a frame is %.2f): one board from now\n", tag, ms, budget);
+    else if (v != AutoBoard::Verdict::none)
+        std::printf("%s: one board takes %.2f ms a frame here (every board %.2f): %s\n", tag, ms, every_ms,
+                    v == AutoBoard::Verdict::kept ? "kept" : "every board again, for the rest of the game");
+}
+
+// Joined in progress, the cabinet taken: still short of the frame it is ours from (the authority chose it ahead of its
+// own frame then), run unpaced until there, as catching up (2026-11-10: the inputs come in order, behind the state and
+// the rest, so the furthest of them lag the others' game; caught up by them, a joiner took its seat ~300 frames short
+// and ran to it at the time sync's pace, 5 s, the others held all that time).
+inline bool behind_own_seat(NetPlay& net, uint64_t frame) {
+    const uint64_t from = net.session().seat_from();
+    return from && frame + 2 < from;
+}
+
 // Joined in progress (run on from a state): caught up with the others (as far as the furthest of their inputs: one
 // seat alone may be a cabinet whose player left, its inputs stopped where they did); our cabinet then (the caller:
 // Session::take_seat, rollback's guesses and snapshots from frame + 2). Not gaining on them after a few seconds (a PC
@@ -285,6 +375,11 @@ struct CatchUp {
                         static_cast<unsigned long long>(front));
         }
         const double so_far = std::chrono::duration<double>(now - at).count();
+        // (no input from past the state yet: the others' inputs since come after the state, queued behind it on the
+        // way, so the furthest known is still older than the state: not caught up whatever it says (2026-11-09: taken
+        // at once, the seat came 390 frames ahead, run to at the game's pace: the others held 6.2 s). 10 s at most:
+        // the others quiet, the cabinet taken as before)
+        if (front < from && so_far < 10) return false;
         const bool given_up = so_far > 5 && front > frame + 4 && front - frame + 30 >= start_behind;
         if (given_up)
             std::printf("%s: not gaining on the others (%llu frames behind after %.0f s): the cabinet taken anyway\n", tag,

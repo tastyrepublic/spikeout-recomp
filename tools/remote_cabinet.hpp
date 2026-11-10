@@ -1249,7 +1249,10 @@ inline bool Cabinets::hook(uint32_t pc) {
     }
     if (pc == kBeforeIdle) { // (this board's MSR there, which a master's shadow starting there takes)
         idle_msr_ = c_.cpu.msr;
-        return true;
+        // (and the game's own hook after it: the same PC is its decrementer wait (m3::games, kDecLoop), gone round at
+        // once by its idle skip. Taken here, it never was: the staying board went round that wait up to 200,000 times
+        // a frame, one board's ~1.5 ms a frame over every board's (2026-11-09))
+        return false;
     }
     if (pc == kModeDispatch || pc == kViewTest || pc == kLinkSkipped) settle(); // (the worker's runs' results wanted here)
     if (pc == kLinkSkipped) // (a slave handed back: this board's world after the count it is to catch up, for its view tests)

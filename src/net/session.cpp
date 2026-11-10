@@ -2201,6 +2201,11 @@ void Session::take_seat() {
     m.ask_take(Clock::now());
 }
 
+uint64_t Session::seat_from() const {
+    std::lock_guard guard(impl_->lock);
+    return impl_->late && impl_->mine_from ? *impl_->mine_from : 0;
+}
+
 uint64_t Session::inputs_known(uint8_t seat) const {
     std::lock_guard guard(impl_->lock);
     return seat < kMaxSeats ? impl_->streams[seat].next() : 0;

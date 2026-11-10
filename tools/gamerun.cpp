@@ -324,6 +324,9 @@ struct Options {
     // --net-one-board FRAME: from the end of FRAME, this machine runs only its own board, the others made by its
     // tools::remote::Cabinets from their players' inputs (Mode B, every board run here, before)
     uint64_t net_one_board = 0;
+    // --net-auto-board: the board mode by this PC's speed, as the window's Auto (its default): every board until it
+    // can't keep up, then one board (tools/net_frame.hpp, AutoBoard; --net-one-board's set-up, wanted then)
+    bool net_auto_board = false;
     uint64_t net_leave_at = 0; // --net-leave-at FRAME: this player leaves a little after FRAME, its board handed to the others first
     uint64_t net_vanish_at = 0; // --net-vanish-at FRAME: this machine gone at the end of FRAME without a word (a crash)
     uint64_t net_rollback = 0;   // --net-rollback N: rollback, the boards running up to N frames ahead on guessed inputs (tools::rollback)
@@ -604,6 +607,16 @@ struct Machine {
     tools::net_frame::Hashes hashes; // (the RAM hashes for the others; --net-rollback: once their frames are settled)
     bool one_board_handed = false; // (--one-board: handed over already)
     double input_wait_max = 0; // (network play: the longest a frame waited for inputs, ms)
+    std::chrono::steady_clock::time_point auto_run_started = std::chrono::steady_clock::now(); // (--net-auto-board: this frame's run from here)
+    // GAMERUN_RB_PROFILE=1: this board's own work a frame (its run less its waits at the meetings), frames run again
+    // after going back [1] against the rest [0], and the one-board module's parts of it (side runs here, the others'
+    // network boards, waiting for the workers, handing them jobs)
+    struct RbProfile {
+        uint64_t frames[4]{}; // ([k]: run again (1) or first (0), +2 with the others on side runs)
+        double work[4]{}, side[4]{}, net[4]{}, wait[4]{}, hand[4]{};
+        double last_side = 0, last_net = 0, last_wait = 0, last_hand = 0;
+    } rb_profile;
+    double frame_waits = 0; // (this frame's waits at the meetings, ms)
     uint64_t sync_waits = 0;   // (--net-rollback: frames held back by the time sync)
     uint64_t input_waits_long = 0; // (network play: frames that waited over a frame's time for inputs)
     std::set<uint8_t> backup_bases; // (the seats sent one: changes from it next)
@@ -941,6 +954,8 @@ uint64_t state_hash(const std::function<void(m3::State&)>& walk);
 tools::one_board::Game g_one_board;
 std::atomic<uint64_t> g_one_board_frame{~0ull}; // (--net-one-board: the frame it was set up at; ~0: not yet)
 bool g_one_board_wanted = false; // (--net-one-board: to be set up at a meeting from its frame on, as the window)
+bool g_one_board_back = false;   // (--net-auto-board: every board again, the module gone at a meeting once it can be)
+std::unique_ptr<tools::net_frame::AutoBoard> g_auto_board; // (--net-auto-board: made anew each start, as the window)
 bool one_board_goes(const Options& o, std::size_t board) {
     return o.one_board >= 0 && (static_cast<std::size_t>(o.one_board) == board ||
                                 std::find(o.one_board_also.begin(), o.one_board_also.end(), board) != o.one_board_also.end());
@@ -1581,7 +1596,11 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             if (m.recording_host) m.host_log.push_back({HostCall::Pass, 0, 0, 0, m.c.cycles()});
             m.line = line;
             tools::one_board::Game::meet(m.ob, line); // (--one-board: the other cabinets' blocks due)
+            const auto passing = std::chrono::steady_clock::now();
             turns.pass(m.index);
+            const double waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - passing).count();
+            m.frame_waits += waited; // (GAMERUN_RB_PROFILE)
+            if (g_auto_board) g_auto_board->wait(m.index, waited); // (--net-auto-board: a meeting's wait isn't this board's work, as the window)
             if (g_net_rb && g_net_rb->rewind(m.index)) throw tools::rollback::Rewound{}; // (--net-rollback: gone back, with the others)
             if (m.rb.rewind) { // (--rollback-test: put back at the meeting, with the others)
                 m.rb.rewind = false;
@@ -1599,6 +1618,33 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
     m.timing.on_frame_end = [&m, &o] {
         const uint64_t frame = m.timing.frames();
         tools::one_board::Game::end_frame(m.ob); // (--one-board: the other cabinets' frames end with this board's)
+        static const bool rb_profile = std::getenv("GAMERUN_RB_PROFILE") != nullptr;
+        if (rb_profile && m.index == o.local_seat) { // (GAMERUN_RB_PROFILE: this frame's own work, by kind)
+            auto& p = m.rb_profile;
+            const int k = (g_net_rb && g_net_rb->quiet(m.index, frame) ? 1 : 0) + (tools::one_board::Game::on_side_runs(m.ob) ? 2 : 0);
+            ++p.frames[k];
+            p.work[k] += std::max(0.0, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m.auto_run_started).count() - m.frame_waits);
+            if (m.ob.cabinets) {
+                const auto& c = *m.ob.cabinets;
+                const double side = 1000 * c.whole_seconds(), net = 1000 * c.netboard_seconds(), wait = 1000 * c.worker_wait(), hand = 1000 * c.worker_hand();
+                p.side[k] += side - p.last_side, p.net[k] += net - p.last_net, p.wait[k] += wait - p.last_wait, p.hand[k] += hand - p.last_hand;
+                p.last_side = side, p.last_net = net, p.last_wait = wait, p.last_hand = hand;
+            }
+        }
+        m.frame_waits = 0;
+        if (g_auto_board) { // (--net-auto-board: as the window's Auto, tools/net_frame.hpp)
+            g_auto_board->frame_end(m.index, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m.auto_run_started).count());
+            if (o.netplay && m.index == o.local_seat) {
+                const bool switched = g_one_board_frame != ~0ull;
+                const bool timed = switched ? tools::one_board::Game::on_side_runs(m.ob) : !g_one_board_wanted;
+                double ms = 0;
+                const auto verdict = g_auto_board->decide(frame, switched, timed, g_catching_up, ms);
+                tools::net_frame::auto_board_said(verdict, ms, g_auto_board->every_board_ms(), "net");
+                if (verdict == tools::net_frame::AutoBoard::Verdict::one_board) g_one_board_wanted = true;
+                if (verdict == tools::net_frame::AutoBoard::Verdict::every_board_again)
+                    tools::one_board::Game::keep_whole(m.ob), g_one_board_back = true;
+            }
+        }
         if (o.one_board_whole && frame == o.one_board_whole && m.ob.cabinets) { // --one-board-whole FRAME
             tools::one_board::Game::keep_whole(m.ob);
             std::printf("board %zu: the other run whole from frame %llu\n", m.index, (unsigned long long)frame);
@@ -2055,7 +2101,8 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             using clock = std::chrono::steady_clock;
             static auto started = clock::now(), last = started;
             static uint64_t first = frame;
-            if (g_catching_up) { // (--net-catch-up: flat out until caught up, paced from there)
+            // (--net-catch-up: flat out until caught up, and on to our seat's frame (tools/net_frame.hpp), paced from there)
+            if (g_catching_up || (o.netplay && tools::net_frame::behind_own_seat(*o.netplay, frame))) {
                 started = last = clock::now(), first = frame;
                 g_speed.frame_end(frame, true);
             } else {
@@ -2684,6 +2731,7 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         // (the window's step, tools/net_frame.hpp; the first from g_rollback_from always)
         if (g_net_rb)
             tools::net_frame::rollback_frame_end(*g_net_rb, o.netplay, m.index == o.local_seat, o.boards, m.index, frame, g_rollback_from, m.c);
+        m.auto_run_started = std::chrono::steady_clock::now(); // (--net-auto-board: the next frame runs from here, as the window)
     };
 }
 
@@ -3593,6 +3641,7 @@ int main(int argc_given, char** argv_given) {
         else if (arg == "--net-start-alone") o.net_start_alone = true;
         else if (arg == "--net-catch-up") o.net_catch_up = true;
         else if (arg == "--net-one-board" && i + 1 < argc) o.net_one_board = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--net-auto-board") o.net_auto_board = true, o.net_one_board = std::max<uint64_t>(o.net_one_board, 1);
         else if (arg == "--net-leave-at" && i + 1 < argc) o.net_leave_at = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--net-vanish-at" && i + 1 < argc) o.net_vanish_at = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--net-rollback" && i + 1 < argc) o.net_rollback = std::strtoull(argv[++i], nullptr, 0);
@@ -4148,8 +4197,11 @@ int main(int argc_given, char** argv_given) {
             }
             o.one_board_frame = o.net_one_board;
             o.one_board_tasks = o.one_board_auto = o.one_board_held = true; // (the window's: Settings from net_frame)
-            std::printf("net: one board here from frame %llu: the other %u made from their players' inputs\n",
-                        static_cast<unsigned long long>(o.net_one_board), start->seats - 1);
+            if (o.net_auto_board)
+                std::printf("net: Auto: every board here until this PC can't keep up, then one board\n");
+            else
+                std::printf("net: one board here from frame %llu: the other %u made from their players' inputs\n",
+                            static_cast<unsigned long long>(o.net_one_board), start->seats - 1);
         }
         if (o.net_spectate && o.net_rollback) {
             std::fprintf(stderr, "gamerun: a spectator runs on inputs all in (no --net-rollback)\n");
@@ -4350,6 +4402,12 @@ int main(int argc_given, char** argv_given) {
                     net_set_up_one_board(machines, o);
                 }
             }
+            // (--net-auto-board: every board again, once the others' shadows run, the module gone: as the window)
+            if (g_one_board_back && g_one_board.tear_down()) {
+                g_one_board_back = false;
+                g_one_board_frame = ~0ull;
+                std::printf("net: every board here again (the other cabinet run whole), as plain network play\n");
+            }
             if (rollback.ring) rollback.between(o);
         }) : std::function<void()>());
     };
@@ -4359,6 +4417,21 @@ int main(int argc_given, char** argv_given) {
     // turns, so they share it.
 #ifdef SPIKEOUT_GPU
     gpu::Device gpu_device;
+    // (at the end, the boards' GPU parts let go before the device: the boards, declared before it, are destroyed after
+    // it, each renderer then waiting on a device already closed (a crash at exit, --renderer gpu). Only those parts:
+    // the boards themselves go as before, after MachinesGone (clearing them here crashed network games at exit))
+    struct GpuPartsFirst {
+        std::vector<std::unique_ptr<Machine>>& machines;
+        gpu::Device& device;
+        ~GpuPartsFirst() {
+            for (auto& m : machines) {
+                if (!m) continue;
+                m->presenter.reset();
+                if (m->screen_target) SDL_ReleaseGPUTexture(device.get(), m->screen_target), m->screen_target = nullptr;
+                m->gpu.reset();
+            }
+        }
+    } gpu_parts_first{machines, gpu_device};
     if (o.renderer != Options::Renderer::Software || o.gpu_time_scale) {
         if (gpu_device.open_headless()) {
             std::printf("GPU: %s\n", gpu_device.driver());
@@ -4382,7 +4455,9 @@ int main(int argc_given, char** argv_given) {
             std::construct_at(&g_one_board);
             g_one_board.set_turns(turns_ptr.get());
         }
-        g_one_board_frame = ~0ull, g_one_board_wanted = true;
+        // (--net-auto-board: not wanted until Auto finds this PC too slow; measured anew each start, as the window)
+        g_one_board_frame = ~0ull, g_one_board_wanted = !o.net_auto_board, g_one_board_back = false;
+        if (o.net_auto_board) g_auto_board = std::make_unique<tools::net_frame::AutoBoard>();
     }
     for (std::size_t i = 0; i < o.boards; ++i) {
         machines.push_back(std::make_unique<Machine>(i, roms, functions));
@@ -4673,6 +4748,15 @@ int main(int argc_given, char** argv_given) {
         std::printf("Network: %llu hash checks differed\n", static_cast<unsigned long long>(netplay->desyncs()));
         std::printf("Node check: %s\n", netplay->node_check().report().c_str());
         if (g_net_rb) std::printf("Rollback: %s\n", g_net_rb->report().c_str());
+        if (std::getenv("GAMERUN_RB_PROFILE") && o.local_seat < machines.size()) { // (this board's own work a frame, by kind)
+            const auto& p = machines[o.local_seat]->rb_profile;
+            for (int k = 0; k < 4; ++k)
+                if (const double n = static_cast<double>(p.frames[k]))
+                    std::printf("Profile, %s: %llu frames, own work %.2f ms a frame (side runs here %.2f, their network boards %.2f, "
+                                "waiting for the workers %.2f, handing them jobs %.2f)\n",
+                                (k & 1) ? (k & 2 ? "run again, others on side runs" : "run again, every board whole") : (k & 2 ? "run first, others on side runs" : "run first, every board whole"), static_cast<unsigned long long>(p.frames[k]), p.work[k] / n,
+                                p.side[k] / n, p.net[k] / n, p.wait[k] / n, p.hand[k] / n);
+        }
         double wait_max = 0;
         uint64_t sync_waits = 0, long_waits = 0;
         for (const auto& m : machines)

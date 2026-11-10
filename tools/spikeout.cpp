@@ -270,6 +270,8 @@ struct Shared {
     std::atomic<bool> net_save_request{false}; // F9 in network play: every board's state in a file
     std::vector<uint8_t> net_state;
     std::atomic<bool> catching_up{false};
+    // Auto, the board mode by speed (tools/net_frame.hpp, gamerun --net-auto-board the same): made anew each start
+    std::unique_ptr<tools::net_frame::AutoBoard> auto_board = std::make_unique<tools::net_frame::AutoBoard>();
     std::atomic<uint64_t> catch_up_behind{0}; // (frames still to catch up, the shown board's; 0 not known yet)
     std::atomic<uint64_t> catch_up_start{0};  // (and as many when catching up started: the loading bar)
     // A spectator (docs/netplay.md, "Spectators"): no seat; every board run here on inputs all in (no one board, no
@@ -776,10 +778,7 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
         shared.one_board_parts[index] = &part;
     }
     const bool goes = one_board && index != shown; // (handed over at shared.one_board_frame, if it comes)
-    const uint64_t auto_from = timing.frames(); // (Auto: this board's frames timed from 600 on)
-    double auto_ms = 0, auto_every_ms = 0; // (and every board's, when one board was taken for it)
-    uint64_t auto_frames = 0;
-    bool auto_decided = false; // (one board tried: kept, or every board again)
+    tools::net_frame::AutoBoard& auto_board = *shared.auto_board; // (Auto: this game's)
     m3::TilegenRenderer tilegen;
     m3::Real3dRenderer real3d;
     real3d.set_fog_over_nothing(shared.fog_over_nothing);
@@ -805,11 +804,12 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             bus.netboard().sync(c.cycles());
             const auto met = meet_timing ? clock::now() : clock::time_point{};
             tools::one_board::Game::meet(part, line); // (--net-one-board: the other cabinet's blocks due)
-            const auto passing = meet_timing ? clock::now() : clock::time_point{};
+            const auto passing = clock::now();
             turns.pass(index);
+            const double waited = std::chrono::duration<double, std::milli>(clock::now() - passing).count();
+            auto_board.wait(index, waited); // (Auto: not this board's work)
             if (meet_timing) // (SPIKEOUT_NET_DEBUG: the module's link runs at the meetings, and the meetings' waits)
-                meet_ms += std::chrono::duration<double, std::milli>(passing - met).count(),
-                    pass_ms += std::chrono::duration<double, std::milli>(clock::now() - passing).count();
+                meet_ms += std::chrono::duration<double, std::milli>(passing - met).count(), pass_ms += waited;
             if (shared.rollback && shared.rollback->rewind(index)) throw tools::rollback::Rewound{}; // (gone back, with the others)
         }
     };
@@ -823,10 +823,12 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
     tools::SpeedReport speed;
     auto pace = [&] {
         if (index != shown) return;
-        if (shared.fast || shared.catching_up || repace) { // (catching up: run on from a state, behind the others)
+        // (catching up: run on from a state, behind the others; and on to our seat's frame: tools/net_frame.hpp)
+        const bool to_seat = shared.netplay && tools::net_frame::behind_own_seat(*shared.netplay, timing.frames());
+        if (shared.fast || shared.catching_up || to_seat || repace) {
             start = clock::now();
             paced_from = timing.frames();
-            repace = shared.fast || shared.catching_up;
+            repace = shared.fast || shared.catching_up || to_seat;
             speed.frame_end(timing.frames(), true);
             return;
         }
@@ -935,13 +937,8 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
         // (and catching up with the others, run on from a state: nobody looks; the sound still plays, so the music goes on)
         const bool unseen = quiet || shared.catching_up;
         tools::one_board::Game::end_frame(part); // (one board: the other cabinet's frame ends with this board's)
-        // One board, Auto: this board's frames timed (from the end of one frame's waits to the end of the next: its
-        // own work and its meetings with the others, not the waits for inputs or the pacing), 300 at a time; over
-        // 97% of a frame on average, this PC can't run every board at full speed: one board from the next meeting.
-        // Then, once the other cabinet is made by side runs, timed again: one board kept only if it is 5% faster than
-        // every board was, else the other cabinet run whole again (a shadow never handed back) for the rest of the
-        // game (a PC with cores to spare runs every board faster; one busy with something else, neither helps).
-        // (Not while running free (Tab) or catching up, nor in the first 600 frames: the boot's loads.)
+        auto_board.frame_end(index, std::chrono::duration<double, std::milli>(clock::now() - run_started).count()); // (Auto)
+        // (One board, Auto: tools/net_frame.hpp's AutoBoard, below, as gamerun --net-auto-board)
         // (a spectator on one board switching players: every other cabinet whole first, from their backups; set up
         // again around the new one once the module is gone, in the turns' meeting)
         if (one_board && index == shown && shared.switch_to != ~std::size_t{0} && !shared.switch_started &&
@@ -952,32 +949,15 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
                         shared.switch_to.load() + 1);
             tools::one_board::Game::keep_whole(part), shared.one_board_back = true;
         }
-        if (one_board && index == shown && shared.one_board == Shared::OneBoard::automatic && !auto_decided) {
+        if (one_board && index == shown && shared.one_board == Shared::OneBoard::automatic) { // (tools/net_frame.hpp, AutoBoard)
             const bool switched = shared.one_board_frame != ~0ull;
             const bool timed = switched ? tools::one_board::Game::on_side_runs(part) : !shared.one_board_wanted;
-            if (!timed || shared.fast || shared.catching_up || timing.frames() < auto_from + 600) {
-                auto_ms = 0, auto_frames = 0;
-            } else {
-                auto_ms += std::chrono::duration<double, std::milli>(clock::now() - run_started).count();
-                if (++auto_frames == 300) {
-                    const double budget = 1000.0 / recomp::FrameTiming::kRefreshHz, ms = auto_ms / 300;
-                    // (tests: SPIKEOUT_TEST_AUTO_MS=N, one board once frames take over N ms: a PC too slow, played)
-                    static const char* test_ms = std::getenv("SPIKEOUT_TEST_AUTO_MS");
-                    if (!switched && ms > (test_ms ? std::atof(test_ms) : 0.97 * budget)) {
-                        std::printf("spikeout: every board takes %.2f ms a frame here (a frame is %.2f): one board from now\n", ms,
-                                    budget);
-                        auto_every_ms = ms;
-                        shared.one_board_wanted = true;
-                    } else if (switched) {
-                        auto_decided = true;
-                        const bool keep = ms < 0.95 * auto_every_ms;
-                        std::printf("spikeout: one board takes %.2f ms a frame here (every board %.2f): %s\n", ms, auto_every_ms,
-                                    keep ? "kept" : "every board again, for the rest of the game");
-                        if (!keep) tools::one_board::Game::keep_whole(part), shared.one_board_back = true;
-                    }
-                    auto_ms = 0, auto_frames = 0;
-                }
-            }
+            double ms = 0;
+            const auto verdict = auto_board.decide(timing.frames(), switched, timed, shared.fast || shared.catching_up, ms);
+            tools::net_frame::auto_board_said(verdict, ms, auto_board.every_board_ms(), "spikeout");
+            if (verdict == tools::net_frame::AutoBoard::Verdict::one_board) shared.one_board_wanted = true;
+            if (verdict == tools::net_frame::AutoBoard::Verdict::every_board_again)
+                tools::one_board::Game::keep_whole(part), shared.one_board_back = true;
         }
         if (timing_debug && timing.frames() % 300 == 0) {
             const uint32_t logic = bus.read32(0x1000A8);
@@ -2347,6 +2327,7 @@ int main(int argc, char** argv) {
         // One board a PC: a run's own (any number of players: the rules follow each other cabinet, its shadows from its
         // machine's real board); --net-one-board's wanted at once
         shared.one_board_game.reset();
+        shared.auto_board = std::make_unique<tools::net_frame::AutoBoard>(); // (Auto: measured anew, this start)
         shared.one_board_parts = {}, shared.one_board_wanted = false, shared.one_board_back = false, shared.one_board_frame = ~0ull;
         shared.backup_bases.clear(); // (every machine sent its whole first again)
         if (shared.netplay && shared.one_board != Shared::OneBoard::never && boards >= 2) { // (a spectator's too: by its power)

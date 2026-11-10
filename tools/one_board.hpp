@@ -871,9 +871,20 @@ private:
         if (!m.keep_ram || !m.keeping) return;
         auto ram = m.bus.ram();
         const uint32_t count = m.bus.read32(remote::kLogicCounter);
-        m.ram_at.erase(m.ram_at.lower_bound(count), m.ram_at.end()); // (none from after it: as done_seed, a going back)
-        m.ram_at[count].assign(ram.begin(), ram.end());
-        while (m.ram_at.size() > 3) m.ram_at.erase(m.ram_at.begin());
+        // (the newest 3 kept, the same as before; each copy into a buffer let go, not a new 8 MB one: a fresh one
+        // a frame, each board, had every page of it faulted in again (2026-11-09: most of one board's extra ~1.4 ms
+        // a frame while the others are held whole))
+        std::vector<uint8_t> buffer;
+        for (auto it = m.ram_at.lower_bound(count); it != m.ram_at.end();) { // (none from after it: as done_seed, a going back)
+            buffer = std::move(it->second);
+            it = m.ram_at.erase(it);
+        }
+        while (m.ram_at.size() >= 3) {
+            buffer = std::move(m.ram_at.begin()->second);
+            m.ram_at.erase(m.ram_at.begin());
+        }
+        buffer.assign(ram.begin(), ram.end()); // (a new one only for the first 3)
+        m.ram_at[count] = std::move(buffer);
     }
 
     // The rules: once a frame on the board that stays, where it finished a count (0x36E94). A shadow of the other

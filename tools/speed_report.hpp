@@ -36,7 +36,11 @@ public:
         }
         const double gap = std::chrono::duration<double, std::milli>(now - last_).count();
         last_ = now;
-        if (gap > kStutter * 1000.0 / recomp::FrameTiming::kRefreshHz) ++stutters_, ++total_stutters_;
+        if (gap > kStutter * 1000.0 / recomp::FrameTiming::kRefreshHz) {
+            ++stutters_, ++total_stutters_;
+            static const bool each = std::getenv("SPIKEOUT_STUTTER_LOG") != nullptr; // (tests: every stutter, where)
+            if (each) std::printf("stutter: frame %llu, %.1f ms\n", static_cast<unsigned long long>(frame), gap);
+        }
         worst_ = std::max(worst_, gap), total_worst_ = std::max(total_worst_, gap);
         total_to_ = frame, total_end_ = now;
         const double secs = std::chrono::duration<double>(now - second_at_).count();
