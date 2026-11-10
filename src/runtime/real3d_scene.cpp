@@ -9,7 +9,10 @@ namespace m3 {
 
 namespace {
 
-constexpr int kMaxDepth = 64;
+// (the nodes' nesting, siblings not counted, as deep as Supermodel's attribute stack allows (Model.cpp StackLimit, 1024).
+// 2026-11-10, issue #6: it was 64 with each sibling counted, and a long chain of siblings (the roadside guard rails
+// after the rest of the road's objects) ended there: never visited)
+constexpr int kMaxDepth = 1024;
 constexpr uint32_t kMaxVisits = 200000;
 constexpr uint32_t kMaxPolygonsPerModel = 65536;
 constexpr int kScreenHeight = 384, kScreenWidth = 496;
@@ -343,7 +346,7 @@ void Real3dSceneBuilder::walk_node(uint32_t addr, int depth) {
 
     // Siblings first, as Supermodel does (a colour-table node has none).
     const bool colour_table_node = (flags & 7) == 6, point_ref = flags & 0x10000000;
-    if ((!colour_table_node || point_ref) && sibling && !(sibling & 0x1000000)) walk_node(sibling, depth + 1);
+    if ((!colour_table_node || point_ref) && sibling && !(sibling & 0x1000000)) walk_node(sibling, depth); // (a sibling: no deeper)
 
     if (flags & 4) // the colour table address, in pieces
         colour_table_ = ((node[3] >> 19) | ((node[7] >> 28) << 13) | ((node[8] >> 25) << 17)) & 0xFFFFF;
@@ -406,10 +409,13 @@ void Real3dSceneBuilder::walk_node(uint32_t addr, int depth) {
                 if (lod_scale >= delete_size(level) && (mem_->culling(child + static_cast<uint32_t>(level)) & 0x1000000)) break;
             const float parent_alpha = attribs_.alpha;
             const float node_alpha = fade(level);
+            // (the table's entries culling nodes when the node's word 3 has bit 29, else models, as Supermodel 77d28ee's
+            // New3D.cpp DescendCullingNode decides; it went by the child pointer's bit 24 before (2026-11-10, found
+            // comparing the two for issue #6))
             auto draw_level = [&](int l) {
                 const uint32_t entry = mem_->culling(child + static_cast<uint32_t>(l)) & 0xFFFFFF;
-                if (child & 0x01000000) add_model(entry);
-                else walk_node(entry, depth + 1);
+                if (node[3] & 0x20000000) walk_node(entry, depth + 1);
+                else add_model(entry);
             };
             attribs_.alpha = parent_alpha * node_alpha;
             draw_level(level);
