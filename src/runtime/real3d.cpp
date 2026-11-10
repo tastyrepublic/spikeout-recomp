@@ -250,4 +250,51 @@ void Real3d::state(State& s) {
     if (s.loading()) std::fill(rows_written_.begin(), rows_written_.end(), uint8_t{1}); // a renderer's copy is stale
 }
 
+// The 3D frame dump (docs/frame-dump.md), every number little-endian:
+//   "M3FRDUMP", u32 version (1), u32 game mark (GameSpec::security_key), u32 flags (bit 0: block culling), u32 configuration registers[4],
+//   u32 words of low culling RAM, of high culling RAM, of polygon RAM, u32 texture width, height;
+//   then those memories in that order, 32-bit words as the Real3D reads them, the texels 16-bit, row by row.
+namespace {
+constexpr char kDumpMagic[8] = {'M', '3', 'F', 'R', 'D', 'U', 'M', 'P'};
+constexpr uint32_t kDumpVersion = 1;
+void put32(std::vector<uint8_t>& out, uint32_t v) {
+    for (int i = 0; i < 4; ++i) out.push_back(static_cast<uint8_t>(v >> (8 * i)));
+}
+uint32_t get32(std::span<const uint8_t> in, size_t at) {
+    return uint32_t{in[at]} | uint32_t{in[at + 1]} << 8 | uint32_t{in[at + 2]} << 16 | uint32_t{in[at + 3]} << 24;
+}
+} // namespace
+
+std::vector<uint8_t> Real3d::frame_dump(uint32_t game_crc) const {
+    std::vector<uint8_t> out(kDumpMagic, kDumpMagic + 8);
+    out.reserve(64 + 4 * (culling_lo_.size() + culling_hi_.size() + polygon_.size()) + 2 * texture_.size());
+    put32(out, kDumpVersion), put32(out, game_crc), put32(out, block_culling_ ? 1u : 0u);
+    for (uint32_t c : config_) put32(out, c);
+    put32(out, static_cast<uint32_t>(culling_lo_.size())), put32(out, static_cast<uint32_t>(culling_hi_.size()));
+    put32(out, static_cast<uint32_t>(polygon_.size())), put32(out, kTextureWidth), put32(out, kTextureHeight);
+    for (const auto* mem : {&culling_lo_, &culling_hi_, &polygon_})
+        for (uint32_t w : *mem) put32(out, w);
+    for (uint16_t t : texture_) out.push_back(static_cast<uint8_t>(t)), out.push_back(static_cast<uint8_t>(t >> 8));
+    return out;
+}
+
+bool Real3d::load_frame_dump(std::span<const uint8_t> dump, uint32_t game_crc, std::string& error) {
+    constexpr size_t kHeader = 8 + 4 * 12;
+    if (dump.size() < kHeader || !std::equal(kDumpMagic, kDumpMagic + 8, dump.begin())) return error = "not a 3D frame dump", false;
+    if (get32(dump, 8) != kDumpVersion) return error = "a 3D frame dump of another version (" + std::to_string(get32(dump, 8)) + ")", false;
+    if (get32(dump, 12) != game_crc) return error = "a 3D frame dump of another game", false;
+    const uint32_t lo = get32(dump, 36), hi = get32(dump, 40), poly = get32(dump, 44), tw = get32(dump, 48), th = get32(dump, 52);
+    if (lo != culling_lo_.size() || hi != culling_hi_.size() || poly != polygon_.size() || tw != kTextureWidth || th != kTextureHeight)
+        return error = "a 3D frame dump of other memory sizes", false;
+    if (dump.size() != kHeader + 4 * (size_t{lo} + hi + poly) + 2 * size_t{tw} * th) return error = "a 3D frame dump cut short", false;
+    block_culling_ = get32(dump, 16) & 1;
+    for (size_t i = 0; i < config_.size(); ++i) config_[i] = get32(dump, 20 + 4 * i);
+    size_t at = kHeader;
+    for (auto* mem : {&culling_lo_, &culling_hi_, &polygon_})
+        for (uint32_t& w : *mem) w = get32(dump, at), at += 4;
+    for (uint16_t& t : texture_) t = static_cast<uint16_t>(dump[at] | dump[at + 1] << 8), at += 2;
+    std::fill(rows_written_.begin(), rows_written_.end(), uint8_t{1});
+    return true;
+}
+
 } // namespace m3

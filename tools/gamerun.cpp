@@ -327,6 +327,10 @@ struct Options {
     // --net-auto-board: the board mode by this PC's speed, as the window's Auto (its default): every board until it
     // can't keep up, then one board (tools/net_frame.hpp, AutoBoard; --net-one-board's set-up, wanted then)
     bool net_auto_board = false;
+    // --dump-3d FILE@FRAME: the 3D frame dump of FRAME (docs/frame-dump.md; tools/frame3d draws it, and the patched
+    // Supermodel), of board 0 or this machine's in network play
+    std::string dump_3d;
+    uint64_t dump_3d_frame = 0;
     uint64_t net_leave_at = 0; // --net-leave-at FRAME: this player leaves a little after FRAME, its board handed to the others first
     uint64_t net_vanish_at = 0; // --net-vanish-at FRAME: this machine gone at the end of FRAME without a word (a crash)
     uint64_t net_rollback = 0;   // --net-rollback N: rollback, the boards running up to N frames ahead on guessed inputs (tools::rollback)
@@ -1618,6 +1622,13 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
     m.timing.on_frame_end = [&m, &o] {
         const uint64_t frame = m.timing.frames();
         tools::one_board::Game::end_frame(m.ob); // (--one-board: the other cabinets' frames end with this board's)
+        if (!o.dump_3d.empty() && frame == o.dump_3d_frame && m.index == (o.netplay ? o.local_seat : 0)) { // --dump-3d
+            const std::vector<uint8_t> dump = m.bus.real3d().frame_dump(m3::games::kSpikeoutFinalEdition.security_key);
+            std::ofstream out(o.dump_3d, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(dump.data()), static_cast<std::streamsize>(dump.size()));
+            std::printf("board %zu: the 3D frame dump of frame %llu -> %s (%zu bytes)\n", m.index, (unsigned long long)frame,
+                        o.dump_3d.c_str(), dump.size());
+        }
         static const bool rb_profile = std::getenv("GAMERUN_RB_PROFILE") != nullptr;
         if (rb_profile && m.index == o.local_seat) { // (GAMERUN_RB_PROFILE: this frame's own work, by kind)
             auto& p = m.rb_profile;
@@ -3642,6 +3653,15 @@ int main(int argc_given, char** argv_given) {
         else if (arg == "--net-catch-up") o.net_catch_up = true;
         else if (arg == "--net-one-board" && i + 1 < argc) o.net_one_board = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--net-auto-board") o.net_auto_board = true, o.net_one_board = std::max<uint64_t>(o.net_one_board, 1);
+        else if (arg == "--dump-3d" && i + 1 < argc) { // FILE@FRAME
+            const std::string v = argv[++i];
+            const size_t at = v.rfind('@');
+            if (at == std::string::npos) {
+                std::fprintf(stderr, "gamerun: --dump-3d FILE@FRAME\n");
+                return 2;
+            }
+            o.dump_3d = v.substr(0, at), o.dump_3d_frame = std::strtoull(v.c_str() + at + 1, nullptr, 0);
+        }
         else if (arg == "--net-leave-at" && i + 1 < argc) o.net_leave_at = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--net-vanish-at" && i + 1 < argc) o.net_vanish_at = std::strtoull(argv[++i], nullptr, 0);
         else if (arg == "--net-rollback" && i + 1 < argc) o.net_rollback = std::strtoull(argv[++i], nullptr, 0);

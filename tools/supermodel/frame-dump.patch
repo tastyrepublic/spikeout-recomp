@@ -1,0 +1,232 @@
+diff --git a/Src/Graphics/New3D/New3D.cpp b/Src/Graphics/New3D/New3D.cpp
+index 7db69c6..8b50c25 100644
+--- a/Src/Graphics/New3D/New3D.cpp
++++ b/Src/Graphics/New3D/New3D.cpp
+@@ -606,6 +606,15 @@ bool CNew3D::DrawModel(UINT32 modelAddr)
+ {
+ 	bool cached = false;
+ 
++	// spikeout-recomp's comparison tool (its tools/supermodel/): SUPERMODEL_MODELS_OUT=FILE lists each model drawn,
++	// its address and where its matrix puts it, as its frame3d --models does
++	static FILE* modelsOut = getenv("SUPERMODEL_MODELS_OUT") ? fopen(getenv("SUPERMODEL_MODELS_OUT"), "w") : nullptr;
++	if (modelsOut) {
++		fprintf(modelsOut, "%06x %.2f %.2f %.2f\n", modelAddr & 0xFFFFFF, m_modelMat.currentMatrix[12], m_modelMat.currentMatrix[13],
++			m_modelMat.currentMatrix[14]);
++		fflush(modelsOut);
++	}
++
+ 	const UINT32* const modelAddress = TranslateModelAddress(modelAddr);
+ 
+ 	// create a new model to push onto the vector
+diff --git a/Src/Model3/Model3.h b/Src/Model3/Model3.h
+index 405a0d9..be3e401 100644
+--- a/Src/Model3/Model3.h
++++ b/Src/Model3/Model3.h
+@@ -90,6 +90,11 @@ public:
+   void RenderFrame(void);
+   void Reset(void);
+   const Game &GetGame(void) const;
++
++  // spikeout-recomp's comparison tool (its tools/supermodel/): the Real3D, and one frame drawn from what its memories hold
++  // now (a 3D frame dump loaded into them), without running the game
++  CReal3D &GetReal3D(void) { return GPU; }
++  void DrawLoadedFrame(void) { gpusReady = true; RenderFrame(); }
+   void AttachRenderers(CRender2D *Render2DPtr, IRender3D *Render3DPtr, SuperAA *superAA);
+   void AttachInputs(CInputs *InputsPtr);
+   void AttachOutputs(COutputs *OutputsPtr);
+@@ -322,4 +327,4 @@ private:
+ };
+ 
+ 
+-#endif  // INCLUDED_MODEL3_H
+\ No newline at end of file
++#endif  // INCLUDED_MODEL3_H
+\ No newline at end of file
+diff --git a/Src/Model3/Real3D.cpp b/Src/Model3/Real3D.cpp
+index dac1335..e290a7e 100644
+--- a/Src/Model3/Real3D.cpp
++++ b/Src/Model3/Real3D.cpp
+@@ -1241,3 +1241,108 @@ CReal3D::~CReal3D(void)
+ 
+   DebugLog("Destroyed Real3D\n");
+ }
++
++
++/******************************************************************************
++ spikeout-recomp's 3D frame dump (added for its comparison tool, tools/supermodel)
++
++ Every number little-endian: "M3FRDUMP", u32 version (1), u32 game mark (the
++ encryption key), u32 flags (bit 0: block culling), u32 configuration
++ registers[4], u32 words of low culling RAM, of high culling RAM, of polygon
++ RAM, u32 texture width, height; then those memories in that order, 32-bit
++ words as the Real3D reads them, the texels 16-bit, row by row.
++******************************************************************************/
++
++#include <fstream>
++#include <vector>
++
++namespace
++{
++  const char kFrameDumpMagic[8] = { 'M', '3', 'F', 'R', 'D', 'U', 'M', 'P' };
++  const uint32_t kFrameDumpVersion = 1;
++  const uint32_t kDumpLoWords = 0x400000 / 4, kDumpHiWords = 0x100000 / 4, kDumpPolyWords = 0x400000 / 4;
++
++  void Put32(std::vector<uint8_t> &out, uint32_t v)
++  {
++    for (int i = 0; i < 4; i++)
++      out.push_back(uint8_t(v >> (8 * i)));
++  }
++
++  uint32_t Get32(const std::vector<uint8_t> &in, size_t at)
++  {
++    return uint32_t(in[at]) | uint32_t(in[at + 1]) << 8 | uint32_t(in[at + 2]) << 16 | uint32_t(in[at + 3]) << 24;
++  }
++}
++
++bool CReal3D::WriteFrameDump(const std::string &path, uint32_t mark, std::string &error) const
++{
++  std::vector<uint8_t> out(kFrameDumpMagic, kFrameDumpMagic + 8);
++  out.reserve(64 + 4 * (kDumpLoWords + kDumpHiWords + kDumpPolyWords) + 2 * 2048 * 2048);
++  Put32(out, kFrameDumpVersion);
++  Put32(out, mark);
++  Put32(out, (m_modeword[static_cast<int>(CASIC::Name::Mercury)] & 4) ? 1 : 0);
++  for (uint32_t r : m_configRegisters.regs)
++    Put32(out, r);
++  Put32(out, kDumpLoWords);
++  Put32(out, kDumpHiWords);
++  Put32(out, kDumpPolyWords);
++  Put32(out, 2048);
++  Put32(out, 2048);
++  for (uint32_t i = 0; i < kDumpLoWords; i++)   Put32(out, cullingRAMLo[i]);
++  for (uint32_t i = 0; i < kDumpHiWords; i++)   Put32(out, cullingRAMHi[i]);
++  for (uint32_t i = 0; i < kDumpPolyWords; i++) Put32(out, polyRAM[i]);
++  for (uint32_t i = 0; i < 2048 * 2048; i++)
++  {
++    out.push_back(uint8_t(textureRAM[i]));
++    out.push_back(uint8_t(textureRAM[i] >> 8));
++  }
++  std::ofstream file(path, std::ios::binary);
++  file.write(reinterpret_cast<const char *>(out.data()), std::streamsize(out.size()));
++  if (!file)
++  {
++    error = "can't write " + path;
++    return false;
++  }
++  return true;
++}
++
++bool CReal3D::LoadFrameDump(const std::string &path, uint32_t mark, std::string &error)
++{
++  std::ifstream file(path, std::ios::binary);
++  std::vector<uint8_t> in((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
++  const size_t header = 8 + 4 * 12;
++  if (in.size() < header || !std::equal(kFrameDumpMagic, kFrameDumpMagic + 8, in.begin()))
++  {
++    error = "not a 3D frame dump";
++    return false;
++  }
++  if (Get32(in, 8) != kFrameDumpVersion || Get32(in, 12) != mark)
++  {
++    error = "a 3D frame dump of another version or game";
++    return false;
++  }
++  if (Get32(in, 36) != kDumpLoWords || Get32(in, 40) != kDumpHiWords || Get32(in, 44) != kDumpPolyWords ||
++      Get32(in, 48) != 2048 || Get32(in, 52) != 2048 ||
++      in.size() != header + 4 * size_t(kDumpLoWords + kDumpHiWords + kDumpPolyWords) + 2 * 2048 * 2048)
++  {
++    error = "a 3D frame dump of other memory sizes, or cut short";
++    return false;
++  }
++  if (Get32(in, 16) & 1)
++    m_modeword[static_cast<int>(CASIC::Name::Mercury)] |= 4;
++  else
++    m_modeword[static_cast<int>(CASIC::Name::Mercury)] &= ~4u;
++  for (int i = 0; i < 4; i++)
++    m_configRegisters.regs[i] = Get32(in, 20 + 4 * i);
++  size_t at = header;
++  for (uint32_t i = 0; i < kDumpLoWords; i++, at += 4)   cullingRAMLo[i] = Get32(in, at);
++  for (uint32_t i = 0; i < kDumpHiWords; i++, at += 4)   cullingRAMHi[i] = Get32(in, at);
++  for (uint32_t i = 0; i < kDumpPolyWords; i++, at += 4) polyRAM[i] = Get32(in, at);
++  for (uint32_t i = 0; i < 2048 * 2048; i++, at += 2)
++    textureRAM[i] = uint16_t(in[at] | in[at + 1] << 8);
++  if (m_gpuMultiThreaded)
++    UpdateSnapshots(true);
++  Render3D->SetBlockCulling((m_modeword[static_cast<int>(CASIC::Name::Mercury)] & 4) == 4);
++  Render3D->UploadTextures(0, 0, 0, 2048, 2048);
++  return true;
++}
+diff --git a/Src/Model3/Real3D.h b/Src/Model3/Real3D.h
+index 3f65996..9aba8b8 100644
+--- a/Src/Model3/Real3D.h
++++ b/Src/Model3/Real3D.h
+@@ -93,6 +93,12 @@ public:
+    */
+   void SaveState(CBlockFile *SaveState);
+ 
++  // spikeout-recomp's 3D frame dump (its docs/frame-dump.md; its tools/supermodel/ adds these): the memories, the
++  // configuration registers and block culling, written for a frame and loaded to draw it again. `mark`: the game's
++  // (its encryption key). False and `error` on failure.
++  bool WriteFrameDump(const std::string &path, uint32_t mark, std::string &error) const;
++  bool LoadFrameDump(const std::string &path, uint32_t mark, std::string &error);
++
+   /*
+    * LoadState(SaveState):
+    *
+diff --git a/Src/OSD/SDL/Main.cpp b/Src/OSD/SDL/Main.cpp
+index d589e4a..c824b94 100644
+--- a/Src/OSD/SDL/Main.cpp
++++ b/Src/OSD/SDL/Main.cpp
+@@ -551,6 +551,8 @@ static void SaveFrameBuffer(const std::string& file)
+     Util::WriteSurfaceToBMP<Util::RGBA8>(file, pixels.get(), totalXRes, totalYRes, true);
+ }
+ 
++static CModel3 *s_dumpModel3 = nullptr; // (spikeout-recomp's comparison tool: the emulator, when it is a CModel3)
++
+ void Screenshot()
+ {
+     // Make a screenshot
+@@ -573,6 +575,15 @@ void Screenshot()
+ 
+     std::cout << "Screenshot created: " << file << std::endl;
+     SaveFrameBuffer(file);
++    // spikeout-recomp's comparison tool (its tools/supermodel/): SUPERMODEL_DUMP_3D=1, a 3D frame dump beside it
++    if (getenv("SUPERMODEL_DUMP_3D") && s_dumpModel3)
++    {
++      std::string dump = file.substr(0, file.size() - 4) + ".m3d", error;
++      if (s_dumpModel3->GetReal3D().WriteFrameDump(dump, s_dumpModel3->GetGame().encryption_key, error))
++        std::cout << "3D frame dump created: " << dump << std::endl;
++      else
++        std::cout << "No 3D frame dump: " << error << std::endl;
++    }
+ }
+ 
+ /******************************************************************************
+@@ -1043,6 +1054,28 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
+     quit = true;
+   }
+ #endif
++  // spikeout-recomp's comparison tool (its tools/supermodel/): SUPERMODEL_DRAW_3D=DUMP draws that 3D frame dump in place
++  // of the game, without running it, saves the picture as SUPERMODEL_DRAW_3D_OUT (a .bmp; DUMP.bmp if not set) and quits
++  s_dumpModel3 = dynamic_cast<CModel3 *>(Model3);
++  if (const char *drawDump = getenv("SUPERMODEL_DRAW_3D"); drawDump && s_dumpModel3)
++  {
++    std::string error;
++    if (!s_dumpModel3->GetReal3D().LoadFrameDump(drawDump, s_dumpModel3->GetGame().encryption_key, error))
++      std::cout << "Can't draw the 3D frame dump " << drawDump << ": " << error << std::endl;
++    else
++    {
++      s_dumpModel3->DrawLoadedFrame();
++      const char *out = getenv("SUPERMODEL_DRAW_3D_OUT");
++      GLint readBuffer;
++      glGetIntegerv(GL_READ_BUFFER, &readBuffer);
++      glReadBuffer(GL_FRONT);
++      SaveFrameBuffer(out ? std::string(out) : std::string(drawDump) + ".bmp");
++      glReadBuffer(readBuffer);
++      std::cout << "3D frame dump drawn: " << (out ? out : drawDump) << std::endl;
++    }
++    quit = true;
++  }
++
+   while (!quit)
+   {
+     // Poll the inputs

@@ -25,6 +25,7 @@
 #include <array>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -87,6 +88,15 @@ public:
     // Save states (runtime/state.hpp). Loading marks all of texture RAM
     // written (take_written_rows).
     void state(State& s);
+
+    // A 3D frame dump (docs/frame-dump.md): all a frame's drawing reads (the memories, the configuration
+    // registers, block culling), to draw it again elsewhere: our renderers or Supermodel's (tools/supermodel/).
+    // `game_crc`: the game's mark (GameSpec::security_key), checked on loading. Holds the ROM's models and textures as uploaded:
+    // never committed, as save states.
+    std::vector<uint8_t> frame_dump(uint32_t game_crc) const;
+    // Loads one in place of this frame's (false and `error` if it isn't one, or of another game). Marks all of
+    // texture RAM written.
+    bool load_frame_dump(std::span<const uint8_t> dump, uint32_t game_crc, std::string& error);
 
 private:
     static uint32_t swap(uint32_t v) { return (v >> 24) | ((v >> 8) & 0xFF00) | ((v << 8) & 0xFF0000) | (v << 24); }

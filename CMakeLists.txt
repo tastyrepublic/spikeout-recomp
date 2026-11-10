@@ -463,6 +463,14 @@ if(SPIKEOUT_GPU)
     target_link_libraries(m3gpu PUBLIC SDL3::SDL3 m3runtime PRIVATE spikeout_warnings)
 endif()
 
+# frame3d: a 3D frame dump drawn by our renderers, to compare with Supermodel's (docs/frame-dump.md).
+add_executable(frame3d tools/frame3d.cpp)
+target_link_libraries(frame3d PRIVATE m3runtime spikeout_warnings)
+if(SPIKEOUT_GPU)
+    target_link_libraries(frame3d PRIVATE m3gpu)
+    target_compile_definitions(frame3d PRIVATE SPIKEOUT_GPU)
+endif()
+
 # Code generated from ROM data goes here, never into the source tree.
 set(SPIKEOUT_GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
 file(MAKE_DIRECTORY ${SPIKEOUT_GENERATED_DIR})
