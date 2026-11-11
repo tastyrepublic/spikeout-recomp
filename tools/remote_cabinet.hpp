@@ -661,7 +661,7 @@ private:
     recomp::Context& c_;
     m3::Bus& bus_;
     recomp::FrameTiming& timing_;
-    std::size_t local_;
+    [[maybe_unused]] std::size_t local_; // (not read since a570048; clang's -Wunused-private-field)
     Held held_;
     uint64_t write_at_;
     std::vector<uint32_t> own_;

@@ -4771,7 +4771,7 @@ int main(int argc_given, char** argv_given) {
         if (std::getenv("GAMERUN_RB_PROFILE") && o.local_seat < machines.size()) { // (this board's own work a frame, by kind)
             const auto& p = machines[o.local_seat]->rb_profile;
             for (int k = 0; k < 4; ++k)
-                if (const double n = static_cast<double>(p.frames[k]))
+                if (const double n = static_cast<double>(p.frames[k]); p.frames[k] != 0) // (clang: a double isn't a condition)
                     std::printf("Profile, %s: %llu frames, own work %.2f ms a frame (side runs here %.2f, their network boards %.2f, "
                                 "waiting for the workers %.2f, handing them jobs %.2f)\n",
                                 (k & 1) ? (k & 2 ? "run again, others on side runs" : "run again, every board whole") : (k & 2 ? "run first, others on side runs" : "run first, every board whole"), static_cast<unsigned long long>(p.frames[k]), p.work[k] / n,
