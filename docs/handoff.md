@@ -1,5 +1,14 @@
 # Hand-off, 2026-11-08 (one board a PC, network play)
 
+**Latest (2026-11-11).** Done since 8490611 (input timing, stick, #8): the macOS crash after leaving a network game
+(rollback kept across `start_games`); a one-board machine's 30 s wait per gone player; spectators' channels paced as
+players' (issue #9: a 2 Mbit/s host's game never reached a spectator); the spectator's screen (progress, Esc hint, a
+slow host, a failed watch) and log lines on both sides; crash reports (the issue shows the log's last lines, the
+clock time, which thread; a code trace for C++ errors on every system); the log (the clock at its top, each player's
+link, a line a minute, settings and arcade settings changed, a goodbye no longer "heard hours ago", node-check
+lines 3 of each unless detailed); reports hide IPv4:port. Open (docs/netplay.md): the owner's "Communication error"
+at an area's start with 4 cabinets (not reproduced on one PC in four set-ups), one play test out of step in 17.
+
 ## The owner's rules: read before changing ANYTHING
 
 These are the owner's standing rules for this project (from CLAUDE.md, the memory notes and the owner's own words).

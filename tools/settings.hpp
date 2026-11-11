@@ -16,6 +16,8 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace tools {
 
@@ -178,7 +180,8 @@ inline Settings load_settings(const std::string& path) {
     return s;
 }
 
-inline bool save_settings(const std::string& path, const Settings& s) {
+// The settings as settings.ini has them
+inline std::string settings_text(const Settings& s) {
     std::ostringstream o;
     o << "# Spikeout recomp settings (the in-game menu writes this file)\n";
     o << "render_scale = " << s.render_scale << "\n";
@@ -209,9 +212,37 @@ inline bool save_settings(const std::string& path, const Settings& s) {
         for (std::size_t a = 0; a < kActions; ++a)
             o << "p" << p + 1 << "_pad_" << kActionKeys[a] << " = " << s.pad_buttons[p][a] << "\n";
     }
+    return o.str();
+}
+
+inline bool save_settings(const std::string& path, const Settings& s) {
     std::ofstream out(path, std::ios::trunc);
-    out << o.str();
+    out << settings_text(s);
     return static_cast<bool>(out);
+}
+
+// The settings that differ between two texts of them (settings_text), a line each: "key: old -> new" (the log: a
+// report says what the player changed, issue #8)
+inline std::vector<std::string> settings_changes(const std::string& before, const std::string& after) {
+    auto read = [](const std::string& text) {
+        std::vector<std::pair<std::string, std::string>> out;
+        std::istringstream in(text);
+        for (std::string line; std::getline(in, line);) {
+            const auto eq = line.find(" = ");
+            if (line.empty() || line[0] == '#' || eq == std::string::npos) continue;
+            out.push_back({line.substr(0, eq), line.substr(eq + 3)});
+        }
+        return out;
+    };
+    const auto a = read(before), b = read(after);
+    std::vector<std::string> changes;
+    for (const auto& [key, value] : b) {
+        std::string old = "(none)";
+        for (const auto& [k, v] : a)
+            if (k == key) old = v;
+        if (old != value) changes.push_back(key + ": " + old + " -> " + value);
+    }
+    return changes;
 }
 
 } // namespace tools

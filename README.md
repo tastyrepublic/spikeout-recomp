@@ -129,6 +129,15 @@ Change them in the menu (<kbd>Esc</kbd>), under Controls.
 Gamepads: d-pad or left stick, A beat, X charge, B jump, Y shift, Start, Back coin. Free play is the game's own
 setting: Esc > Game > Arcade settings.
 
+**How quickly a press shows (from the next version).** The keys and pads are read just before each of the game's
+frames starts, the frame is run, and its picture is shown as soon as it is drawn, as Supermodel does it. Measured on
+a 100 Hz screen, a press reaches the screen in about **39 ms** (from 29 to 54), where earlier versions took about
+**77 ms**. The game's own speed is unchanged: the arcade's 57.52 frames a second.
+
+**The left stick (from the next version)** works as the cabinet's 8-way lever: a light push does nothing (a round dead
+zone, 30% of the stick's reach), and past it the direction is one of eight equal slices of 45 degrees, so the
+diagonals are as easy to hold as up, down, left and right. The d-pad and the keys are unchanged.
+
 ## Features
 
 - **Render scale** up to 6x the arcade's 496 x 384, or Auto to fit the window; antialiasing; quads drawn whole

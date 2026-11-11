@@ -90,6 +90,23 @@ inline Log& log() {
     static Log* l = new Log; // (never destroyed: a crash at exit still finds it)
     return *l;
 }
+// Which part of the program a thread is (a crash report says which crashed): the window, a game board; others unnamed.
+inline const char*& thread_name() {
+    static thread_local const char* name = nullptr;
+    return name;
+}
+inline std::string clock_text() { // (local time, to read: 2026-11-09 08:15:00)
+    const std::time_t t = std::time(nullptr);
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    char text[32];
+    std::strftime(text, sizeof text, "%Y-%m-%d %H:%M:%S", &tm);
+    return text;
+}
 inline std::string stamp() { // (local time, for file names: 20261109-081500)
     const std::time_t t = std::time(nullptr);
     std::tm tm{};
@@ -214,8 +231,13 @@ inline bool start_log(const std::string& folder) {
         std::lock_guard guard(g.lock);
         if (g.file) std::fclose(g.file), g.file = nullptr;
     });
+    // (the clock time once: the lines after count seconds from here, and a crash report's name is the clock's)
+    std::printf("log: started %s (this computer's time; the numbers in [ ] are seconds from now)\n", detail::clock_text().c_str());
     return true;
 }
+
+// This thread's name in a crash report ("the window", "game board 1"; a literal, kept). Unnamed: "another thread".
+inline void name_thread(const char* name) { detail::thread_name() = name; }
 
 inline std::vector<std::string> last_lines() {
     detail::Log& l = detail::log();
@@ -380,7 +402,9 @@ inline std::string write_crash_text(const std::string& what, const std::string& 
     const std::string name = "crash-" + stamp();
     std::FILE* f = open(crash_folder() + name + ".txt", "wb");
     if (!f) return name;
-    std::fprintf(f, "Spikeout %s crashed: %s\n%s\n\nThe log's last lines:\n", crash_version().c_str(), what.c_str(), where.c_str());
+    const char* thread = thread_name();
+    std::fprintf(f, "Spikeout %s crashed: %s\nin %s, at %s\n%s\n\nThe log's last lines:\n", crash_version().c_str(), what.c_str(),
+                 thread ? thread : "another thread (network, sound or a helper)", clock_text().c_str(), where.c_str());
     for (const std::string& line : l.lines) std::fprintf(f, "%s\n", line.c_str()); // (no lock: it may be held by the crash)
     std::fclose(f);
     if (std::FILE* mark = open(crash_folder() + "crashed.txt", "wb")) {
@@ -407,7 +431,9 @@ inline LONG WINAPI on_crash(EXCEPTION_POINTERS* info) {
     static std::atomic<bool> once{false};
     if (once.exchange(true)) return EXCEPTION_EXECUTE_HANDLER;
     char what[96];
-    std::snprintf(what, sizeof what, "exception 0x%08lx", static_cast<unsigned long>(info->ExceptionRecord->ExceptionCode));
+    const unsigned long code = static_cast<unsigned long>(info->ExceptionRecord->ExceptionCode);
+    std::snprintf(what, sizeof what, "exception 0x%08lx%s", code,
+                  code == 0x20474343 ? " (a C++ error no one caught: GCC's)" : code == 0xC0000005 ? " (a bad memory access)" : "");
     // (the stack, from the crash's own registers: each frame's place as module+offset, for the release's symbols)
     std::string where = "at " + module_at(reinterpret_cast<DWORD64>(info->ExceptionRecord->ExceptionAddress)) + "\nstack:";
     CONTEXT c = *info->ContextRecord;
@@ -437,7 +463,26 @@ inline LONG WINAPI on_crash(EXCEPTION_POINTERS* info) {
     }
     return EXCEPTION_EXECUTE_HANDLER;
 }
+// This thread's stack now, a frame a line (module+offset, for the release's symbols)
+inline std::string stack_here() {
+    void* frames[64];
+    const USHORT n = CaptureStackBackTrace(1, 64, frames, nullptr);
+    std::string where = "stack:";
+    for (USHORT i = 0; i < n; ++i) where += "\n  " + module_at(reinterpret_cast<DWORD64>(frames[i]));
+    return where;
+}
 #else
+// This thread's stack now, a frame a line (the program and offset, or a name where the system knows one)
+inline std::string stack_here() {
+    void* frames[64];
+    const int n = backtrace(frames, 64);
+    std::string where = "stack:";
+    if (char** names = backtrace_symbols(frames, n)) {
+        for (int i = 1; i < n; ++i) where += std::string("\n  ") + names[i];
+        std::free(names);
+    }
+    return where;
+}
 inline void on_signal(int sig, siginfo_t* info, void*) {
     static std::atomic<bool> once{false};
     if (!once.exchange(true)) {
@@ -472,7 +517,9 @@ inline void catch_crashes(const std::string& folder, const std::string& version)
             } catch (...) {
             }
         }
-        detail::write_crash_text(what, "(std::terminate)");
+        // (the stack: an exception no one catches ends here before its stack is unwound, so where it was thrown is in
+        // it; on macOS "mutex lock failed" had no trace at all, issues #8 and #9)
+        detail::write_crash_text(what, "(std::terminate)\n" + detail::stack_here());
         std::_Exit(3);
     });
 #ifdef _WIN32
@@ -688,10 +735,29 @@ inline net::report::Report github_report(const std::string& folder, const std::s
     body += "<details><summary>The computer and its controllers</summary>\n\n" +
             fenced(detail::scrubbed(about + system_lines() + controllers_now())) + "\n</details>\n\n";
     if (!crash_text.empty()) {
+        // (what happened and where, then the log's LAST lines: the moments before the crash. It was the first 40 lines,
+        // the log's start: a crash at 1732 s showed nothing past 121 s, issues #8 and #9)
+        std::vector<std::string> lines;
+        {
+            std::istringstream in(crash_text);
+            for (std::string line; std::getline(in, line);) {
+                if (!line.empty() && line.back() == '\r') line.pop_back(); // (a file with Windows' line ends)
+                lines.push_back(line);
+            }
+        }
+        std::size_t log_from = lines.size();
+        for (std::size_t i = 0; i < lines.size(); ++i)
+            if (lines[i] == "The log's last lines:") { log_from = i + 1; break; }
+        constexpr std::size_t kHeadLines = 30, kTailLines = 30;
         std::string head;
-        std::istringstream in(crash_text);
-        int n = 0;
-        for (std::string line; n < 40 && std::getline(in, line); ++n) head += line + "\n";
+        for (std::size_t i = 0; i < std::min(log_from, kHeadLines); ++i) head += lines[i] + "\n";
+        if (log_from > kHeadLines) head += "(more of the stack in the crash report below)\n";
+        if (log_from < lines.size()) {
+            const std::size_t from = lines.size() - log_from > kTailLines ? lines.size() - kTailLines : log_from;
+            if (log_from > kHeadLines) head += lines[log_from - 1] + "\n"; // (the heading, left out above)
+            if (from > log_from) head += "(...)\n";
+            for (std::size_t i = from; i < lines.size(); ++i) head += lines[i] + "\n";
+        }
         body += "**The newest crash report** (" + crash.filename().string() + "):\n\n" + fenced(head) + "\n";
     }
     body += "_Sent from the game (Esc > Game > Report a problem). Its logs are in the comments below._\n";

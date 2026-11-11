@@ -1253,6 +1253,19 @@ private:
     // (whether a shadow's state for `want` has come, at this board's frame `f`; tests: ONEBOARD_LATE_TEST=N, taken
     // as not come before frame want + N)
     bool come(std::size_t seat, uint64_t want, uint64_t f, uint32_t ms) const {
+        // (its player gone: its state is the run on here from its backup (replays_), not its machine's, which won't come:
+        // come once that run is done. Asked of the machine, a window waited 30 s for each gone player, frozen)
+        {
+            std::unique_lock guard(lock_);
+            if (replays_.count(seat)) {
+                const auto done = [&] {
+                    const auto r = replays_.find(seat);
+                    return r == replays_.end() || r->second.done;
+                };
+                if (ms && !done()) replayed_.wait_for(guard, std::chrono::milliseconds(ms), done);
+                return done();
+            }
+        }
         static const uint64_t hold = [] {
             const char* n = std::getenv("ONEBOARD_LATE_TEST");
             return n ? std::strtoull(n, nullptr, 0) : uint64_t{0};
@@ -1291,7 +1304,8 @@ private:
         std::optional<RemoteBoard> board;
     };
     std::map<std::size_t, Replaying> replays_;
-    std::condition_variable replayed_, live_changed_;
+    mutable std::condition_variable replayed_; // (mutable: come() waits on it)
+    std::condition_variable live_changed_;
     uint64_t live_frame_ = 0;
     bool live_stopped_ = false;
     std::vector<std::jthread> replay_threads_;

@@ -3125,6 +3125,37 @@ board the same as the players', every frame of 7,600. The window: a
 spectator forced to one board (two windows), the host told; Right refused
 with the note.
 
+### A spectator's game that never came: the host's channel to it paced (2026-11-10, issue #9)
+
+A player on macOS could never watch: "the host let us in", then nothing. Measured on one PC with the host's upload a
+slow line (`SPIKEOUT_TEST_LINK=KB,LOSS`, a router's one-second queue, its overflow dropped; `SPIKEOUT_TEST_LATENCY`),
+the spectator joining a game in progress: its channel had only the shared spectator cap, which a full line doesn't
+lower while no player's round trip shows it (the host alone), and sent a piece again after a fixed 150 ms, while the
+line's queue held pieces up to a second: most of what went was copies. A 1 MB/s upload brought 4.2 MB in 36 s; a
+250 KB/s one (2 Mbit/s, a common home upload) never brought it. Now a spectator's channel (and a player's to a
+spectator on one board, `Bulk`) is paced as a player's is (`pace_spectator`: halved when more than a twentieth had
+to be sent again, up a quarter a second while it gets through), within the shared cap, and a spectator's pieces are
+sent again only after twice its round trip, measured as a player's: from our time it sends back with its
+acknowledgements (`Watcher::rtt`; the reliable channel's own acknowledgements gave minutes: pieces beyond its 64-wide
+gap report are acknowledged only when the gap closes). The host also tells a spectator the state's size
+(`kStateSize`), as a joiner.
+
+| host's upload | players | before | after |
+|---|---|---|---|
+| 250 KB/s | the host alone | never came (210 s) | 37 s |
+| 500 KB/s | the host alone | | 8 s |
+| 1 MB/s | the host alone | 36 s | 5 s |
+| 2.5 MB/s | the host alone | | 2 s |
+| 1 MB/s, 2% lost | the host alone | | 10 s |
+| 1 MB/s | a second player | | 36 s (the host 57.5 a second, 0 stutters; the player's round trip 21 ms) |
+| 250 KB/s | a second player | | 83 s (the host's longest gap 37 ms) |
+
+With a player in, the spectator gets what the players leave (the owner's rule). The spectator's screen shows the
+game coming ("Receiving the game: X of Y MB", "ESC: THE MENU, TO STOP WATCHING"; after 30 s with nothing more:
+"The host's connection is too slow or busy to send the game"; the host gone: "COULDN'T WATCH: THE HOST STOPPED
+ANSWERING"); the logs: the spectator's progress every 15 s, the host's "the game reached X (watching): KB in s".
+Why the tests had passed: one PC and the Codespaces' data centres never fill the line.
+
 ## The first tests over the internet (2026-11-05)
 
 Every test before was on one PC or a LAN. Two GitHub Codespaces (Azure,
@@ -3717,6 +3748,44 @@ back 3.1-3.9 ms against 4.6-5.0 one after another, 0 differences.
 Passed: onepc-tests, onepc-net-tests, -LeaverFirst, rbbot, the 13 window
 tests and all 12 internet cases (three and four players included, where
 it had crashed): 0 hash checks differed on every machine.
+
+### Leaving, and a gone player's board: two fixes (2026-11-11)
+
+- **Leaving a game with rollback kept its rollback on (the macOS crash, issues #8/#9).** After Leave game, the local
+  game was started again (`start_games`) with the network game's `tools::rollback::Linked` still set: it pointed at
+  the link ring `start_games` had just let go and the session's input table `net_leave` let go next. The local game
+  went on taking snapshots through them every frame (seen: a second "rollback:" report when it stopped); on macOS
+  locking the gone table's mutex threw "mutex lock failed: Invalid argument". Now `start_games` lets the last
+  rollback go first. Proved with the window hosting alone with `--net-rollback 12`, leaving from its menu, playing on:
+  one report and the game on to its end, where the old build gave two.
+- **A gone player's board, waited for from its gone machine (a frozen window, 30 s a player).** A one-board machine
+  whose other players were dropped runs each one's board on from its backup (`replays_`), whole from an agreed frame;
+  but the shadow's wait (`come`) asked only the player's machine (`has_board`), which was gone: 30 s for each. Now a
+  board run on here from its backup is come once that run is done. Seen in the play test (`window-autoplay-test.ps1`)
+  after this PC paused 3-5 s as a whole (every process silent, every player dropping the others).
+
+### Open: "Communication error" at an area's start, 4 cabinets, 2 players (the owner's game, 2026-11-11)
+
+The owner joined a Codespace's private internet game in progress (4 seats, the host gamerun on one board, its player
+a bot, no rollback; the owner's window every board, rollback, delay 0, 10 ms away), seat 2 taken at frame 2935. At an
+area's start ("FIGHT!!", about frame 19,500) both showed "Communication error!! Please call service staff. (code:
+0x... 1)" and froze. Every machine stayed in step (0 hash checks differed), so it is the emulated game's own: its
+cabinets disagreed (the check at 0x7425C: each cabinet's frame counter one or two behind its own; "(code: 0x... 1)"
+was seen before when a cabinet was loaded from a state a frame late, "Taking a seat in the game" above).
+Not reproduced on one PC (2026-11-11), each run past two or three area starts (`0x11BD24`'s bit 4, recorded with
+`gamerun --ram-dump 0:11BD20-11BD28@0:N`): a gamerun joiner with rollback (two seeds); the window joining through its
+menu, its player coining in and pressing at random, without rollback and with rollback 12, delay 0 and 5 ms each
+way. The node check's byte +x05 differences in the owner's log (41 of 17,052 packets) came back only with the window
+on rollback (24 of 20,830) and match its frames' settling, not the error: likely the check comparing a guessed run's
+packet. Next: the owner's own play recorded (the window's `--record` doesn't cover a network game yet: a network
+game's inputs and the host's state kept for a report would let it be run again exactly).
+
+### Open: one play test out of step in 17 (2026-11-11)
+
+`tools/window-autoplay-test.ps1 -Seed 1` (the window hosting on one board, two gamerun bots): once bot 1's board 1
+differed from seat 3's at frame 2640, the window never handing the others back to side runs that run. Then 16 runs
+the same (two of them on that same path), and 6 runs of the committed build the same; the failing run's logs were
+not kept. Not known whether it is today's change or older.
 
 ## Plan
 

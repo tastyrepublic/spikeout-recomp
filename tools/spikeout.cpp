@@ -688,6 +688,8 @@ std::vector<TestPress> parse_test_presses(const char* list) {
 }
 
 void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, tools::Turns& turns, Shared& shared) {
+    static constexpr const char* kBoardNames[] = {"game board 1", "game board 2", "game board 3", "game board 4"};
+    tools::report::name_thread(index < std::size(kBoardNames) ? kBoardNames[index] : "a game board"); // (a crash report says which)
     const m3::GameSpec& game = m3::games::kSpikeoutFinalEdition;
     const std::vector<recomp::FunctionEntry> functions = tools::game_functions();
     Screen& out = shared.screens[index];
@@ -1392,6 +1394,8 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
                     shared.rollback->report().c_str(), static_cast<unsigned long long>(shared.sync_slowed.load()),
                     static_cast<unsigned long long>(shared.sync_sooner.load()), static_cast<unsigned long long>(shared.sync_free.load()));
     if (index == shown && speed.measured()) std::printf("%s\n", speed.summary().c_str()); // (tools/speed_report.hpp)
+    if (index == shown && shared.netplay) // (the made packets' check, all of it in one line: as gamerun's "Node check:")
+        std::printf("net: node check: %s\n", shared.netplay->node_check().report().c_str());
     turns.finish(index);
     std::lock_guard<std::mutex> guard(shared.lock);
     out.stopped = why.empty() ? "quit" : why;
@@ -1870,6 +1874,7 @@ int main(int argc, char** argv) {
     const char* log_env = std::getenv("SPIKEOUT_LOG");
     if (!(log_env && log_env[0] == '0')) tools::report::start_log(report_folder);
     tools::report::catch_crashes(report_folder, net::kVersion);
+    tools::report::name_thread("the window (its main thread)");
     const std::string last_crash = tools::report::last_crash(report_folder);
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
         std::fprintf(stderr, "spikeout: SDL_Init: %s\n", SDL_GetError());
@@ -2244,6 +2249,12 @@ int main(int argc, char** argv) {
     std::unique_ptr<tools::Turns> turns;
     std::vector<tools::GameThread> games;
     auto start_games = [&] {
+        // (rollback: the last game's let go first, before the ring and the inputs it points at go: a network game
+        // left, the local game started again with it kept, ran it on a ring and an input table already gone: a frozen
+        // window here, "mutex lock failed: Invalid argument" on macOS (issues #8, #9's crash). A network game makes
+        // its own below.)
+        shared.rollback.reset();
+        shared.rollback_depth = 0, shared.rollback_frames = 0;
         ring.reset();
         if (boards > 1) ring = std::make_unique<m3::LinkRing>(boards);
         shared.ring = ring.get();
@@ -4036,6 +4047,16 @@ int main(int argc, char** argv) {
             }
         }
 #endif
+        // Tests: SPIKEOUT_TEST_CRASH=FRAME, from the shown board's frame FRAME a C++ error no one catches, on a helper
+        // thread (as the macOS "mutex lock failed"): the crash report and its issue text checked
+        if (static const char* test_crash = std::getenv("SPIKEOUT_TEST_CRASH"); test_crash && *test_crash) {
+            static bool thrown = false;
+            if (!thrown && shown_number[0] >= std::strtoull(test_crash, nullptr, 0)) {
+                thrown = true;
+                std::printf("spikeout: SPIKEOUT_TEST_CRASH: a C++ error thrown on purpose\n");
+                std::thread([] { throw std::system_error(EINVAL, std::generic_category(), "mutex lock failed (a test)"); }).detach();
+            }
+        }
         // (from the game's frame 300: the board shown, in a network game this player's; and then on, through a
         // network game starting: its frames begin again)
         if (test_key < test_keys.size() && (test_key_ready || shown_number[shared.netplay ? shared.local : 0] >= 300) && std::chrono::steady_clock::now() >= test_key_due) {
@@ -4239,6 +4260,22 @@ int main(int argc, char** argv) {
             shared.paused = menu_open;
             // (closing it always plays the sound again: a network game started from the menu was paused before it began)
             if (sound && (!menu_open || !shared.netplay)) sound->pause(menu_open);
+            // (the log: what the player changed in the menu, a line each; the arcade's own settings as they go in. A
+            // report couldn't tell before, issue #8)
+            static std::string settings_before;
+            if (menu_open) settings_before = tools::settings_text(settings);
+            else
+                for (const std::string& c : tools::settings_changes(settings_before, tools::settings_text(settings)))
+                    std::printf("settings: %s\n", c.c_str());
+            if (!menu_open && arcade_changed) {
+                const tools::ArcadeSettings a{arcade_words};
+                const int d = a.difficulty(), c = a.country();
+                std::printf("arcade settings: difficulty %s, region %s, free play %s, demo sound %s: into every board, the game "
+                            "started again\n",
+                            d >= 0 && d < 5 ? tools::ArcadeSettings::kDifficultyNames[static_cast<std::size_t>(d)] : "?",
+                            c >= 1 && c <= 4 ? tools::ArcadeSettings::kCountryNames[static_cast<std::size_t>(c)] : "?",
+                            a.free_play() ? "on" : "off", a.advertise_sound() ? "on" : "off");
+            }
             if (!menu_open && settings_changed && !test_run) {
                 tools::save_settings(settings_path, settings);
                 settings_changed = false;
@@ -4294,8 +4331,11 @@ int main(int argc, char** argv) {
         // A spectator's game ended (its host gone, no new one): out of it too.
         if (netgame && (!netgame->running || shared.spectating) && !netgame->host && netgame->session().room_closed()) {
             const bool watched = shared.spectating;
+            const bool watch_waiting = !watched && netgame->spectator; // (let in, the game not here yet: issue #9)
             net_leave();
-            net_notice = watched ? "THE GAME YOU WATCHED ENDED" : "THE HOST CLOSED THE ROOM";
+            net_notice = watched ? "THE GAME YOU WATCHED ENDED"
+                         : watch_waiting ? "COULDN'T WATCH: THE HOST STOPPED ANSWERING"
+                                         : "THE HOST CLOSED THE ROOM";
             net_notice_until = now + std::chrono::seconds(6);
 #ifdef SPIKEOUT_GPU
             if (menu_ready && menu.is_open()) menu.open(make_root());
@@ -4376,6 +4416,50 @@ int main(int argc, char** argv) {
         }
         if (discovery) discovery->poll(); // (games heard of, for the nearby list)
 #ifdef SPIKEOUT_GPU
+        // The log (player reports): each other player's link as it is first known or changes (on this network, direct
+        // over the internet, or through the relay; the round trip), and a line a minute: each seat's link, round trip
+        // and wrong guesses here, the time sync's slowed frames and rollback's catch-ups that minute. (Only on screen
+        // before: a report couldn't tell whether a player's connection was the trouble, issues #8 and #9.)
+        if (netgame && netgame->running) {
+            using Link = net::Session::SeatView::Link;
+            static std::array<Link, net::kMaxSeats> link_told{};
+            static auto summary_at = now;
+            static uint64_t slowed_before = 0, sooner_before = 0;
+            static const NetGame* told_for = nullptr; // (each network game told afresh)
+            if (told_for != netgame.get()) {
+                told_for = netgame.get(), summary_at = now, link_told = {};
+                slowed_before = shared.sync_slowed, sooner_before = shared.sync_sooner;
+            }
+            const auto seats = netgame->session().seats();
+            auto kind = [](Link l) { return l == Link::lan ? "on this network" : l == Link::relay ? "through the relay" : "direct"; };
+            for (std::size_t s = 0; s < seats.size(); ++s) {
+                const auto& v = seats[s];
+                if (v.link == Link::none || v.link == link_told[s]) continue;
+                std::printf("net: %s (seat %zu): %s, %d ms there and back\n", v.name.empty() ? "a player" : v.name.c_str(), s + 1,
+                            kind(v.link), v.round_trip);
+                link_told[s] = v.link;
+            }
+            if (now - summary_at >= std::chrono::seconds(60)) {
+                summary_at = now;
+                const uint64_t frame_now = shared.inputs ? shared.inputs->next(shared.local) : 0;
+                const uint64_t minute_ago = frame_now > 3451 ? frame_now - 3451 : 0; // (60 s of the game's frames)
+                std::string line;
+                for (std::size_t s = 0; s < seats.size(); ++s) {
+                    const auto& v = seats[s];
+                    using State = net::Session::SeatView::State;
+                    if (v.state != State::playing && v.state != State::joining) continue;
+                    line += "; seat " + std::to_string(s + 1) + " " + (v.name.empty() ? "?" : v.name) + ": " +
+                            (v.link == Link::none ? "not reached" : kind(v.link)) + ", " + std::to_string(v.round_trip) + " ms";
+                    if (shared.rollback && shared.inputs) line += ", " + std::to_string(shared.inputs->wrongs_since(s, minute_ago)) + " wrong guesses";
+                }
+                const uint64_t slowed = shared.sync_slowed, sooner = shared.sync_sooner;
+                std::printf("net: the last minute: %s%s; time sync %llu frames slowed, %llu sooner; input delay %llu\n",
+                            shared.rollback ? "rollback" : "waiting for inputs", line.empty() ? "; no other players" : line.c_str(),
+                            static_cast<unsigned long long>(slowed - slowed_before), static_cast<unsigned long long>(sooner - sooner_before),
+                            static_cast<unsigned long long>(shared.input_delay.load()));
+                slowed_before = slowed, sooner_before = sooner;
+            }
+        }
         // Network status (Settings::show_net), 4 times a second: each seat
         // under the frame rate. A seat's news (joined, left) shows in its
         // row for a few seconds in place of its connection. In a room whose
@@ -4561,7 +4645,9 @@ int main(int argc, char** argv) {
             // (a game joined in progress: a loading screen through each step, the game's picture not real until the
             // cabinet is ours: receiving every board's state, catching up with the others, taking the cabinet; the
             // owner's design, 2026-11-05. A spectator's: catching up only, as before)
-            const auto join = netgame && !netgame->spectator ? netgame->session().join_progress() : net::Session::JoinProgress{};
+            // (a spectator too: its game coming shown, as a joiner's; it waited on nothing at all before, issue #9)
+            const auto join = netgame ? netgame->session().join_progress() : net::Session::JoinProgress{};
+            const bool watcher = shared.spectating || (netgame && netgame->spectator);
             using Stage = net::Session::JoinProgress::Stage;
             const bool catching = netgame && netgame->running && shared.catching_up;
             if (join.stage == Stage::receiving || join.stage == Stage::seating || catching) {
@@ -4580,13 +4666,14 @@ int main(int argc, char** argv) {
                 for (const auto& v : seats) players += v.state == State::me || v.state == State::playing || v.state == State::joining;
                 std::string sub;
                 if (host < seats.size() && !seats[host].name.empty()) sub = "HOST " + tools::clean_name(seats[host].name) + " \xC2\xB7 ";
-                sub += std::to_string(players) + " PLAYERS";
+                if (players) sub += std::to_string(players) + " PLAYERS"; // (a spectator not told the seats yet: none said)
+                else if (sub.size() >= 4) sub.resize(sub.size() - 4);   // (the host's name alone: its " · " off)
                 if (host < seats.size()) {
                     using Link = net::Session::SeatView::Link;
                     const Link l = seats[host].link;
                     if (l != Link::none) sub += l == Link::relay ? " \xC2\xB7 THROUGH THE RELAY" : l == Link::lan ? " \xC2\xB7 ON THIS NETWORK" : " \xC2\xB7 DIRECT";
                 }
-                const std::string title = shared.spectating ? "WATCHING THE GAME" : code.empty() ? "JOINING THE GAME" : "JOINING ROOM " + code;
+                const std::string title = watcher ? "WATCHING THE GAME" : code.empty() ? "JOINING THE GAME" : "JOINING ROOM " + code;
                 static const std::vector<std::string> kSteps = {"JOINED", "RECEIVING THE GAME", "CATCHING UP", "YOUR CABINET"};
                 const auto mb = [](std::size_t b) {
                     char t[16];
@@ -4597,13 +4684,25 @@ int main(int argc, char** argv) {
                     // (the bar: how much of the gap there was as catching up started has been closed)
                     const uint64_t behind = shared.catch_up_behind, start = shared.catch_up_start;
                     const int percent = start && behind <= start ? static_cast<int>(100 * (start - behind) / start) : 0;
-                    menu.set_loading(title, percent, "Catching up with the others", sub, shared.spectating ? std::vector<std::string>{} : kSteps, 2);
+                    menu.set_loading(title, percent, "Catching up with the others", sub, watcher ? std::vector<std::string>{} : kSteps, 2);
                 } else if (join.stage == Stage::receiving) {
                     const int percent = join.total ? static_cast<int>(100 * join.bytes / join.total) : -1;
-                    menu.set_loading(title, percent,
-                                     join.total ? "Receiving the game: " + mb(join.bytes) + " of " + mb(join.total) + " MB"
-                                                : std::string("Waiting for the game..."),
-                                     sub, kSteps, 1);
+                    // (nothing more of it for 30 s: said plainly why, the owner's wording; issue #9's spectator waited
+                    // on a still screen and gave up)
+                    static std::size_t bytes_seen = 0;
+                    static auto grew_at = now, drawn_at = now;
+                    if (join.bytes != bytes_seen || now - drawn_at > std::chrono::seconds(2)) // (grew, or a new wait)
+                        bytes_seen = join.bytes, grew_at = now;
+                    drawn_at = now;
+                    const bool stuck = now - grew_at > std::chrono::seconds(30);
+                    std::string detail = join.total   ? "Receiving the game: " + mb(join.bytes) + " of " + mb(join.total) + " MB"
+                                         : join.bytes ? "Receiving the game: " + mb(join.bytes) + " MB so far"
+                                                      : std::string("Waiting for the game...");
+                    if (stuck) detail = "The host's connection is too slow or busy to send the game";
+                    // (a spectator: how to give up, as it can't be seen here: the menu over this screen, Your room, Stop watching)
+                    std::string hint = sub;
+                    if (watcher) hint += std::string(hint.empty() ? "" : " \xC2\xB7 ") + "ESC: THE MENU, TO STOP WATCHING";
+                    menu.set_loading(title, percent, detail, hint, watcher ? std::vector<std::string>{} : kSteps, 1);
                 } else {
                     menu.set_loading(title, 100, "Taking your cabinet", sub, kSteps, 3);
                 }

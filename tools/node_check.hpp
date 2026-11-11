@@ -295,11 +295,13 @@ public:
         }
         return out;
     }
-    // (tests: NODE_CHECK_LOG=N prints the first N differing packets, bytes and all)
+    // (tests: NODE_CHECK_LOG=N prints the first N differing packets, bytes and all; else the first 3 of each kind, 20 with
+    // detailed logging (SPIKEOUT_NET_DEBUG): 40 such lines filled a player's log, issues #8 and #9; their count is in
+    // report(), printed as the game ends)
     static uint64_t log_limit() {
         static const uint64_t n = [] {
             const char* v = std::getenv("NODE_CHECK_LOG");
-            return v ? std::strtoull(v, nullptr, 0) : uint64_t{20};
+            return v ? std::strtoull(v, nullptr, 0) : std::getenv("SPIKEOUT_NET_DEBUG") ? uint64_t{20} : uint64_t{3};
         }();
         return n;
     }
