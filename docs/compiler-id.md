@@ -235,10 +235,12 @@ a leaf function keeps having no frame after the rounding, GCC 2.8's 603
 multiply costs, and its 603 integer and compare timing. The development tree
 of winter 1996-97 already has the last two and needs neither.
 
-Options: `-O2 -mcpu=603 -mno-traceback`, and `-fno-exceptions -ffixed-14
--ffixed-15` for the development tree (r14 and r15 are reserved: the game
-code keeps its own pointers there, the C never touches them, and a large
-function saves exactly r16-r31 only with them reserved) (`-mno-traceback` drops a tag word GCC 2.7 puts before each
+Options: `-O2 -mcpu=603 -mno-traceback`, and `-fno-exceptions -ffixed-12
+-ffixed-14 -ffixed-15` for the development tree (r12, r14 and r15 are
+reserved: the C never touches them; a large function saves exactly r16-r31
+only with r14 and r15 reserved, and with r12 reserved GCC parks a value in
+the CTR register exactly where the game does, which it only does when it
+runs out of ordinary registers) (`-mno-traceback` drops a tag word GCC 2.7 puts before each
 function; the game has none).
 
 **Comparing.** `tools/old-gcc/compare.sh` compiles a C file, links it at the
@@ -270,9 +272,10 @@ way is what made the loops match.
 ## Next steps
 
 - Progress on 2026-11-12: 34 of the 57 functions match byte for byte (1,694
-  instructions, including ones of 212 and 249); 16 more (1,302) are written
-  and close; 7, the largest (2,813 instructions), are not written yet. The C
-  is kept privately.
+  instructions, including ones of 212 and 249); 17 more (1,741) are written
+  and close (one of 439 instructions matches exactly for its first 147); 6,
+  the largest (2,374 instructions), are not written yet. The C is kept
+  privately.
 - Write the rest until `compare.sh` says MATCH.
 - For the hand-written 95%: no compiler is involved. Make `codemap`'s
   disassembly re-assemblable (labels instead of addresses, data kept as
