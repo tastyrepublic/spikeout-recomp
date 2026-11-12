@@ -22,7 +22,7 @@ winter 1996-97 (between the 2.7.2 release and the 2.8 work of spring 1997),
 with `-O2 -mcpu=603 -mno-traceback`, changed in a few small places to follow
 SEGA's house rules for stack frames.** GCC's own development tree as it stood
 on any day from November 1996 to March 1997, rebuilt with SEGA's changes,
-gives 31 of the 57 functions **byte for byte** (see "The test compiles"
+gives 34 of the 57 functions **byte for byte** (see "The test compiles"
 below); the tree of April 1997 already differs. Cygnus sold releases cut from
 that line at the time, and SEGA's Saturn GCC came from Cygnus, so a Cygnus
 release of early 1997 is the likely origin; that part is unproven.
@@ -184,7 +184,7 @@ What the C block's habits say (GCC fingerprints):
 | candidate | for | against |
 |---|---|---|
 | **Hand-written assembly** (game code) | everything in 2 and 4: r2 as scratch, stack-passed `printf`, conditional calls, shared tails, mixed styles, a save routine no compiler uses | none found |
-| **GCC development tree, Nov 1996-Mar 1997** (C block) | proved: 31 functions byte for byte with SEGA's frame changes and nothing else; GCC's compare sequences, register order, frame layout; SEGA used Cygnus' GCC for the Saturn | needs changes no option gives (a modified build); a few functions still differ by an instruction or two |
+| **GCC development tree, Nov 1996-Mar 1997** (C block) | proved: 34 functions byte for byte with SEGA's frame changes and nothing else; GCC's compare sequences, register order, frame layout; SEGA used Cygnus' GCC for the Saturn | needs changes no option gives (a modified build); a few functions still differ by an instruction or two |
 | GCC 2.7.2.3 release | the same in most functions (28 with SEGA's changes and three back-ported pieces) | lacks pieces the game has (603 timing and multiply costs, branch-free `?:`); one loop matches only it |
 | GCC 2.8.1, egcs 1.0, egcs 1.0.3a, the tree of April 1997 on | the same code in small functions | copy zero arguments register to register where the game loads them again (from April 1997; `reload_cse_regs`, July 1997, adds more): ruled out |
 | GCC 2.95.3 | GCC | different registers, cr0 instead of cr1: ruled out |
@@ -235,8 +235,10 @@ a leaf function keeps having no frame after the rounding, GCC 2.8's 603
 multiply costs, and its 603 integer and compare timing. The development tree
 of winter 1996-97 already has the last two and needs neither.
 
-Options: `-O2 -mcpu=603 -mno-traceback`, and `-fno-exceptions` for the
-development tree (`-mno-traceback` drops a tag word GCC 2.7 puts before each
+Options: `-O2 -mcpu=603 -mno-traceback`, and `-fno-exceptions -ffixed-14
+-ffixed-15` for the development tree (r14 and r15 are reserved: the game
+code keeps its own pointers there, the C never touches them, and a large
+function saves exactly r16-r31 only with them reserved) (`-mno-traceback` drops a tag word GCC 2.7 puts before each
 function; the game has none).
 
 **Comparing.** `tools/old-gcc/compare.sh` compiles a C file, links it at the
@@ -249,6 +251,8 @@ so they stay private, outside the repository, like the bytes.
 **Dating the compiler.** The same C, compiled with the development tree of
 different days (with SEGA's changes): 1 November 1996, 1 December, 1
 January 1997, 1 February and 1 March all give 31 matches; 1 April gives 20
+(measured with the C written at that point; the January tree reaches 34
+with more C written and r14/r15 reserved)
 (from then on, zero arguments are copied from one register to another where
 the game loads zero again; GCC 2.8's `reload_cse_regs`, added in July 1997,
 does more of the same). GCC 2.95.3 differs everywhere (registers, cr0 for
@@ -265,10 +269,10 @@ way is what made the loops match.
 
 ## Next steps
 
-- Progress on 2026-11-12: 31 of the 57 functions match byte for byte (1,098
-  instructions); 14 more (818) are written and close, most within a few
-  instructions; 12, the largest (3,893 instructions), are not written yet.
-  The C is kept privately.
+- Progress on 2026-11-12: 34 of the 57 functions match byte for byte (1,694
+  instructions, including ones of 212 and 249); 16 more (1,302) are written
+  and close; 7, the largest (2,813 instructions), are not written yet. The C
+  is kept privately.
 - Write the rest until `compare.sh` says MATCH.
 - For the hand-written 95%: no compiler is involved. Make `codemap`'s
   disassembly re-assemblable (labels instead of addresses, data kept as

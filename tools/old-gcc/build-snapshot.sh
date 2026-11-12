@@ -54,7 +54,7 @@ for f in $(cd "$G" && ls *.h *.def); do [ -f "$S/$f" ] || cp "$G/$f" "$S/"; done
 # SEGA's frame changes (docs/compiler-id.md, items 1-3)
 C=$S/config/rs6000
 sed -i 's/info->lr_save_offset + sp_offset/info->lr_save_offset/g' "$C/rs6000.c"
-sed -i '/mfcr %s\\n", reg_names\[12\]/s/reg_names\[12\]/reg_names[2]/
+sed -i '/mfcr %s/s/reg_names\[12\]/reg_names[2]/
         /reg_names\[12\], info->cr_save_offset/s/reg_names\[12\]/reg_names[2]/
         /0x8, reg_names\[12\]/s/reg_names\[12\]/reg_names[2]/' "$C/rs6000.c"
 sed -i 's/ALIGN (current_function_outgoing_args_size, 8)/ALIGN (current_function_outgoing_args_size, 16)/' "$C/rs6000.c" "$C/rs6000.h"
