@@ -3901,6 +3901,38 @@ everything recorded so far, the node check stays a detector (its counts in each 
 
 What it would cost if on: a snapshot every frame on a one-board machine with rollback (lazy ones skipped most).
 
+### Auto delay that tries (2026-11-11, branch claude/smart-auto, uncommitted when written)
+
+The owner: nothing forced, a smarter and real reflection. Measured on this PC the same day (two one-board windows,
+delay 0 against 1, close players): the joiner's rollbacks -45%, frames run again -55%, catch-ups over a frame -43%,
+over two frames -62%. The old Auto could never choose that: its ceiling was the far player's distance (0 frames here),
+and its trigger (over a quarter of the catch-ups late two seconds running) missed games with 1-2 hitches a second.
+A guess of the gain from the distance alone would also have been wrong (a fifth of the rollbacks foreseen, nearly half
+gone: fewer rollbacks, less work, this machine's own inputs out on time more often).
+
+So, with rollback (tools::DelayTuner::step, the window's and gamerun's alike: the callers' own 3-second wait gone):
+- a hitch: a catch-up after going back longer than a frame (Linked::take_catches);
+- 1 or more a second over 5 seconds: a frame more tried; 2 seconds to settle, 5 measured; kept only at 70% of the
+  hitches before or fewer, else back, and no try for 30 s (doubling each time it didn't help, up to 4 minutes);
+- 30 s with under a quarter a second: a frame less tried the same way; back up if the hitches rise past 1.5 times
+  what they were (and half a second at least), then no lower for 2 minutes;
+- from the distance's half (two at most) up to its frames plus 2. Without rollback: as before.
+Unit tests: tests/test_delay.cpp (frequent hitches halved by a frame: kept; a frame that doesn't help: given back,
+resting; calm: a frame less; a frame less that brings them back: back up, two minutes; no rollback: the distance's).
+Tested (2026-11-11): the unit tests (97), every local suite (17 steps: the window tests, the four matrices, where each
+window at 40-110 ms stayed at delay 2, its 7-19 goings back no reason to try), and all 12 internet cases (0 hash checks
+different anywhere). Over the internet the tries: this PC 21 (6 kept, 14 given back as no better, 1 lower tried), the UK
+Codespace 13 (1 kept, 11 given back): on the small, busy Codespaces most tries didn't bring the hitches down enough, and
+were given back after 7 s rather than left in.
+
+### Smarter guesses: measured first (2026-11-11, branch claude/smart-auto)
+
+tools/input_guess.hpp (learned run lengths: each button's runs of a player, held only while its runs as long as
+this one more often than not go on) and tools/guess-study.cpp (a recording's seats played as if L frames late, the
+game's rollback, frames wrong and run again against "held last"). Not in the game: measured first. No recording of a
+person playing on this PC yet (the five net-game recordings in the data folder are coins and starts; the owner's game
+of 08:59 was rotated out): the owner to record a few minutes of a fight.
+
 ## Plan
 
 1. Single board, single player (milestones 1–4).

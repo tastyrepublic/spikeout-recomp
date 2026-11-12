@@ -2312,11 +2312,9 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
 #endif
             me.boards = g_one_board_frame != ~0ull ? Status::Boards::one : Status::Boards::every;
             me.net = g_net_rb ? Status::Net::rollback : Status::Net::delay;
-            if (g_input_delay_auto) { // (--input-delay auto: once a second, the window's rule: tools::DelayTuner, a frame at a time
-                                      // once it has asked for the same for 3 seconds)
+            if (g_input_delay_auto) { // (--input-delay auto: once a second, the window's rule: tools::DelayTuner::step)
                 static tools::DelayTuner tuner;
                 static auto checked = std::chrono::steady_clock::now();
-                static int asked = 0;
                 if (const auto now = std::chrono::steady_clock::now(); now - checked >= std::chrono::seconds(1) && !g_catching_up) {
                     checked = now;
                     int one_way = -1;
@@ -2324,15 +2322,13 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
                     for (std::size_t s = 0; s < o.boards && s < trips.size(); ++s)
                         if (s != o.local_seat && trips[s] >= 0) one_way = std::max(one_way, trips[s] / 2);
                     const auto [catches, late] = g_net_rb ? g_net_rb->take_catches() : std::pair<uint64_t, uint64_t>{0, 0};
-                    const uint64_t want = tuner.tick(one_way, g_net_rb != nullptr, catches, late), have = g_input_delay;
-                    asked = want == have ? 0 : asked + 1;
-                    if (asked >= 3 && one_way >= 0) {
-                        asked = 0;
-                        g_input_delay = want > have ? have + 1 : have - 1;
+                    const uint64_t have = g_input_delay, want = tuner.step(one_way, g_net_rb != nullptr, late, have);
+                    if (want != have) {
+                        g_input_delay = want;
                         std::printf("net: input delay %llu at frame %llu (auto; the furthest player %d ms away one way, %llu of %llu "
                                     "catch-ups late)\n",
-                                    (unsigned long long)g_input_delay.load(), (unsigned long long)frame, one_way,
-                                    (unsigned long long)late, (unsigned long long)catches);
+                                    (unsigned long long)want, (unsigned long long)frame, one_way, (unsigned long long)late,
+                                    (unsigned long long)catches);
                     }
                 }
             }

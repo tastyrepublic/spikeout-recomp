@@ -4432,22 +4432,19 @@ int main(int argc, char** argv) {
         // The host left the game in progress and this machine hosts the room
         // now (host migration): on the internet, the room listed again under
         // its code (the lobby still knows it), so the others can join it.
-        // The input delay in play (Auto): each second, what the furthest player's round trip asks for now; moved a frame
-        // towards it once it has asked for the same for 3 seconds (a moment's spike doesn't move it; a raised delay
-        // leaves a frame held, a lowered one drops one: the session's stream takes either).
+        // The input delay in play (Auto): each second, tools::DelayTuner::step (gamerun's the same), a frame at a time
+        // (a raised delay leaves a frame held, a lowered one drops one: the session's stream takes either).
         static auto delay_checked = now;
-        static int delay_asked = 0;
         if (netgame && netgame->running && !shared.spectating && net_delay < 0 && now - delay_checked >= std::chrono::seconds(1)) {
             delay_checked = now;
             const int one_way = furthest_one_way(shared.local, shared.boards);
             const auto [catches, late] = shared.rollback ? shared.rollback->take_catches() : std::pair<uint64_t, uint64_t>{0, 0};
-            const uint64_t want = delay_tuner.tick(one_way, shared.rollback != nullptr, catches, late), have = shared.input_delay;
-            delay_asked = want == have ? 0 : delay_asked + 1;
-            if (delay_asked >= 3 && one_way >= 0) {
-                delay_asked = 0;
-                shared.input_delay = want > have ? have + 1 : have - 1;
-                std::printf("spikeout: input delay %llu (the furthest player %d ms away one way)\n",
-                            static_cast<unsigned long long>(shared.input_delay.load()), one_way);
+            const uint64_t have = shared.input_delay, want = delay_tuner.step(one_way, shared.rollback != nullptr, late, have);
+            if (want != have) {
+                shared.input_delay = want;
+                std::printf("spikeout: input delay %llu (the furthest player %d ms away one way, %llu of %llu catch-ups late)\n",
+                            static_cast<unsigned long long>(want), one_way, static_cast<unsigned long long>(late),
+                            static_cast<unsigned long long>(catches));
             }
         }
         if (netgame && netgame->running && !netgame->host && netgame->session().hosting()) {
