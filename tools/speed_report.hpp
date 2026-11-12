@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <string>
 
 namespace tools {
@@ -25,6 +26,8 @@ public:
     using clock = std::chrono::steady_clock;
     static constexpr double kStutter = 1.5; // (frames: a gap over this is a stutter)
 
+    // A gap over `ms` told as it ends (the frame, its gap): the window's problem bundles (tools/problem_report.hpp).
+    void on_long_gap(double ms, std::function<void(uint64_t frame, double gap)> fn) { long_gap_ms_ = ms, long_gap_ = std::move(fn); }
     // A frame shown (paced): `frame` its number. `restart`: the pacing started again (catching up, a join's load):
     // the gap to it isn't counted.
     void frame_end(uint64_t frame, bool restart = false) {
@@ -42,6 +45,7 @@ public:
             if (each) std::printf("stutter: frame %llu, %.1f ms\n", static_cast<unsigned long long>(frame), gap);
         }
         worst_ = std::max(worst_, gap), total_worst_ = std::max(total_worst_, gap);
+        if (long_gap_ && gap > long_gap_ms_) long_gap_(frame, gap);
         total_to_ = frame, total_end_ = now;
         const double secs = std::chrono::duration<double>(now - second_at_).count();
         if (secs >= 1.0) {
@@ -67,6 +71,8 @@ public:
 
 private:
     bool print_ = std::getenv("SPIKEOUT_NET_DEBUG") != nullptr;
+    double long_gap_ms_ = 0;
+    std::function<void(uint64_t, double)> long_gap_;
     bool started_ = false, total_from_set_ = false;
     clock::time_point last_, second_at_, total_at_, total_end_;
     uint64_t second_from_ = 0, stutters_ = 0, total_from_ = 0, total_to_ = 0, total_stutters_ = 0;

@@ -178,7 +178,9 @@ and only the players' inputs travel, so the game is the same on every screen.
 > and over the internet, and tell us how it went. Expect some rough edges while it's tested: moments of lag, a
 > stutter now and then (more often with players far apart), and a short pause when someone joins a game in
 > progress. If something goes wrong, or feels worse than that, use **Esc > Game > Report a problem** in the game:
-> it collects the logs we need (see [Reporting a problem](#reporting-a-problem)).
+> it collects the logs we need (see [Reporting a problem](#reporting-a-problem)). And when the game asks, please let
+> it send [network play reports](#network-play-reports-you-choose): real games are what we need most to find and fix
+> network play's bugs.
 
 <p align="center">
   <img src="docs/images/network-play.jpg" alt="A three-player network game: the seat list with each player's connection and board mode" width="800">
@@ -297,8 +299,40 @@ In the game: **Esc > Game > Report a problem**.
 
 A report holds the game's log, its settings, your computer's details and controllers, and any crash report; internet
 addresses, your user name and game files are left out. Reports sent from the game are public on GitHub.
+It also holds your last network game's recording and any problems the game noticed (below), locked so that only the
+project can open them: the zip can be posted publicly, and nobody else can read those parts.
 
 If the game crashes, it writes a crash report in its data folder, and says so at the next start.
+
+### Network play reports (you choose)
+
+Network play is the hardest part of this project, and the part that needs the most real games to get right. On our
+own test machines a game behaves the same every time; with real players it doesn't: different PCs, different
+distances, different networks, players joining, leaving, continuing. Most network bugs only show there, and by the
+time a player writes a report, what caused it is long gone. So the game can help, if you let it.
+
+**The first time you open Network play, the game asks whether it may send reports.** If you say yes:
+
+- **After each network game**, never during one, it sends that game's numbers: how smoothly it ran, the input delay
+  Auto chose and what its tries did, how often rollback corrected a guess and how long that took, how long messages
+  took between the players, and which problems it noticed. This tells us how network play really behaves out there,
+  and whether each change makes it better.
+- **The buttons pressed** in that game (every player's, frame by frame). Rollback has to guess the other players'
+  next presses before they arrive; real players' presses are what we need to make those guesses better, so the game
+  goes back to fix them less often (fewer stutters).
+- **Problems the game noticed itself**, with what's needed to find their cause: the games on two PCs drifting apart,
+  the game standing still (with where it was stuck), a long stall, a crash. With the game's recording, we can replay
+  the exact game that went wrong and find the line of code responsible, without asking you to make it happen again.
+
+What's protected:
+
+- The numbers carry no names and no internet addresses. Everything else (the recordings, the presses, logs) is
+  locked before it leaves your PC, so that only the project can open it.
+- Nothing is sent while you play; the game never waits for it. It goes after the game ends, a little at a time.
+- You can change your answer at any time: **Esc > Network play > Send reports**. With it off, problems are still
+  saved on your PC (the newest ten, in `saves/`), for Report a problem.
+
+Every report helps: most of the network fixes so far came from a game that went wrong and could be replayed.
 
 ## Roadmap
 

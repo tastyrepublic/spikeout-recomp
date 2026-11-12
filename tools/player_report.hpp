@@ -725,6 +725,16 @@ inline std::filesystem::path make_report(const std::string& folder, const std::s
                 if (!locked.empty()) files.push_back({p.filename().string() + ".locked", std::string(locked.begin(), locked.end())});
             }
     }
+    // (the newest problems the game noticed itself, tools/problem_report.hpp: locked already, as they are)
+    {
+        std::vector<fs::path> problems;
+        for (const auto& f : fs::directory_iterator(detail::utf8(folder + "saves/"), ec)) {
+            const std::string name = f.path().filename().string();
+            if (name.rfind("problem-", 0) == 0 && name.size() > 11 && name.substr(name.size() - 11) == ".zip.locked") problems.push_back(f.path());
+        }
+        std::sort(problems.rbegin(), problems.rend());
+        for (std::size_t i = 0; i < problems.size() && i < 3; ++i) files.push_back({problems[i].filename().string(), detail::read_all(problems[i])});
+    }
     const fs::path zip = detail::utf8(folder + "spikeout-report-" + detail::stamp() + ".zip");
     return detail::write_zip(zip, files) ? zip : fs::path();
 }

@@ -195,8 +195,10 @@ public:
         };
         cb.desync = [this](uint8_t seat, uint64_t key) {
             ++desyncs_;
-            if (log_) log_("board " + std::to_string(key % net::kMaxSeats) + " differs from seat " + std::to_string(seat + 1) +
-                           "'s at frame " + std::to_string(key / net::kMaxSeats));
+            const std::string what = "board " + std::to_string(key % net::kMaxSeats) + " differs from seat " + std::to_string(seat + 1) +
+                                     "'s at frame " + std::to_string(key / net::kMaxSeats);
+            if (log_) log_(what);
+            problem("desync", what, key / net::kMaxSeats);
         };
         cb.log = [this](const std::string& s) {
             if (log_) log_(s);
@@ -242,6 +244,22 @@ public:
         cb.node = [this](uint8_t seat, uint64_t seq, std::vector<uint8_t> node) { node_check_.received(seat, seq, node); };
         session_ = std::make_unique<net::Session>(std::move(cb), build);
         node_check_.set_session(session_.get());
+        node_check_.set_problem([this](const std::string& what, uint64_t frame) { problem("node", what, frame); });
+    }
+
+    // A problem noticed (tools/problem_report.hpp: a bundle saved for it, the window's; gamerun only logs): an out of
+    // step, a made packet different from its real one. Any thread (the session's, the game's).
+    void on_problem(std::function<void(const std::string& kind, const std::string& what, uint64_t frame)> fn) {
+        std::lock_guard guard(problem_lock_);
+        problem_ = std::move(fn);
+    }
+    void problem(const std::string& kind, const std::string& what, uint64_t frame) {
+        std::function<void(const std::string&, const std::string&, uint64_t)> fn;
+        {
+            std::lock_guard guard(problem_lock_);
+            fn = problem_;
+        }
+        if (fn) fn(kind, what, frame);
     }
 
     // One board a PC's check: the packets made here for the other cabinets against their real ones (tools/
@@ -475,6 +493,8 @@ public:
 private:
     InputTable& table_;
     std::function<void(const std::string&)> log_;
+    std::mutex problem_lock_;
+    std::function<void(const std::string&, const std::string&, uint64_t)> problem_;
     std::mutex lock_;
     std::condition_variable changed_;
     std::optional<net::StartInfo> start_, resync_;

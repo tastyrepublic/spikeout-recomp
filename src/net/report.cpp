@@ -2,7 +2,9 @@
 #include "net/report.hpp"
 #include "net/ca_file.hpp"
 #include "net/json.hpp"
+#include "net/lobby.hpp" // (kLobbyUrl: uploads go to the lobby)
 
+#include <atomic>
 #include <cstdlib>
 #include <curl/curl.h>
 
@@ -20,9 +22,13 @@ std::size_t keep(char* data, std::size_t size, std::size_t n, void* user) {
     return size * n;
 }
 
-// One request: `body` sent if not empty (`type` its Content-Type), `token` as GitHub's Bearer if not empty.
+std::atomic<bool> g_cancel{false}; // (cancel_uploads: the window closing)
+int cancelled(void*, curl_off_t, curl_off_t, curl_off_t, curl_off_t) { return g_cancel.load() ? 1 : 0; } // (curl, often)
+
+// One request: `body` sent if not empty (`type` its Content-Type), `token` as GitHub's Bearer if not empty; `max_send`
+// bytes a second at most for the body (0: as fast as it goes), the time allowed grown to fit.
 Http request(const std::string& method, const std::string& url, const std::string& body, const std::string& type,
-               const std::string& token) {
+               const std::string& token, long max_send = 0) {
     static const bool ready = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK;
     (void)ready;
     Http a;
@@ -41,7 +47,12 @@ Http request(const std::string& method, const std::string& url, const std::strin
     curl_easy_setopt(c, CURLOPT_USERAGENT, "spikeout-recomp");
     curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 10L);
-    curl_easy_setopt(c, CURLOPT_TIMEOUT, 60L);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, max_send > 0 ? 60L + static_cast<long>(body.size()) / max_send : 60L);
+    if (max_send > 0) { // (an upload: also stopped at once by cancel_uploads)
+        curl_easy_setopt(c, CURLOPT_MAX_SEND_SPEED_LARGE, static_cast<curl_off_t>(max_send));
+        curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, cancelled);
+        curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
+    }
     curl_easy_setopt(c, CURLOPT_SSL_OPTIONS, static_cast<long>(CURLSSLOPT_REVOKE_BEST_EFFORT | CURLSSLOPT_NATIVE_CA));
     set_ca_file(c);
     if (!body.empty()) {
@@ -183,5 +194,26 @@ Issue fetch_issue(int number, const std::string& token) {
     issue.ok = true;
     return issue;
 }
+
+Sent upload(const std::string& what, const std::string& body, const std::string& type, const std::string& version) {
+    if (g_cancel.load()) return {false, 0, {}, "stopped: the game is closing"};
+    // (the lobby's address, wss://HOST/v1/lobby, as https://HOST/v1/WHAT)
+    std::string base = env_or("SPIKEOUT_UPLOAD_URL", "");
+    if (base.empty()) {
+        base = kLobbyUrl;
+        if (base.rfind("wss://", 0) == 0) base = "https://" + base.substr(6);
+        else if (base.rfind("ws://", 0) == 0) base = "http://" + base.substr(5);
+        if (const auto at = base.rfind("/lobby"); at != std::string::npos) base.erase(at);
+    }
+    Sent s;
+    // (256 KB a second at most: never filling a home line, a network game started meanwhile left room)
+    const Http a = request("POST", base + "/" + what + "?version=" + version, body, type, {}, 256 * 1024);
+    if (!a.error.empty()) s.error = "no connection to the lobby (" + a.error + ")";
+    else if (a.status != 200) s.error = "the lobby answered " + std::to_string(a.status) + (a.text.empty() ? "" : ": " + a.text.substr(0, 200));
+    else s.ok = true;
+    return s;
+}
+
+void cancel_uploads() { g_cancel = true; }
 
 } // namespace net::report

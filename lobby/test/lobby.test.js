@@ -1,14 +1,16 @@
-// The lobby, run on this machine (wrangler dev), driven by WebSocket
+﻿// The lobby, run on this machine (wrangler dev), driven by WebSocket
 // clients as the game would: `npm test`.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const PORT = 8790;
 let dev;
 
 before(async () => {
-	dev = spawn("npx", ["wrangler", "dev", "--port", String(PORT), "--ip", "127.0.0.1"], {
+	dev = spawn("npx", ["wrangler", "dev", "--port", String(PORT), "--ip", "127.0.0.1", "--var", "ADMIN_TOKEN:test-admin", "--var", "REPORTS_KEPT:6000000", "--var", "REPORTS_A_MONTH:40", "--persist-to", join(tmpdir(), `spikeout-lobby-test-${Date.now()}`)], {
 		cwd: new URL("..", import.meta.url),
 		shell: true,
 		stdio: ["ignore", "pipe", "pipe"],
@@ -220,4 +222,116 @@ test("a game in progress whose host goes: a player of it takes it over under its
 	guest.send({ t: "join", code, port: 1, candidates: [] });
 	assert.equal((await guest.next("joining")).session, "s3ss10n");
 	for (const p of [stranger, bo, guest]) p.close();
+});
+
+// Reports sent by the game itself (src/index.js): numbers as JSON, problem bundles only locked, the owner's list behind a
+// key, and each address's day limited.
+const BASE = `http://127.0.0.1:${PORT}`;
+const ADMIN = { Authorization: "Bearer test-admin" };
+
+test("reports: a game's numbers kept, read back with the owner's key only", async () => {
+	const numbers = { version: "test", seats: 2, rollback: true, round_trips: [0, 140] };
+	let r = await fetch(`${BASE}/v1/stats?version=test`, { method: "POST", body: JSON.stringify(numbers) });
+	assert.equal(r.status, 200);
+	r = await fetch(`${BASE}/v1/stats?version=test`, { method: "POST", body: "not json" });
+	assert.equal(r.status, 400);
+	r = await fetch(`${BASE}/v1/stats?version=test`, { method: "POST", body: "[1,2]" });
+	assert.equal(r.status, 400);
+	r = await fetch(`${BASE}/v1/stats?version=test`, { method: "POST", body: "x".repeat(9000) });
+	assert.equal(r.status, 413);
+	assert.equal((await fetch(`${BASE}/v1/admin/stats`)).status, 404); // (no key: as if nothing were there)
+	assert.equal((await fetch(`${BASE}/v1/admin/stats`, { headers: { Authorization: "Bearer wrong" } })).status, 404);
+	const rows = await (await fetch(`${BASE}/v1/admin/stats`, { headers: ADMIN })).json();
+	const mine = rows.find((x) => x.version === "test");
+	assert.ok(mine);
+	assert.deepEqual(JSON.parse(mine.json), numbers);
+	assert.equal(typeof mine.country, "string");
+	assert.ok(!("who" in mine)); // (no address kept with it)
+});
+
+test("reports: a problem bundle kept only locked, and fetched back whole", async () => {
+	const locked = new Uint8Array(200);
+	locked.set(new TextEncoder().encode("SPKLOCK1"));
+	for (let i = 8; i < locked.length; i++) locked[i] = i & 0xff;
+	let r = await fetch(`${BASE}/v1/problem?version=test`, { method: "POST", body: locked });
+	assert.equal(r.status, 200);
+	const plain = new Uint8Array(200).fill(65); // (not locked: refused)
+	r = await fetch(`${BASE}/v1/problem?version=test`, { method: "POST", body: plain });
+	assert.equal(r.status, 400);
+	const list = await (await fetch(`${BASE}/v1/admin/problems`, { headers: ADMIN })).json();
+	assert.ok(list.length >= 1);
+	const got = new Uint8Array(await (await fetch(`${BASE}/v1/admin/file/${encodeURIComponent(list.at(-1).key)}`, { headers: ADMIN })).arrayBuffer());
+	assert.deepEqual(got, locked);
+	assert.equal((await fetch(`${BASE}/v1/admin/file/${encodeURIComponent(list.at(-1).key)}`)).status, 404);
+});
+
+test("reports: one address's day limited", async () => {
+	const statuses = [];
+	for (let i = 0; i < 14; i++) {
+		const locked = new Uint8Array(100);
+		locked.set(new TextEncoder().encode("SPKLOCK1"));
+		statuses.push((await fetch(`${BASE}/v1/problem?version=test`, { method: "POST", body: locked })).status);
+	}
+	assert.ok(statuses.includes(429)); // (12 a day: the earlier test's one, then these)
+	assert.equal(statuses.filter((s) => s === 200).length, 11);
+});
+
+test("reports: a game's inputs kept only locked, listed apart from the bundles", async () => {
+	const locked = new Uint8Array(300);
+	locked.set(new TextEncoder().encode("SPKLOCK1"));
+	for (let i = 8; i < locked.length; i++) locked[i] = (i * 7) & 0xff;
+	assert.equal((await fetch(`${BASE}/v1/inputs?version=test`, { method: "POST", body: locked })).status, 200);
+	assert.equal((await fetch(`${BASE}/v1/inputs?version=test`, { method: "POST", body: new Uint8Array(300) })).status, 400);
+	const inputs = await (await fetch(`${BASE}/v1/admin/inputs`, { headers: ADMIN })).json();
+	assert.equal(inputs.length, 1);
+	assert.ok(inputs[0].key.startsWith("inputs/"));
+	const problems = await (await fetch(`${BASE}/v1/admin/problems`, { headers: ADMIN })).json();
+	assert.ok(problems.every((p) => p.key.startsWith("problems/")));
+	const got = new Uint8Array(await (await fetch(`${BASE}/v1/admin/file/${encodeURIComponent(inputs[0].key)}`, { headers: ADMIN })).arrayBuffer());
+	assert.deepEqual(got, locked);
+	assert.equal((await fetch(`${BASE}/v1/admin/file/${encodeURIComponent("other/x")}`, { headers: ADMIN })).status, 404);
+});
+
+test("reports: a 2.5 MB file fetched back whole", async () => {
+	const big = new Uint8Array(2_500_000);
+	big.set(new TextEncoder().encode("SPKLOCK1"));
+	for (let i = 8; i < big.length; i++) big[i] = (i * 13 + (i >> 9)) & 0xff;
+	assert.equal((await fetch(`${BASE}/v1/inputs?version=big`, { method: "POST", body: big })).status, 200);
+	const inputs = await (await fetch(`${BASE}/v1/admin/inputs`, { headers: ADMIN })).json();
+	const mine = inputs.find((x) => x.version === "big");
+	assert.equal(mine.size, big.length);
+	const got = new Uint8Array(await (await fetch(`${BASE}/v1/admin/file/${encodeURIComponent(mine.key)}`, { headers: ADMIN })).arrayBuffer());
+	assert.equal(got.length, big.length);
+	assert.deepEqual(got, big);
+});
+
+test("reports: never past the cap: the oldest files let go (REPORTS_KEPT, 6 MB here; 8 GB live)", async () => {
+	const before = [...(await (await fetch(`${BASE}/v1/admin/problems`, { headers: ADMIN })).json()),
+		...(await (await fetch(`${BASE}/v1/admin/inputs`, { headers: ADMIN })).json())].sort((a, b) => a.id - b.id);
+	const big = new Uint8Array(4_000_000);
+	big.set(new TextEncoder().encode("SPKLOCK1"));
+	assert.equal((await fetch(`${BASE}/v1/inputs?version=cap`, { method: "POST", body: big })).status, 200);
+	const after = [...(await (await fetch(`${BASE}/v1/admin/problems`, { headers: ADMIN })).json()),
+		...(await (await fetch(`${BASE}/v1/admin/inputs`, { headers: ADMIN })).json())];
+	const total = after.reduce((t, f) => t + f.size, 0);
+	assert.ok(total <= 6_000_000, `kept ${total} bytes`);
+	assert.ok(after.some((f) => f.version === "cap")); // (the new one kept)
+	assert.ok(!after.some((f) => f.id === before[0].id)); // (the oldest gone)
+	assert.equal((await fetch(`${BASE}/v1/admin/file/${encodeURIComponent(before[0].key)}`, { headers: ADMIN })).status, 404); // (from the bucket too)
+});
+
+test("reports: R2's operations held under a monthly cap (REPORTS_A_MONTH, 40 here; 500,000 live)", async () => {
+	const small = new Uint8Array(100);
+	small.set(new TextEncoder().encode("SPKLOCK1"));
+	let full = 0;
+	for (let i = 0; i < 26 && !full; i++) {
+		const r = await fetch(`${BASE}/v1/inputs?version=month`, { method: "POST", body: small });
+		if (r.status === 503) full = (await r.text()).includes("full for this month") ? 1 : -1;
+	}
+	assert.equal(full, 1);
+	const usage = await (await fetch(`${BASE}/v1/admin/usage`, { headers: ADMIN })).json();
+	assert.ok(usage.r2a[0] <= 40, `class A ${usage.r2a[0]}`);
+	assert.equal(usage.r2a[1], 40);
+	assert.ok(usage.r2b[0] >= 1); // (the downloads above, counted)
+	assert.match(usage.month, /^\d{4}-\d{2}$/);
 });

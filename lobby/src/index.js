@@ -48,9 +48,165 @@ export default {
 			return env.LOBBY.getByName("lobby").fetch(request);
 		}
 		if (url.pathname === "/") return new Response("Spikeout lobby\n", { headers: { "Content-Type": "text/plain" } });
+		if (url.pathname === "/v1/stats" || url.pathname === "/v1/problem" || url.pathname === "/v1/inputs") return reportIn(request, env, url);
+		if (url.pathname.startsWith("/v1/admin/")) return admin(request, env, url);
 		return new Response("not found", { status: 404 });
 	},
 };
+
+// ---- Reports sent by the game itself (the player's yes asked first: tools/problem_report.hpp, part 2) ----
+//   POST /v1/stats?version=V    a network game's numbers, a JSON object (MAX_STATS bytes at most)
+//   POST /v1/problem?version=V  a problem bundle, locked to the project owner's key ("SPKLOCK1...")
+//   POST /v1/inputs?version=V   a network game's inputs (every seat's presses, frame by frame), locked the same way
+// Locked ones kept in R2 (the REPORTS bucket, problems/ and inputs/; listed in the Reports database), unreadable without
+// that key. Never past R2's free 10 GB: the oldest let go once KEPT (8 GB) is passed, the database adding up every
+// file's size; and the bucket's own rule deletes anything older than 90 days whatever the count. Each kind a day from
+// one address at most its LOCKED[kind].day, a file at most its .most (the address only counted, hashed: never kept).
+// The owner's (a secret, ADMIN_TOKEN: `npx wrangler secret put ADMIN_TOKEN`; without it, none of these):
+//   GET /v1/admin/stats?after=ID      the numbers, oldest first (ADMIN_PAGE a time)
+//   GET /v1/admin/problems?after=ID   the bundles' list; /v1/admin/inputs?after=ID the inputs' list
+//   GET /v1/admin/file/KEY            one of them (tools/fetch-reports.ps1 takes them, gamerun --unlock opens them)
+const MAX_STATS = 8192;
+const STATS_A_DAY = 60;
+const LOCKED = {
+	problem: { most: 24 << 20, day: 12, folder: "problems", ext: ".zip.locked" },
+	inputs: { most: 8 << 20, day: 30, folder: "inputs", ext: ".inputs.locked" },
+};
+const ADMIN_PAGE = 500;
+const KEPT = 8 * 1024 * 1024 * 1024;
+// R2's free operations a month: 1,000,000 class A (a file stored, a list), 10,000,000 class B (a file read). Half of
+// each at most (counted here, a month at a time: past it a file is refused, "full for this month", and the game keeps it
+// to send another time; nothing is charged). Deletes (free on R2) counted with class A, to be safe.
+const R2_A_MONTH = 500_000;
+const R2_B_MONTH = 5_000_000;
+
+async function reportIn(request, env, url) {
+	if (request.method !== "POST") return new Response("POST only", { status: 405 });
+	const kind = url.pathname.slice("/v1/".length); // stats, problem, inputs
+	const version = text(url.searchParams.get("version"), 40);
+	const body = new Uint8Array(await request.arrayBuffer());
+	const locked = LOCKED[kind];
+	if (!locked) {
+		if (body.length === 0 || body.length > MAX_STATS) return new Response("too big", { status: 413 });
+		let parsed;
+		try {
+			parsed = JSON.parse(new TextDecoder().decode(body));
+		} catch {
+			return new Response("not JSON", { status: 400 });
+		}
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return new Response("not an object", { status: 400 });
+	} else {
+		if (body.length < 80 || body.length > locked.most) return new Response("wrong size", { status: 413 });
+		if (new TextDecoder().decode(body.slice(0, 8)) !== "SPKLOCK1") return new Response("not locked", { status: 400 });
+		if (!env.REPORTS) return new Response("not kept here", { status: 503 });
+	}
+	const who = await hashed(request.headers.get("CF-Connecting-IP") || "");
+	const country = (request.cf && request.cf.country) || "";
+	const db = env.REPORTS_DB.getByName("reports");
+	if (!(await db.allow(who, kind, locked ? locked.day : STATS_A_DAY))) return new Response("enough for today", { status: 429 });
+	if (locked && !(await db.spend("r2a", Number(env.REPORTS_A_MONTH) || R2_A_MONTH, 1)))
+		return new Response("full for this month", { status: 503 });
+	if (!locked) {
+		await db.addStats(version, country, new TextDecoder().decode(body));
+	} else {
+		const key = `${locked.folder}/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}${locked.ext}`;
+		await env.REPORTS.put(key, body);
+		const kept = Number(env.REPORTS_KEPT) || KEPT; // (tests: a smaller cap)
+		for (const old of await db.addFile(kind, version, country, key, body.length, kept)) {
+			await db.spend("r2a", Infinity, 1); // (counted, never refused: the cap must hold)
+			await env.REPORTS.delete(old); // (past it: the oldest)
+		}
+	}
+	return new Response("thanks\n", { headers: { "Content-Type": "text/plain" } });
+}
+
+async function hashed(address) {
+	const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("spikeout reports " + address));
+	return [...new Uint8Array(d).slice(0, 12)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function admin(request, env, url) {
+	const token = (env.ADMIN_TOKEN || "").trim(); // (a secret typed or piped in may end in a line break)
+	if (!token || (request.headers.get("Authorization") || "").trim() !== `Bearer ${token}`) return new Response("not found", { status: 404 });
+	const db = env.REPORTS_DB.getByName("reports");
+	const after = Number(url.searchParams.get("after")) || 0;
+	if (url.pathname === "/v1/admin/stats") return Response.json(await db.stats(after, ADMIN_PAGE));
+	if (url.pathname === "/v1/admin/problems") return Response.json(await db.files("problem", after, ADMIN_PAGE));
+	if (url.pathname === "/v1/admin/inputs") return Response.json(await db.files("inputs", after, ADMIN_PAGE));
+	if (url.pathname === "/v1/admin/usage")
+		return Response.json({ month: await db.month(), r2a: [await db.spent("r2a"), Number(env.REPORTS_A_MONTH) || R2_A_MONTH],
+			r2b: [await db.spent("r2b"), Number(env.REPORTS_B_MONTH) || R2_B_MONTH], stored: await db.stored(), kept: Number(env.REPORTS_KEPT) || KEPT });
+	if (url.pathname.startsWith("/v1/admin/file/") && env.REPORTS) {
+		const key = decodeURIComponent(url.pathname.slice("/v1/admin/file/".length));
+		const ok = Object.values(LOCKED).some((l) => key.startsWith(l.folder + "/"));
+		if (ok && !(await db.spend("r2b", Number(env.REPORTS_B_MONTH) || R2_B_MONTH, 1))) return new Response("full for this month", { status: 503 });
+		const o = ok ? await env.REPORTS.get(key) : null;
+		if (!o) return new Response("not found", { status: 404 });
+		return new Response(o.body, { headers: { "Content-Type": "application/octet-stream" } });
+	}
+	return new Response("not found", { status: 404 });
+}
+
+// What came: a database of its own (not the lobby's: its games' traffic never waits on it).
+export class Reports extends DurableObject {
+	constructor(ctx, env) {
+		super(ctx, env);
+		const sql = this.ctx.storage.sql;
+		sql.exec(`CREATE TABLE IF NOT EXISTS stats (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, version TEXT, country TEXT, json TEXT)`);
+		sql.exec(`CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, at INTEGER, version TEXT, country TEXT, key TEXT, size INTEGER)`);
+		sql.exec(`CREATE TABLE IF NOT EXISTS uses (who TEXT, kind TEXT, day TEXT, n INTEGER, PRIMARY KEY (who, kind, day))`);
+		sql.exec(`CREATE TABLE IF NOT EXISTS months (month TEXT, kind TEXT, n INTEGER, PRIMARY KEY (month, kind))`);
+	}
+	allow(who, kind, most) {
+		const sql = this.ctx.storage.sql;
+		const day = new Date().toISOString().slice(0, 10);
+		sql.exec(`DELETE FROM uses WHERE day < ?`, day); // (yesterday's counts: gone)
+		const row = sql.exec(`SELECT n FROM uses WHERE who = ? AND kind = ? AND day = ?`, who, kind, day).toArray()[0];
+		const n = row ? row.n : 0;
+		if (n >= most) return false;
+		sql.exec(`INSERT OR REPLACE INTO uses (who, kind, day, n) VALUES (?, ?, ?, ?)`, who, kind, day, n + 1);
+		return true;
+	}
+	month() {
+		return new Date().toISOString().slice(0, 7); // (UTC, as Cloudflare's billing month: 2026-11)
+	}
+	spent(kind) {
+		const row = this.ctx.storage.sql.exec(`SELECT n FROM months WHERE month = ? AND kind = ?`, this.month(), kind).toArray()[0];
+		return row ? row.n : 0;
+	}
+	// This month's count of `kind` up by `n`, unless that would pass `most` (false: not done).
+	spend(kind, most, n) {
+		const had = this.spent(kind);
+		if (had + n > most) return false;
+		this.ctx.storage.sql.exec(`INSERT OR REPLACE INTO months (month, kind, n) VALUES (?, ?, ?)`, this.month(), kind, had + n);
+		return true;
+	}
+	stored() {
+		return this.ctx.storage.sql.exec(`SELECT COALESCE(SUM(size), 0) AS t FROM files`).one().t;
+	}
+	addStats(version, country, json) {
+		this.ctx.storage.sql.exec(`INSERT INTO stats (at, version, country, json) VALUES (?, ?, ?, ?)`, Date.now(), version, country, json);
+	}
+	addFile(kind, version, country, key, size, most) { // (the keys of those let go, past `most` bytes in all: oldest first)
+		const sql = this.ctx.storage.sql;
+		sql.exec(`INSERT INTO files (kind, at, version, country, key, size) VALUES (?, ?, ?, ?, ?, ?)`, kind, Date.now(), version, country, key, size);
+		const gone = [];
+		let total = sql.exec(`SELECT COALESCE(SUM(size), 0) AS t FROM files`).one().t;
+		while (total > most) {
+			const old = sql.exec(`SELECT id, key, size FROM files ORDER BY id LIMIT 1`).one();
+			sql.exec(`DELETE FROM files WHERE id = ?`, old.id);
+			gone.push(old.key);
+			total -= old.size;
+		}
+		return gone;
+	}
+	stats(after, most) {
+		return this.ctx.storage.sql.exec(`SELECT * FROM stats WHERE id > ? ORDER BY id LIMIT ?`, after, most).toArray();
+	}
+	files(kind, after, most) {
+		return this.ctx.storage.sql.exec(`SELECT * FROM files WHERE kind = ? AND id > ? ORDER BY id LIMIT ?`, kind, after, most).toArray();
+	}
+}
 
 function text(v, max) {
 	return typeof v === "string" ? v.slice(0, max) : "";

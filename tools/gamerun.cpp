@@ -4150,6 +4150,10 @@ int main(int argc_given, char** argv_given) {
         }
         netplay = std::make_unique<tools::NetPlay>(inputs, build,
                                                    [](const std::string& s) { std::printf("net: %s\n", s.c_str()), std::fflush(stdout); });
+        // (a problem the window would save a bundle for, tools/problem_report.hpp: here only said, for the tests)
+        netplay->on_problem([](const std::string& kind, const std::string& what, uint64_t frame) {
+            std::printf("problem: %s at frame %llu: %s\n", kind.c_str(), static_cast<unsigned long long>(frame), what.c_str());
+        });
         net::Session& session = netplay->session();
         session.set_cabinet(o.eeprom_bytes, {}); // (this process's cabinet: --eeprom FILE)
         const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(120);

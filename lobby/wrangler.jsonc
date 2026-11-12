@@ -3,14 +3,25 @@
 // owner's Cloudflare account. The TURN relay's key goes in as secrets,
 // never in the repo: `npx wrangler secret put TURN_KEY_ID` and
 // `TURN_KEY_API_TOKEN` (locally: a .dev.vars file, git-ignored).
+// Reports the game sends (src/index.js, "Reports sent by the game itself"): their own database (Reports), the files in
+// an R2 bucket (spikeout-reports, made once: `npx wrangler r2 bucket create spikeout-reports`, its 90-day rule:
+// `npx wrangler r2 bucket lifecycle add spikeout-reports expire-90d --expire-days 90`). The owner's download key, once:
+// `npx wrangler secret put ADMIN_TOKEN`.
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "spikeout-lobby",
 	"main": "src/index.js",
 	"compatibility_date": "2026-10-01",
 	"durable_objects": {
-		"bindings": [{ "name": "LOBBY", "class_name": "Lobby" }]
+		"bindings": [
+			{ "name": "LOBBY", "class_name": "Lobby" },
+			{ "name": "REPORTS_DB", "class_name": "Reports" }
+		]
 	},
-	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["Lobby"] }],
+	"migrations": [
+		{ "tag": "v1", "new_sqlite_classes": ["Lobby"] },
+		{ "tag": "v2", "new_sqlite_classes": ["Reports"] }
+	],
+	"r2_buckets": [{ "binding": "REPORTS", "bucket_name": "spikeout-reports" }],
 	"observability": { "enabled": true }
 }

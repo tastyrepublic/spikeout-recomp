@@ -68,4 +68,11 @@ struct Issue {
 };
 Issue fetch_issue(int number, const std::string& token);
 
+// Sent to the project's lobby by the game itself, when the player allows it (tools/problem_report.hpp, part 2): `what`
+// "stats" (a game's numbers, JSON) or "problem" (a problem bundle, locked to the owner's key). The lobby's address is the
+// build's (SPIKEOUT_LOBBY_URL, its https form; SPIKEOUT_UPLOAD_URL for tests). Blocks: a thread of its own.
+Sent upload(const std::string& what, const std::string& body, const std::string& type, const std::string& version);
+// Any upload going on stops at once (the window closing: it never waits for one), and none starts after.
+void cancel_uploads();
+
 } // namespace net::report

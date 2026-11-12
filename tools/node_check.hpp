@@ -46,6 +46,12 @@ public:
         making_ = making;
     }
     void set_session(net::Session* session) { session_ = session; }
+    // A made packet found different from its real one: told (what, the frame it left in), with the check's lock held:
+    // quick, and nothing calling back in (tools::NetPlay::problem: a problem bundle queued).
+    void set_problem(std::function<void(const std::string& what, uint64_t frame)> fn) {
+        std::lock_guard guard(lock_);
+        problem_ = std::move(fn);
+    }
     // With rollback: this machine's own nodes sent only once their frame is settled here (every seat's inputs in, none
     // guessed): a packet from a frame run on guesses, gone back over later, isn't the one its board finally sends, and
     // taken as real by another it put that one out of step (2026-11-07). A packet's frame: its arrival on the ring (in
@@ -394,6 +400,13 @@ private:
                         (unsigned long long)seq, at == made_at_[seat].end() ? -1ll : static_cast<long long>(at->second) - 2, n,
                         bytes.c_str());
         }
+        if (n && problem_) { // (a problem bundle: tools/problem_report.hpp, one a minute at most)
+            const auto at = made_at_[seat].find(seq);
+            const uint64_t frame = at == made_at_[seat].end() || at->second < 2 ? 0 : at->second - 2;
+            problem_("seat " + std::to_string(seat + 1) + "'s made packet " + std::to_string(seq) + ": " + std::to_string(n) +
+                         " bytes differ from its real one (real/made):" + bytes,
+                     frame);
+        }
         if (n && run_again_) { // (step 3: back to the frame it left in; the real one kept, put in as it's sent again)
             const auto f = made_frame_[seat].find(seq);
             if (f != made_frame_[seat].end()) back_to_ = std::min(back_to_, f->second ? f->second - 1 : 0); // (a frame more: to be sure)
@@ -461,6 +474,7 @@ private:
     std::map<std::size_t, std::map<uint64_t, Whole>> made_whole_, real_whole_;
     uint64_t whole_compared_ = 0, whole_differed_ = 0;
     std::function<void(uint64_t)> run_again_;
+    std::function<void(const std::string&, uint64_t)> problem_;
     std::function<uint64_t()> frame_now_;
     uint64_t back_to_ = ~0ull, backs_ = 0, patched_ = 0, replaced_ = 0;
     std::array<uint64_t, kNodeBytes> counts_{};

@@ -17,5 +17,9 @@ Issue fetch_issue(int, const std::string&) {
     i.error = "this build has no internet connection";
     return i;
 }
+Sent upload(const std::string&, const std::string&, const std::string&, const std::string&) {
+    return {false, 0, {}, "this build has no internet connection"};
+}
+void cancel_uploads() {}
 
 } // namespace net::report

@@ -109,6 +109,7 @@
 #include "player_report.hpp" // (spikeout.log, crash reports, Report a problem)
 #include "pad_layouts.hpp"   // (layouts for pads and sticks SDL has none for: the community database, a generic one)
 #include "net_record.hpp"    // (a network game recorded: its state and every seat's inputs, gamerun --net-replay)
+#include "problem_report.hpp" // (problems noticed in network play: a locked bundle each, a hang watchdog)
 #include "ui/assets.hpp" // (the app's icon)
 #ifdef SPIKEOUT_JIT
 #include "jit/jit.hpp" // (spikeout-jit: the game translated from the ROM set at the first start, LLVM)
@@ -190,6 +191,11 @@ struct Shared {
     // When the shown board's next frame starts (steady clock, ns; 0: not known): the window reads the keys and pads
     // just before it, so the frame runs with them fresh
     std::atomic<int64_t> next_due{0};
+    // Problems noticed in network play (tools/problem_report.hpp): their bundles saved, locked; the game thread's beat
+    // for the hang watchdog (armed while a network game runs). Set up in main.
+    tools::problems::Saver* problems = nullptr;
+    tools::problems::Watchdog* watchdog = nullptr;
+    std::atomic<uint64_t> shown_frame{0}; // (the shown board's frames done, for a problem's note)
     uint64_t max_frames = 0; // 0: run until the window is closed
     // --record FILE: board 0's run recorded (tools::Recording), from power-on;
     // each restart a file of its own (FILE, then FILE-2 ...)
@@ -281,6 +287,8 @@ struct Shared {
     // then each frame's inputs as they settle, written by the shown board's thread
     std::atomic<bool> net_record_wanted{false};
     tools::net_record::Writer net_rec;
+    std::mutex recordings_lock;
+    std::vector<std::string> game_recordings; // (this network game's NAME.inputs files: sent when it ends, if allowed)
     std::vector<uint8_t> net_state;
     std::atomic<bool> catching_up{false};
     // Auto, the board mode by speed (tools/net_frame.hpp, gamerun --net-auto-board the same): made anew each start
@@ -858,8 +866,30 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
     // (how smoothly the shown board runs: tools/speed_report.hpp, the same as gamerun --pace; each paced frame after its
     // wait, a stall too; Tab, catching up and the menu start it again)
     tools::SpeedReport speed;
+    // (a frame over a second late in a network game: a problem bundle, tools/problem_report.hpp)
+    speed.on_long_gap(tools::problems::kStallMs, [&shared](uint64_t frame, double ms) {
+        if (shared.netplay && shared.problems)
+            shared.problems->note("stall", "a frame " + std::to_string(static_cast<long long>(ms)) + " ms late", frame);
+    });
     auto pace = [&] {
         if (index != shown) return;
+        shared.shown_frame = timing.frames();
+        if (shared.watchdog) shared.watchdog->beat_here(); // (the hang watchdog: the shown board's thread, finishing a frame)
+        // (tests, tools/problem_report.hpp: SPIKEOUT_TEST_HANG=FRAME:SECONDS stands this thread still that long at that
+        // frame of a network game (a hang over 10 s); SPIKEOUT_TEST_STALL=FRAME:MS one frame that late (a stall), once each)
+        if (shared.netplay) {
+            static auto test_wait = [](const char* name) -> std::pair<uint64_t, uint64_t> {
+                const char* v = std::getenv(name);
+                if (!v) return {~0ull, 0};
+                char* end = nullptr;
+                const uint64_t at = std::strtoull(v, &end, 10);
+                return {at, end && *end == ':' ? std::strtoull(end + 1, nullptr, 10) : 0};
+            };
+            static const auto hang = test_wait("SPIKEOUT_TEST_HANG"), stall = test_wait("SPIKEOUT_TEST_STALL");
+            static std::atomic<bool> hung{false}, stalled{false};
+            if (timing.frames() >= hang.first && !hung.exchange(true)) std::this_thread::sleep_for(std::chrono::seconds(hang.second));
+            if (timing.frames() >= stall.first && !stalled.exchange(true)) std::this_thread::sleep_for(std::chrono::milliseconds(stall.second));
+        }
         // (catching up: run on from a state, behind the others; and on to our seat's frame: tools/net_frame.hpp)
         const bool to_seat = shared.netplay && tools::net_frame::behind_own_seat(*shared.netplay, timing.frames());
         if (shared.fast || shared.catching_up || to_seat || repace) {
@@ -1189,9 +1219,12 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
                         }).detach();
                     };
                     shared.linked.capture_frame = frame + 2;
-                    if (shared.net_rec.start(base + ".inputs", shared.boards, frame + 2))
+                    if (shared.net_rec.start(base + ".inputs", shared.boards, frame + 2)) {
                         std::printf("net: this game recorded from frame %llu: %s.state and .inputs (gamerun --net-replay)\n",
                                     static_cast<unsigned long long>(frame + 2), base.c_str());
+                        std::lock_guard guard(shared.recordings_lock);
+                        shared.game_recordings.push_back(base + ".inputs");
+                    }
                     tools::net_record::prune(shared.saves_dir);
                 }
             }
@@ -1393,7 +1426,10 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
         if (shared.max_frames && networked && one_board && index == shown && shared.one_board_frame != ~0ull &&
             timing.frames() + tools::one_board::Game::kAskAhead + 5 == shared.max_frames)
             shared.parting_wanted = true;
-        if (shared.max_frames && timing.frames() >= shared.max_frames) shared.quit = true;
+        if (shared.max_frames && timing.frames() >= shared.max_frames) {
+            shared.quit = true;
+            if (shared.watchdog) shared.watchdog->arm(false); // (the frames end here: not a hang)
+        }
         if (shared.quit) throw Stop{};
         run_started = clock::now(); // (SPIKEOUT_NET_DEBUG: the next frame runs from here)
         if (timing_debug && index == shown) {
@@ -1746,6 +1782,11 @@ int grid_columns(std::size_t boards) { return boards == 1 ? 1 : 2; }
 int grid_rows(std::size_t boards) { return boards <= 2 ? 1 : 2; }
 
 std::string on_off(bool on) { return on ? "On" : "Off"; }
+// (the question and the setting's words: tools/problem_report.hpp, part 2)
+constexpr const char* kSendReportsText =
+    "After each network game, its numbers (speed, delay, rollbacks, how long datagrams take) are sent to the project, and any "
+    "problem the game noticed (out of step, a hang, a crash) with that game's recording and log, locked so only the project "
+    "can open them. The numbers carry no names or internet addresses. It helps find and fix network play's problems.";
 
 // The boards' EEPROM and backup RAM, kept between runs as a cabinet keeps
 // them: nvram/board<N>.eeprom (64 words, high byte first) and
@@ -2002,6 +2043,7 @@ int main(int argc, char** argv) {
     if (cli_sound >= 0) settings.sound_volume = cli_sound;
     if (cli_music >= 0) settings.music_volume = cli_music;
     const bool test_run = max_frames != 0; // (writes no settings)
+    const bool report_test = std::getenv("SPIKEOUT_TEST_REPORTS") != nullptr; // (tests: reports sent in a --frames run too)
 
     // (hidden until the ROM set is read, as before it was made after; shown at once if one must be chosen)
     SDL_Window* window =
@@ -2182,6 +2224,42 @@ int main(int argc, char** argv) {
 
     Shared shared;
     if (!last_crash.empty()) shared.say("THE LAST RUN CRASHED: ESC > GAME > REPORT A PROBLEM", 12);
+    // Problems noticed in network play (tools/problem_report.hpp): each a locked bundle in saves/, Report a problem takes
+    // them in. A crash of the run before: one too, with its report and dump.
+    tools::problems::Saver problems;
+    problems.start(report_folder, "Spikeout " + std::string(net::kVersion) + "\n" + tools::report::system_lines(), [&shared] {
+        // (atomics only: this runs on the saving thread; the rest is in the log's last lines)
+        return "input delay " + std::to_string(shared.input_delay.load()) +
+               (shared.one_board_frame.load() != ~0ull ? ", one board here" : ", every board here") + ", the shown board at frame " +
+               std::to_string(shared.shown_frame.load()) + "\n";
+    });
+    tools::problems::Watchdog watchdog;
+    watchdog.start(problems, [&shared] { return shared.shown_frame.load(); });
+    shared.problems = &problems, shared.watchdog = &watchdog;
+    if (!last_crash.empty()) {
+        tools::problems::Note n{"crash", "the run before crashed: " + last_crash, 0, {}, {}, {}};
+        for (const char* ext : {".txt", ".dmp"}) {
+            const std::filesystem::path p = tools::report::detail::utf8(report_folder + last_crash + ext);
+            std::error_code ec;
+            if (std::filesystem::exists(p, ec)) n.files.push_back({last_crash + ext, tools::report::detail::read_all(p)});
+        }
+        problems.note(std::move(n));
+    }
+    // (part 2: what waits sent to the project, if the player said yes: now, before any game, and after each network game)
+    tools::problems::Sender report_sender;
+    std::atomic<bool> net_game_on{false}; // (a network game running: the sender stops between files, the rest after it)
+    auto send_reports = [&] {
+        if (settings.send_reports != 1 || !net::report::available() || (test_run && !report_test)) return;
+        report_sender.send(
+            report_folder,
+            [](const std::string& what, const std::string& body, const std::string& type) {
+                const net::report::Sent s = net::report::upload(what, body, type, net::kVersion);
+                if (!s.ok) std::printf("reports: not sent: %s\n", s.error.c_str());
+                return s.ok;
+            },
+            [&net_game_on] { return !net_game_on.load(); });
+    };
+    send_reports();
     shared.boards = boards;
     shared.roms = &roms;
     shared.max_frames = max_frames;
@@ -2576,6 +2654,9 @@ int main(int argc, char** argv) {
     if (shared.old_link) link.use_old_link();
     const uint64_t build = tools::build_id(roms, tools::game_functions().size(), shared.real_netboard ? &link : nullptr);
     std::unique_ptr<NetGame> netgame;
+    // (the network game's start, for its numbers when it ends: tools/problem_report.hpp, part 2)
+    std::chrono::steady_clock::time_point net_game_began{};
+    uint64_t net_game_first_frame = 0;
     std::string net_notice; // (a line where the room's was, for a while: the host closed it)
     std::chrono::steady_clock::time_point net_notice_until{};
     std::chrono::steady_clock::time_point watch_banner_until{}; // (a spectator's banner: whom it watches, the keys)
@@ -2659,6 +2740,7 @@ int main(int argc, char** argv) {
     int own_country = 0;
     auto new_netgame = [&] {
         netgame = std::make_unique<NetGame>(build);
+        net_game_on = true; // (in a room: a join's state may be coming; reports wait until it's left)
         std::vector<uint8_t> eeprom, backup;
         {
             std::lock_guard<std::mutex> guard(shared.lock);
@@ -2822,6 +2904,10 @@ int main(int argc, char** argv) {
             focus = shared.local;
         });
         netgame->running = true;
+        // (problems in this game: a bundle each, tools/problem_report.hpp; the hang watchdog on while it runs)
+        netgame->play->on_problem([&problems](const std::string& kind, const std::string& what, uint64_t frame) { problems.note(kind, what, frame); });
+        watchdog.arm(true);
+        net_game_began = std::chrono::steady_clock::now(), net_game_first_frame = shared.shown_frame.load();
         if (shared.spectating)
             std::printf("spikeout: watching a network game of %u cabinets%s\n", start.seats,
                         start.state_frame ? " (in progress)" : "");
@@ -2835,6 +2921,7 @@ int main(int argc, char** argv) {
     auto net_resync = [&](const net::StartInfo& again) {
         auto unpacked = net::decompress(again.state);
         if (!unpacked || !again.state_frame) return;
+        watchdog.arm(false); // (the boards stopped and set up again: no frames meanwhile)
         reset_game([&] {
             shared.net_state = std::move(*unpacked);
             netgame->table.reset();
@@ -2843,6 +2930,7 @@ int main(int argc, char** argv) {
             shared.rollback_from = ~0ull; // (rollback: none until caught up)
             shared.catching_up = true;
         });
+        watchdog.arm(true);
         std::printf("spikeout: put back in step with the host (frame %llu)\n", static_cast<unsigned long long>(*again.state_frame));
     };
     // Leaving: back to this computer's own cabinets, as they were.
@@ -2857,8 +2945,33 @@ int main(int argc, char** argv) {
         std::printf("spikeout: %s\n", shared.parted ? "this board's state sent, leaving" : "leaving without this board's state sent");
         shared.parting_wanted = false, shared.parted = false, shared.parting_frame = 0;
     };
+    // A network game's numbers as it ends (tools/problem_report.hpp, part 2): what it measured, no names or addresses.
+    auto game_stats = [&] {
+        using tools::problems::json_text;
+        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - net_game_began).count();
+        std::string j = "{\"version\":" + json_text(net::kVersion) + ",\"os\":" + json_text(tools::report::os_name()) +
+                        ",\"cpu\":" + json_text(tools::report::cpu_name()) +
+                        ",\"threads\":" + std::to_string(std::thread::hardware_concurrency()) +
+                        ",\"seats\":" + std::to_string(shared.boards) + ",\"spectator\":" + (shared.spectating ? "true" : "false") +
+                        ",\"internet\":" + (netgame->internet ? "true" : "false") + ",\"host\":" + (netgame->host ? "true" : "false") +
+                        ",\"one_board\":" + (shared.one_board_frame.load() != ~0ull ? "true" : "false") +
+                        ",\"rollback\":" + (shared.rollback ? "true" : "false") +
+                        ",\"input_delay\":" + std::to_string(shared.input_delay.load()) +
+                        ",\"seconds\":" + std::to_string(static_cast<long long>(seconds)) +
+                        ",\"frames\":" + std::to_string(shared.shown_frame.load() - net_game_first_frame) + ",\"round_trips\":[";
+        const auto trips = netgame->session().round_trips();
+        for (std::size_t s = 0; s < trips.size() && s < shared.boards; ++s) j += (s ? "," : "") + std::to_string(trips[s]);
+        j += "],\"rollback_report\":" + json_text(shared.rollback ? shared.rollback->report() : std::string());
+        j += ",\"node_check\":" + json_text(netgame->play->node_check().report()) + ",\"problems\":{";
+        bool first = true;
+        for (const auto& [kind, n] : problems.counts_by_kind()) j += (first ? "" : ",") + json_text(kind) + ":" + std::to_string(n), first = false;
+        return j + "}}";
+    };
     auto net_leave = [&] {
         if (!netgame) return;
+        watchdog.arm(false); // (the boards stopped and set up again below: no frames meanwhile)
+        netgame->play->on_problem(nullptr);
+        if (netgame->running && settings.send_reports == 1 && (!test_run || report_test)) tools::problems::keep_stats(report_folder, game_stats());
         parting();
         netgame->session().leave();
         if (netgame->running)
@@ -2876,6 +2989,17 @@ int main(int argc, char** argv) {
             });
         netgame.reset();
         if (set_up_display) set_up_display();
+        { // (its recordings closed now: their inputs to send, if the player said yes; the list emptied for the next game)
+            std::vector<std::string> recordings;
+            {
+                std::lock_guard guard(shared.recordings_lock);
+                recordings = std::exchange(shared.game_recordings, {});
+            }
+            if (settings.send_reports == 1 && (!test_run || report_test))
+                for (const std::string& r : recordings) tools::problems::keep_inputs(report_folder, r);
+        }
+        net_game_on = false;
+        send_reports(); // (the game over: its numbers, inputs and any problem bundle sent, if the player said yes)
     };
 #ifdef SPIKEOUT_GPU
     set_up_display = set_up_3d;
@@ -3978,8 +4102,29 @@ int main(int argc, char** argv) {
         if (netgame) p.items.erase(p.items.begin(), p.items.begin() + 2); // (in a room: no other until it's left)
         p.items.push_back({"Player name", "The name the other players see. Enter: change it.", [&] { return player_name(settings); },
                            {}, [&] { menu.push(name_page()); }});
+        if (net::report::available())
+            p.items.push_back({"Send reports", kSendReportsText, [&] { return on_off(settings.send_reports == 1); },
+                               [&](int) {
+                                   settings.send_reports = settings.send_reports == 1 ? 0 : 1;
+                                   changed();
+                               }});
         // (no input delay, board mode or rollback to set: chosen by themselves, net_begin; the owner's choice)
         p.items.push_back(back_item());
+        return p;
+    };
+    // Asked once, the first time Network play opens: may the game send its network numbers and the problems it notices
+    // (tools/problem_report.hpp, part 2)? Either answer goes on to Network play; "Send reports" there changes it.
+    auto ask_reports_page = [&] {
+        ui::MenuPage p{"Help improve network play?", kSendReportsText, {}};
+        auto answer = [&](int yes) {
+            settings.send_reports = yes;
+            changed();
+            menu.pop();
+            menu.push(network_page());
+        };
+        p.items.push_back({"Yes, send them", "Sent after each network game, never during one. You can change this in Network play.", {},
+                           {}, [answer] { answer(1); }});
+        p.items.push_back({"No", "Nothing is sent. Problems are still saved here, for Report a problem.", {}, {}, [answer] { answer(0); }});
         return p;
     };
     auto root_page = [&] {
@@ -4015,7 +4160,13 @@ int main(int argc, char** argv) {
                                    ". Opens its page on GitHub, with the downloads. Players need the same version to play together.",
                                {}, {}, [&] { SDL_OpenURL(newer_version->page.c_str()); }});
         p.items.push_back({"Network play", netgame ? "The game you're in." : "Play with others, on this network or the internet.", {},
-                           {}, [&] { menu.push(netgame ? lobby_page() : network_page()); }});
+                           {}, [&] {
+                               // (the first time: asked once whether reports may be sent, tools/problem_report.hpp part 2)
+                               // (never in a test run: its menu keys are scripted)
+                               if (!netgame && settings.send_reports < 0 && net::report::available() && !test_run)
+                                   return menu.push(ask_reports_page());
+                               menu.push(netgame ? lobby_page() : network_page());
+                           }});
         p.items.push_back({"Display", "Render scale, antialiasing, quads, the 3D renderer, CRT colours, screen filter, fullscreen.", {}, {},
                            [&] { menu.push(display_page()); }});
         p.items.push_back({"Sound", "The volumes, and the speakers: stereo, or the cabinet's front and rear apart.", {}, {}, [&] { menu.push(sound_page()); }});
@@ -5003,8 +5154,25 @@ int main(int argc, char** argv) {
     (void)menu_ready;
 #endif
     shared.paused = false;
+    watchdog.arm(false); // (closing: the boards stop and frames end; not a hang)
+    // (an upload going on stopped at once: closing never waits for one; what it was sending stays to go next time.
+    // Tests sending at the end, SPIKEOUT_TEST_REPORTS: let finish)
+    if (!report_test) net::report::cancel_uploads();
+    // (closed in a network game: its numbers and inputs kept to send at the next start, if the player said yes)
+    const bool keep_reports = netgame && netgame->running && settings.send_reports == 1 && (!test_run || report_test);
+    if (keep_reports) tools::problems::keep_stats(report_folder, game_stats());
     if (netgame) parting(), netgame->session().leave();
     stop_games();
+    if (keep_reports) {
+        shared.net_rec.close();
+        std::lock_guard guard(shared.recordings_lock);
+        for (const std::string& r : shared.game_recordings) tools::problems::keep_inputs(report_folder, r);
+        if (report_test) report_sender.send(report_folder, [](const std::string& what, const std::string& body, const std::string& type) {
+            const net::report::Sent s = net::report::upload(what, body, type, net::kVersion);
+            std::printf("reports: %s %s\n", what.c_str(), s.ok ? "sent" : s.error.c_str());
+            return s.ok;
+        }); // (tests: sent before the window closes; the sender's thread joined as it goes)
+    }
     if (!shared.spectating) keep_seat(); // (a network game: only this player's board is ours to keep; a spectator's: none)
     if (!test_run && !shared.netplay) save_nvram(data_folder, shared, boards); // (a network game's boards aren't ours to keep)
     netgame.reset();
