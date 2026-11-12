@@ -15,6 +15,7 @@ four-player co-op over the internet, one player a PC, as four linked cabinets pl
 
 <p align="center">
   <a href="https://github.com/tastyrepublic/spikeout-recomp/releases/latest">Download</a> ·
+  <a href="#latest-update">What's new</a> ·
   <a href="#play">Install</a> ·
   <a href="#controls">Controls</a> ·
   <a href="#online-play">Online play</a> ·
@@ -32,6 +33,25 @@ four-player co-op over the internet, one player a PC, as four linked cabinets pl
 > Supermodel's `spikeofe` set (`spikeofe.zip`). It is read on your computer, and the game's program is translated
 > there on the first start. An unofficial fan project, not made, approved or supported by SEGA, and not affiliated
 > with it.
+
+## Latest update
+
+**0.1.0-preview5** ([all the details](https://github.com/tastyrepublic/spikeout-recomp/releases/tag/v0.1.0-preview5))
+
+- **Thank you for the reports:** in its first day, preview4's automatic reports brought in about 170 network games
+  from players in Hong Kong, Taiwan, Japan, Canada, Australia and the UK, and showed us problems we couldn't see on
+  our own machines.
+- **Watching:** switching between players is smoother (the picture could stand still for seconds), and a game that
+  never answers now gives up after 45 seconds with a reason.
+- **Screenshots (F12)** now look like the game on your screen: your render scale, picture shape, CRT colours and
+  filter.
+- **Esc > Game > Game folder** shows where your settings, save states, screenshots and logs are, and opens it.
+- **XInput sticks** always show Xbox button names.
+- **Reports that find more:** any crash or freeze, also at the start; what a freeze was waiting for; when each
+  player's buttons arrived over the network; how smooth each game was; and the layout of a stick you set up yourself.
+  The game asks again once, as the question now covers more.
+- **Next:** a room freezing when a late player takes their cabinet, then a slow PC slowing everyone (see
+  [Roadmap](#roadmap)).
 
 ## About
 
@@ -58,8 +78,8 @@ translation is checked against the project's own ahead-of-time build by recordin
 | Save states | Working (one player, not in network games) |
 | Reporting a problem from the game | Working: a GitHub issue sent from the menu, or a zip (see [Reporting a problem](#reporting-a-problem)) |
 | Windows 10 / 11 (64-bit) | Working |
-| Linux / Steam Deck (x86-64) | Working; built in Valve's Steam Runtime SDK, for Linux from about 2020 on; the Steam Deck not tried yet |
-| macOS 13.3 or later (Apple silicon and Intel) | First builds: not tried on a Mac yet, please report how they run |
+| Linux / Steam Deck (x86-64) | Working; built in Valve's Steam Runtime SDK, for Linux from about 2020 on; players run it on Steam Decks (SteamOS), still being tested by them through the automatic reports |
+| macOS 13.3 or later (Apple silicon and Intel) | Working on players' Apple silicon Macs, including network play; still being tested by them through the automatic reports (Intel Macs: please report how they run) |
 
 **This is a preview.** Please report anything that looks or plays differently from the arcade: see
 [Reporting a problem](#reporting-a-problem).
@@ -106,10 +126,16 @@ The full guide, step by step (controls, the picture, online play, updating): [do
 3. Choose your `spikeofe.zip` when it asks.
 
 **Where things are kept:** your settings, the cabinets' settings and rankings, the translated game and the game's
-log (`spikeout.log`) are in your user data folder (Windows `%APPDATA%\spikeout-recomp\Spikeout`, Linux
-`~/.local/share/spikeout-recomp/Spikeout`, macOS `~/Library/Application Support/spikeout-recomp/Spikeout`). Put an
-empty file named `portable.txt` next to the program and they're kept in its folder instead. Save states
-(<kbd>F9</kbd>) and screenshots (<kbd>F12</kbd>) go in the folder the game was started from.
+log (`spikeout.log`) are in your user data folder:
+
+| System | Folder |
+| --- | --- |
+| Windows | `C:\Users\<you>\AppData\Roaming\spikeout-recomp\Spikeout` (type `%APPDATA%\spikeout-recomp\Spikeout` in Explorer's address bar) |
+| Linux, Steam Deck | `~/.local/share/spikeout-recomp/Spikeout` |
+| macOS | `~/Library/Application Support/spikeout-recomp/Spikeout` |
+
+Save states (<kbd>F9</kbd>) go in its `saves` folder, screenshots (<kbd>F12</kbd>) in its `screenshots` folder. Put an
+empty file named `portable.txt` next to the program and all of it is kept in the program's folder instead.
 
 ## Controls
 
@@ -309,9 +335,11 @@ If the game crashes, it writes a crash report in its data folder, and says so at
 Network play is the hardest part of this project, and the part that needs the most real games to get right. On our
 own test machines a game behaves the same every time; with real players it doesn't: different PCs, different
 distances, different networks, players joining, leaving, continuing. Most network bugs only show there, and by the
-time a player writes a report, what caused it is long gone. So the game can help, if you let it.
+time a player writes a report, what caused it is long gone. The same goes for crashes and freezes on PCs we don't
+have. So the game can help, if you let it.
 
-**The first time you open Network play, the game asks whether it may send reports.** If you say yes:
+**The first time you start the game, it asks whether it may send reports.** (If you said yes in 0.1.0-preview4, which
+asked about network play only, it asks once more, because it now covers more.) If you say yes:
 
 - **After each network game**, never during one, it sends that game's numbers: how smoothly it ran, the input delay
   Auto chose and what its tries did, how often rollback corrected a guess and how long that took, how long messages
@@ -321,21 +349,31 @@ time a player writes a report, what caused it is long gone. So the game can help
   next presses before they arrive; real players' presses are what we need to make those guesses better, so the game
   goes back to fix them less often (fewer stutters).
 - **Problems the game noticed itself**, with what's needed to find their cause: the games on two PCs drifting apart,
-  the game standing still (with where it was stuck), a long stall, a crash. With the game's recording, we can replay
-  the exact game that went wrong and find the line of code responsible, without asking you to make it happen again.
+  the game or its start standing still (with where every part of it was stuck), a long stall, a crash, in network play
+  or alone. With the logs and the game's recording, we can replay the exact game that went wrong and find the line of
+  code responsible, without asking you to make it happen again. A problem's report also holds the last few minutes of
+  when each player's buttons arrived over the network, so a freeze can be rebuilt as your PC had it.
+- **Your controller's layout, if you set it up yourself** in Controls: its name, its USB IDs and the button you chose
+  for each action (nothing about you). That's how a stick the game doesn't know can get the right layout built in,
+  for everyone after you.
 
 What's protected:
 
-- The numbers carry no names and no internet addresses. Everything else (the recordings, the presses, logs) is
+- The numbers and controller layouts carry no names and no internet addresses. Everything else (the recordings, the presses, logs) is
   locked before it leaves your PC, so that only the project can open it.
 - Nothing is sent while you play; the game never waits for it. It goes after the game ends, a little at a time.
-- You can change your answer at any time: **Esc > Network play > Send reports**. With it off, problems are still
+- You can change your answer at any time: **Esc > Game > Send reports** (or Network play > Send reports). With it off, problems are still
   saved on your PC (the newest ten, in `saves/`), for Report a problem.
 
 Every report helps: most of the network fixes so far came from a game that went wrong and could be replayed.
 
 ## Roadmap
 
+- Network play, next: a room no longer freezing when a late player takes their cabinet; then a slow PC no longer
+  slowing everyone (the room showing who holds it and why, a slow PC catching up by skipping pictures, the others
+  slowed only as a last resort, weak PCs running their own cabinet only, and the host able to move a player who holds
+  everyone to watching)
+- Smarter guessing of the other players' buttons, learnt from real games' presses (fewer corrections, fewer stutters)
 - macOS: signed and notarized apps
 - Smooth motion: pictures made between the game's frames, for high-refresh screens
 - HD texture packs: the game's textures replaced by sharper ones you make or share (off by default; packs are never

@@ -244,6 +244,8 @@ public:
     bool running() const { return started_; }
     // Our cabinet ours: from the start, or (joined in progress) once taken.
     bool seated() const;
+    // Joining or watching: the host (or the room's new host) has let us in; hosting: true.
+    bool greeted() const;
 
     // This machine's player's inputs, set at the end of `frame` (in order;
     // frames skipped hold the last).

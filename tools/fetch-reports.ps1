@@ -46,7 +46,9 @@ foreach ($kind in 'problems', 'inputs') { # (problem bundles, and games' inputs 
     "$(@($files | Where-Object { $_ -like '*\inputs\*' }).Count) games' inputs"
 if ($files.Count) {
     $exe = if ($Gamerun) { $Gamerun } else { Join-Path (Split-Path $PSScriptRoot) 'build\gamerun.exe' }
-    if ((Test-Path $exe) -and (Test-Path $KeyFile)) { & $exe --unlock @files --report-key $KeyFile }
+    if ((Test-Path $exe) -and (Test-Path $KeyFile)) { # (20 at a time: all at once can pass Windows' command line limit)
+        for ($i = 0; $i -lt $files.Count; $i += 20) { & $exe --unlock @($files[$i..([math]::Min($i + 19, $files.Count - 1))]) --report-key $KeyFile }
+    }
     else { "to open them: gamerun --unlock FILE.locked --report-key $KeyFile" }
 }
 # (this month's use of R2's free operations and the space, as the lobby counts them: it refuses past half of each)

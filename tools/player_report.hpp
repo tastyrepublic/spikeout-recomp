@@ -10,6 +10,7 @@
 // where the output went before: a console, a script's file), each line with the seconds since the start.
 #pragma once
 
+#include "net/event_log.hpp" // (the network timeline in the zip)
 #include "net/report.hpp"
 #include "report_lock.hpp" // (a network game's recording in the zip, locked)
 
@@ -29,6 +30,7 @@
 #else
 #include <execinfo.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sys/utsname.h>
 #include <unistd.h>
@@ -172,15 +174,26 @@ inline void pump() {
 }
 } // namespace detail
 
-// The data folder's log, started first thing in main: the last run's kept as spikeout-prev.log. False: no log (the
-// output stays where it was).
+inline void name_thread(const char* name); // (below: the log's thread names itself)
+
+// The earlier runs' logs kept: spikeout-prev.log (1, the run before), spikeout-prev2.log ... (kOldLogs).
+constexpr int kOldLogs = 4;
+inline std::string old_log_name(int i) { return i <= 1 ? "spikeout-prev.log" : "spikeout-prev" + std::to_string(i) + ".log"; }
+
+// The data folder's log, started first thing in main: the last runs' kept as spikeout-prev.log, -prev2.log... False:
+// no log (the output stays where it was).
 inline bool start_log(const std::string& folder) {
     detail::Log& l = detail::log();
     l.folder = folder;
     std::error_code ec;
     const std::filesystem::path path = detail::utf8(folder + "spikeout.log");
-    if (std::filesystem::exists(path, ec))
+    if (std::filesystem::exists(path, ec)) {
+        // (the last runs' logs kept, five in all with this one: a run that went wrong was lost after two more starts,
+        // issue 16; spikeout-prev.log the run before, then spikeout-prev2.log... spikeout-prev4.log)
+        for (int i = kOldLogs; i >= 2; --i)
+            std::filesystem::rename(detail::utf8(folder + old_log_name(i - 1)), detail::utf8(folder + old_log_name(i)), ec);
         std::filesystem::rename(path, detail::utf8(folder + "spikeout-prev.log"), ec);
+    }
     l.file = detail::open(folder + l.name, "wb");
     // (spikeout.log in use: the game open twice, or another program holding the file. It was no log at all, the output
     // only where it went before (2026-11-11: the owner's two network games, started from a terminal: nothing in the
@@ -231,7 +244,10 @@ inline bool start_log(const std::string& folder) {
 #endif
     std::setvbuf(stderr, nullptr, _IONBF, 0);
     l.read_end = ends[0];
-    l.thread = std::thread(detail::pump);
+    l.thread = std::thread([] {
+        name_thread("the log");
+        detail::pump();
+    });
     // (at the end: the pipe closed, so that the thread writes the last lines and stops)
     std::atexit([] {
         detail::Log& g = detail::log();
@@ -254,8 +270,47 @@ inline bool start_log(const std::string& folder) {
     return true;
 }
 
+namespace detail {
+// Each named thread by the system's id for it (a hang report's every-thread stacks say which is which).
+inline uint64_t system_thread_id() {
+#ifdef _WIN32
+    return GetCurrentThreadId();
+#elif defined(__linux__)
+    return static_cast<uint64_t>(::gettid());
+#else
+    uint64_t id = 0;
+    pthread_threadid_np(nullptr, &id);
+    return id;
+#endif
+}
+struct ThreadNames {
+    std::mutex lock;
+    std::vector<std::pair<uint64_t, const char*>> names;
+};
+inline ThreadNames& thread_names() {
+    static ThreadNames* t = new ThreadNames; // (never destroyed: threads may still name themselves at exit)
+    return *t;
+}
+} // namespace detail
+
 // This thread's name in a crash report ("the window", "game board 1"; a literal, kept). Unnamed: "another thread".
-inline void name_thread(const char* name) { detail::thread_name() = name; }
+inline void name_thread(const char* name) {
+    detail::thread_name() = name;
+    detail::ThreadNames& t = detail::thread_names();
+    std::lock_guard guard(t.lock);
+    const uint64_t id = detail::system_thread_id();
+    for (auto& [i, n] : t.names)
+        if (i == id) return void(n = name);
+    t.names.push_back({id, name});
+}
+// A thread's name by the system's id ("" if it never said).
+inline std::string thread_name_of(uint64_t id) {
+    detail::ThreadNames& t = detail::thread_names();
+    std::lock_guard guard(t.lock);
+    for (const auto& [i, n] : t.names)
+        if (i == id) return n;
+    return {};
+}
 
 inline std::vector<std::string> last_lines() {
     detail::Log& l = detail::log();
@@ -691,11 +746,16 @@ inline std::filesystem::path make_report(const std::string& folder, const std::s
     files.push_back({"system.txt", detail::scrubbed(about + system_lines() + controllers_now())});
     if (!words.empty()) files.push_back({"what-happened.txt", detail::scrubbed(words)}); // (the player's words)
     const std::string this_log = detail::log().name; // (spikeout.log, or this run's own when that was in use)
-    for (const std::string& name : {this_log, std::string("spikeout-prev.log"), std::string("settings.ini")}) {
+    std::vector<std::string> names{this_log};
+    for (int i = 1; i <= kOldLogs; ++i) names.push_back(old_log_name(i));
+    names.push_back("settings.ini");
+    for (const std::string& name : names) {
         const fs::path p = detail::utf8(folder + name);
         std::error_code ec;
         if (fs::exists(p, ec)) files.push_back({name, detail::scrubbed(detail::read_all(p))});
     }
+    // (this run's network timeline: when each player's inputs came, net/event_log.hpp)
+    if (const std::string ev = net::events::text(); !ev.empty()) files.push_back({"net-events.txt", detail::scrubbed(ev)});
     std::vector<fs::path> crashes; // (the newest two crashes' files)
     std::error_code ec;
     for (const auto& f : fs::directory_iterator(detail::utf8(folder), ec))
@@ -819,6 +879,8 @@ inline net::report::Report github_report(const std::string& folder, const std::s
     add("spikeout-prev.log (the run before)", detail::utf8(folder + "spikeout-prev.log"));
     if (!crash.empty()) add(crash.filename().string(), crash);
     add("settings.ini", detail::utf8(folder + "settings.ini"));
+    // (the earlier runs' too, while comments are left: a problem a few starts back, issue 16)
+    for (int i = 2; i <= kOldLogs; ++i) add(old_log_name(i) + " (" + std::to_string(i) + " runs before)", detail::utf8(folder + old_log_name(i)));
     return r;
 }
 

@@ -88,8 +88,11 @@ step), while every board still runs whole, before the hand-over to one board (ch
 2026-11-11, all one board: each recorded). Its replay (gamerun --net-replay) runs every board whole: the game the
 players had, not the side runs' own mistakes (tools/onepc-diff.ps1 -MadeBoard for those).
 
-Part 2, sent by the game when the player allows it (settings.ini send_reports: -1 not asked, 0 no, 1 yes). Asked once,
-the first time Network play opens ("Help improve network play?"); Network play > Send reports changes it. With yes:
+Part 2, sent by the game when the player allows it (settings.ini send_reports: -1 not asked, 0 no, 1 yes to network
+play's only, 2 yes to every problem). Asked once, at the first start since 2026-11-12 ("Help improve the game?"; before,
+the first time Network play opened, "Help improve network play?", for network play's only: a 1 is asked again); Game >
+Send reports and Network play > Send reports change it (to 0 or 2). A 1 sends every kind but startup and hang-alone
+(Sender::send's `everything`). With yes:
 after each network game, its numbers (a JSON line: version, OS, CPU, seats, one board or every, rollback, input delay,
 seconds, frames, round trips, the rollback's and the node check's reports, the problems by kind; no names, no
 addresses) wait in saves/outbox/; then, and at each start, a thread of its own sends them and the problem bundles not
@@ -122,3 +125,46 @@ Tests: SPIKEOUT_TEST_HANG=FRAME:SECONDS (the shown board's thread stood still th
 game: a hang over 10 s), SPIKEOUT_TEST_STALL=FRAME:MS (a frame that late), SPIKEOUT_TEST_POKE (a byte changed on one
 machine: out of step), NODE_SPOIL (a made packet spoiled: a node difference); SPIKEOUT_TEST_REPORTS=1 (a --frames run
 sends too), SPIKEOUT_UPLOAD_URL=http://127.0.0.1:PORT/v1 (a local lobby: `npx wrangler dev`).
+
+## Better logs and reports (2026-11-12)
+
+The owner's request after issues 16 and 18 ("we still need better debug logs and reports, both automatic and by hand"):
+what those two reports lacked, added.
+
+- **Every message the player sees is in the log.** The network room page's (NetGame::set_status, "net: shown: ...";
+  a failure "net: failed: ..."), the notices at the bottom (Shared::say, "notice: ..."). Issue 18's second watch failed
+  with its reason on the screen only.
+- **A join or a watch the host never answers** (Session::greeted: no welcome yet) says how long it has waited every
+  15 s and gives up after 45 s, with a reason. It waited for ever before, silently.
+- **The start's steps** ("start: making the window", "reading the ROM set", "translating the game", "closing the start
+  screen", "handing the window to the GPU", "the GPU is ready", "setting up the sound", "starting the game", "the first
+  picture shown"), each with the log's time, and **watched**: the problem saver and the hang watchdog start first thing
+  now, and a step standing still 60 s (120 s for the translation, beaten by each part done) is a "startup" problem
+  bundle, with the step, every thread's stack and a minidump (issue 16's first start standing still at 90%+ left
+  nothing). SPIKEOUT_TEST_START_HANG=SECONDS holds the first step that long (tested: a bundle at 60 s, the start then
+  going on).
+- **A game alone is watched too**: the watchdog on while its frames run (not with the menu open, nor once a board has
+  stopped), its hangs "hang-alone".
+- **Every thread's stack in a hang** (Watchdog::other_stacks): Windows lists the process's threads (Toolhelp) and walks
+  each, stopped, into a fixed array (nothing allocated while it's stopped: it may hold the heap's lock), Linux asks each
+  of /proc/self/task by SIGUSR2 (SA_RESTART), macOS the stuck one only. Threads named for it (report::name_thread kept
+  by the system's id): the window, the boards, the translation, the log, the saver, the sender, the watchdog.
+- **The last five logs** (spikeout.log, spikeout-prev.log, spikeout-prev2.log ... prev4); Report a problem takes them
+  all (the zip; the GitHub issue's comments while there's room).
+- **Each board's state once a minute in network play** without detailed logging (its logic count, inputs, network
+  board; "shown", "on side runs").
+- **Reading a report's stacks**: tools/symbolize.ps1 -File FILE [-Version V] downloads the release's program with its
+  symbols (the draft release symbols-vV, which the release workflow makes) and gives each "spikeout.exe+0x..." its
+  function. Its first use found issue 18's freeze (below).
+
+### Issue 18: a spectator's freeze at a seat switch, found and fixed
+
+A spectator's every board paces itself only while shown (run_game's pace()). A board never shown since the join kept
+its pacing's start from then; joined in progress, it had caught up fast (466 frames in 1.1 s in issue 18's log, 1,266
+in 4.3 s in a Taiwan report), so once shown, it thought itself that far ahead and held each frame until the clock caught
+up: 7 s in issue 18 ("a frame 7023 ms late"), over 10 s in the Taiwan one (its hang bundle's stack, symbolized: the
+game thread in pace()'s wait, steady_clock::now). And each board's speed measure counted the time it was out of view as
+one frame that late (the "806,251 ms" and "85,059 ms" stalls, 1,078 stutters). Now a board shown again starts its
+pacing and its measure afresh (repace). Tested with two windows, a spectator switching seats 60 times: every switch
+gave a 0.5-0.8 s "stutter" before, none over 150 ms after. A spectator's first frames from a game's start (waiting
+kWatchLag behind the players by design, ~2 s) aren't a stall either.

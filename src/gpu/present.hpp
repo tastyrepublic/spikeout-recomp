@@ -93,7 +93,18 @@ public:
     // texture (width x height pixels): the menu.
     std::function<void(SDL_GPUCommandBuffer*, SDL_GPUTexture*, uint32_t, uint32_t)> overlay;
 
+    // A screenshot (F12): the next picture also drawn, as the window draws it (its looks, its shape) but without
+    // the overlay, at width x height, and read back; take_capture gives it (0xAARRGGBB), once.
+    void request_capture(int width, int height) { capture_width_ = width, capture_height_ = height; }
+    bool take_capture(std::vector<uint32_t>& pixels, int& width, int& height);
+
 private:
+    void pass_into(SDL_GPUCommandBuffer* cmd, SDL_GPUGraphicsPipeline* pipeline, std::initializer_list<SDL_GPUTexture*> inputs,
+                   int width, int height, uint32_t smooth_input, int extend, SDL_GPUTexture* target, uint32_t tw, uint32_t th);
+    void capture(SDL_GPUCommandBuffer* cmd, SDL_GPUGraphicsPipeline* pipeline, std::initializer_list<SDL_GPUTexture*> inputs,
+                 int width, int height, uint32_t smooth_input, int extend);
+    int capture_width_ = 0, capture_height_ = 0, captured_width_ = 0, captured_height_ = 0;
+    std::vector<uint32_t> captured_;
     void resize(int width, int height);
     bool upload(SDL_GPUCommandBuffer* cmd, std::initializer_list<std::span<const uint32_t>> frames, int width, int height);
     void draw(SDL_GPUCommandBuffer* cmd, SDL_GPUGraphicsPipeline* pipeline, std::initializer_list<SDL_GPUTexture*> inputs,

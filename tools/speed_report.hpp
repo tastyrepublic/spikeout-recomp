@@ -28,6 +28,8 @@ public:
 
     // A gap over `ms` told as it ends (the frame, its gap): the window's problem bundles (tools/problem_report.hpp).
     void on_long_gap(double ms, std::function<void(uint64_t frame, double gap)> fn) { long_gap_ms_ = ms, long_gap_ = std::move(fn); }
+    // Each counted gap (ms; not a restart's): the window's network game numbers.
+    std::function<void(double gap)> on_gap;
     // A frame shown (paced): `frame` its number. `restart`: the pacing started again (catching up, a join's load):
     // the gap to it isn't counted.
     void frame_end(uint64_t frame, bool restart = false) {
@@ -45,6 +47,7 @@ public:
             if (each) std::printf("stutter: frame %llu, %.1f ms\n", static_cast<unsigned long long>(frame), gap);
         }
         worst_ = std::max(worst_, gap), total_worst_ = std::max(total_worst_, gap);
+        if (on_gap) on_gap(gap);
         if (long_gap_ && gap > long_gap_ms_) long_gap_(frame, gap);
         total_to_ = frame, total_end_ = now;
         const double secs = std::chrono::duration<double>(now - second_at_).count();

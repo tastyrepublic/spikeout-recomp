@@ -3,7 +3,8 @@
 // then, locked to the project owner's key (tools/report_lock.hpp), in the data folder's saves/:
 //   problem-<time>-<kind>.zip.locked   (gamerun --unlock FILE --report-key KEY gives the zip back)
 // Kinds: desync (this machine's boards differ from another's), node (a made packet differs from its real one: one board a
-// PC), hang (the game stood still kHangSeconds), stall (a frame over kStallMs late), crash (the run before crashed).
+// PC), hang (the game stood still kHangSeconds), stall (a frame over kStallMs late), crash (the run before crashed),
+// startup (the start stood still: Watchdog::set_step), hang-alone (a hang in a game alone, no network game).
 // In the zip: problem.txt (what, when, the counts), the log's last lines, the newest network game's recording
 // (saves/net-game-*.inputs and .state), and for a hang every thread's stack (hang-stacks.txt; Windows: hang.dmp too).
 // Report a problem takes the newest few in (tools::report::make_report); part 2 sends them by itself if the player
@@ -13,6 +14,7 @@
 // At most one a kind every kSpacing seconds, kMaxRun a run; the newest kKeep kept.
 #pragma once
 
+#include "net/event_log.hpp"
 #include "player_report.hpp"
 #include "report_lock.hpp"
 
@@ -34,10 +36,14 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <tlhelp32.h> // (every thread listed, for a hang's stacks)
 #else
 #include <csignal>
+#include <cstdlib>
 #include <execinfo.h>
 #include <pthread.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #endif
 
 namespace tools::problems {
@@ -64,7 +70,10 @@ public:
     void start(const std::string& folder, std::string about, std::function<std::string()> counts) {
         folder_ = folder, about_ = std::move(about), counts_ = std::move(counts);
         if (!lock::owner_key()) return; // (no key built in: nothing could be locked, so nothing is kept)
-        thread_ = std::thread([this] { run(); });
+        thread_ = std::thread([this] {
+            report::name_thread("the problem saver");
+            run();
+        });
     }
     ~Saver() {
         {
@@ -122,6 +131,8 @@ private:
         for (const std::string& line : report::last_lines()) lines += line + "\n";
         files.push_back({"log-last-lines.txt", report::detail::scrubbed(lines)});
         if (!n.stacks.empty()) files.push_back({"hang-stacks.txt", n.stacks});
+        // (the network's last minutes, when each player's inputs came: net/event_log.hpp; gamerun --net-arrivals)
+        if (const std::string ev = net::events::text(); !ev.empty()) files.push_back({"net-events.txt", report::detail::scrubbed(ev)});
         if (!n.dump.empty()) files.push_back({"hang.dmp", std::string(n.dump.begin(), n.dump.end())});
         for (const auto& f : n.files) files.push_back(f);
         // (the newest network game's recording: the state from its start, the inputs up to now)
@@ -194,9 +205,11 @@ inline std::vector<std::filesystem::path> newest(const std::string& folder, std:
 }
 
 // ---- A hang: the game standing still ----
-// The game thread beats (each frame it finishes); a watchdog thread looks once a second while `armed` (a network game
-// going on), and when no beat came for kHangSeconds, takes the game thread's stack (and on Windows a minidump of every
-// thread) and notes a hang. Once per hang: armed again when it beats again.
+// The game thread beats (each frame it finishes); a watchdog thread looks once a second while `armed` (a game going on,
+// or the start), and when no beat came for its limit (kHangSeconds in a game), takes the stuck thread's stack, every
+// other thread's (a hang is usually one thread waiting for another), and on Windows a minidump, and notes a hang. Once
+// per hang: armed again when it beats again. During the start (set_step: what it is doing, the limit longer) the notes
+// are "startup" ones instead (issue 16: a first start standing still, nothing kept to say where).
 class Watchdog {
 public:
     // On the game thread, each frame it finishes: a beat, and this thread the one to look at (the shown board's: it
@@ -213,26 +226,40 @@ public:
         DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &h, 0, FALSE, DUPLICATE_SAME_ACCESS);
         if (thread_) CloseHandle(thread_);
         thread_ = h;
+        thread_sys_ = GetCurrentThreadId();
 #else
         thread_ = pthread_self();
         have_thread_ = true;
-        static std::once_flag handler;
-        std::call_once(handler, [] {
-        struct sigaction sa {};
-        sa.sa_handler = [](int) { // (on the stuck thread: its stack's return addresses, read by the watchdog)
-            caught().n = backtrace(caught().frames, 64);
-            caught().done.store(true);
-        };
-        sigemptyset(&sa.sa_mask);
-        sigaction(SIGUSR2, &sa, nullptr);
-        });
+        thread_sys_ = report::detail::system_thread_id();
 #endif
     }
     void beat() { beats_.fetch_add(1, std::memory_order_relaxed); }
     void arm(bool on) { armed_ = on; }
+    // A game alone (no network game): its hangs noted as "hang-alone" (sent only with the player's yes to every problem).
+    void set_alone(bool alone) { alone_ = alone; }
+    // The start: what it is doing now (a literal; nullptr once the game runs) and how long it may stand still.
+    void set_step(const char* step, int seconds = kHangSeconds) {
+        step_ = step, limit_ = seconds;
+        beat();
+    }
     void start(Saver& saver, std::function<uint64_t()> frame) {
         saver_ = &saver, frame_ = std::move(frame);
-        thread_run_ = std::thread([this] { run(); });
+#ifndef _WIN32
+        struct sigaction sa {};
+        sa.sa_handler = [](int) { // (on the thread asked: its stack's return addresses, read by the watchdog)
+            caught().n = backtrace(caught().frames, 64);
+            caught().done.store(true);
+        };
+        sa.sa_flags = SA_RESTART; // (a thread waiting in the system goes on waiting after it)
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGUSR2, &sa, nullptr);
+        void* warm[2];
+        backtrace(warm, 2); // (its first call loads what it needs: not in a signal handler)
+#endif
+        thread_run_ = std::thread([this] {
+            report::name_thread("the hang watchdog");
+            run();
+        });
     }
     ~Watchdog() {
         stop_ = true;
@@ -243,6 +270,7 @@ public:
     }
 
 private:
+    static constexpr int kFrames = 48;
 #ifndef _WIN32
     struct Caught {
         void* frames[64];
@@ -265,35 +293,45 @@ private:
                 last = now, still = 0, told = false;
                 continue;
             }
-            if (++still < kHangSeconds || told) continue;
+            if (++still < limit_.load() || told) continue;
             told = true;
             Note n;
-            n.kind = "hang";
-            n.detail = "the game stood still " + std::to_string(still) + " s (no frame finished)";
+            const char* step = step_.load();
+            const std::string what = step ? "the start stood still " + std::to_string(still) + " s: " + step
+                                          : "the game stood still " + std::to_string(still) + " s (no frame finished)";
+            n.kind = step ? "startup" : alone_ ? "hang-alone" : "hang";
+            n.detail = what;
             n.frame = frame_ ? frame_() : 0;
-            n.stacks = stuck_stack();
+            n.stacks = stuck_stack() + "\n\n" + other_stacks();
 #ifdef _WIN32
             n.dump = minidump();
 #endif
-            std::printf("problem: the game has stood still %d s\n", still);
+            std::printf("problem: %s\n", what.c_str());
             saver_->note(std::move(n));
         }
     }
+    static std::string heading(const char* what, uint64_t id) {
+        const std::string name = report::thread_name_of(id);
+        return std::string(what) + " (thread " + std::to_string(id) + (name.empty() ? "" : ", " + name) + ")";
+    }
 #ifdef _WIN32
-    std::string stuck_stack() {
-        std::lock_guard guard(thread_lock_);
-        if (!thread_) return "(the game thread not known)";
-        if (SuspendThread(thread_) == static_cast<DWORD>(-1)) return "(the game thread couldn't be stopped to look)";
+    // A thread's return addresses: stopped, its stack walked into `out` (nothing allocated meanwhile: it may hold the
+    // heap's lock), let go. Returns how many, -1 if it couldn't be stopped.
+    static int walk(HANDLE thread, DWORD64 (&out)[kFrames]) {
+        if (SuspendThread(thread) == static_cast<DWORD>(-1)) return -1;
         CONTEXT c{};
         c.ContextFlags = CONTEXT_FULL;
-        std::string where = "the game thread's stack:";
-        if (GetThreadContext(thread_, &c))
-            for (int i = 0; i < 48 && c.Rip; ++i) { // (as the crash report walks it)
-                where += "\n  " + report::detail::module_at(c.Rip);
+        int n = 0;
+        if (GetThreadContext(thread, &c))
+            while (n < kFrames && c.Rip) { // (as the crash report walks it)
+                out[n++] = c.Rip;
                 DWORD64 base = 0;
                 PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(c.Rip, &base, nullptr);
-                if (!fn) {
-                    c.Rip = *reinterpret_cast<DWORD64*>(c.Rsp);
+                if (!fn) { // (a leaf: its return address on top of the stack; read with care, it may be anything)
+                    DWORD64 next = 0;
+                    SIZE_T got = 0;
+                    if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(c.Rsp), &next, sizeof next, &got)) break;
+                    c.Rip = next;
                     c.Rsp += 8;
                 } else {
                     void* data = nullptr;
@@ -301,8 +339,43 @@ private:
                     RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, c.Rip, fn, &c, &data, &frame, nullptr);
                 }
             }
-        ResumeThread(thread_);
-        return where;
+        ResumeThread(thread);
+        return n;
+    }
+    static std::string lines(const DWORD64* frames, int n) {
+        std::string out;
+        for (int i = 0; i < n; ++i) out += "\n  " + report::detail::module_at(frames[i]);
+        return out;
+    }
+    std::string stuck_stack() {
+        std::lock_guard guard(thread_lock_);
+        if (!thread_) return "(the game thread not known)";
+        DWORD64 frames[kFrames];
+        const int n = walk(thread_, frames);
+        if (n < 0) return "(the game thread couldn't be stopped to look)";
+        return heading(step_.load() ? "the stuck thread's stack" : "the game thread's stack", thread_sys_) + ":" + lines(frames, n);
+    }
+    // Every other thread's (not this one's, not the stuck one's again).
+    std::string other_stacks() {
+        std::vector<DWORD> ids;
+        const DWORD me = GetCurrentThreadId(), pid = GetCurrentProcessId();
+        const HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (snap == INVALID_HANDLE_VALUE) return "(the other threads couldn't be listed)";
+        THREADENTRY32 te{};
+        te.dwSize = sizeof te;
+        for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te))
+            if (te.th32OwnerProcessID == pid && te.th32ThreadID != me && te.th32ThreadID != thread_sys_) ids.push_back(te.th32ThreadID);
+        CloseHandle(snap);
+        std::string out = "the other threads (" + std::to_string(ids.size()) + "):";
+        for (const DWORD id : ids) {
+            const HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, id);
+            if (!h) continue;
+            DWORD64 frames[kFrames];
+            const int n = walk(h, frames);
+            CloseHandle(h);
+            out += "\n\n" + heading("a thread", id) + ":" + (n < 0 ? std::string("\n  (couldn't be stopped to look)") : lines(frames, n));
+        }
+        return out;
     }
     static std::vector<uint8_t> minidump() { // (every thread's stack: through a temporary file)
         wchar_t dir[MAX_PATH], name[MAX_PATH];
@@ -325,28 +398,57 @@ private:
         return out;
     }
     HANDLE thread_ = nullptr;
+    DWORD thread_sys_ = 0;
 #else
-    std::string stuck_stack() {
-        std::lock_guard guard(thread_lock_);
-        if (!have_thread_) return "(the game thread not known)";
+    // A thread asked for its stack (SIGUSR2: the handler above takes it there, one thread at a time).
+    template <class Send>
+    static std::string ask(Send send) {
         caught().done = false;
-        if (pthread_kill(thread_, SIGUSR2) != 0) return "(the game thread couldn't be asked)";
+        if (!send()) return "\n  (couldn't be asked)";
         for (int i = 0; i < 100 && !caught().done.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        if (!caught().done.load()) return "(the game thread didn't answer: stuck where signals wait)";
-        std::string where = "the game thread's stack:";
+        if (!caught().done.load()) return "\n  (didn't answer: stuck where signals wait)";
+        std::string where;
         if (char** names = backtrace_symbols(caught().frames, caught().n)) {
             for (int i = 0; i < caught().n; ++i) where += std::string("\n  ") + names[i];
             std::free(names);
         }
         return where;
     }
+    std::string stuck_stack() {
+        std::lock_guard guard(thread_lock_);
+        if (!have_thread_) return "(the game thread not known)";
+        const pthread_t target = thread_;
+        return heading(step_.load() ? "the stuck thread's stack" : "the game thread's stack", thread_sys_) + ":" +
+               ask([target] { return pthread_kill(target, SIGUSR2) == 0; });
+    }
+    std::string other_stacks() {
+#ifdef __linux__
+        std::vector<uint64_t> ids;
+        const uint64_t me = report::detail::system_thread_id();
+        std::error_code ec;
+        for (const auto& e : std::filesystem::directory_iterator("/proc/self/task", ec)) {
+            const uint64_t id = std::strtoull(e.path().filename().string().c_str(), nullptr, 10);
+            if (id && id != me && id != thread_sys_) ids.push_back(id);
+        }
+        std::string out = "the other threads (" + std::to_string(ids.size()) + "):";
+        for (const uint64_t id : ids)
+            out += "\n\n" + heading("a thread", id) + ":" +
+                   ask([id] { return ::syscall(SYS_tgkill, ::getpid(), static_cast<pid_t>(id), SIGUSR2) == 0; });
+        return out;
+#else
+        return "(the other threads: not on this system)";
+#endif
+    }
     pthread_t thread_{};
     bool have_thread_ = false;
+    uint64_t thread_sys_ = 0;
 #endif
     std::mutex thread_lock_;
     std::atomic<std::thread::id> watched_id_{};
     std::atomic<uint64_t> beats_{0};
-    std::atomic<bool> armed_{false}, stop_{false};
+    std::atomic<bool> armed_{false}, stop_{false}, alone_{false};
+    std::atomic<const char*> step_{nullptr};
+    std::atomic<int> limit_{kHangSeconds};
     Saver* saver_ = nullptr;
     std::function<uint64_t()> frame_;
     std::thread thread_run_;
@@ -411,16 +513,41 @@ inline void keep_inputs(const std::string& folder, const std::string& inputs_pat
     }
 }
 
+// A pad's layout as its player set it (the window's pad_layout_json) kept to send, as a game's numbers are: in
+// saves/outbox/pad-<guid>.json (the newest choice for that pad), once for each choice (saves/pads-sent.txt: each pad and
+// its choice's hash, kept as it's queued).
+inline void keep_pad(const std::string& folder, const std::string& guid, const std::string& json) {
+    namespace fs = std::filesystem;
+    uint64_t h = 1469598103934665603ull; // (FNV-1a)
+    for (const char c : json) h = (h ^ static_cast<unsigned char>(c)) * 1099511628211ull;
+    const std::string mark = guid + " " + std::to_string(h) + "\n";
+    const std::string list = folder + "saves/pads-sent.txt";
+    if (report::detail::read_all(report::detail::utf8(list)).find(mark) != std::string::npos) return;
+    std::error_code ec;
+    fs::create_directories(report::detail::utf8(folder + "saves/outbox/"), ec);
+    if (std::FILE* f = report::detail::open(folder + "saves/outbox/pad-" + guid + ".json", "wb")) {
+        std::fwrite(json.data(), 1, json.size(), f);
+        std::fclose(f);
+    }
+    if (std::FILE* f = report::detail::open(list, "ab")) {
+        std::fwrite(mark.data(), 1, mark.size(), f);
+        std::fclose(f);
+    }
+}
+
 class Sender {
 public:
     // Sends what waits (`upload`: net::report::upload, or a test's), unless sending already; returns at once. `may_go`
-    // asked before each file: false (a network game started meanwhile), the rest waits for the next time.
+    // asked before each file: false (a network game started meanwhile), the rest waits for the next time. `everything`:
+    // the player said yes to any problem (settings send_reports 2); else network play's only (1: preview4's question), the
+    // start's and a game alone's (kinds startup, hang-alone) kept here, for Report a problem.
     void send(const std::string& folder, std::function<bool(const std::string& what, const std::string& body, const std::string& type)> upload,
-              std::function<bool()> may_go = {}) {
+              std::function<bool()> may_go = {}, bool everything = true) {
         if (busy_.exchange(true)) return;
         if (thread_.joinable()) thread_.join();
-        thread_ = std::thread([this, folder, upload = std::move(upload), may_go = std::move(may_go)] {
-            run(folder, upload, may_go);
+        thread_ = std::thread([this, folder, upload = std::move(upload), may_go = std::move(may_go), everything] {
+            report::name_thread("the report sender");
+            run(folder, upload, may_go, everything);
             busy_ = false;
         });
     }
@@ -430,7 +557,7 @@ public:
 
 private:
     static void run(const std::string& folder, const std::function<bool(const std::string&, const std::string&, const std::string&)>& upload,
-                    const std::function<bool()>& may_go) {
+                    const std::function<bool()>& may_go, bool everything) {
         auto go = [&] { return !may_go || may_go(); };
         namespace fs = std::filesystem;
         std::error_code ec;
@@ -438,7 +565,7 @@ private:
         std::vector<fs::path> waiting;
         for (const auto& e : fs::directory_iterator(report::detail::utf8(folder + "saves/outbox/"), ec)) waiting.push_back(e.path());
         std::sort(waiting.begin(), waiting.end());
-        for (const fs::path& p : waiting) { // (stats-*.json a game's numbers, inputs-*.locked its seats' presses)
+        for (const fs::path& p : waiting) { // (stats-*.json a game's numbers, pad-*.json a pad's layout, inputs-*.locked its seats' presses)
             if (!go()) return;
             const bool presses = p.filename().string().rfind("inputs-", 0) == 0;
             if (!upload(presses ? "inputs" : "stats", report::detail::read_all(p), presses ? "application/octet-stream" : "application/json"))
@@ -450,6 +577,7 @@ private:
         for (const fs::path& p : newest(folder, kKeep)) {
             const std::string name = p.filename().string();
             if (sent.find(name + "\n") != std::string::npos) continue;
+            if (!everything && (name.find("-startup.") != std::string::npos || name.find("-hang-alone.") != std::string::npos)) continue;
             if (!go()) break;
             const std::string bytes = report::detail::read_all(p);
             if (bytes.empty() || bytes.size() > (24u << 20)) continue;

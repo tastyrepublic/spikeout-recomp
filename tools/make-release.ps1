@@ -90,10 +90,11 @@ First start: choose spikeofe.zip in the window. The game is then translated from
 (about 15-25 seconds, once; later starts take a moment). Esc opens the menu.
 
 Your settings, the rankings and the translated game: Windows
-%APPDATA%\spikeout-recomp\Spikeout, Linux ~/.local/share/spikeout-recomp/Spikeout.
+C:\Users\<you>\AppData\Roaming\spikeout-recomp\Spikeout (%APPDATA%\spikeout-recomp\Spikeout),
+Linux ~/.local/share/spikeout-recomp/Spikeout.
 To keep them next to the program instead, put an empty file called portable.txt
-beside it. Save states (F9) and screenshots (F12) go in the folder the game was
-started from.
+beside it. Save states (F9) go in its saves folder, screenshots (F12) in its
+screenshots folder.
 
 New versions: at start the game asks GitHub whether a newer one is out, and the menu
 says so (Esc > Game > Check for updates turns that off). Players need the same

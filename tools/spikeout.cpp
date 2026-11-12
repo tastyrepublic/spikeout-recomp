@@ -220,6 +220,7 @@ struct Shared {
     std::chrono::steady_clock::time_point notice_until{};
     void say(const std::string& text, int seconds = 3) {
         std::lock_guard<std::mutex> guard(lock);
+        if (text != notice || std::chrono::steady_clock::now() >= notice_until) std::printf("notice: %s\n", text.c_str()); // (what the player saw, for reports)
         notice = text, notice_until = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
     }
     bool net_save_key = false; // --net-save-key: F9 in network play saves every cabinet (spikeout-net-<frame>.state), for gamerun
@@ -321,6 +322,10 @@ struct Shared {
     uint64_t rollback_depth = 0; // (rollback's history: the long window, as memory allows; a quiet player guessed that far)
     std::unique_ptr<tools::rollback::Linked> rollback;
     std::atomic<uint64_t> sync_slowed{0}, sync_sooner{0}, sync_free{0}; // (rollback's time sync: frames slowed, sooner, unpaced)
+    // (a network game's smoothness, as its player saw it, for its numbers (tools/problem_report.hpp part 2): the shown
+    // board's frames paced, the stutters among them (a gap over 1.5 frames), the longest gap; from net_begin)
+    std::atomic<uint64_t> net_frames{0}, net_stutters{0};
+    std::atomic<int64_t> net_worst_ms{0};
     std::atomic<uint64_t> rollback_from{0}; // (rollback's snapshots and guesses from this frame on: a joiner's, once caught up)
     std::unique_ptr<tools::one_board::Game> one_board_game; // (this run's, else none)
     std::array<tools::one_board::Board*, kMaxBoards> one_board_parts{};
@@ -407,6 +412,36 @@ std::array<bool, tools::kActions> pad_actions(SDL_Gamepad* pad, const std::array
     return held;
 }
 
+// A pad's layout as its player set it, for the project to make it a built-in layout (the owner, 2026-11-12: sticks SDL
+// has no layout for, on the generic one, and pads set up by hand: their players' own choices are the right layout).
+// Sent with the reports, as a game's numbers are (tools/problem_report.hpp part 2: the lobby's /v1/stats, "kind":"pad").
+// What the pad is (its name, its USB IDs, SDL's GUID and layout, how it's reached) and each action's input: nothing of
+// the player's. "" if the pad's set as it came (nothing learnt).
+std::string pad_layout_json(SDL_Gamepad* pad, const std::array<int, tools::kActions>& buttons) {
+    using tools::problems::json_text;
+    if (!pad || buttons == tools::kDefaultPad) return {};
+    SDL_Joystick* j = SDL_GetGamepadJoystick(pad);
+    const std::string guid = tools::pads::guid_text(SDL_GetJoystickGUID(j));
+    char ids[16];
+    std::snprintf(ids, sizeof ids, "%04x:%04x", SDL_GetGamepadVendor(pad), SDL_GetGamepadProduct(pad));
+    const char* path = SDL_GetGamepadPath(pad);
+    const std::string p = path ? path : "";
+    const std::string reached = p.rfind("XInput", 0) == 0 ? "xinput" : p.find("HID") != std::string::npos ? "hid" :
+                                p.rfind("/dev/input", 0) == 0 ? "evdev" : p.empty() ? "" : "other";
+    std::string mapping;
+    if (char* m = SDL_GetGamepadMapping(pad)) mapping = m, SDL_free(m);
+    const char* name = SDL_GetGamepadName(pad);
+    std::string j_text = "{\"kind\":\"pad\",\"version\":" + json_text(net::kVersion) + ",\"os\":" + json_text(tools::report::os_name()) +
+                         ",\"name\":" + json_text(name ? name : "") + ",\"ids\":" + json_text(ids) + ",\"guid\":" + json_text(guid) +
+                         ",\"reached\":" + json_text(reached) +
+                         ",\"generic\":" + (tools::pads::generic_guids().count(guid) ? "true" : "false") +
+                         ",\"type\":" + json_text(SDL_GetGamepadStringForType(SDL_GetGamepadType(pad)) ? SDL_GetGamepadStringForType(SDL_GetGamepadType(pad)) : "") +
+                         ",\"mapping\":" + json_text(mapping) + ",\"actions\":{";
+    for (std::size_t a = 0; a < tools::kActions; ++a)
+        j_text += std::string(a ? "," : "") + json_text(tools::kActionKeys[a]) + ":" + std::to_string(buttons[a]);
+    return j_text + "}}";
+}
+
 // A pad input's name in the menu (a pad given: its face buttons as that pad labels them, A or Cross, ...).
 std::string pad_input_name(int code, SDL_Gamepad* pad) {
     if (code <= 0) return "None";
@@ -422,8 +457,13 @@ std::string pad_input_name(int code, SDL_Gamepad* pad) {
     }
     const auto b = static_cast<SDL_GamepadButton>(code - 1);
     if (b <= SDL_GAMEPAD_BUTTON_NORTH) {
-        const SDL_GamepadButtonLabel label =
-            pad ? SDL_GetGamepadButtonLabel(pad, b) : SDL_GetGamepadButtonLabelForType(SDL_GAMEPAD_TYPE_XBOX360, b);
+        // (a pad reached through XInput sends an Xbox pad's buttons whatever SDL calls it: a Qanba stick in its XInput
+        // mode, 2c22:2003, was named a PS3 pad by its maker's ID, its buttons shown as Cross and Circle; players' reports
+        // of 2026-11-12)
+        const char* path = pad ? SDL_GetGamepadPath(pad) : nullptr;
+        const bool xinput = path && std::strncmp(path, "XInput", 6) == 0;
+        const SDL_GamepadButtonLabel label = pad && !xinput ? SDL_GetGamepadButtonLabel(pad, b)
+                                                            : SDL_GetGamepadButtonLabelForType(SDL_GAMEPAD_TYPE_XBOX360, b);
         switch (label) {
         case SDL_GAMEPAD_BUTTON_LABEL_A: return "A";
         case SDL_GAMEPAD_BUTTON_LABEL_B: return "B";
@@ -867,12 +907,26 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
     // wait, a stall too; Tab, catching up and the menu start it again)
     tools::SpeedReport speed;
     // (a frame over a second late in a network game: a problem bundle, tools/problem_report.hpp)
+    speed.on_gap = [&shared](double gap) { // (a network game's numbers: the shown board's frames)
+        if (!shared.netplay) return;
+        ++shared.net_frames;
+        if (gap > tools::SpeedReport::kStutter * 1000.0 / recomp::FrameTiming::kRefreshHz) ++shared.net_stutters;
+        const auto ms = static_cast<int64_t>(gap);
+        for (int64_t w = shared.net_worst_ms.load(); ms > w && !shared.net_worst_ms.compare_exchange_weak(w, ms);) {}
+    };
     speed.on_long_gap(tools::problems::kStallMs, [&shared](uint64_t frame, double ms) {
         if (shared.netplay && shared.problems)
             shared.problems->note("stall", "a frame " + std::to_string(static_cast<long long>(ms)) + " ms late", frame);
     });
+    bool paced_last = false; // (this board shown at its last frame's end)
     auto pace = [&] {
-        if (index != shown) return;
+        if (index != shown) return void(paced_last = false);
+        // (shown again after a while out of view (a spectator's switch, issue 18): its pacing and its measure start
+        // again from here, or the time it was away counted as one frame that late: 806 s "stalls" in a report)
+        if (!paced_last) paced_last = true, repace = true;
+        // (a spectator from a game's start: its first frames wait for the inputs to come kWatchLag frames behind the
+        // players' (about 2 s, by design): not a stall, and not a problem bundle at every watch)
+        if (shared.spectating && timing.frames() <= 2) repace = true;
         shared.shown_frame = timing.frames();
         if (shared.watchdog) shared.watchdog->beat_here(); // (the hang watchdog: the shown board's thread, finishing a frame)
         // (tests, tools/problem_report.hpp: SPIKEOUT_TEST_HANG=FRAME:SECONDS stands this thread still that long at that
@@ -1030,12 +1084,18 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             if (verdict == tools::net_frame::AutoBoard::Verdict::every_board_again)
                 tools::one_board::Game::keep_whole(part), shared.one_board_back = true;
         }
-        if (timing_debug && timing.frames() % 300 == 0) {
+        // (each board's state: every 300 frames with detailed logging; in network play every minute anyway (the owner,
+        // 2026-11-12: a report's log should say what each board was doing without detailed logging: one board's and a
+        // spectator's above all)
+        const uint64_t board_every = timing_debug ? 300 : networked ? 3600 : 0;
+        if (board_every && timing.frames() % board_every == 0 && !(shared.rollback && shared.rollback->quiet(index, timing.frames()))) {
             const uint32_t logic = bus.read32(0x1000A8);
             static thread_local uint32_t logic_before2 = 0;
-            std::printf("spikeout: board %zu at %llu: game logic +%u; inputs %02x %02x %02x %02x; %s\n", index,
+            const bool side = one_board && shared.one_board_frame != ~0ull && index != shown;
+            std::printf("spikeout: board %zu at %llu: game logic +%u; inputs %02x %02x %02x %02x; %s%s%s\n", index,
                         static_cast<unsigned long long>(timing.frames()), logic - logic_before2, bus.inputs.bank0, bus.inputs.bank1,
-                        bus.inputs.controls, bus.inputs.controls2, bus.netboard().describe().c_str());
+                        bus.inputs.controls, bus.inputs.controls2, bus.netboard().describe().c_str(), index == shown ? "; shown" : "",
+                        side ? "; on side runs (one board)" : "");
             logic_before2 = logic;
             std::fflush(stdout);
         }
@@ -1784,9 +1844,11 @@ int grid_rows(std::size_t boards) { return boards <= 2 ? 1 : 2; }
 std::string on_off(bool on) { return on ? "On" : "Off"; }
 // (the question and the setting's words: tools/problem_report.hpp, part 2)
 constexpr const char* kSendReportsText =
-    "After each network game, its numbers (speed, delay, rollbacks, how long datagrams take) are sent to the project, and any "
-    "problem the game noticed (out of step, a hang, a crash) with that game's recording and log, locked so only the project "
-    "can open them. The numbers carry no names or internet addresses. It helps find and fix network play's problems.";
+    "Any problem the game notices (a crash, the game or its start standing still, network games out of step) is sent to the "
+    "project with what's needed to find its cause (the logs, the stacks, a network game's recording), locked so only the "
+    "project can open them; and after each network game, its numbers (speed, delay, rollbacks, how long datagrams take) "
+    "and buttons; and a controller's layout if you set it up yourself. The numbers carry no names or internet addresses. "
+    "It helps find and fix problems we can't see here.";
 
 // The boards' EEPROM and backup RAM, kept between runs as a cabinet keeps
 // them: nvram/board<N>.eeprom (64 words, high byte first) and
@@ -1837,13 +1899,14 @@ struct NetGame {
     bool spectator = false; // (watching it: Session::watch)
     std::size_t listed_taken = 1; // (the host, on the internet: the players the lobby last heard of)
     std::atomic<bool> ready{false}, failed{false};
+    std::chrono::steady_clock::time_point asked_at{}, told_at{}; // (joining or watching: since then no answer; last said then)
     mutable std::mutex lock;
     std::string status, code;
 
     NetGame(uint64_t build) {
         play = std::make_unique<tools::NetPlay>(table, build, [this](const std::string& s) {
             std::printf("net: %s\n", s.c_str());
-            set_status(s);
+            set_status(s, true);
         });
     }
     ~NetGame() {
@@ -1851,8 +1914,11 @@ struct NetGame {
         play.reset(); // (its thread first: it calls back into the table and the status)
     }
     net::Session& session() { return play->session(); }
-    void set_status(const std::string& s) {
+    // What the room's page shows; in the log too as it changes (`logged`: the session's, printed already), so that a
+    // report says why a join or a watch didn't happen (issue 18: the reason was only on the screen).
+    void set_status(const std::string& s, bool logged = false) {
         std::lock_guard guard(lock);
+        if (!logged && s != status) std::printf("net: shown: %s\n", s.c_str());
         status = s;
     }
     std::string get_status() const {
@@ -1860,8 +1926,9 @@ struct NetGame {
         return status;
     }
     void fail(const std::string& why) {
-        set_status(why);
+        std::printf("net: failed: %s\n", why.c_str());
         failed = true;
+        set_status(why, true);
     }
 };
 
@@ -1993,6 +2060,37 @@ int main(int argc, char** argv) {
     std::printf("spikeout: version %s\n%s%s", net::kVersion, tools::report::system_lines().c_str(),
                 tools::report::controllers_now().c_str());
     if (!last_crash.empty()) std::printf("spikeout: the last run crashed: %s.txt in the data folder\n", last_crash.c_str());
+    // Problems the game notices (tools/problem_report.hpp): each a locked bundle in saves/, Report a problem takes them in,
+    // and sent if the player said yes. From here on, so that the start is watched too (issue 16: a first start standing
+    // still at "PREPARING THE GAME", nothing kept): each step said in the log, and a stack of every thread if one stands
+    // still too long (Watchdog::set_step; the start's steps take longer than a frame, so a longer limit).
+    std::atomic<Shared*> report_shared{nullptr}; // (the game's counts: once it's made, below)
+    tools::problems::Saver problems;
+    problems.start(report_folder, "Spikeout " + std::string(net::kVersion) + "\n" + tools::report::system_lines(), [&report_shared] {
+        // (atomics only: this runs on the saving thread; the rest is in the log's last lines)
+        const Shared* s = report_shared.load();
+        if (!s) return std::string("(the game not set up yet)\n");
+        // (and what the boards waited for, if a wait went on a second or more lately: which player a room stood still for)
+        const std::string waited = tools::InputTable::last_long_wait();
+        return "input delay " + std::to_string(s->input_delay.load()) +
+               (s->one_board_frame.load() != ~0ull ? ", one board here" : ", every board here") + ", the shown board at frame " +
+               std::to_string(s->shown_frame.load()) + "\n" + (waited.empty() ? "" : waited + "\n");
+    });
+    tools::problems::Watchdog watchdog;
+    watchdog.start(problems, [&report_shared] {
+        const Shared* s = report_shared.load();
+        return s ? s->shown_frame.load() : uint64_t{0};
+    });
+    // (each step of the start: in the log, and the watchdog's; kStartSeconds without a beat is a "startup" problem)
+    constexpr int kStartSeconds = 60;
+    auto start_step = [&watchdog](const char* step) {
+        std::printf("start: %s\n", step);
+        watchdog.beat_here();
+        watchdog.set_step(step, kStartSeconds);
+    };
+    // (tests: SPIKEOUT_TEST_START_HANG=SECONDS stands the start still that long at its first step)
+    const int test_start_hang = std::getenv("SPIKEOUT_TEST_START_HANG") ? std::atoi(std::getenv("SPIKEOUT_TEST_START_HANG")) : 0;
+    watchdog.arm(true);
     // Tests: SPIKEOUT_TEST_VIRTUAL_PAD=1 connects a pad that isn't there (SDL's virtual joystick: no buttons
     // pressed), for the menu's pad pages on a computer with none.
     // =stick: an arcade stick SDL has no layout for (12 buttons, 2 axes, a hat; issue #11), its button 1 and its hat's
@@ -2045,6 +2143,8 @@ int main(int argc, char** argv) {
     const bool test_run = max_frames != 0; // (writes no settings)
     const bool report_test = std::getenv("SPIKEOUT_TEST_REPORTS") != nullptr; // (tests: reports sent in a --frames run too)
 
+    start_step("making the window");
+    if (test_start_hang > 0) std::this_thread::sleep_for(std::chrono::seconds(test_start_hang));
     // (hidden until the ROM set is read, as before it was made after; shown at once if one must be chosen)
     SDL_Window* window =
         SDL_CreateWindow("Spikeout: Final Edition", width * scale, height * scale, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
@@ -2073,6 +2173,7 @@ int main(int argc, char** argv) {
             if (!rom_path.empty()) {
                 why = rom_problem(rom_path);
                 if (why.empty()) {
+                    start_step("reading the ROM set");
                     screen.loading();
                     try {
                         roms = m3::load_rom_set(m3::games::kSpikeoutFinalEdition, rom_path);
@@ -2100,7 +2201,9 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "spikeout: ROM set incomplete; run romcheck for details\n");
                 return 1;
             }
+            watchdog.arm(false); // (the player choosing: no time limit)
             const auto picked = screen.choose(why);
+            watchdog.arm(true);
             if (!picked) {
                 SDL_DestroyWindow(window);
                 SDL_Quit();
@@ -2129,11 +2232,15 @@ int main(int argc, char** argv) {
         jo.prune = true;
         if (!settings.jit_cache.empty()) jo.cache_dir = utf8_path(settings.jit_cache);
         else if (const char* e = std::getenv("SPIKEOUT_JIT_CACHE"); !e || !*e) jo.cache_dir = utf8_path(tools::data_folder() + "jit-cache");
+        start_step("translating the game from the ROM set (the JIT)");
+        watchdog.set_step("translating the game from the ROM set (the JIT)", 2 * kStartSeconds); // (a part can take a while on a slow PC)
         jo.progress = [&](const jit::Progress& p) {
+            watchdog.beat(); // (each step and part done: not standing still)
             step = static_cast<int>(p.step);
             if (p.step == jit::Step::Compile) total = p.total, done = p.done;
         };
         std::thread worker([&] {
+            tools::report::name_thread("the game's translation (the JIT)");
             try {
                 const jit::Report report = jit::prepare(m3::games::kSpikeoutFinalEdition, roms, jo);
                 jit_cache_in_use = report.cache_path;
@@ -2180,6 +2287,7 @@ int main(int argc, char** argv) {
             return 1;
         }
 #endif
+        start_step("closing the start screen");
         screen.close(); // (the window given to the GPU)
     }
     SDL_ShowWindow(window);
@@ -2190,7 +2298,9 @@ int main(int argc, char** argv) {
     auto presenter = std::make_unique<gpu::Presenter>();
     bool on_gpu = false;
     if (use_gpu) {
+        start_step("handing the window to the GPU");
         on_gpu = gpu_device->open(window, fifo) && presenter->open(*gpu_device);
+        start_step(on_gpu ? "the GPU is ready" : "no GPU");
         if (on_gpu) presenter->set_look(settings.crt_colours, settings.screen_filter);
         if (on_gpu)
             std::printf("spikeout: drawing with the GPU (%s, %s)\n", gpu_device->driver(),
@@ -2224,18 +2334,14 @@ int main(int argc, char** argv) {
 
     Shared shared;
     if (!last_crash.empty()) shared.say("THE LAST RUN CRASHED: ESC > GAME > REPORT A PROBLEM", 12);
-    // Problems noticed in network play (tools/problem_report.hpp): each a locked bundle in saves/, Report a problem takes
-    // them in. A crash of the run before: one too, with its report and dump.
-    tools::problems::Saver problems;
-    problems.start(report_folder, "Spikeout " + std::string(net::kVersion) + "\n" + tools::report::system_lines(), [&shared] {
-        // (atomics only: this runs on the saving thread; the rest is in the log's last lines)
-        return "input delay " + std::to_string(shared.input_delay.load()) +
-               (shared.one_board_frame.load() != ~0ull ? ", one board here" : ", every board here") + ", the shown board at frame " +
-               std::to_string(shared.shown_frame.load()) + "\n";
-    });
-    tools::problems::Watchdog watchdog;
-    watchdog.start(problems, [&shared] { return shared.shown_frame.load(); });
+    // (the problem saver and the watchdog, from the start on: their counts from here; none once `shared` is gone)
+    report_shared = &shared;
+    struct Unshare {
+        std::atomic<Shared*>& p;
+        ~Unshare() { p = nullptr; }
+    } unshare{report_shared};
     shared.problems = &problems, shared.watchdog = &watchdog;
+    // A crash of the run before: a bundle too, with its report and dump.
     if (!last_crash.empty()) {
         tools::problems::Note n{"crash", "the run before crashed: " + last_crash, 0, {}, {}, {}};
         for (const char* ext : {".txt", ".dmp"}) {
@@ -2249,7 +2355,7 @@ int main(int argc, char** argv) {
     tools::problems::Sender report_sender;
     std::atomic<bool> net_game_on{false}; // (a network game running: the sender stops between files, the rest after it)
     auto send_reports = [&] {
-        if (settings.send_reports != 1 || !net::report::available() || (test_run && !report_test)) return;
+        if (settings.send_reports < 1 || !net::report::available() || (test_run && !report_test)) return;
         report_sender.send(
             report_folder,
             [](const std::string& what, const std::string& body, const std::string& type) {
@@ -2257,7 +2363,7 @@ int main(int argc, char** argv) {
                 if (!s.ok) std::printf("reports: not sent: %s\n", s.error.c_str());
                 return s.ok;
             },
-            [&net_game_on] { return !net_game_on.load(); });
+            [&net_game_on] { return !net_game_on.load(); }, settings.send_reports == 2);
     };
     send_reports();
     shared.boards = boards;
@@ -2277,6 +2383,7 @@ int main(int argc, char** argv) {
     shared.sleep_pacing = sleep_pacing;
     std::unique_ptr<Sound> sound;
     auto speaker_setup = [&] { return SpeakerSetup{settings.speakers, settings.front_output, settings.rear_output}; };
+    start_step("setting up the sound");
     if (!mute) sound = std::make_unique<Sound>(roms, effects_volume(settings), music_volume(settings), speaker_setup());
     shared.sound = sound.get();
 
@@ -2571,6 +2678,7 @@ int main(int argc, char** argv) {
         int n = 0;
         SDL_JoystickID* ids = SDL_GetGamepads(&n);
         std::printf("spikeout: the game starts: %d gamepad(s) connected to SDL\n", n);
+        start_step("starting the game (waiting for its first picture)");
         for (int i = 0; i < n; ++i) add_pad(ids[i]);
         SDL_free(ids);
     }
@@ -2609,7 +2717,10 @@ int main(int argc, char** argv) {
     std::size_t focus = 0; // the board the first player's keys drive
     bool running = true;
     std::size_t reported = 0;
+    std::string pending_shot; // (F12: the picture asked of the presenter, to write once it comes)
     auto fps_start = std::chrono::steady_clock::now();
+    bool first_picture = false, solo_armed = false, reports_asked = false; // (the start over; the watchdog on for a game alone)
+    (void)reports_asked; // (the menu's: not in a build without the GPU)
     uint64_t fps_frames = 0, frames_shown = 0, pictures_shown = 0; // in the last second: frames run, shown, and (smooth motion) pictures
     // Tests: SPIKEOUT_SMOOTH_LOG=1 (or --smooth-log, into smooth_log.txt by
     // the program) prints smooth motion's pictures a second, how evenly its
@@ -2657,6 +2768,7 @@ int main(int argc, char** argv) {
     // (the network game's start, for its numbers when it ends: tools/problem_report.hpp, part 2)
     std::chrono::steady_clock::time_point net_game_began{};
     uint64_t net_game_first_frame = 0;
+    uint64_t net_sync_from[3] = {}; // (time sync's counts at the game's start: slowed, sooner, unpaced)
     std::string net_notice; // (a line where the room's was, for a while: the host closed it)
     std::chrono::steady_clock::time_point net_notice_until{};
     std::chrono::steady_clock::time_point watch_banner_until{}; // (a spectator's banner: whom it watches, the keys)
@@ -2908,6 +3020,8 @@ int main(int argc, char** argv) {
         netgame->play->on_problem([&problems](const std::string& kind, const std::string& what, uint64_t frame) { problems.note(kind, what, frame); });
         watchdog.arm(true);
         net_game_began = std::chrono::steady_clock::now(), net_game_first_frame = shared.shown_frame.load();
+        shared.net_frames = 0, shared.net_stutters = 0, shared.net_worst_ms = 0;
+        net_sync_from[0] = shared.sync_slowed, net_sync_from[1] = shared.sync_sooner, net_sync_from[2] = shared.sync_free;
         if (shared.spectating)
             std::printf("spikeout: watching a network game of %u cabinets%s\n", start.seats,
                         start.state_frame ? " (in progress)" : "");
@@ -2958,7 +3072,13 @@ int main(int argc, char** argv) {
                         ",\"rollback\":" + (shared.rollback ? "true" : "false") +
                         ",\"input_delay\":" + std::to_string(shared.input_delay.load()) +
                         ",\"seconds\":" + std::to_string(static_cast<long long>(seconds)) +
-                        ",\"frames\":" + std::to_string(shared.shown_frame.load() - net_game_first_frame) + ",\"round_trips\":[";
+                        // ("frames": the frames shown, paced: before preview5 the shown board's frame number since net_begin,
+                        // wrong for a game joined in progress or started afresh; "smooth": a sign of the new count)
+                        ",\"frames\":" + std::to_string(shared.net_frames.load()) + ",\"smooth\":{\"stutters\":" +
+                        std::to_string(shared.net_stutters.load()) + ",\"longest_gap_ms\":" + std::to_string(shared.net_worst_ms.load()) +
+                        ",\"sync_slowed\":" + std::to_string(shared.sync_slowed - net_sync_from[0]) +
+                        ",\"sync_sooner\":" + std::to_string(shared.sync_sooner - net_sync_from[1]) +
+                        ",\"sync_unpaced\":" + std::to_string(shared.sync_free - net_sync_from[2]) + "},\"round_trips\":[";
         const auto trips = netgame->session().round_trips();
         for (std::size_t s = 0; s < trips.size() && s < shared.boards; ++s) j += (s ? "," : "") + std::to_string(trips[s]);
         j += "],\"rollback_report\":" + json_text(shared.rollback ? shared.rollback->report() : std::string());
@@ -2971,7 +3091,7 @@ int main(int argc, char** argv) {
         if (!netgame) return;
         watchdog.arm(false); // (the boards stopped and set up again below: no frames meanwhile)
         netgame->play->on_problem(nullptr);
-        if (netgame->running && settings.send_reports == 1 && (!test_run || report_test)) tools::problems::keep_stats(report_folder, game_stats());
+        if (netgame->running && settings.send_reports >= 1 && (!test_run || report_test)) tools::problems::keep_stats(report_folder, game_stats());
         parting();
         netgame->session().leave();
         if (netgame->running)
@@ -2995,7 +3115,7 @@ int main(int argc, char** argv) {
                 std::lock_guard guard(shared.recordings_lock);
                 recordings = std::exchange(shared.game_recordings, {});
             }
-            if (settings.send_reports == 1 && (!test_run || report_test))
+            if (settings.send_reports >= 1 && (!test_run || report_test))
                 for (const std::string& r : recordings) tools::problems::keep_inputs(report_folder, r);
         }
         net_game_on = false;
@@ -3808,6 +3928,32 @@ int main(int argc, char** argv) {
                            "A bug report: what happened, the game's log and settings, this computer's details. Sent to the "
                            "project's GitHub page, or saved as a zip.",
                            {}, {}, [&] { menu.push(report_page()); }});
+        // (where everything is kept, said in the game itself (the owner, 2026-11-12): the data folder, opened in the
+        // system's file manager)
+        p.items.push_back({"Game folder",
+                           "Your settings, save states (saves), screenshots (screenshots), the logs, reports and the translated "
+                           "game are kept in " + report_folder + ". Enter: open it.",
+                           {}, {}, [&] {
+                               std::string url = "file://";
+                               if (!report_folder.empty() && report_folder[0] != '/') url += '/';
+                               for (const char c : report_folder) {
+                                   const auto u = static_cast<unsigned char>(c);
+                                   if (std::isalnum(u) || std::strchr("/:._-~", c)) url += c;
+                                   else if (c == '\\') url += '/';
+                                   else {
+                                       char hex[4];
+                                       std::snprintf(hex, sizeof hex, "%%%02X", u);
+                                       url += hex;
+                                   }
+                               }
+                               if (!SDL_OpenURL(url.c_str())) std::printf("spikeout: can't open %s: %s\n", url.c_str(), SDL_GetError());
+                           }});
+        if (net::report::available()) // (the same as Network play's: the question covers every problem since 2026-11-12)
+            p.items.push_back({"Send reports", kSendReportsText, [&] { return on_off(settings.send_reports >= 1); },
+                               [&](int) {
+                                   settings.send_reports = settings.send_reports >= 1 ? 0 : 2;
+                                   changed();
+                               }});
         p.items.push_back(back_item());
         return p;
     };
@@ -4103,27 +4249,29 @@ int main(int argc, char** argv) {
         p.items.push_back({"Player name", "The name the other players see. Enter: change it.", [&] { return player_name(settings); },
                            {}, [&] { menu.push(name_page()); }});
         if (net::report::available())
-            p.items.push_back({"Send reports", kSendReportsText, [&] { return on_off(settings.send_reports == 1); },
+            p.items.push_back({"Send reports", kSendReportsText, [&] { return on_off(settings.send_reports >= 1); },
                                [&](int) {
-                                   settings.send_reports = settings.send_reports == 1 ? 0 : 1;
+                                   settings.send_reports = settings.send_reports >= 1 ? 0 : 2;
                                    changed();
                                }});
         // (no input delay, board mode or rollback to set: chosen by themselves, net_begin; the owner's choice)
         p.items.push_back(back_item());
         return p;
     };
-    // Asked once, the first time Network play opens: may the game send its network numbers and the problems it notices
-    // (tools/problem_report.hpp, part 2)? Either answer goes on to Network play; "Send reports" there changes it.
+    // Asked once, at the first start (the owner, 2026-11-12; before, the first time Network play opened, for network play's
+    // only: those who said yes then are asked again, the question being wider): may the game send its network numbers
+    // and the problems it notices (tools/problem_report.hpp, part 2)? Either answer closes the menu; "Send reports" in
+    // Game and in Network play changes it.
     auto ask_reports_page = [&] {
-        ui::MenuPage p{"Help improve network play?", kSendReportsText, {}};
+        ui::MenuPage p{"Help improve the game?", kSendReportsText, {}};
         auto answer = [&](int yes) {
             settings.send_reports = yes;
             changed();
-            menu.pop();
-            menu.push(network_page());
+            std::printf("settings: reports: %s\n", yes ? "yes (sent by the game)" : "no");
+            menu.close();
         };
-        p.items.push_back({"Yes, send them", "Sent after each network game, never during one. You can change this in Network play.", {},
-                           {}, [answer] { answer(1); }});
+        p.items.push_back({"Yes, send them", "Sent between games, never during a network game. You can change this in Game or Network play.", {},
+                           {}, [answer] { answer(2); }});
         p.items.push_back({"No", "Nothing is sent. Problems are still saved here, for Report a problem.", {}, {}, [answer] { answer(0); }});
         return p;
     };
@@ -4161,10 +4309,6 @@ int main(int argc, char** argv) {
                                {}, {}, [&] { SDL_OpenURL(newer_version->page.c_str()); }});
         p.items.push_back({"Network play", netgame ? "The game you're in." : "Play with others, on this network or the internet.", {},
                            {}, [&] {
-                               // (the first time: asked once whether reports may be sent, tools/problem_report.hpp part 2)
-                               // (never in a test run: its menu keys are scripted)
-                               if (!netgame && settings.send_reports < 0 && net::report::available() && !test_run)
-                                   return menu.push(ask_reports_page());
                                menu.push(netgame ? lobby_page() : network_page());
                            }});
         p.items.push_back({"Display", "Render scale, antialiasing, quads, the 3D renderer, CRT colours, screen filter, fullscreen.", {}, {},
@@ -4208,6 +4352,23 @@ int main(int argc, char** argv) {
 
     uint64_t frames_seen = 0;
     while (running) {
+#ifdef SPIKEOUT_GPU
+        // (F12's picture, drawn again by the presenter at the last present: written on a thread of its own, the game not
+        // waiting for a large PNG)
+        if (!pending_shot.empty() && presenter) {
+            std::vector<uint32_t> pixels;
+            int pw = 0, ph = 0;
+            if (presenter->take_capture(pixels, pw, ph)) {
+                std::thread([path = std::move(pending_shot), pixels = std::move(pixels), pw, ph] {
+                    if (tools::write_png(path, pixels, static_cast<uint32_t>(pw), static_cast<uint32_t>(ph)))
+                        std::printf("screenshot: %s (%dx%d)\n", path.c_str(), pw, ph);
+                    else
+                        std::printf("screenshot: can't write %s\n", path.c_str());
+                }).detach();
+                pending_shot.clear();
+            }
+        }
+#endif
         // Each frame shown as soon as it is finished (and, with the game
         // paused or stopped, the menu and events 50 times a second: longer
         // than a frame, 17.4 ms).
@@ -4341,7 +4502,16 @@ int main(int argc, char** argv) {
             if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_F12 && !e.key.repeat) {
                 const std::string path = shared.shots_dir + "spikeout-" + std::to_string(shown_number[shared.netplay ? shared.local : 0]) + ".png";
 #ifdef SPIKEOUT_GPU
-                if (shared.gpu_3d) shown = capture();
+                // (the picture as the window draws it (the owner, 2026-11-12): at the render scale, in the picture's
+                // shape, with its CRT colours and filter, no menu: the presenter draws the next one again for it
+                // (Presenter::request_capture), written below on a thread of its own. Without the GPU: the arcade's
+                // 496x384, as before)
+                if (on_gpu) {
+                    const int k = std::max(1, draw_scale / std::max(1, settings.antialiasing));
+                    const int sides = shared.gpu_3d && real3d_gpu ? real3d_gpu->extend() : 0;
+                    presenter->request_capture((shared.gpu_3d ? kWidth + 2 * sides : width) * k, (shared.gpu_3d ? kHeight : height) * k);
+                    pending_shot = path;
+                } else
 #endif
                 if (tools::write_png(path, shown, width, height)) std::printf("screenshot: %s\n", path.c_str());
             }
@@ -4518,6 +4688,14 @@ int main(int argc, char** argv) {
             if (!menu_open && settings_changed && !test_run) {
                 tools::save_settings(settings_path, settings);
                 settings_changed = false;
+                // (each player's pad set by hand: its layout kept to send, once per new choice, if the player said yes;
+                // sent with the reports at the next start or network game's end: pad_layout_json)
+                if (settings.send_reports >= 1)
+                    for (std::size_t p = 0; p < 2; ++p)
+                        for (SDL_Gamepad* pad : gamepads)
+                            if (tools::pads::guid_text(SDL_GetJoystickGUID(SDL_GetGamepadJoystick(pad))) == settings.pads[p])
+                                if (const std::string json = pad_layout_json(pad, settings.pad_buttons[p]); !json.empty())
+                                    tools::problems::keep_pad(report_folder, settings.pads[p], json);
             }
             if (!menu_open && arcade_changed) {
                 arcade_changed = false;
@@ -4576,9 +4754,49 @@ int main(int argc, char** argv) {
                          : watch_waiting ? "COULDN'T WATCH: THE HOST STOPPED ANSWERING"
                                          : "THE HOST CLOSED THE ROOM";
             net_notice_until = now + std::chrono::seconds(6);
+            std::printf("notice: %s\n", net_notice.c_str());
 #ifdef SPIKEOUT_GPU
             if (menu_ready && menu.is_open()) menu.open(make_root());
 #endif
+        }
+        // The hang watchdog in a game alone too (the owner, 2026-11-12: any freeze reported, not only network play's):
+        // on while its frames run (not with the menu open: the game paused), from the first picture on. A network game's
+        // own arming is net_begin's and net_leave's.
+#ifdef SPIKEOUT_GPU
+        // (reports: asked once, at the first picture: never asked, or asked by preview4 for network play's only (1); never in
+        // a test run, whose menu keys are scripted)
+        if (first_picture && !reports_asked) {
+            reports_asked = true;
+            if ((settings.send_reports < 0 || settings.send_reports == 1) && net::report::available() && !test_run && menu_ready &&
+                !menu.is_open()) {
+                menu.open(root_page());
+                menu.push(ask_reports_page());
+            }
+        }
+#endif
+        if (first_picture) {
+            if (netgame && netgame->running) solo_armed = false, watchdog.set_alone(false);
+            else if (const bool want = !shared.paused && !shared.quit && reported == 0; want != solo_armed) { // (a board stopped: no more frames)
+                watchdog.set_alone(true);
+                watchdog.arm(solo_armed = want);
+            }
+        }
+        // Joining or watching, no answer from the host's machine (issue 18: a second room's watch waited for ever, its
+        // log silent): how long, every 15 s; given up after kNoAnswer, said why.
+        if (netgame && !netgame->host && !netgame->running && netgame->ready && !netgame->failed) {
+            constexpr auto kNoAnswer = std::chrono::seconds(45);
+            if (netgame->session().greeted()) netgame->asked_at = {};
+            else if (netgame->asked_at == std::chrono::steady_clock::time_point{}) netgame->asked_at = now, netgame->told_at = now;
+            else if (now - netgame->asked_at >= kNoAnswer) {
+                std::printf("net: no answer from the host's computer in %lld s: given up\n",
+                            static_cast<long long>(std::chrono::duration_cast<std::chrono::seconds>(now - netgame->asked_at).count()));
+                netgame->fail(std::string("No answer from the host's computer (") + (netgame->spectator ? "watching" : "joining") +
+                              "): its network may block players from outside, or it has just closed the game.");
+            } else if (now - netgame->told_at >= std::chrono::seconds(15)) {
+                netgame->told_at = now;
+                std::printf("net: still waiting for the host's answer after %lld s\n",
+                            static_cast<long long>(std::chrono::duration_cast<std::chrono::seconds>(now - netgame->asked_at).count()));
+            }
         }
         // The host left the game in progress and this machine hosts the room
         // now (host migration): on the internet, the room listed again under
@@ -4965,6 +5183,12 @@ int main(int argc, char** argv) {
                     if (b == (shared.netplay ? shared.local : 0)) {
                         fps_frames += s.frame_number - shown_number[b];
                         ++frames_shown;
+                        if (!first_picture) { // (the start's end: the watchdog's start steps over)
+                            first_picture = true;
+                            std::printf("start: the first picture shown\n");
+                            watchdog.set_step(nullptr);
+                            watchdog.arm(false);
+                        }
                     }
                     shown_number[b] = s.frame_number;
                 }
@@ -5159,7 +5383,7 @@ int main(int argc, char** argv) {
     // Tests sending at the end, SPIKEOUT_TEST_REPORTS: let finish)
     if (!report_test) net::report::cancel_uploads();
     // (closed in a network game: its numbers and inputs kept to send at the next start, if the player said yes)
-    const bool keep_reports = netgame && netgame->running && settings.send_reports == 1 && (!test_run || report_test);
+    const bool keep_reports = netgame && netgame->running && settings.send_reports >= 1 && (!test_run || report_test);
     if (keep_reports) tools::problems::keep_stats(report_folder, game_stats());
     if (netgame) parting(), netgame->session().leave();
     stop_games();

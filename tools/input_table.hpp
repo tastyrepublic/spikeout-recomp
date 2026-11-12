@@ -15,6 +15,7 @@
 #include "recording.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -59,10 +60,9 @@ public:
     // Waits until they have been (or the table is closed: nothing then).
     std::optional<Inputs> wait(std::size_t board, uint64_t frame) {
         std::unique_lock guard(lock_);
-        changed_.wait(guard, [&] { return closed_ || find(boards_[board], frame); });
+        wait_said(guard, "inputs", board, frame, [&] { return closed_ || find(boards_[board], frame); });
         return find(boards_[board], frame);
     }
-
     // Rollback (tools/rollback.hpp): the inputs set at the end of `frame`; or, not set yet and fewer than `ahead`
     // frames past the last set, a guess, remembered (`guessed` true): what this board's player held last (a cabinet
     // held: as held). Set later to something else, it was guessed wrong (wrong_from). Further ahead: waited for, as
@@ -72,7 +72,7 @@ public:
     std::optional<Inputs> guess(std::size_t board, uint64_t frame, uint64_t ahead, bool& guessed, uint64_t ahead_quiet = 0) {
         std::unique_lock guard(lock_);
         Board& b = boards_[board];
-        changed_.wait(guard, [&] {
+        wait_said(guard, "inputs (rollback's window)", board, frame, [&] {
             return closed_ || find(b, frame) || !b.known || frame < b.next + (b.quiet ? std::max(ahead, ahead_quiet) : ahead);
         });
         guessed = false;
@@ -148,7 +148,7 @@ public:
     // And waited for (nothing: the table closed).
     bool wait_all(uint64_t frame, std::size_t boards, std::size_t but = ~std::size_t{0}) { // (`but`: this machine's own, set after)
         std::unique_lock guard(lock_);
-        changed_.wait(guard, [&] {
+        wait_said(guard, "every board's inputs", ~std::size_t{0}, frame, [&] {
             if (closed_) return true;
             for (std::size_t i = 0; i < boards && i < boards_.size(); ++i)
                 if (i != but && !find(boards_[i], frame)) return false;
@@ -226,7 +226,42 @@ public:
         changed_.notify_all();
     }
 
+    // A wait of a second or more for inputs, the latest (a hang's problem bundle: which player's inputs a room stood
+    // still for, and how far each board's went): kept apart from any table, so read safely from any thread at any time.
+    // "" if none in the last `within` seconds.
+    static std::string last_long_wait(int within = 15) {
+        LongWait& l = long_wait();
+        std::lock_guard guard(l.lock);
+        if (l.text.empty() || std::chrono::steady_clock::now() - l.at > std::chrono::seconds(within)) return {};
+        return l.text;
+    }
+
 private:
+    struct LongWait {
+        std::mutex lock;
+        std::string text;
+        std::chrono::steady_clock::time_point at;
+    };
+    static LongWait& long_wait() {
+        static LongWait* l = new LongWait; // (never destroyed: a waiting thread may still write at exit)
+        return *l;
+    }
+    // changed_.wait, with each second waited said in long_wait (the lock held: the boards read as they are).
+    template <class Ready>
+    void wait_said(std::unique_lock<std::mutex>& guard, const char* what, std::size_t board, uint64_t frame, Ready ready) {
+        const auto since = std::chrono::steady_clock::now();
+        while (!changed_.wait_for(guard, std::chrono::seconds(1), ready)) {
+            std::string text = std::string("waited ") +
+                               std::to_string(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - since).count()) +
+                               " s for " + what + (board == ~std::size_t{0} ? std::string() : ", board " + std::to_string(board + 1)) + ", frame " + std::to_string(frame) +
+                               "; each board's inputs set up to:";
+            for (std::size_t i = 0; i < boards_.size(); ++i)
+                text += " " + (boards_[i].known ? std::to_string(boards_[i].next) : std::string("none")) + (boards_[i].quiet ? " (quiet)" : "");
+            LongWait& l = long_wait();
+            std::lock_guard g(l.lock);
+            l.text = std::move(text), l.at = std::chrono::steady_clock::now();
+        }
+    }
     struct Board {
         std::deque<Inputs> frames; // frames first .. next - 1
         uint64_t first = 0, next = 0;

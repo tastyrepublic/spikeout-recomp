@@ -283,6 +283,14 @@ void Presenter::draw(SDL_GPUCommandBuffer* cmd, SDL_GPUGraphicsPipeline* pipelin
         SDL_SubmitGPUCommandBuffer(cmd); // minimized: nothing to draw to
         return;
     }
+    pass_into(cmd, pipeline, inputs, width, height, smooth_input, extend, swapchain, sw, sh);
+    if (overlay) overlay(cmd, swapchain, sw, sh);
+    if (capture_width_ > 0) return capture(cmd, pipeline, inputs, width, height, smooth_input, extend); // (it submits)
+    SDL_SubmitGPUCommandBuffer(cmd);
+}
+
+void Presenter::pass_into(SDL_GPUCommandBuffer* cmd, SDL_GPUGraphicsPipeline* pipeline, std::initializer_list<SDL_GPUTexture*> inputs,
+                          int width, int height, uint32_t smooth_input, int extend, SDL_GPUTexture* swapchain, Uint32 sw, Uint32 sh) {
     SDL_GPUColorTargetInfo colour{};
     colour.texture = swapchain;
     colour.clear_color = {0, 0, 0, 1};
@@ -348,8 +356,64 @@ void Presenter::draw(SDL_GPUCommandBuffer* cmd, SDL_GPUGraphicsPipeline* pipelin
     SDL_PushGPUFragmentUniformData(cmd, 0, &look, sizeof look);
     SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
     SDL_EndGPURenderPass(pass);
-    if (overlay) overlay(cmd, swapchain, sw, sh);
-    SDL_SubmitGPUCommandBuffer(cmd);
+}
+
+// The picture drawn again, the same way, into a texture of the size asked for (no menu over it), read back, kept for
+// take_capture. Submits `cmd` and waits for it (a screenshot: once).
+void Presenter::capture(SDL_GPUCommandBuffer* cmd, SDL_GPUGraphicsPipeline* pipeline, std::initializer_list<SDL_GPUTexture*> inputs,
+                        int width, int height, uint32_t smooth_input, int extend) {
+    SDL_GPUDevice* d = device_->get();
+    const auto w = static_cast<Uint32>(capture_width_), h = static_cast<Uint32>(capture_height_);
+    capture_width_ = capture_height_ = 0;
+    const SDL_GPUTextureFormat format = device_->window() ? SDL_GetGPUSwapchainTextureFormat(d, device_->window())
+                                                          : SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM; // (the pipelines')
+    const bool bgra = format == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM || format == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB;
+    const bool rgba = format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM || format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB;
+    SDL_GPUTextureCreateInfo tex{};
+    tex.type = SDL_GPU_TEXTURETYPE_2D;
+    tex.format = format;
+    tex.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+    tex.width = w, tex.height = h, tex.layer_count_or_depth = 1, tex.num_levels = 1;
+    SDL_GPUTexture* target = (bgra || rgba) ? SDL_CreateGPUTexture(d, &tex) : nullptr;
+    SDL_GPUTransferBufferCreateInfo tb{};
+    tb.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+    tb.size = w * h * 4;
+    SDL_GPUTransferBuffer* down = target ? SDL_CreateGPUTransferBuffer(d, &tb) : nullptr;
+    if (!target || !down) {
+        if (target) SDL_ReleaseGPUTexture(d, target);
+        SDL_SubmitGPUCommandBuffer(cmd);
+        return;
+    }
+    // (the filter's gain is worked out for this size, then again for the window's next picture)
+    pass_into(cmd, pipeline, inputs, width, height, smooth_input, extend, target, w, h);
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+    SDL_GPUTextureRegion from{};
+    from.texture = target, from.w = w, from.h = h, from.d = 1;
+    SDL_GPUTextureTransferInfo to{};
+    to.transfer_buffer = down, to.pixels_per_row = w, to.rows_per_layer = h;
+    SDL_DownloadFromGPUTexture(copy, &from, &to);
+    SDL_EndGPUCopyPass(copy);
+    if (SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd)) {
+        SDL_WaitForGPUFences(d, true, &fence, 1);
+        SDL_ReleaseGPUFence(d, fence);
+        if (const auto* p = static_cast<const uint32_t*>(SDL_MapGPUTransferBuffer(d, down, false))) {
+            captured_.assign(p, p + static_cast<std::size_t>(w) * h);
+            SDL_UnmapGPUTransferBuffer(d, down);
+            if (rgba) // (to 0xAARRGGBB, as B8G8R8A8's bytes read)
+                for (uint32_t& c : captured_) c = (c & 0xff00ff00u) | ((c & 0xffu) << 16) | ((c >> 16) & 0xffu);
+            for (uint32_t& c : captured_) c |= 0xff000000u;
+            captured_width_ = static_cast<int>(w), captured_height_ = static_cast<int>(h);
+        }
+    }
+    SDL_ReleaseGPUTransferBuffer(d, down);
+    SDL_ReleaseGPUTexture(d, target);
+}
+
+bool Presenter::take_capture(std::vector<uint32_t>& pixels, int& width, int& height) {
+    if (captured_.empty()) return false;
+    pixels = std::move(captured_), width = captured_width_, height = captured_height_;
+    captured_.clear();
+    return true;
 }
 
 void Presenter::present(std::span<const uint32_t> pixels, int width, int height) {

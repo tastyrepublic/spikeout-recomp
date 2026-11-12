@@ -79,7 +79,7 @@ rm -f "$llvm_license"
 cp "$repo/LICENSE" "$stage/LICENSE.txt"
 
 case $platform in
-windows-*) data='%APPDATA%\spikeout-recomp\Spikeout' ;;
+windows-*) data='C:\Users\<you>\AppData\Roaming\spikeout-recomp\Spikeout (%APPDATA%\spikeout-recomp\Spikeout)' ;;
 linux-*) data='~/.local/share/spikeout-recomp/Spikeout' ;;
 macos-*) data='~/Library/Application Support/spikeout-recomp/Spikeout' ;;
 esac
@@ -97,8 +97,8 @@ First start: choose spikeofe.zip in the window. The game is then translated from
 Your settings, the rankings, the translated game and the game's log (spikeout.log):
 $data
 To keep them next to the program instead, put an empty file called portable.txt
-beside it. Save states (F9) and screenshots (F12) go in the folder the game was
-started from.
+beside it. Save states (F9) go in its saves folder, screenshots (F12) in its
+screenshots folder.
 
 Something wrong? Esc > Game > Report a problem: write what happened, then log in to
 GitHub (a code and a QR code for your phone; GitHub's own page asks your password)

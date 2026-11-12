@@ -1,5 +1,7 @@
 #include "net/session.hpp"
 
+#include "net/event_log.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
@@ -424,6 +426,7 @@ struct Session::Impl {
         return static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - epoch).count());
     }
     void log(const std::string& s) {
+        events::add(events::Kind::note, 0xFF, 0xFF, 0, 0, s); // (the timeline of a problem report: net/event_log.hpp)
         if (cb.log) cb.log(s);
     }
 
@@ -1618,6 +1621,7 @@ struct Session::Impl {
             const uint64_t first = r.u64();
             const uint8_t count = r.u8();
             if (!r.ok() || s >= seats || count * 4u > r.left()) return;
+            events::add(events::Kind::inputs_in, from, s, first, count);
             const uint8_t* data = r.here();
             r.skip(count * 4u);
             if (watch_mode) { // (a spectator: kept, given out kWatchLag frames later: deliver_watched)
@@ -1661,6 +1665,7 @@ struct Session::Impl {
     void set_idle(uint8_t s, uint64_t frame) {
         if (peers[s].dropped) return;
         peers[s].connected = false, peers[s].dropped = true;
+        events::add(events::Kind::idle, 0xFF, s, frame);
         drops[s].suspected = true;
         cabinets[s] = Seat{true, frame, std::nullopt};
         log((peers[s].name.empty() ? "seat " + std::to_string(s + 1) : peers[s].name) + " dropped: idle from frame " +
@@ -1696,6 +1701,7 @@ struct Session::Impl {
     void taken(uint8_t s, uint64_t x) {
         if (cabinets[s].until) return;
         cabinets[s].until = x;
+        events::add(events::Kind::taken, 0xFF, s, x);
         log("seat " + std::to_string(s + 1) + " taken from frame " + std::to_string(x));
         if (s == my_seat) {
             mine_from = x;
@@ -1827,6 +1833,7 @@ struct Session::Impl {
     void begin(const StartInfo& info) {
         start_info = info;
         started = true;
+        events::add(events::Kind::started, 0xFF, info.my_seat, info.seats, info.state_frame ? *info.state_frame : 0);
         owner.started_ = true;
         log("the game starts: " + std::to_string(info.seats) + " cabinets" + (info.state_frame ? " (joined in progress)" : ""));
         if (cb.started) cb.started(info);
@@ -2146,6 +2153,7 @@ void Session::local_input(uint64_t frame, const InputBytes& in) {
     Impl& m = *impl_;
     std::lock_guard guard(m.lock);
     if (m.my_seat == kNoSeat || !m.started) return;
+    events::add(events::Kind::local, 0xFF, m.my_seat, frame);
     // A cabinet joined in progress: our inputs kept until the frame it's ours from is known (kTaken), since with an
     // input delay we make them before then and the first of them may be ours (thrown away, those frames were never
     // filled: every machine waited for them for good); the ones before it dropped then (Impl::taken).
@@ -2263,6 +2271,11 @@ void Session::send_node(uint64_t seq, std::vector<uint8_t> node) {
 bool Session::seated() const {
     std::lock_guard guard(impl_->lock);
     return !impl_->late || impl_->mine_from.has_value();
+}
+
+bool Session::greeted() const {
+    std::lock_guard guard(impl_->lock);
+    return impl_->is_host || impl_->my_seat != kNoSeat || impl_->my_watch != kNoSeat;
 }
 
 void Session::hold_inputs(uint64_t frames) {
