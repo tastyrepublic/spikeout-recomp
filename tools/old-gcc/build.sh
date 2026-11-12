@@ -1,6 +1,7 @@
 #!/bin/bash
 # build.sh: build the compiler Spikeout's C code was made with: GCC 2.7.2.3 for
-# PowerPC, stock and with SEGA's frame changes, plus a modern PowerPC assembler
+# PowerPC, stock and with SEGA's frame changes (and three pieces back-ported
+# from the 1997 development tree), plus a modern PowerPC assembler
 # and linker, in WSL / Ubuntu 24.04, without root.
 #
 #   bash tools/old-gcc/build.sh [WORKDIR]      (default ~/oldgcc)

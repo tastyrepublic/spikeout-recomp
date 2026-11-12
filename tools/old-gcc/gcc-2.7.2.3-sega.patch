@@ -100,3 +100,34 @@
      case PROCESSOR_PPC403:				\
      case PROCESSOR_PPC604:				\
      case PROCESSOR_PPC620:				\
+--- gcc-2.7.2.3/config/rs6000/rs6000.md
++++ gcc-2.7.2.3-sega/config/rs6000/rs6000.md
+@@ -145,13 +145,26 @@
+   20 19
+   [(eq_attr "type" "integer")])
+ 
++; PPC603 integer unit and compares, as in GCC 2.8
++(define_function_unit "iu" 1 0
++  (and (eq_attr "type" "integer")
++       (eq_attr "cpu" "ppc603"))
++  1 1)
++
++(define_function_unit "iu" 1 0
++  (and (eq_attr "type" "compare,delayed_compare")
++       (eq_attr "cpu" "ppc603"))
++  3 1)
++
+ ; Branch Processing Unit
+ (define_function_unit "bpu" 1 0
+-  (eq_attr "type" "compare")
++  (and (eq_attr "type" "compare")
++       (eq_attr "cpu" "!ppc603"))
+   4 0)
+ 
+ (define_function_unit "bpu" 1 0
+-  (eq_attr "type" "delayed_compare")
++  (and (eq_attr "type" "delayed_compare")
++       (eq_attr "cpu" "!ppc603"))
+   5 0)
+ 
+ (define_function_unit "bpu" 1 0
