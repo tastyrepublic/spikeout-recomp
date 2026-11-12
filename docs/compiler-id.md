@@ -12,20 +12,25 @@ AM2's programmers wrote the PowerPC instructions themselves, with their own
 shorthand ("macros") and their own rules for how functions call each other.
 Confidence: **high**.
 
-The other ~5% is one block of **47 functions written in C** (RAM
-0x78488-0x7DF48, about 22 KB, at the very end of the code, just before the
-data). It looks like test-menu code for the video board (it sends bit-by-bit
-read and write commands and prints numbers on the test screen; the nearby
-texts are the video board's RAM and JTAG tests). That block was compiled by
-**GCC 2.8.1 (1998), with `-O2 -mno-eabi`, changed in two small places to
-follow SEGA's house calling rules.** This is proved: the rebuilt compiler
-gives four of the game's functions **byte for byte** (see "The test
-compiles" below). Most likely the build came to SEGA from Cygnus, as its
-Saturn GCC did; that part is unproven.
+The other ~5% is one block of **57 C functions** (RAM 0x78488-0x7DF4C, about
+22 KB, at the very end of the code, just before the data; 11 of them are never
+called, so the project's analysis listed 47). It looks like test-menu code
+for the video board (it sends bit-by-bit read and write commands and prints
+numbers on the test screen; the nearby texts are the video board's RAM and
+JTAG tests). That block was compiled by **GCC 2.7.2.3 (1997) with `-O2
+-mno-traceback`, changed in a few small places to follow SEGA's house rules
+for stack frames.** This is proved by test compiles: the rebuilt compiler
+gives the game's functions **byte for byte** (see "The test compiles" below).
+Most likely the build came to SEGA from Cygnus, as its Saturn GCC did; that
+part is unproven.
 
-Updated the same day after the test compiles. The first version of this page
-guessed "GCC 2.x, version unknown" and said the cr1 compares were one of
-SEGA's changes; the tests showed they are stock GCC 2.7/2.8 behaviour.
+History of this page (2026-11-12): the first version guessed "GCC 2.x". The
+first test compiles matched four small functions with GCC 2.8.1; matching
+more of them then showed three things 2.8.1 does that the game's compiler
+doesn't (a clean-up pass after register allocation that GCC 2.8 added, a
+different loop rewrite, a frame-size quirk), all of which GCC 2.7.2.3 doesn't
+do either. With 2.7.2.3 and SEGA's changes, every function written so far
+matches or comes within a line or two.
 
 What it means for a matching decompile:
 
@@ -36,9 +41,9 @@ What it means for a matching decompile:
   back into the same bytes. That needs no special tools: GNU `as` for
   PowerPC (free) does it, and the project's own analysis already knows
   every function, block and jump table.
-- Only the 47-function C block can be decompiled to matching C, with GCC
-  2.8.1 rebuilt with SEGA's changes: `tools/old-gcc/build.sh` builds it in
-  WSL and `tools/old-gcc/compare.sh` checks a function against its bytes.
+- The 57-function C block can be decompiled to matching C with GCC 2.7.2.3
+  rebuilt with SEGA's changes: `tools/old-gcc/build.sh` builds it in WSL and
+  `tools/old-gcc/compare.sh` checks a function against its bytes.
 
 ## How it was found
 
@@ -89,8 +94,8 @@ lowest up at the top of the frame (no `stmw`); the condition register saved
 just below them; on the way out the return address first, then the
 registers, then the stack pointer moved back. All 19 frame sizes are
 multiples of 16 bytes (the System V rule). The 9th argument is read from 8
-bytes into the caller's frame, as System V says. Two things differ from a
-stock GCC, and both are what SEGA's rules need:
+bytes into the caller's frame, as System V says. Two things (of the four found later)
+differ from a stock GCC, and both are what SEGA's rules need:
 
 - The return address is saved at offset 4 of the function's **own** frame,
   not the caller's. A stock GCC function called from the game code would
@@ -101,9 +106,9 @@ stock GCC, and both are what SEGA's rules need:
   its small-data base at 0x108000 and r14/r15 as its own pointers): maybe
   reserved from the compiler, maybe just never needed in this small block.
 
-The test compiles confirmed the first change and that a 16-byte frame comes
-from the option `-mno-eabi`; the second change is in the patch but no tested
-function exercises it yet.
+The test compiles confirmed both changes (the second in a function that keeps a
+compare result across calls, 0x79698), and showed SEGA also rounded frames and
+the outgoing-argument area to 16 bytes (stock 2.7.2.3 for EABI uses 8).
 
 ### 3. Runtime helpers: none from a compiler
 
@@ -165,11 +170,11 @@ What the C block's habits say (GCC fingerprints):
   GCC 2.95.3 uses cr0 instead (and later GCCs cr7 first).
 - CTR used now and then as a spare register (`mtctr`/`mfctr`), which GCC
   2.x allowed.
-- No `stmw`/`lmw`: GCC 2.8.1's PowerPC target saves registers one by one.
+- No `stmw`/`lmw`: GCC 2.7.2.3's PowerPC target saves registers one by one.
 - Instruction scheduling (compares moved ahead of stores) and pointer
   stepping in loops: GCC 2.x does these at `-O2` (the tests confirm `-O1`
   gives different code). No counted loops with `bdnz` even where they fit:
-  GCC 2.8.1 doesn't make them.
+  GCC 2.7.2.3 doesn't make them.
 - No small-data accesses (no r13 use): `-msdata=none` or `-G 0`.
 
 ### 5. Each candidate, for and against
@@ -177,10 +182,9 @@ What the C block's habits say (GCC fingerprints):
 | candidate | for | against |
 |---|---|---|
 | **Hand-written assembly** (game code) | everything in 2 and 4: r2 as scratch, stack-passed `printf`, conditional calls, shared tails, mixed styles, a save routine no compiler uses | none found |
-| **GCC 2.8.1** (C block) | proved: four functions byte for byte with two small changes; GCC's compare sequences, register order, frame layout; SEGA used Cygnus' GCC for the Saturn | needs two prologue changes no option gives (a modified build) |
-| GCC 2.7.2.3 | same code inside the tested functions | no 16-byte frame option (`-mno-eabi` doesn't exist yet): would need a third change |
-| GCC 2.95.3 | GCC | different registers, cr0 instead of cr1, different code: ruled out |
-| egcs 1.0.x (late 1997) | close relative of 2.8.1 | not tested (its download failed); could match as well |
+| **GCC 2.7.2.3** (C block) | proved: the game's functions byte for byte, with SEGA's frame changes; GCC's compare sequences, register order, frame layout; SEGA used Cygnus' GCC for the Saturn | needs changes no option gives (a modified build) |
+| GCC 2.8.1, egcs 1.0, egcs 1.0.3a | the same code in small functions | a clean-up pass after register allocation (`reload_cse_regs`, new in 2.8) and a different loop rewrite give different code in larger ones: ruled out |
+| GCC 2.95.3 | GCC | different registers, cr0 instead of cr1: ruled out |
 | Metrowerks CodeWarrior | was used for embedded PowerPC in 1997-99 | saves the return address before or at frame+4, uses `stmw`, `cntlzw` for "== 0", r3-r12 scratch order, MSL texts; none seen |
 | Green Hills MULTI | big in embedded PowerPC then | standard frame (return address at frame+4), its library texts and helpers; none seen |
 | Diab Data | likewise | standard frame, its own helper names and sequences; none seen |
@@ -198,61 +202,61 @@ may have come from Real3D, also likely built with GCC.
 `tools/old-gcc/build.sh` builds everything in WSL (Ubuntu 24.04) without
 root, in a few minutes on 3 cores:
 
-- GCC 2.8.1 from the GNU site (checked by SHA-256), only its compiler proper
-  (`cc1`), as a cross compiler for `powerpc-eabi`, twice: stock, and with
-  `tools/old-gcc/gcc-2.8.1-sega.patch` (SEGA's changes, 6 lines in
-  `config/rs6000/rs6000.c`: the return address stored at offset 4 of the new
-  frame and read back from there; the condition register saved through r2
-  instead of r12).
+- GCC 2.7.2.3 from the GNU site (checked by SHA-256), only its compiler
+  proper (`cc1`), as a cross compiler for `powerpc-eabi`, twice: stock, and
+  with `tools/old-gcc/gcc-2.7.2.3-sega.patch` (SEGA's changes, 9 lines in
+  `config/rs6000/rs6000.c` and `rs6000.h`, listed below).
 - Old GCC only builds as a 32-bit program, so Ubuntu's own 32-bit C library
   packages are unpacked into a folder (not installed) and used through a
-  small wrapper; compiler flags `-std=gnu89 -fcommon` let a modern GCC build
-  the 1998 source unchanged.
+  small wrapper; the flags `-std=gnu89 -fcommon` let a modern GCC build the
+  1997 source unchanged.
 - binutils 2.42 (current) for the assembler, linker and `objdump`.
 
-GCC 2.7.2.3 and 2.95.3 were built the same way for comparison (by hand; the
-script builds 2.8.1 only).
+GCC 2.8.1, egcs 1.0, egcs 1.0.3a and 2.95.3 were built the same way, by
+hand, for comparison.
+
+**SEGA's changes** (each found because the stock compiler differed from the
+game in exactly that place, and each fix made the game's bytes come out):
+
+1. The return address is stored at offset 4 of the function's own frame and
+   read back from there (stock: the caller's frame).
+2. The condition register is saved through r2 (stock: r12).
+3. Every frame, and the area for arguments passed on the stack, is rounded
+   up to 16 bytes (stock EABI: 8), which fits the game's assembly, which
+   moves the stack 16 bytes at a time.
+4. A function without a frame of its own (a leaf) still gets none after
+   that rounding.
+
+Options: `-O2 -mcpu=603 -mno-traceback` (`-mno-traceback` drops a tag word
+GCC 2.7 puts before each function; the game has none; `-mcpu` makes no
+difference seen so far).
 
 **Comparing.** `tools/old-gcc/compare.sh` compiles a C file, links it at the
 function's real address (with the addresses of what it calls and uses) and
-compares every byte with the function's bytes, cut from the RAM image into a
-scratch folder (`romcheck --dump-crom`, then the 1 MB at offset 0x600000).
-The C files are written by hand from what each function does; they are made
-from the ROM, so they stay private like the bytes.
+compares every byte with the function's bytes, cut from the RAM image
+(`romcheck --dump-crom`, then the 1 MB at offset 0x600000). The C files are
+written by hand from what each function does; they are made from the ROM,
+so they stay private, outside the repository, like the bytes.
 
-**Results** (options `-O2 -mcpu=603 -mno-eabi`; `-mcpu` makes no difference
-to these):
-
-| function | what it does | GCC 2.8.1 + SEGA patch |
-|---|---|---|
-| 0x7DF08, 17 instructions | compares two strings | **byte for byte** |
-| 0x79240, 8 instructions | swaps a word's byte order | **byte for byte** |
-| 0x79568, 9 instructions | calls another function with a fixed second value | **byte for byte** |
-| 0x79260, 24 instructions | reads two swapped words into two globals | **byte for byte** (even saving two registers it never uses, as the game does) |
-| 0x792C0, 33 instructions | a loop copying swapped words | same prologue and ending; the loop differs: the right C not found yet |
-
-And what rules the others out:
+**What told the versions apart:**
 
 - GCC 2.95.3: different registers and cr0 for compares in every test.
-- GCC 2.7.2.3: the same instructions inside the leaf functions, but it has
-  no option for 16-byte frames, so it would need one more change.
-- Stock GCC 2.8.1: the leaf functions match; framed ones store the return
-  address at frame+4 of the caller (no option changes that), and without
-  `-mno-eabi` frames are 8-byte aligned.
-- `-O1`: different code; `-O3` gave the same as `-O2` here.
+- GCC 2.8.1 and egcs 1.0 / 1.0.3a: identical to the game in small
+  functions, but they add a clean-up pass after register allocation
+  (`reload_cse_regs`: copies one register into another where the game loads
+  the value again) and rewrite some loops differently. GCC 2.7.2.3 does
+  neither, exactly like the game.
+- `-O1` gives different code; `-O2` and `-O3` gave the same here.
 
-So: **GCC 2.8.1 (or egcs 1.0, its close relative, not tested), `-O2
--mno-eabi`, with the return address kept in the function's own frame.**
-Confidence: high for the version family and options, given four exact
-matches of different kinds; the CR-through-r2 change is still untested.
+**Style of the original C**, learnt from the matches: hardware and buffer
+addresses are often plain integers, and many loops step a byte offset
+(`off += 4`) rather than an index; sizes come from macros such as
+`(end - start) / 4`. Writing the C that way is what made the loops match.
 
 ## Next steps
 
-- For the C block (47 functions): write each function's C until
-  `compare.sh` says MATCH, starting with the small ones, then the loops
-  (0x792C0 shows the loop's exact form matters) and a function that saves
-  the condition register (0x7B6F4 or 0x7BD14) to test the r2 change. If
-  egcs 1.0.3 can be found, test it too.
+- Write the rest of the C block's functions until `compare.sh` says MATCH
+  (progress is kept privately with the C).
 - For the hand-written 95%: no compiler is involved. Make `codemap`'s
   disassembly re-assemblable (labels instead of addresses, data kept as
   data) and check that GNU `as` gives back the same 1 MB, byte for byte.

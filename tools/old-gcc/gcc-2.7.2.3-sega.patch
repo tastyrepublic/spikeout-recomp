@@ -1,6 +1,31 @@
---- gcc-2.8.1/config/rs6000/rs6000.c
-+++ gcc-2.8.1-sega/config/rs6000/rs6000.c
-@@ -3667,7 +3667,7 @@
+--- gcc-2.7.2.3/config/rs6000/rs6000.c
++++ gcc-2.7.2.3-sega/config/rs6000/rs6000.c
+@@ -2400,13 +2400,13 @@
+   info_ptr->fixed_size   = RS6000_SAVE_AREA;
+   info_ptr->varargs_size = RS6000_VARARGS_AREA;
+   info_ptr->vars_size    = ALIGN (get_frame_size (), 8);
+-  info_ptr->parm_size    = ALIGN (current_function_outgoing_args_size, 8);
++  info_ptr->parm_size    = ALIGN (current_function_outgoing_args_size, 16);
+   info_ptr->save_size    = ALIGN (info_ptr->fp_size + info_ptr->gp_size + info_ptr->cr_size, 8);
+   info_ptr->total_size   = ALIGN (info_ptr->vars_size
+ 				  + info_ptr->parm_size
+ 				  + info_ptr->save_size
+ 				  + info_ptr->varargs_size
+-				  + info_ptr->fixed_size, STACK_BOUNDARY / BITS_PER_UNIT);
++				  + info_ptr->fixed_size, 16);
+ 
+   /* Determine if we need to allocate any stack frame.
+      For AIX We need to push the stack if a frame pointer is needed (because
+@@ -2420,7 +2420,7 @@
+     info_ptr->push_p = 1;
+ 
+   else if (abi == ABI_V4)
+-    info_ptr->push_p = (info_ptr->total_size > info_ptr->fixed_size
++    info_ptr->push_p = (info_ptr->vars_size + info_ptr->parm_size + info_ptr->save_size + info_ptr->varargs_size > 0
+ 			|| info_ptr->lr_save_p);
+ 
+   else
+@@ -2686,7 +2686,7 @@
  
    /* If we need to save CR, put it into r12.  */
    if (info->cr_save_p && sp_reg != 12)
@@ -9,7 +34,7 @@
  
    /* Do any required saving of fpr's.  If only one or two to save, do it
       ourself.  Otherwise, call function.  Note that since they are statically
-@@ -3715,7 +3715,7 @@
+@@ -2721,7 +2721,7 @@
  
    /* Save lr if we used it.  */
    if (info->lr_save_p)
@@ -18,7 +43,7 @@
  		 reg_names[sp_reg]);
  
    /* Save CR if we use any that must be preserved.  */
-@@ -3729,7 +3729,7 @@
+@@ -2735,7 +2735,7 @@
  		       reg_names[sp_reg]);
  	}
        else
@@ -27,7 +52,7 @@
  		     reg_names[sp_reg]);
      }
  
-@@ -3897,11 +3897,11 @@
+@@ -2886,11 +2886,11 @@
  
        /* Get the old lr if we saved it.  */
        if (info->lr_save_p)
@@ -41,7 +66,7 @@
  
        /* Set LR here to try to overlap restores below.  */
        if (info->lr_save_p)
-@@ -3940,7 +3940,7 @@
+@@ -2929,7 +2929,7 @@
  	asm_fprintf (file, "\tmtcrf %d,%s\n",
  		     (regs_ever_live[70] != 0) * 0x20
  		     + (regs_ever_live[71] != 0) * 0x10
@@ -49,4 +74,15 @@
 +		     + (regs_ever_live[72] != 0) * 0x8, reg_names[2]);
  
        /* If this is V.4, unwind the stack pointer after all of the loads have been done */
-       if (sp_offset)
+ #ifdef USING_SVR4_H
+--- gcc-2.7.2.3/config/rs6000/rs6000.h
++++ gcc-2.7.2.3-sega/config/rs6000/rs6000.h
+@@ -931,7 +931,7 @@
+    except for dynamic allocations.  So we start after the fixed area and
+    outgoing parameter area.  */
+ 
+-#define STARTING_FRAME_OFFSET (ALIGN (current_function_outgoing_args_size, 8) \
++#define STARTING_FRAME_OFFSET (ALIGN (current_function_outgoing_args_size, 16) \
+ 			       + RS6000_VARARGS_AREA \
+ 			       + RS6000_SAVE_AREA)
+ 

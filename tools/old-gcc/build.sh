@@ -1,12 +1,12 @@
 #!/bin/bash
-# build.sh: build the 1998 compiler Spikeout's C code was made with (GCC 2.8.1
-# for PowerPC, stock and with SEGA's two prologue changes) and a modern PowerPC
-# assembler and linker, in WSL / Ubuntu 24.04, without root.
+# build.sh: build the compiler Spikeout's C code was made with: GCC 2.7.2.3 for
+# PowerPC, stock and with SEGA's frame changes, plus a modern PowerPC assembler
+# and linker, in WSL / Ubuntu 24.04, without root.
 #
 #   bash tools/old-gcc/build.sh [WORKDIR]      (default ~/oldgcc)
 #
-# Gives WORKDIR/build-2.8.1/cc1 (stock), WORKDIR/build-2.8.1s/cc1 (SEGA's
-# changes: tools/old-gcc/gcc-2.8.1-sega.patch) and WORKDIR/tools/bin/powerpc-eabi-*.
+# Gives WORKDIR/build-2.7.2.3/cc1 (stock), WORKDIR/build-2.7.2.3s/cc1 (SEGA's
+# changes: tools/old-gcc/gcc-2.7.2.3-sega.patch) and WORKDIR/tools/bin/powerpc-eabi-*.
 # Old GCC builds only as a 32-bit program, so Ubuntu's own 32-bit C library
 # packages are unpacked into WORKDIR/sys32 (apt-get download: no root needed)
 # and used through the WORKDIR/gcc32 wrapper. See docs/compiler-id.md.
@@ -22,7 +22,7 @@ fetch() { # url sha256
     [ -s "$f" ] || curl -sSfL --max-time 600 -o "$f" "$1"
     echo "$2  $f" | sha256sum -c --quiet
 }
-fetch https://ftp.gnu.org/gnu/gcc/gcc-2.8.1.tar.gz 3b30fbfdf93e628373d90d174243f3267b0eec9ebe792bb64fd15b8828c2ea4c
+fetch https://ftp.gnu.org/gnu/gcc/gcc-2.7.2.3.tar.gz 16166e0f0f2064bb3114716650569065ef3855ae2331d7a29b85d4b9aa73773c
 fetch https://ftp.gnu.org/gnu/binutils/binutils-2.42.tar.xz f6e4d41fd5fc778b06b7891457b3620da5ecea1006c6a4a41ae998109f85a800
 
 # 32-bit C library, unpacked (not installed)
@@ -48,21 +48,21 @@ if [ ! -x "$W/tools/bin/powerpc-eabi-ld" ]; then
     make MAKEINFO=true install-gas install-binutils install-ld > inst.log 2>&1
 fi
 
-# GCC 2.8.1: stock, and with SEGA's changes
+# GCC 2.7.2.3: stock, and with SEGA's changes
 cd "$W"/src
-[ -d gcc-2.8.1 ] || tar xzf ../dl/gcc-2.8.1.tar.gz
-if [ ! -d gcc-2.8.1-sega ]; then
-    cp -a gcc-2.8.1 gcc-2.8.1-sega
-    patch -d gcc-2.8.1-sega -p1 < "$HERE/gcc-2.8.1-sega.patch"
+[ -d gcc-2.7.2.3 ] || tar xzf ../dl/gcc-2.7.2.3.tar.gz
+if [ ! -d gcc-2.7.2.3-sega ]; then
+    cp -a gcc-2.7.2.3 gcc-2.7.2.3-sega
+    chmod -R u+w gcc-2.7.2.3-sega
+    patch -d gcc-2.7.2.3-sega -p1 < "$HERE/gcc-2.7.2.3-sega.patch"
 fi
-for v in 2.8.1:gcc-2.8.1 2.8.1s:gcc-2.8.1-sega; do
+HOSTCC="$W/gcc32 -std=gnu89 -fcommon -w -fno-strict-aliasing -O1 -g0"
+for v in 2.7.2.3:gcc-2.7.2.3 2.7.2.3s:gcc-2.7.2.3-sega; do
     name=${v%%:*}; src=${v##*:}; B=$W/build-$name
     [ -x "$B/cc1" ] && continue
     rm -rf "$B"; mkdir -p "$B"; cd "$B"
-    CC="$W/gcc32 -std=gnu89 -fcommon -w -fno-strict-aliasing -O1 -g0" \
-        ../src/$src/configure --host=i686-pc-linux-gnu --build=i686-pc-linux-gnu \
-        --target=powerpc-eabi --prefix="$W/gcc-$name" --with-gnu-as --with-gnu-ld \
-        --disable-nls > cfg.log 2>&1
-    nice make -j"$JOBS" CC="$W/gcc32 -std=gnu89 -fcommon -w -fno-strict-aliasing -O1 -g0" cc1 > cc1.log 2>&1
+    CC="$HOSTCC" ../src/$src/configure --host=i686-pc-linux-gnu --build=i686-pc-linux-gnu \
+        --target=powerpc-eabi --prefix="$W/gcc-$name" > cfg.log 2>&1
+    nice make -j"$JOBS" CC="$HOSTCC" HOST_CC="$HOSTCC" cc1 > cc1.log 2>&1
 done
-ls -l "$W"/build-2.8.1/cc1 "$W"/build-2.8.1s/cc1
+ls -l "$W"/build-2.7.2.3/cc1 "$W"/build-2.7.2.3s/cc1

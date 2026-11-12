@@ -4,13 +4,13 @@
 #
 #   [TEXT=0xADDR DEFS="sym=0xADDR ..."] bash tools/old-gcc/compare.sh CC1 FILE.c GAME.bin [cc1 options]
 #
-# CC1      e.g. ~/oldgcc/build-2.8.1s/cc1 (from build.sh)
+# CC1      e.g. ~/oldgcc/build-2.7.2.3s/cc1 (from build.sh)
 # GAME.bin the function's bytes, cut from the RAM image (see docs/compiler-id.md);
 #          made from the ROM: keep it, and the C, out of the repository
 # TEXT     the function's address: links the object there, with DEFS giving the
 #          addresses of what it calls and uses, so every byte is final.
 #          Without TEXT, calls and addresses are left unlinked.
-# Options used for Spikeout: -O2 -mcpu=603 -mno-eabi
+# Options used for Spikeout: -O2 -mcpu=603 -mno-traceback
 set -u
 CC1=$1; C=$2; BIN=$3; shift 3
 T=${TOOLS:-$HOME/oldgcc/tools/bin}/powerpc-eabi
