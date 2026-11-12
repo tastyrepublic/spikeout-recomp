@@ -204,8 +204,8 @@ root, in a few minutes on 3 cores:
 
 - GCC 2.7.2.3 from the GNU site (checked by SHA-256), only its compiler
   proper (`cc1`), as a cross compiler for `powerpc-eabi`, twice: stock, and
-  with `tools/old-gcc/gcc-2.7.2.3-sega.patch` (SEGA's changes, 9 lines in
-  `config/rs6000/rs6000.c` and `rs6000.h`, listed below).
+  with `tools/old-gcc/gcc-2.7.2.3-sega.patch` (the changes listed below, a
+  few lines in `config/rs6000/rs6000.c` and `rs6000.h`).
 - Old GCC only builds as a 32-bit program, so Ubuntu's own 32-bit C library
   packages are unpacked into a folder (not installed) and used through a
   small wrapper; the flags `-std=gnu89 -fcommon` let a modern GCC build the
@@ -226,6 +226,15 @@ game in exactly that place, and each fix made the game's bytes come out):
    moves the stack 16 bytes at a time.
 4. A function without a frame of its own (a leaf) still gets none after
    that rounding.
+5. Multiplying by a small constant is priced as GCC 2.8 prices it on the
+   603 (cheap), so `mulli` is used where stock 2.7.2.3 makes shifts and
+   adds.
+
+Item 5 is not a SEGA house rule but a piece of a newer compiler: together
+with the rest, the game's compiler looks like a GCC 2.7 with some of the
+PowerPC improvements that appeared in GCC 2.8, which fits a Cygnus build
+from 1997 (Cygnus sold such in-between releases). The exact build may have
+more such differences; each found so far is a few lines.
 
 Options: `-O2 -mcpu=603 -mno-traceback` (`-mno-traceback` drops a tag word
 GCC 2.7 puts before each function; the game has none; `-mcpu` makes no
@@ -255,8 +264,16 @@ addresses are often plain integers, and many loops step a byte offset
 
 ## Next steps
 
-- Write the rest of the C block's functions until `compare.sh` says MATCH
-  (progress is kept privately with the C).
+- Progress on 2026-11-12: 24 of the 57 functions match byte for byte (all
+  the small and several medium ones, 440 instructions); 11 more (531) are
+  written: 5 of them within a few instructions (the order of two
+  instructions, a register), 6 further off (register choice and layout over
+  larger parts); 22, mostly the large ones (4,838 instructions), are
+  not written yet. The C is kept privately.
+- Write the rest until `compare.sh` says MATCH. Where a function stays a
+  line or two off whatever the C, the compiler probably differs again from
+  the real build; such a difference is worth finding once, since it fixes
+  every function it touches (as items 3-5 did).
 - For the hand-written 95%: no compiler is involved. Make `codemap`'s
   disassembly re-assemblable (labels instead of addresses, data kept as
   data) and check that GNU `as` gives back the same 1 MB, byte for byte.
