@@ -3780,12 +3780,81 @@ on rollback (24 of 20,830) and match its frames' settling, not the error: likely
 packet. Next: the owner's own play recorded (the window's `--record` doesn't cover a network game yet: a network
 game's inputs and the host's state kept for a report would let it be run again exactly).
 
+### A network game recorded (2026-11-11)
+
+The window records every network game it plays (`tools/net_record.hpp`): at the first frame it can (after joining,
+after a resync) every board's state, as the network F9 save makes it (`LinkedState`, packed with zstd on a thread of
+its own: 107 MB to 5-10 MB in about 0.5 s; `write_elsewhere`), into the data folder's `saves/net-game-<time>.state`,
+and from that frame each seat's inputs as they settle in the input table, 4 bytes a seat a frame
+(`net-game-<time>.inputs`, ~16 KB a minute). The newest 5 kept. Every machine runs the same boards on the same inputs,
+so these decide the game: `gamerun --net-replay FILE.inputs` runs it again, every board whole, from the state (its
+packed form read too). Proved: the window joining a 4-seat gamerun host (rollback, random presses), 3,000 frames
+recorded and replayed: 12,000 of 12,000 RAM hashes the same as the host's. Its cost in play: 16 bytes a frame; the
+state's copy once, on the game thread (as a host's at a join); nothing sent, nothing in the build id.
+
+**In a report, locked** (`tools/report_lock.hpp`, the owner's choice): the state is the game's memory, pieces of the
+ROM in it, and a report's zip may be posted where anyone can download it. So Report a problem > Save as a zip adds the
+newest recording locked to the project owner's public key (Monocypher 4.0.2, third_party/monocypher: X25519 with a key
+of the file's own, BLAKE2b, XChaCha20-Poly1305); only the owner's secret key, kept on the owner's PC and never in the
+repository, opens it: `gamerun --unlock FILE.locked ... --report-key KEYFILE` (`--make-report-key KEYFILE` makes a
+pair). Proved: the window's zip, its two files opened, replayed: 12,000 of 12,000 hashes; another key, one byte
+changed, and replacing an existing key file are refused. A report sent to GitHub from the game carries no recording
+(issues take text only).
+
+### The made packets' buttons: the check compared a guessed run's (2026-11-11)
+
+The owner's one-board games on a Codespace (and two gamerun bots on one PC, one board each, rollback 12, 5 ms each
+way) showed the node check's differences at +x05 (each record's buttons, the word at +0x04) on both sides: ~60 a game
+in the window, 136-145 in the local run, every machine in step. Cause: rollback clears the wrong guess
+(`forget_guesses_after`) as it goes back, before the frames after it have run again, ~12-60 ms; meanwhile the settled
+test (every input in, no wrong guess) called those frames settled, so a real node arriving then (the network thread)
+was compared with the made one from the guessed run, and this machine's own nodes of those frames could be sent from
+it. Now a frame after the one gone back to isn't settled until the boards are back where they were
+(`Linked::redoing`, in the node check's settled test, gamerun's and the window's). The same local run: host 145 to 0,
+joiner 136 to 5; rollback's catch-up the same (54-61 ms there: two one-board machines with three side runs each on one
+PC). Left: those 5 (+x21-+x2A, a character entry's flags and float, at about packet 20,000), and whether this was the
+"Communication error": the made packets with a wrong button were the node check's, not the game's (the game's are
+made in the run again), so likely not.
+
+### A made cabinet whose player leaves play: exact (2026-11-11)
+
+The owner's recorded Codespace game (4 cabinets, the window on one board; `net-game-20261111-085956`) run offline
+with the host's cabinet made as the window made it (`tools/onepc-diff.ps1 -MadeBoard 0 -NoShadows ... -NoBot -Extra
+'--net-replay',NAME.inputs`; `-MadeBoard` is new: one made board, the others whole, so it has its camera and rules;
+gamerun's offline made cabinets now take their buttons from the recording) differed first at 30,277, every time
+around the host's player timing out and playing on. Each fix from the game's own code, the finder's next difference
+further on each time; now board 1 the same in all 9,701 frames (the received-record area aside: below).
+
+- **The player's update writes its record's +0x08 to +0x0D only while the player is in play** (0x55050: the player
+  word's bit 0x02 clear, the cabinet's mode -16376(r13) not 3, the player's bit in the players-in-play word at +0x50 of
+  the object -16108(r13) points to, 0x111150 in play; else the record keeps them). The made record took them from the
+  player's object and the camera every count: the host's heading turned on in its records after its player had gone.
+  Made records follow the test now (`make_record`), and link_run's pass over the older records decides it again from
+  this board's own record of that count (`players_at_`, now with the players-in-play word): a master's record is made
+  a count ahead, before this board has the word of that count.
+- **The view bits stay as they were while the player's update doesn't run** (0x5185C runs each player's update only
+  with its word at the object's +0x10 + 4k, bit 0: its view test is in it). The made side ran its own view test of its
+  player every count (after its tasks, as its drawing's): with the player's object cleared, the test took 0x08/0x10,
+  which came back with the player (00000110 sent for 00000100). Now only while the update runs; a count its tasks
+  tested nothing keeps the last bits (`own_view`), and a cleared object clears them.
+- A player gone sends no view bits (its whole word 0).
+
+Left, and harmless: each new record of a master is first sent with its player's view bits as this board has them,
+put right a frame later (its view test of that count isn't run yet: it is a count ahead); the game reads a record two
+counts on (the finder over everything else: the same to the end). Tested: the local suites, the 13 window tests, the
+play test (5 of 6; the sixth the stall below, the window running no side runs at all).
+
 ### Open: one play test out of step in 17 (2026-11-11)
 
 `tools/window-autoplay-test.ps1 -Seed 1` (the window hosting on one board, two gamerun bots): once bot 1's board 1
 differed from seat 3's at frame 2640, the window never handing the others back to side runs that run. Then 16 runs
 the same (two of them on that same path), and 6 runs of the committed build the same; the failing run's logs were
 not kept. Not known whether it is today's change or older.
+Seen again (2026-11-11, logs kept): this PC stalled ~3 s as a whole at about frame 2,400 (the window: "gamerun isn't
+answering (heard 3001 ms ago)"), the window dropped both bots and ran their boards whole ("its board whole here: on
+from here", no side runs, no hand-backs), and bot 2's board 1 then differed from seat 2's. So it is the drop path
+after a stall of every process, not the made cabinets: to be found with a forced stall (a test switch holding every
+datagram 3 s).
 
 ## Plan
 

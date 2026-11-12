@@ -8,6 +8,9 @@
 #
 #   tools/onepc-diff.ps1 -State build-jit\bench\two-3800.state -Boards 2 -Stays 1 -From 3810 -Frames 4600
 #
+# A network game's recording (the window's saves/net-game-*: docs/netplay.md, "A network game recorded"):
+#   tools/onepc-diff.ps1 -State NAME.state -Boards 4 -Stays 1 -MadeBoard 0 -From F -Frames G -NoBot -Extra '--net-replay',NAME.inputs
+# -MadeBoard N: only board N made by side runs, the others whole (offline, more than one made board has no camera or rules).
 # -Exe: the gamerun to use; -BotSeed: the bots' seed; -Extra: more gamerun arguments for both runs (e.g. a poke);
 # -OneBoard: the one-board run's own arguments; -Watch: frames watched before the first difference (default 3);
 # -Build: build gamerun first. -NoShadows: no shadows after the first hand-back (side runs alone through
@@ -17,7 +20,7 @@ param([Parameter(Mandatory)][string]$State, [int]$Boards = 2, [int]$Stays = 1, [
       [string]$Exe = "build\gamerun.exe", [string]$Rom = "Z:\Emu\spikeout-recomp\build\roms\spikeofe", [int]$BotSeed = 1,
       [string[]]$Extra = @(), [string[]]$OneBoard = @("--one-board-auto", "--one-board-held"), [int]$Watch = 3,
       [string]$Out = "build\onepc-diff", [int]$MaxBytes = 40, [switch]$Build, [switch]$NoShadows, [string]$Ignore = "", [switch]$NoBot,
-      [int]$TimeoutMin = 15)
+      [int]$TimeoutMin = 15, [int]$MadeBoard = -1)
 if ($NoShadows) { $env:ONEBOARD_NO_SHADOWS = "1" } else { Remove-Item Env:ONEBOARD_NO_SHADOWS -ErrorAction SilentlyContinue }
 # (-Ignore "LO-HI,...": hex RAM ranges left out of the comparison, bytes known to differ, to look past them)
 if ($Ignore) { $env:RAM_HASH_IGNORE = $Ignore } else { Remove-Item Env:RAM_HASH_IGNORE -ErrorAction SilentlyContinue }
@@ -36,6 +39,7 @@ $built = (Get-Item $Exe).LastWriteTime
 Write-Host ("Build: {0} from {1:HH:mm:ss}; newest source {2} {3:HH:mm:ss}{4}" -f $Exe, $built, $newest.Name, $newest.LastWriteTime,
     $(if ($newest.LastWriteTime -gt $built) { "  ** OLDER THAN THE SOURCES **" } else { "" }))
 $made = @(0..($Boards - 1) | Where-Object { $_ -ne $Stays })
+if ($MadeBoard -ge 0) { $made = @($MadeBoard) } # (-MadeBoard N: only board N made, the rest whole: one made board offline has its camera and rules)
 $obArgs = @()
 foreach ($b in $made) { $obArgs += @("--one-board", "$b@$From") }
 $obArgs += @("--one-board-stays", "$Stays") + $OneBoard

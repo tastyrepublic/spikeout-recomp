@@ -23,6 +23,8 @@ extern const Asset flags_png, flags_rcss;
 extern const Asset platforms_png, platforms_rcss;
 // The app's icon, 256 x 256 (assets/icon, tools/make-icons.ps1): the window's own (title bar, taskbar, macOS's Dock)
 extern const Asset app_icon_png;
+// SDL_GameControllerDB (assets/controllers, zlib licence): pads and sticks SDL has no layout of its own for
+extern const Asset controller_db;
 } // namespace assets
 
 } // namespace ui

@@ -44,6 +44,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <span>
 #include <string>
 #include <thread>
@@ -128,6 +129,10 @@ constexpr uint32_t kAnimationStep = 0x62AF4;
 constexpr std::pair<uint32_t, uint32_t> kOwnRegions[] = {{0x180000, 0x1A0000}, {0x1A8000, 0x1AC000}, {0x1AC000, 0x1B0000}, {0x210000, 0x230000}};
 constexpr uint32_t kRegionBytes = 0x48000;
 constexpr uint32_t kLinkPlayers = 0x140128;
+// The players in play (the word at +0x50 of the object -16108(r13) points to, 0x111100 in play: a player's bit cleared
+// as they time out, set as they play on) and a cabinet's mode (-16376(r13), its own), which its player's update
+// (0x55050) tests before writing its record's +0x08 to +0x0D. r13 is 0x108000.
+constexpr uint32_t kPlayersObject = 0x104114, kOwnMode = 0x104008;
 constexpr uint32_t kLinkError = 0x106288; // (the link's error bits, -7544(r13): its checks of the entries received)
 // Whether own area `i` is a cabinet's own with the link's players `mask` (players 3 and 4: while their seats are empty).
 inline bool region_own(std::size_t i, uint32_t mask) {
@@ -501,6 +506,7 @@ private:
         uint32_t own_logic = 0;           // (its own variables are after its flow of this count)
         uint64_t toggled_at = ~0ull;      // (the frame its toggles were flipped for)
         std::map<uint32_t, uint16_t> heading_at;                   // (after its update of a count)
+        std::set<uint32_t> unwritten; // (counts whose record its player's update left as before: +0x08 to +0x0F kept)
         std::map<std::pair<uint32_t, uint32_t>, uint32_t> view_at; // ((count, character): its first word after the test)
         std::map<uint32_t, std::vector<std::pair<uint32_t, uint8_t>>> flow_delta; // (its own bytes its flow of a count changed: index, value)
         bool making = false;
@@ -557,7 +563,23 @@ private:
     };
     struct Players { // (as this board writes its own record of a count: each player's first word, +0x44, +0x2A, +0x74, +0x76)
         std::array<std::array<uint32_t, 5>, 4> p{};
+        uint32_t in_play = ~0u; // (and the players in play then: kPlayersObject's +0x50)
     };
+    // The players in play as this board has them now (~0: not known).
+    uint32_t players_in_play() {
+        const uint32_t at = bus_.read32(kPlayersObject) + 0x50;
+        return at >= 0x100000 && at + 4 <= m3::kWorkRamSize ? bus_.read32(at) : ~0u;
+    }
+    // Whether a made cabinet's player's update wrote its record of count `x` (+0x08 to +0x0D: 0x55050's test): from this
+    // board's own record of that count where it has one, else as made.
+    bool wrote_at(const Remote& r, uint32_t x) const {
+        const auto at = players_at_.find(x);
+        if (at == players_at_.end()) return !r.unwritten.count(x);
+        uint8_t mode = 0;
+        for (std::size_t i = 0; i < own_.size() && i < r.own.size(); ++i)
+            if (own_[i] == kOwnMode) mode = r.own[i];
+        return !(at->second.p[r.seat][0] & 0x02u) && mode != 3 && (at->second.in_play & (0x80000000u >> r.seat));
+    }
 
 public:
     // Rollback (tools/rollback.hpp): everything it carries from one frame to the next, the other cabinets' made
@@ -765,12 +787,45 @@ private:
     };
     // (its view of its own player after its tasks of `logic`, its camera's heading)
     void own_view(Exec& e, Remote& r, uint32_t logic) {
-        if (r.viewed != logic) { // (else tested in its tasks' run, on their world)
+        // (its player's object cleared (its first word 0, here as on every cabinet): its own view bits of it gone too, as
+        // the real cabinet's whole word is; kept, they came back with the player (00000110 for 00000100, 2026-11-11, the
+        // owner's recorded game))
+        if (bus_.read32(player_object(r.seat)) == 0)
+            for (std::size_t i = 0; i < own_.size() && i < r.own.size(); ++i)
+                if (own_[i] == player_object(r.seat) + 3) r.own[i] = static_cast<uint8_t>(r.own[i] & ~own_mask_[i]);
+        if (r.viewed != logic && tasks_mode_) {
+            // (its tasks' run, its game's own code, ran no view test of its player: its update didn't run (0x5185C: out of
+            // play, a time over). Its view bits as they were, not tested here: the real cabinet's stay (on at its player's
+            // leaving, 03200115), and come again only with its update (2026-11-11, the owner's recorded game))
+            const uint32_t word = bus_.read32(player_object(r.seat));
+            uint8_t own = static_cast<uint8_t>(word);
+            for (std::size_t i = 0; i < own_.size() && i < r.own.size(); ++i)
+                if (own_[i] == player_object(r.seat) + 3) own = static_cast<uint8_t>((own & ~own_mask_[i]) | (r.own[i] & own_mask_[i]));
+            r.view_at[{logic, player_object(r.seat)}] = word == 0 ? 0 : (word & ~0xFFu) | own;
+        } else if (r.viewed != logic) { // (else tested in its tasks' run, on their world)
             uint32_t flags = 0;
             side_run(e, r, kViewTest, &flags, false, 0, player_object(r.seat));
             r.view_at[{logic, player_object(r.seat)}] = flags;
         }
         r.heading_at[logic] = static_cast<uint16_t>(r.camera[kCameraHeading] << 8 | r.camera[kCameraHeading + 1]);
+        // (tests: ONEBOARD_OWN_LOG=FROM-TO: its camera's heading and follows, its player's view bits as kept, by count)
+        static const std::pair<uint32_t, uint32_t> own_log = [] {
+            unsigned a = 0, b = 0;
+            if (const char* v = std::getenv("ONEBOARD_OWN_LOG")) std::sscanf(v, "%u-%u", &a, &b);
+            return std::pair<uint32_t, uint32_t>{a, b};
+        }();
+        if (logic >= own_log.first && logic <= own_log.second) {
+            int bits = -1;
+            for (std::size_t i = 0; i < own_.size() && i < r.own.size(); ++i)
+                if (own_[i] == player_object(r.seat) + 3) bits = r.own[i];
+            const auto v = r.view_at.find({logic, player_object(r.seat)});
+            std::printf("own: seat %zu count %u: heading %02x%02x, follows %02x%02x%02x%02x, its player's view bits %02x, its word "
+                        "here %08x, view %08x (%s)\n",
+                        r.seat + 1, logic, r.camera[kCameraHeading], r.camera[kCameraHeading + 1], r.camera[kCameraFollows],
+                        r.camera[kCameraFollows + 1], r.camera[kCameraFollows + 2], r.camera[kCameraFollows + 3], bits,
+                        bus_.read32(player_object(r.seat)), v != r.view_at.end() ? v->second : 0xFFFFFFFFu,
+                        r.viewed == logic ? "tested in its tasks" : "kept");
+        }
         while (!r.heading_at.empty() && r.heading_at.begin()->first + 16 < logic) r.heading_at.erase(r.heading_at.begin());
         while (!r.view_at.empty() && r.view_at.begin()->first.first + 16 < logic) r.view_at.erase(r.view_at.begin());
     }
@@ -1161,7 +1216,12 @@ inline void Cabinets::side_run(Exec& e, Remote& r, uint32_t pc, uint32_t* flags,
                 e.c.cpu.msr &= ~recomp::Context::kMsrEE;
                 e.c.cpu.gpr[12] = kCamera;
                 e.c.call(kCameraView);
-                if (!capture_ && count) { // (and its view test of its own player, on the world its tasks made, as its
+                // (only while its player's update runs (0x5185C: the word at kPlayersObject's +0x10 + 4 * seat, bit 0): out of
+                // play, its object emptied, the real cabinet's stays 00000000 and comes back 00000100, no view bits; tested
+                // here it took 08 and 10 and sent them on its return (2026-11-11, the owner's recorded game))
+                const uint32_t runs_at = e.bus.read32(kPlayersObject) + 0x10 + 4 * static_cast<uint32_t>(r.seat);
+                const bool runs = runs_at < 0x100000 || runs_at + 4 > m3::kWorkRamSize || (e.bus.read32(runs_at) & 1u);
+                if (!capture_ && count && runs) { // (and its view test of its own player, on the world its tasks made, as its
                                           // drawing's: a run of its own started from this board's world, a count behind,
                                           // saw its player a count late (2026-11-07, tools/onepc-diff.ps1))
                     e.c.cpu = aside.cpu;
@@ -1275,6 +1335,7 @@ inline bool Cabinets::hook(uint32_t pc) {
             const uint32_t p = player_object(k);
             at.p[k] = {bus_.read32(p), bus_.read32(p + 0x44), bus_.read16(p + 0x2A), bus_.read16(p + 0x74), bus_.read16(p + 0x76)};
         }
+        at.in_play = players_in_play();
         while (!players_at_.empty() && players_at_.begin()->first + 16 < logic) players_at_.erase(players_at_.begin());
         return true;
     }
@@ -1453,14 +1514,37 @@ inline void Cabinets::make_record(Remote& r, Block& next, const Block& mine, uin
     std::array<uint32_t, 5> p{bus_.read32(player), bus_.read32(player + 0x44), bus_.read16(player + 0x2A), bus_.read16(player + 0x74),
                               bus_.read16(player + 0x76)};
     if (const auto at = players_at_.find(logic); at != players_at_.end()) p = at->second.p[r.seat];
-    next[(rec + 0x08) / 4] = p[2] << 16 | ((p[1] & 0x80000000u) ? p[4] : p[3]);
-    // (its camera's heading after its update of the count before; else as it was)
+    // (its player's update (0x55050) writes +0x08 to +0x0D only with the player's word's bit 0x02 clear, its mode
+    // (-16376(r13)) not 3 and the player in the game's players mask (the word at +0x50 of -16108(r13)'s object,
+    // 0x111150, the shared game's: cleared as a player times out, set again as one plays on); else the last kept
+    // (2026-11-11, the owner's recorded game, tools/onepc-diff.ps1 -MadeBoard 0: the host's player gone at 28,786, its
+    // heading 07ab and +0x08 7e4e7e4e kept to 28,956, the made ones from its camera and its emptied object)
+    uint8_t mode = 0;
+    for (std::size_t i = 0; i < own_.size() && i < r.own.size(); ++i)
+        if (own_[i] == kOwnMode) mode = r.own[i];
+    // (the players in play at this count, as this board had them at its own record of it; a count it hasn't reached (the
+    // master's, a count ahead): as now, put right by link_run's pass over its older records once this board has it)
+    const auto players_then = players_at_.find(logic);
+    const uint32_t in_play = players_then != players_at_.end() ? players_then->second.in_play : players_in_play();
+    const bool writes = !(p[0] & 0x02u) && mode != 3 && (in_play & (0x80000000u >> r.seat));
+    if (writes) r.unwritten.erase(logic);
+    else r.unwritten.insert(logic);
+    while (!r.unwritten.empty() && *r.unwritten.begin() + 16 < logic) r.unwritten.erase(r.unwritten.begin());
+    next[(rec + 0x08) / 4] = writes ? p[2] << 16 | ((p[1] & 0x80000000u) ? p[4] : p[3]) : r.block[(old + 0x08) / 4];
+    // (its camera's heading after its update of the count before; else as it was. Not written, above: as before, while
+    // its camera goes on turning)
     const auto heading = r.heading_at.find(logic - 1);
-    next[(rec + 0x0C) / 4] = (heading != r.heading_at.end() ? uint32_t{heading->second} << 16 : r.block[(old + 0x0C) / 4] & 0xFFFF0000u) |
-                             (next[(rec + 0x0C) / 4] & 0xFFFFu);
+    if (!writes) // (its heading, +0x0C's high half; the low half isn't 0x55050's)
+        next[(rec + 0x0C) / 4] = (r.block[(old + 0x0C) / 4] & 0xFFFF0000u) | (next[(rec + 0x0C) / 4] & 0xFFFFu);
+    else
+        next[(rec + 0x0C) / 4] = (heading != r.heading_at.end() ? uint32_t{heading->second} << 16 : r.block[(old + 0x0C) / 4] & 0xFFFF0000u) |
+                                 (next[(rec + 0x0C) / 4] & 0xFFFFu);
     // (its player's first word, its view bits from its camera's test of the count before)
     next[(rec + 0x10) / 4] = p[0];
-    if (const auto v = r.view_at.find({logic - 1, player}); v != r.view_at.end()) // (its own view bits; the rest the shared game's)
+    // (its own view bits; the rest the shared game's. None for a player gone: its word 0, as the real record sends it
+    // (2026-11-11, the owner's recorded game: 00000010 sent for 00000000 after the host's player left))
+    // (out of play, its update not running: as they were, own_view)
+    if (const auto v = r.view_at.find({logic - 1, player}); v != r.view_at.end() && p[0] != 0)
         next[(rec + 0x10) / 4] = (p[0] & ~0x18u) | (v->second & 0x18u);
     // (the empty slots' leftovers, as they were: players 3 and 4's +4 and +8 (+0x30 and +0x34, +0x3C and +0x40), each
     // cabinet's own while their seat is empty (0x74808 writes them from its unused players' objects), the game's once a
@@ -1507,7 +1591,8 @@ inline void Cabinets::make_record(Remote& r, Block& next, const Block& mine, uin
             if (k >= 4)
                 for (std::size_t i = 0; i < own_.size(); ++i)
                     if (own_[i] == character_object(k) + 3) {
-                        r.own[i] = static_cast<uint8_t>(r.own[i] & ~own_mask_[i]);
+                        // (none yet before its first seed: gamerun --one-board-camera's first record, 2026-11-11)
+                        if (i < r.own.size()) r.own[i] = static_cast<uint8_t>(r.own[i] & ~own_mask_[i]);
                         if (i < r.state_own.size()) r.state_own[i] = static_cast<uint8_t>(r.state_own[i] & ~own_mask_[i]);
                     }
         } else if (v != r.view_at.end()) put8(next, entry + 3, static_cast<uint8_t>(v->second));
@@ -1595,12 +1680,30 @@ inline void Cabinets::link_run(Remote& r, uint64_t frame) {
     }
     // (its older records' camera fields from its camera's runs since, which can come after a record was written:
     // the others read a record two counts on, and every block sends the last four again)
-    for (uint32_t s = 0; s < 4; ++s) {
+    // (oldest first: a record its player's update didn't write takes the one before's, put right first)
+    std::array<uint32_t, 4> order{0, 1, 2, 3};
+    std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
+        return bus_.read32(kBlock + 0x100 + 0x200 * a + 0xDC) < bus_.read32(kBlock + 0x100 + 0x200 * b + 0xDC);
+    });
+    for (uint32_t s : order) {
         const uint32_t at = kBlock + 0x100 + 0x200 * s, x = bus_.read32(at + 0xDC);
         if (x > r.logic || x + 3 < r.logic) continue;
-        if (const auto h = r.heading_at.find(x - 1); h != r.heading_at.end()) bus_.write16(at + 0x0C, h->second);
-        if (const auto v = r.view_at.find({x - 1, player_object(r.seat)}); v != r.view_at.end())
-            bus_.write8(at + 0x13, static_cast<uint8_t>(v->second));
+        // (its player's update's fields (0x55050): as this board's record of the count says it wrote them, now it has one
+        // (made a count ahead, the players in play were this board's of the count before); else the record before's)
+        const bool writes = wrote_at(r, x);
+        const uint32_t before = kBlock + 0x100 + 0x200 * ((x - 1) & 3);
+        if (!writes && bus_.read32(before + 0xDC) == x - 1) {
+            bus_.write32(at + 0x08, bus_.read32(before + 0x08));
+            bus_.write16(at + 0x0C, bus_.read16(before + 0x0C));
+        } else if (writes) {
+            if (const auto pa = players_at_.find(x); pa != players_at_.end()) {
+                const auto& p = pa->second.p[r.seat];
+                bus_.write32(at + 0x08, p[2] << 16 | ((p[1] & 0x80000000u) ? p[4] : p[3]));
+            }
+            if (const auto h = r.heading_at.find(x - 1); h != r.heading_at.end()) bus_.write16(at + 0x0C, h->second);
+        }
+        if (const auto v = r.view_at.find({x - 1, player_object(r.seat)}); v != r.view_at.end() && (bus_.read32(at + 0x10) & 0xFFFFFF00u))
+            bus_.write8(at + 0x13, static_cast<uint8_t>(v->second)); // (a player gone: its word 0, none)
         for (uint32_t k = 0; k < 12; ++k)
             if (const auto v = r.view_at.find({x - 2, character_object(k)}); v != r.view_at.end() && bus_.read32(at + 0x14 + 12 * k) != 0)
                 bus_.write8(at + 0x14 + 12 * k + 3, static_cast<uint8_t>(v->second));

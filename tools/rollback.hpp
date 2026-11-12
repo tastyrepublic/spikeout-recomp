@@ -343,13 +343,15 @@ public:
         m3::State load(std::vector<uint8_t>(cuts_.at(back)));
         ring_->cut_state(load);
         cuts_.erase(cuts_.upper_bound(back), cuts_.end());
+        {
+            // (before the wrong guess is cleared below: until the boards are back where they were, the frames after
+            // `back` are still as run on guesses (redoing): the table alone would call them settled meanwhile)
+            std::lock_guard guard(catch_lock_);
+            catch_t0_ = t0, catch_to_ = frame, catch_back_ = back, catching_ = true; // (quiet(): the time from here to the frame after `frame`)
+        }
         table_.forget_guesses_after(back); // (and the wrong guesses after `back`: one before it, found meanwhile, kept)
         ++backs_;
         frames_again_ += frame - back;
-        {
-            std::lock_guard guard(catch_lock_);
-            catch_t0_ = t0, catch_to_ = frame, catching_ = true; // (quiet(): the time from here to the frame after `frame`)
-        }
         back_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         if (std::getenv("ROLLBACK_LOG")) std::printf("rollback: at frame %llu, wrong from %llu: back to %llu\n", (unsigned long long)frame,
                                                     (unsigned long long)wrong, (unsigned long long)back);
@@ -357,6 +359,14 @@ public:
     }
     // A board leaving the meeting: true once after going back.
     bool rewind(std::size_t board) { return std::exchange(parts_[board].rewind, false); }
+    // Gone back and not back where it was yet: `frame` (after the frame gone back to) still as run on guesses, its
+    // inputs all in or not. Any thread (the node check's settled test, the network thread's included: a real node
+    // compared meanwhile with the made one of the guessed run differed at the buttons, +x05, ~60 a game, 2026-11-11).
+    bool redoing(uint64_t frame) const {
+        if (!catching_.load()) return false;
+        std::lock_guard guard(catch_lock_);
+        return catching_ && frame > catch_back_;
+    }
     // A frame being run again (drawn and heard nothing).
     bool quiet(std::size_t board, uint64_t frame) const {
         const bool again = frame <= parts_[board].quiet_through;
@@ -436,7 +446,7 @@ private:
     mutable std::mutex catch_lock_;
     mutable std::atomic<bool> catching_{false};
     mutable std::chrono::steady_clock::time_point catch_t0_;
-    mutable uint64_t catch_to_ = 0, catches_ = 0, catch_over_[2] = {0, 0};
+    mutable uint64_t catch_to_ = 0, catch_back_ = 0, catches_ = 0, catch_over_[2] = {0, 0};
     uint64_t taken_catches_ = 0, taken_late_ = 0; // (take_catches: where the last left off)
     mutable double catch_ms_ = 0, catch_max_ = 0;
 };

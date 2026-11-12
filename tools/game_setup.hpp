@@ -26,6 +26,7 @@
 #include <optional>
 #include <span>
 #include <cstring>
+#include <filesystem>
 #include <vector>
 
 namespace generated {
@@ -228,13 +229,16 @@ inline void board_state(m3::State& s, recomp::Context& c, recomp::FrameTiming& t
     if (s.loading() && !s.done()) throw std::runtime_error("save state: longer than this build's");
 }
 
+// (paths UTF-8: the data folder has the user's name in it, in any language; narrow, Windows read it in its code page)
+inline std::filesystem::path utf8_path(const std::string& path) { return std::filesystem::path(std::u8string(path.begin(), path.end())); }
+
 inline bool write_file(const std::string& path, std::span<const uint8_t> data) {
-    std::ofstream out(path, std::ios::binary);
+    std::ofstream out(utf8_path(path), std::ios::binary);
     return static_cast<bool>(out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size())));
 }
 
 inline std::vector<uint8_t> read_file(const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
+    std::ifstream in(utf8_path(path), std::ios::binary);
     return std::vector<uint8_t>(std::istreambuf_iterator<char>(in), {});
 }
 
@@ -384,6 +388,9 @@ struct LinkedState {
     // rather than handed to `sink` (then ready for the next capture). Set
     // before capture_frame.
     bool to_file = false;
+    // (to_file: the bytes handed to this instead, to be written elsewhere (the window's network game recording: packed
+    // and written on a thread of its own, 112 MB raw); then cleared)
+    std::function<void(std::string path, std::vector<uint8_t> bytes)> write_elsewhere;
 
     // (rollback: the ring's part of the frame, cut where the boards met: tools::rollback::Linked::between)
     std::vector<uint8_t> cut;
@@ -416,10 +423,13 @@ struct LinkedState {
             boards.assign(boards.size(), {});
             return;
         }
-        if (tools::write_file(path, s.data()))
+        if (write_elsewhere) {
+            std::exchange(write_elsewhere, nullptr)(path, std::move(s.data()));
+        } else if (tools::write_file(path, s.data())) {
             std::printf("Saved %s: %zu linked boards, %zu bytes\n", path.c_str(), boards.size(), s.data().size());
-        else
+        } else {
             std::fprintf(stderr, "cannot write %s\n", path.c_str());
+        }
         if (sink) { // (the window: ready for the next capture)
             std::lock_guard guard(lock);
             to_file = false;

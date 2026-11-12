@@ -107,6 +107,8 @@
 #include "speed_report.hpp"
 #include "settings.hpp"
 #include "player_report.hpp" // (spikeout.log, crash reports, Report a problem)
+#include "pad_layouts.hpp"   // (layouts for pads and sticks SDL has none for: the community database, a generic one)
+#include "net_record.hpp"    // (a network game recorded: its state and every seat's inputs, gamerun --net-replay)
 #include "ui/assets.hpp" // (the app's icon)
 #ifdef SPIKEOUT_JIT
 #include "jit/jit.hpp" // (spikeout-jit: the game translated from the ROM set at the first start, LLVM)
@@ -144,6 +146,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <cerrno>
 #include <filesystem>
 #include <optional>
 #include <span>
@@ -203,6 +206,9 @@ struct Shared {
     // notice at the bottom of the window (STATE SAVED, CAN'T LOAD: why), under `lock`)
 
     std::string save_to;
+    // Where F9 saves and F12 screenshots go: the data folder's saves/ and screenshots/ (they went to the folder the game
+    // was started in, which a shortcut or a launcher can make one it can't write: issue #12). "" at first: the start folder.
+    std::string saves_dir, shots_dir;
     std::atomic<uint64_t> saves_done{0};
     std::string notice;
     std::chrono::steady_clock::time_point notice_until{};
@@ -271,6 +277,10 @@ struct Shared {
     // caught up with the others (and a cabinet joined in progress is taken).
     tools::LinkedState linked;
     std::atomic<bool> net_save_request{false}; // F9 in network play: every board's state in a file
+    // A network game recorded (tools/net_record.hpp): wanted as it starts (every board's state saved once, as F9 does),
+    // then each frame's inputs as they settle, written by the shown board's thread
+    std::atomic<bool> net_record_wanted{false};
+    tools::net_record::Writer net_rec;
     std::vector<uint8_t> net_state;
     std::atomic<bool> catching_up{false};
     // Auto, the board mode by speed (tools/net_frame.hpp, gamerun --net-auto-board the same): made anew each start
@@ -392,6 +402,8 @@ std::array<bool, tools::kActions> pad_actions(SDL_Gamepad* pad, const std::array
 // A pad input's name in the menu (a pad given: its face buttons as that pad labels them, A or Cross, ...).
 std::string pad_input_name(int code, SDL_Gamepad* pad) {
     if (code <= 0) return "None";
+    // (a stick on the generic layout: named as it has them, "Button 3", "Hat up": its own labels aren't A or Cross)
+    if (std::string generic = tools::pads::generic_name(pad, code, tools::kPadAxis); !generic.empty()) return generic;
     if (code >= tools::kPadAxis) {
         const int axis = (code - tools::kPadAxis) / 2;
         const bool positive = (code - tools::kPadAxis) % 2;
@@ -1149,8 +1161,54 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
                     std::printf("spikeout: no save state: not every board runs whole here (one board)\n");
                 } else {
                     shared.linked.to_file = true;
-                    shared.linked.path = "spikeout-net-" + std::to_string(frame + 2) + ".state";
+                    shared.linked.path = shared.saves_dir + "spikeout-net-" + std::to_string(frame + 2) + ".state";
                     shared.linked.capture_frame = frame + 2;
+                }
+            }
+            // The game recorded (tools/net_record.hpp): every board's state once, as F9 saves it (caught up first: a
+            // game joined in progress from where this machine runs it), then each frame's inputs as every seat's are in.
+            if (index == shown && shared.net_record_wanted && shared.linked.capture_frame == 0 && !shared.catching_up &&
+                !shared.net_save_request) {
+                shared.net_record_wanted = false;
+                if (alone && !one_board->all_whole()) {
+                    std::printf("net: this game not recorded: not every board runs whole here (one board)\n");
+                } else {
+                    const std::string base = shared.saves_dir + "net-game-" + tools::report::detail::stamp();
+                    shared.linked.to_file = true;
+                    shared.linked.path = base + ".state";
+                    // (112 MB raw: packed (about 9 MB) and written on a thread of its own, the game not held for it;
+                    // gamerun reads it packed)
+                    shared.linked.write_elsewhere = [](std::string path, std::vector<uint8_t> bytes) {
+                        std::thread([path = std::move(path), bytes = std::move(bytes)] {
+                            const std::vector<uint8_t> packed = net::compress(bytes);
+                            if (tools::write_file(path, packed))
+                                std::printf("net: the recording's state: %s (%zu KB, %zu KB packed)\n", path.c_str(), bytes.size() / 1024,
+                                            packed.size() / 1024);
+                            else
+                                std::printf("net: the recording's state can't be written: %s\n", path.c_str());
+                        }).detach();
+                    };
+                    shared.linked.capture_frame = frame + 2;
+                    if (shared.net_rec.start(base + ".inputs", shared.boards, frame + 2))
+                        std::printf("net: this game recorded from frame %llu: %s.state and .inputs (gamerun --net-replay)\n",
+                                    static_cast<unsigned long long>(frame + 2), base.c_str());
+                    tools::net_record::prune(shared.saves_dir);
+                }
+            }
+            if (index == shown && shared.net_rec.open()) {
+                std::vector<tools::net_record::Inputs> in(shared.boards);
+                for (uint64_t f = shared.net_rec.next(); shared.inputs->all_set(f, shared.boards); f = shared.net_rec.next()) {
+                    bool all = true;
+                    for (std::size_t b = 0; b < shared.boards && all; ++b)
+                        if (const auto got = shared.inputs->get(b, f)) in[b] = *got;
+                        else all = false; // (let go already: the recording stops short of it)
+                    if (!all) {
+                        std::printf("net: the recording stops at frame %llu (its inputs let go before it was written)\n",
+                                    static_cast<unsigned long long>(f));
+                        shared.net_rec.close();
+                        break;
+                    }
+                    shared.net_rec.frame(in);
                 }
             }
             if (shared.netplay->resync_pending()) throw Stop{}; // (out of step: again from the host's state)
@@ -1276,6 +1334,7 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             read.guess = shared.rollback && frame >= shared.rollback_from && (!one_board || one_board->may_guess(frame));
             read.ahead = shared.rollback_frames, read.quiet_ahead = tools::rollback::quiet_ahead(shared.rollback_depth);
             read.keep = shared.rollback ? shared.rollback_depth + 2 : 0;
+            if (shared.net_rec.open()) read.keep = std::max<uint64_t>(read.keep, 16); // (the recording reads them a little later)
             const auto got = tools::net_frame::read_inputs(*shared.inputs, index, frame, read);
             if (timing_debug) input_ms += std::chrono::duration<double, std::milli>(clock::now() - waited).count();
             if (!got || shared.quit) throw Stop{};
@@ -1290,7 +1349,7 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
         }
         if (index == 0 && !networked && shared.save_request.exchange(false))
             c.request_snapshot([&](uint32_t) {
-                std::string path = "spikeout-" + std::to_string(timing.frames()) + ".state";
+                std::string path = shared.saves_dir + "spikeout-" + std::to_string(timing.frames()) + ".state";
                 bool undo = false; // (the game as it was before a load: F9 goes back to it a few seconds)
                 {
                     std::lock_guard<std::mutex> guard(shared.lock);
@@ -1299,8 +1358,9 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
                 try {
                     m3::State s;
                     tools::board_state(s, c, timing, sound_state);
+                    errno = 0;
                     if (!tools::write_file(path, tools::state_file_bytes(timing.frames(), s.data())))
-                        throw std::runtime_error("can't write it");
+                        throw std::runtime_error(std::string("can't write it") + (errno ? std::string(" (") + std::strerror(errno) + ")" : ""));
                     if (!undo) {
                         {
                             std::lock_guard<std::mutex> guard(shared.lock);
@@ -1311,7 +1371,8 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
                     std::printf("spikeout: saved %s\n", path.c_str());
                 } catch (const std::exception& e) {
                     std::printf("spikeout: no save state %s: %s\n", path.c_str(), e.what());
-                    if (!undo) shared.say("CAN'T SAVE: " + std::string(e.what()));
+                    if (!undo) shared.say(std::string(e.what()).rfind("can't write", 0) == 0 ? "CAN'T SAVE: THE SAVES FOLDER CAN'T BE WRITTEN"
+                                                                                           : "CAN'T SAVE: " + std::string(e.what()));
                 }
                 ++shared.saves_done;
             });
@@ -1881,19 +1942,37 @@ int main(int argc, char** argv) {
         return 1;
     }
     tools::report::watch_controllers(); // (each controller as SDL finds it: the log says what it is, and if SDL can read it)
+    // (more layouts, then a generic one for any joystick still without: arcade sticks SDL didn't know, issue #11)
+#ifdef SPIKEOUT_GPU
+    tools::pads::load_layouts(ui::assets::controller_db.data, ui::assets::controller_db.size, tools::data_folder());
+#else
+    tools::pads::load_layouts(nullptr, 0, tools::data_folder());
+#endif
+    tools::pads::make_generic_layouts();
     std::printf("spikeout: version %s\n%s%s", net::kVersion, tools::report::system_lines().c_str(),
                 tools::report::controllers_now().c_str());
     if (!last_crash.empty()) std::printf("spikeout: the last run crashed: %s.txt in the data folder\n", last_crash.c_str());
     // Tests: SPIKEOUT_TEST_VIRTUAL_PAD=1 connects a pad that isn't there (SDL's virtual joystick: no buttons
     // pressed), for the menu's pad pages on a computer with none.
-    if (std::getenv("SPIKEOUT_TEST_VIRTUAL_PAD")) {
+    // =stick: an arcade stick SDL has no layout for (12 buttons, 2 axes, a hat; issue #11), its button 1 and its hat's
+    // right held from the start: given the generic layout, Beat (A) and Right reach the game.
+    if (const char* virtual_pad = std::getenv("SPIKEOUT_TEST_VIRTUAL_PAD")) {
+        const bool stick = std::string(virtual_pad) == "stick";
         SDL_VirtualJoystickDesc desc;
         SDL_INIT_INTERFACE(&desc);
-        desc.type = SDL_JOYSTICK_TYPE_GAMEPAD;
-        desc.naxes = SDL_GAMEPAD_AXIS_COUNT;
-        desc.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
-        desc.name = "Virtual pad (test)";
-        if (!SDL_AttachVirtualJoystick(&desc)) std::fprintf(stderr, "spikeout: virtual pad: %s\n", SDL_GetError());
+        desc.type = stick ? SDL_JOYSTICK_TYPE_UNKNOWN : SDL_JOYSTICK_TYPE_GAMEPAD;
+        desc.naxes = stick ? 2 : SDL_GAMEPAD_AXIS_COUNT;
+        desc.nbuttons = stick ? 12 : SDL_GAMEPAD_BUTTON_COUNT;
+        desc.nhats = stick ? 1 : 0;
+        desc.name = stick ? "Virtual arcade stick (test)" : "Virtual pad (test)";
+        const SDL_JoystickID id = SDL_AttachVirtualJoystick(&desc);
+        if (!id) std::fprintf(stderr, "spikeout: virtual pad: %s\n", SDL_GetError());
+        else if (stick)
+            if (SDL_Joystick* j = SDL_OpenJoystick(id)) { // (kept open: what it holds stays held)
+                SDL_SetJoystickVirtualButton(j, 0, true);
+                SDL_SetJoystickVirtualHat(j, 0, SDL_HAT_RIGHT);
+            }
+        tools::pads::make_generic_layouts(); // (it came after the first look)
     }
 
     // The settings, and the command line over them.
@@ -2270,7 +2349,8 @@ int main(int argc, char** argv) {
             shared.netplay->node_check().set_settled(
                 [&shared, boards](uint64_t frame) {
                     return !shared.rollback || !shared.inputs ||
-                           (shared.inputs->all_set(frame, boards) && shared.inputs->wrong_from() > frame);
+                           (shared.inputs->all_set(frame, boards) && shared.inputs->wrong_from() > frame &&
+                            !shared.rollback->redoing(frame));
                 },
                 recomp::FrameTiming().frame_cycles());
             ring->on_departure([net = shared.netplay](std::size_t to, uint64_t seq, uint64_t at, const std::vector<uint8_t>& data) {
@@ -2389,6 +2469,9 @@ int main(int argc, char** argv) {
     };
     // The boards' EEPROM and backup RAM from the last run (not for test runs).
     const std::string data_folder = tools::data_folder();
+    shared.saves_dir = data_folder + "saves/", shared.shots_dir = data_folder + "screenshots/"; // (issue #12)
+    SDL_CreateDirectory(shared.saves_dir.c_str());
+    SDL_CreateDirectory(shared.shots_dir.c_str());
     if (!test_run) load_nvram(data_folder, shared, boards);
     start_games();
 
@@ -2406,6 +2489,7 @@ int main(int argc, char** argv) {
     { // Pads already connected: their SDL_EVENT_GAMEPAD_ADDED came at SDL_Init and the start-up screens' event loops
       // (the ROM set's, PREPARING THE GAME) took it, so they're added here (a pad plugged in before the game started
       // was never in the list: issue #1). Later ones come with their event in the main loop.
+        tools::pads::make_generic_layouts(); // (a stick plugged in during the start-up screens: its layout first)
         int n = 0;
         SDL_JoystickID* ids = SDL_GetGamepads(&n);
         std::printf("spikeout: the game starts: %d gamepad(s) connected to SDL\n", n);
@@ -2497,11 +2581,11 @@ int main(int argc, char** argv) {
     std::chrono::steady_clock::time_point watch_banner_until{}; // (a spectator's banner: whom it watches, the keys)
     bool join_shown = false; // (a game joined in progress: the room page closed once for the joining screen)
     // Save states' safeguards (F9 / F10 below): F10's first press arms it a few seconds; after a load, F9 goes back to
-    // the game kept just before it (kUndoState) a few seconds. A state checked before anything is reset: read, then
+    // the game kept just before it (undo_state) a few seconds. A state checked before anything is reset: read, then
     // loaded into a spare board, all of it (CPU, frame timing, the bus and its devices, the sound board and its music);
     // "" if it will load, else why not, in a few words; `other`: from another version of the game (a format or code
     // that differs, or none said: tools::StateFile::matches), offered with a warning (the owner's choice).
-    static constexpr const char* kUndoState = "spikeout-undo.state";
+    const std::string undo_state = shared.saves_dir + "spikeout-undo.state";
     std::chrono::steady_clock::time_point load_armed_until{}, undo_until{};
     auto check_state = [&](const std::string& path, std::optional<uint64_t>& frame, bool& other) -> std::string {
         tools::StateFile f;
@@ -2729,6 +2813,7 @@ int main(int argc, char** argv) {
             shared.net_start = start;
             shared.input_delay = delay;
             shared.net_state = std::move(state);
+            shared.net_rec.close(), shared.net_record_wanted = true; // (this game recorded: tools/net_record.hpp)
             shared.catching_up = start.state_frame.has_value();
             shared.catch_up_behind = 0, shared.catch_up_start = 0;
             shared.rollback_from = start.state_frame ? ~0ull : 0; // (joined in progress: none until caught up)
@@ -2754,6 +2839,7 @@ int main(int argc, char** argv) {
             shared.net_state = std::move(*unpacked);
             netgame->table.reset();
             netgame->session().feed_inputs(*again.state_frame);
+            shared.net_rec.close(), shared.net_record_wanted = true; // (put back from the host's state: recorded again from here)
             shared.rollback_from = ~0ull; // (rollback: none until caught up)
             shared.catching_up = true;
         });
@@ -2786,6 +2872,7 @@ int main(int argc, char** argv) {
                 shared.boards = boards;
                 focus = 0;
                 if (!test_run) load_nvram(data_folder, shared, boards);
+                shared.net_rec.close(), shared.net_record_wanted = false; // (the recording ends with the game)
             });
         netgame.reset();
         if (set_up_display) set_up_display();
@@ -3256,7 +3343,7 @@ int main(int argc, char** argv) {
     auto saved_page = [&](const std::filesystem::path& zip) {
         ui::MenuPage p{"Report saved",
                        "Attach the zip to a bug report on the project's GitHub page (Issues > New issue), and say what "
-                       "happened.",
+                       "happened. Your last network game's recording, if any, is in it locked: only the project's owner can open it.",
                        {}};
         const std::string name = path_utf8(zip.filename()), folder = path_utf8(zip.parent_path());
         p.items.push_back({"File", "", [name] { return name; }, {}, {}, true});
@@ -4072,6 +4159,7 @@ int main(int argc, char** argv) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_EVENT_QUIT) running = false;
+            if (e.type == SDL_EVENT_JOYSTICK_ADDED) tools::pads::make_generic_layouts(); // (no layout: SDL then offers it as a gamepad)
             if (e.type == SDL_EVENT_GAMEPAD_ADDED) add_pad(e.gdevice.which);
             if (e.type == SDL_EVENT_GAMEPAD_REMOVED) {
                 for (auto it = gamepads.begin(); it != gamepads.end(); ++it)
@@ -4100,7 +4188,7 @@ int main(int argc, char** argv) {
 #endif
             }
             if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_F12 && !e.key.repeat) {
-                const std::string path = "spikeout-" + std::to_string(shown_number[shared.netplay ? shared.local : 0]) + ".png";
+                const std::string path = shared.shots_dir + "spikeout-" + std::to_string(shown_number[shared.netplay ? shared.local : 0]) + ".png";
 #ifdef SPIKEOUT_GPU
                 if (shared.gpu_3d) shown = capture();
 #endif
@@ -4122,9 +4210,9 @@ int main(int argc, char** argv) {
                     }
                 } else if (boards == 1 && now_key < undo_until) {
                     undo_until = {};
-                    reset_game([&] { shared.load_path = kUndoState; });
+                    reset_game([&] { shared.load_path = undo_state; });
                     shared.say("BACK TO THE GAME BEFORE THE LOAD");
-                    std::printf("spikeout: back to the game before the load (%s)\n", kUndoState);
+                    std::printf("spikeout: back to the game before the load (%s)\n", undo_state.c_str());
                 } else if (boards == 1) {
                     shared.save_request = true;
                     std::printf("spikeout: saving at the end of the frame\n");
@@ -4157,7 +4245,7 @@ int main(int argc, char** argv) {
                     const uint64_t before = shared.saves_done;
                     {
                         std::lock_guard<std::mutex> guard(shared.lock);
-                        shared.save_to = kUndoState;
+                        shared.save_to = undo_state;
                     }
                     shared.save_request = true;
                     for (int k = 0; k < 200 && shared.saves_done == before; ++k) std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -4165,7 +4253,7 @@ int main(int argc, char** argv) {
                     reset_game([&] { shared.load_path = last; });
                     undo_until = kept ? std::chrono::steady_clock::now() + std::chrono::seconds(5) : std::chrono::steady_clock::time_point{};
                     shared.say(kept ? "LOADED " + which + "  \xC2\xB7  F9 GOES BACK" : "LOADED " + which, 5);
-                    std::printf("spikeout: loading %s%s%s%s\n", last.c_str(), kept ? " (the game before it in " : "", kept ? kUndoState : "",
+                    std::printf("spikeout: loading %s%s%s%s\n", last.c_str(), kept ? " (the game before it in " : "", kept ? undo_state.c_str() : "",
                                 kept ? ")" : "");
                 }
             }
@@ -4777,7 +4865,7 @@ int main(int argc, char** argv) {
 #ifdef SPIKEOUT_GPU
                 if (shared.gpu_3d) shown = capture();
 #endif
-                const std::string path = "spikeout-" + std::to_string(shown_number[shared.netplay ? shared.local : 0]) + ".png";
+                const std::string path = shared.shots_dir + "spikeout-" + std::to_string(shown_number[shared.netplay ? shared.local : 0]) + ".png";
                 if (tools::write_png(path, shown, width, height)) std::printf("screenshot: %s\n", path.c_str());
                 running = false;
             }

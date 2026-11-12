@@ -51,7 +51,9 @@ sync() {
         case "$why" in *ready*) ;; *) echo "STOPPED: $c can't be reached: $(echo "$why" | tail -1)"; exit 2 ;; esac
         base=$(cs "$c" "git -C /workspaces/spikeout-recomp rev-parse HEAD" | tr -d '\r')
         [ -n "$base" ] || { echo "STOPPED: $c gave no commit (its checkout at /workspaces/spikeout-recomp?)"; exit 2; }
-        files=$( (git diff --name-only "$base" -- src tools games CMakeLists.txt cmake; git ls-files --others --exclude-standard -- src tools games) | sort -u)
+        files=$( (git diff --name-only "$base" -- src tools games third_party assets CMakeLists.txt cmake; git ls-files --others --exclude-standard -- src tools games third_party assets) | sort -u)
+        # (new folders made first: gh codespace cp makes none)
+        cs "$c" "cd /workspaces/spikeout-recomp && mkdir -p $(for f in $files; do dirname "$f"; done | sort -u | tr '\n' ' ')" >/dev/null
         for f in $files; do [ -f "$f" ] && timeout 120 gh codespace cp -c "$c" "$f" "remote:/workspaces/spikeout-recomp/$f" >/dev/null 2>&1; done
         local built
         built=$(cs "$c" "cd /workspaces/spikeout-recomp && sed -i 's/\r\$//' $(echo $files) 2>/dev/null; cmake --build build-codespace --target gamerun 2>&1 | grep -E 'error|Linking CXX executable|no work' | tail -1")

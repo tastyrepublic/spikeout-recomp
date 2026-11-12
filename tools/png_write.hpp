@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <span>
 #include <string>
 #include <vector>
@@ -75,10 +77,11 @@ inline bool write_png(const std::string& path, std::span<const uint32_t> pixels,
     chunk("IDAT", z);
     chunk("IEND", {});
 
-    std::FILE* f = std::fopen(path.c_str(), "wb");
+    // (the path UTF-8: the data folder's screenshots/ has the user's name in it, in any language)
+    std::ofstream f(std::filesystem::path(std::u8string(path.begin(), path.end())), std::ios::binary);
     if (!f) return false;
-    const bool ok = std::fwrite(out.data(), 1, out.size(), f) == out.size();
-    return std::fclose(f) == 0 && ok;
+    f.write(reinterpret_cast<const char*>(out.data()), static_cast<std::streamsize>(out.size()));
+    return static_cast<bool>(f);
 }
 
 } // namespace tools

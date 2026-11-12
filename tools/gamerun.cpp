@@ -210,6 +210,8 @@
 #include "netplay.hpp"
 #include "net/compress.hpp"
 #include "input_log.hpp"
+#include "net_record.hpp"
+#include "report_lock.hpp"
 #include "recording.hpp"
 #include "one_board.hpp"
 #include "rollback.hpp"
@@ -287,6 +289,7 @@ struct Options {
     const char* dump_backup = nullptr;
     const tools::Recording* replay = nullptr; // --replay FILE
     const tools::InputLog* input_log = nullptr; // --inputs FILE (spikebot --record-inputs)
+    const tools::net_record::Reader* net_replay = nullptr; // --net-replay FILE.inputs (a network game recorded)
     const std::map<tools::LinkedInputLog::Where, tools::LinkedInputLog::Change>* linked_inputs = nullptr; // (linked boards')
     uint64_t linked_inputs_end = 0;           // (the last frame there)
     std::string save_state;                   // --save-state FILE@FRAME
@@ -493,6 +496,14 @@ void print_probe(const m3::Real3dRenderer& r, int x, int y, uint64_t frame) {
 }
 
 using tools::LinkedState; // (tools/game_setup.hpp)
+
+// A state file's bytes, unpacked if packed (zstd: a network game recording's, tools/net_record.hpp)
+std::vector<uint8_t> read_state_bytes(const char* path) {
+    std::vector<uint8_t> bytes = tools::read_file(path);
+    if (bytes.size() >= 4 && bytes[0] == 0x28 && bytes[1] == 0xB5 && bytes[2] == 0x2F && bytes[3] == 0xFD)
+        if (auto unpacked = net::decompress(bytes)) return std::move(*unpacked);
+    return bytes;
+}
 
 // --link-record / --link-standin: what a main board does to its network
 // board, every call in order with the main board's time (`t`, its cycles):
@@ -999,7 +1010,9 @@ void set_up_one_board(std::vector<std::unique_ptr<Machine>>& machines, const Opt
             if (g_net_rb) g_net_rb->pin(frame);
         };
     }
-    if (!s.net && g_presses) // (its --press list's: bank 0 and the controls)
+    if (!s.net && o.net_replay) // (--net-replay: the recording's, as each board's own come; the --press list's were none)
+        s.buttons = [rec = o.net_replay](std::size_t seat, uint64_t frame) { return rec->get(seat, frame); };
+    else if (!s.net && g_presses) // (its --press list's: bank 0 and the controls)
         s.buttons = [stays = s.stays](std::size_t seat, uint64_t frame) -> std::optional<tools::InputTable::Inputs> {
             uint8_t in[2] = {0xFF, 0xFF};
             for (const Press& p : *g_presses)
@@ -1027,18 +1040,30 @@ void set_up_one_board(std::vector<std::unique_ptr<Machine>>& machines, const Opt
     g_one_board.set_up(std::move(boards), std::move(s));
     for (uint64_t f : o.one_board_missed) m.ob.cabinets->miss(gone, f);
     // (its camera on the side against the recording's, as its update starts: the first difference shown)
-    m.ob.cabinets->on_camera = [cameras, shown = false](std::size_t seat, uint32_t logic, const std::vector<uint8_t>& camera) mutable {
+    // (ONEBOARD_CAMERA_ALL=1: each count whose differences include a byte not seen to differ before, not the first alone)
+    static const bool all = std::getenv("ONEBOARD_CAMERA_ALL") && std::getenv("ONEBOARD_CAMERA_ALL")[0] == '1';
+    // (ONEBOARD_CAMERA_FROM=COUNT[,SKIP_LO-SKIP_HI]: every count from COUNT on, whole, those bytes (hex) left out)
+    static const auto from = [] {
+        unsigned count = ~0u, lo = 0, hi = 0;
+        if (const char* v = std::getenv("ONEBOARD_CAMERA_FROM")) std::sscanf(v, "%u,%x-%x", &count, &lo, &hi);
+        return std::array<unsigned, 3>{count, lo, hi};
+    }();
+    m.ob.cabinets->on_camera = [cameras, shown = false, seen = std::vector<bool>(kCameraBytes)](std::size_t seat, uint32_t logic,
+                                                                                               const std::vector<uint8_t>& camera) mutable {
         const auto next = cameras->find(logic);
         if (shown || next == cameras->end()) return;
         std::string at;
-        for (uint32_t i = 8; i < kCameraBytes && at.size() < 400; ++i)
-            if (camera[i] != next->second[i] && (i < 0x4A8 || i >= 0x4C0)) {
+        bool fresh = false;
+        const bool whole = logic >= from[0];
+        for (uint32_t i = 8; i < kCameraBytes && at.size() < (whole ? 4000u : 400u); ++i)
+            if (camera[i] != next->second[i] && (i < 0x4A8 || i >= 0x4C0) && !(whole && i >= from[1] && i < from[2])) {
                 char one[24];
                 std::snprintf(one, sizeof one, " +%03x %02x/%02x", i, camera[i], next->second[i]);
                 at += one;
+                fresh = fresh || !seen[i], seen[i] = true;
             }
-        if (at.empty()) return;
-        shown = true;
+        if (at.empty() || (all && !fresh && !whole)) return;
+        shown = !all && !whole && from[0] == ~0u;
         std::printf("one board: seat %zu's camera first differs as its update of count %u starts, side/recorded:%s\n", seat + 1, logic, at.c_str());
     };
 }
@@ -1508,7 +1533,7 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
     m.c.set_scheduler(&m.timing);
     if (o.load_state || (m.linked && !m.linked->loaded.empty())) { // everything above that the game sees, as it was saved
         try {
-            m3::State s(m.linked ? std::move(m.linked->loaded[m.index]) : tools::read_state_file(tools::read_file(o.load_state)).state);
+            m3::State s(m.linked ? std::move(m.linked->loaded[m.index]) : tools::read_state_file(read_state_bytes(o.load_state)).state);
             tools::board_state(s, m.c, m.timing, sound_state(m, o));
         } catch (const std::exception& e) {
             std::fprintf(stderr, "gamerun: %s: %s\n", o.load_state ? o.load_state : "the host's state", e.what());
@@ -2330,8 +2355,9 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
         // Network play: only this machine's player's board has a source
         // here (into the session too); the others' inputs come from theirs.
         if (!o.netplay || m.index == o.local_seat) {
-            const tools::InputTable::Inputs source{m.bus.inputs.bank0, m.bus.inputs.bank1, m.bus.inputs.controls,
-                                                   m.bus.inputs.controls2};
+            tools::InputTable::Inputs source{m.bus.inputs.bank0, m.bus.inputs.bank1, m.bus.inputs.controls, m.bus.inputs.controls2};
+            if (o.net_replay) // (a network game run again: its inputs, set at the end of each frame as they were there)
+                if (const auto recorded = o.net_replay->get(m.index, frame)) source = *recorded;
             auto put = [&](uint64_t at, const tools::InputTable::Inputs& value) {
                 if (o.netplay) o.netplay->local(m.index, at, value);
                 else m.inputs->set(m.index, at, value);
@@ -3538,15 +3564,80 @@ int main(int argc_given, char** argv_given) {
     args.push_back(nullptr);
     const int argc = static_cast<int>(args.size()) - 1;
     char** argv = args.data();
+    // A report's locked recording (tools/report_lock.hpp), no ROM needed:
+    //   --make-report-key KEYFILE                      a new key pair: the secret into KEYFILE (keep it, and a copy), the
+    //                                                  public printed (tools::lock::kOwnerKey)
+    //   --unlock FILE.locked [FILE...] --report-key KEYFILE   each opened beside it, without ".locked"
+    {
+        std::string make_key, key_file;
+        std::vector<std::string> unlock;
+        for (int i = 1; i < argc; ++i) {
+            const std::string arg = argv[i];
+            if (arg == "--make-report-key" && i + 1 < argc) make_key = argv[++i];
+            else if (arg == "--report-key" && i + 1 < argc) key_file = argv[++i];
+            else if (arg == "--unlock")
+                while (i + 1 < argc && argv[i + 1][0] != '-') unlock.emplace_back(argv[++i]);
+        }
+        if (!make_key.empty()) {
+            if (!tools::read_file(make_key).empty()) {
+                std::fprintf(stderr, "gamerun: %s is there already: not replaced (a lost key can't be made again)\n", make_key.c_str());
+                return 1;
+            }
+            const auto pair = tools::lock::make_pair();
+            const std::string text = pair ? "spikeout report key (secret: never in the repository, keep a copy)\n" + pair->first + "\n" : "";
+            if (!pair || !tools::write_file(make_key, std::span(reinterpret_cast<const uint8_t*>(text.data()), text.size()))) {
+                std::fprintf(stderr, "gamerun: can't make the key in %s\n", make_key.c_str());
+                return 1;
+            }
+            std::printf("secret key written: %s\npublic key (tools::lock::kOwnerKey): %s\n", make_key.c_str(), pair->second.c_str());
+            return 0;
+        }
+        if (!unlock.empty()) {
+            const std::vector<uint8_t> key_text = tools::read_file(key_file);
+            std::string_view kt(reinterpret_cast<const char*>(key_text.data()), key_text.size());
+            if (const auto nl = kt.find('\n'); nl != std::string_view::npos && kt.substr(0, 8) == "spikeout") kt.remove_prefix(nl + 1);
+            const auto secret = tools::lock::key_from_hex(kt);
+            if (!secret) {
+                std::fprintf(stderr, "gamerun: --unlock needs --report-key KEYFILE (the secret key: %s)\n",
+                             key_file.empty() ? "none given" : ("not one in " + key_file).c_str());
+                return 1;
+            }
+            int failed = 0;
+            for (const std::string& path : unlock) {
+                const auto opened = tools::lock::open(tools::read_file(path), *secret);
+                std::string to = path;
+                if (to.size() > 7 && to.ends_with(".locked")) to.resize(to.size() - 7);
+                else to += ".unlocked";
+                if (!opened || !tools::write_file(to, *opened)) {
+                    std::fprintf(stderr, "gamerun: %s: %s\n", path.c_str(), opened ? "can't write it out" : "not opened (another key, or not a locked file, or changed)");
+                    ++failed;
+                    continue;
+                }
+                std::printf("opened: %s (%zu bytes)\n", to.c_str(), opened->size());
+            }
+            return failed ? 1 : 0;
+        }
+    }
     Options o;
     tools::Recording recording;
     tools::InputLog input_log; // (--inputs)
+    tools::net_record::Reader net_replay; // (--net-replay)
+    std::string net_replay_state;          // (its .state)
     std::map<tools::LinkedInputLog::Where, tools::LinkedInputLog::Change> linked_inputs; // (--inputs, linked boards')
     bool blocks_given = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         bool taken = true; // (the options in two chains: one of over 128 branches is too deep for MSVC, C1061)
         if (arg == "--blocks" && i + 1 < argc) o.blocks = std::strtoll(argv[++i], nullptr, 0), blocks_given = true;
+        else if (arg == "--net-replay" && i + 1 < argc) { // FILE.inputs: a network game recorded (tools/net_record.hpp)
+            const std::string path = argv[++i];
+            if (const std::string why = net_replay.load(path); !why.empty()) {
+                std::fprintf(stderr, "gamerun: %s\n", why.c_str());
+                return 1;
+            }
+            o.net_replay = &net_replay;
+            net_replay_state = path.substr(0, path.rfind('.')) + ".state";
+        }
         else if (arg == "--inputs" && i + 1 < argc) { // FILE (spikebot --record-inputs; with --load-state, the state it began from)
             if (input_log.load(argv[++i])) {
                 o.input_log = &input_log;
@@ -3956,6 +4047,18 @@ int main(int argc_given, char** argv_given) {
                              "               [--press [B:]NAME@FRAME[:N]]... [--poke [B:]ADDR=VALUE@FRAME[:N]]...\n");
         return 2;
     }
+    // --net-replay: its boards linked, run at once as in network play, from its state (NAME.state unless --load-state
+    // says another), each board's inputs the recording's, to its last frame (--frames to stop sooner); each frame's RAM
+    // hashes printed, to compare with a machine of the game
+    if (o.net_replay) {
+        o.boards = o.net_replay->boards, o.parallel = true, o.frame_hashes = true;
+        if (!o.load_state) o.load_state = net_replay_state.c_str();
+        if (!blocks_given) o.blocks = INT64_MAX / 2;
+        if (!o.max_frames) o.max_frames = o.net_replay->end();
+        std::printf("net replay: %zu boards from frame %llu, %llu frames of inputs, from %s\n", o.net_replay->boards,
+                    static_cast<unsigned long long>(o.net_replay->first), static_cast<unsigned long long>(o.net_replay->frames()),
+                    o.load_state);
+    }
     if (o.replay) {
         if (!blocks_given) o.blocks = INT64_MAX / 2; // (to the recording's end)
         std::printf("replay: %zu frames of inputs, %zu hashes\n", o.replay->inputs.size(), o.replay->hashes.size());
@@ -4188,7 +4291,7 @@ int main(int argc_given, char** argv_given) {
                 [boards = start->seats](uint64_t frame) {
                     if (!g_machines || g_machines->empty()) return false;
                     tools::InputTable* t = (*g_machines)[0]->inputs;
-                    return t && t->all_set(frame, boards) && t->wrong_from() > frame;
+                    return t && t->all_set(frame, boards) && t->wrong_from() > frame && !(g_net_rb && g_net_rb->redoing(frame));
                 },
                 recomp::FrameTiming().frame_cycles());
         o.clock = start->clock;
@@ -4357,7 +4460,7 @@ int main(int argc_given, char** argv_given) {
         linked.boards.resize(o.boards);
         if (o.load_state || !join_state.empty()) {
             try {
-                m3::State s(o.load_state ? tools::read_state_file(tools::read_file(o.load_state)).state : std::move(join_state));
+                m3::State s(o.load_state ? tools::read_state_file(read_state_bytes(o.load_state)).state : std::move(join_state));
                 linked.io(s);
             } catch (const std::exception& e) {
                 std::fprintf(stderr, "gamerun: %s: %s (a state of %zu linked boards?)\n", o.load_state ? o.load_state : "the host's state",

@@ -119,6 +119,21 @@ FetchContent_MakeAvailable(zstd)
 target_link_libraries(m3net PUBLIC libzstd_static)
 target_include_directories(m3net PUBLIC ${zstd_SOURCE_DIR}/lib)
 
+# Monocypher 4.0.2 (CC0 or BSD-2-Clause, Loup Vaillant and others; third_party/monocypher, from its GitHub tag):
+# a report's network game recording locked to the project owner's key (tools/report_lock.hpp).
+enable_language(C)
+add_library(monocypher STATIC third_party/monocypher/monocypher.c)
+target_include_directories(monocypher SYSTEM PUBLIC third_party/monocypher)
+if(MSVC)
+    target_compile_options(monocypher PRIVATE /w)
+else()
+    target_compile_options(monocypher PRIVATE -w)
+endif()
+target_link_libraries(m3net PUBLIC monocypher)
+if(WIN32)
+    target_link_libraries(m3net PUBLIC bcrypt) # (BCryptGenRandom: the lock's random bytes)
+endif()
+
 # The internet lobby's client (src/net/lobby.cpp): a WebSocket over TLS to
 # the lobby Worker (lobby/), through libcurl (curl license): the system's if
 # CMake finds it and it speaks wss, else built with the project: on Windows'
@@ -424,7 +439,8 @@ if(SPIKEOUT_GPU)
     set(ui_sources)
     foreach(entry menu_rml:ui/menu.rml menu_rcss:ui/menu.rcss font_medium:fonts/BarlowCondensed-Medium.ttf
                   font_semibold:fonts/BarlowCondensed-SemiBold.ttf font_bold_italic:fonts/BarlowCondensed-BoldItalic.ttf
-                  flags_png:ui/flags.png flags_rcss:ui/flags.rcss platforms_png:ui/platforms.png platforms_rcss:ui/platforms.rcss)
+                  flags_png:ui/flags.png flags_rcss:ui/flags.rcss platforms_png:ui/platforms.png platforms_rcss:ui/platforms.rcss
+                  controller_db:controllers/gamecontrollerdb.txt)
         string(REPLACE ":" ";" parts ${entry})
         list(GET parts 0 name)
         list(GET parts 1 file)

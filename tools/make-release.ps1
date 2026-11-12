@@ -60,9 +60,12 @@ $parts = @(
     @("curl", (Join-Path (dep_dir curl) "COPYING")),
     @("Zstandard (BSD)", (Join-Path (dep_dir zstd) "LICENSE")),
     @("minimp3 (CC0)", "third_party\minimp3\LICENSE"),
+    @("QR Code generator, Project Nayuki (MIT)", "third_party\qrcodegen\LICENSE"),
+    @("Monocypher (CC0 or BSD-2-Clause)", "third_party\monocypher\LICENCE.md"),
     @("Moira", "third_party\moira\LICENSE"),
     @("Barlow Condensed font (SIL Open Font License)", "assets\fonts\OFL.txt"),
-    @("Country flags", "assets\ui\flags-LICENSE.txt"))
+    @("Country flags", "assets\ui\flags-LICENSE.txt"),
+    @("SDL_GameControllerDB, controller layouts (zlib licence)", "assets\controllers\LICENSE.txt"))
 $text = New-Object System.Text.StringBuilder
 [void]$text.AppendLine("Spikeout: Final Edition recomp ${Version}: the libraries and files built into it, and their licences.")
 [void]$text.AppendLine("The program itself is under the GNU GPL version 3 (LICENSE.txt).")

@@ -379,9 +379,12 @@ private:
                     bytes += b;
                 }
             }
-        if (n && ++totals_.differed <= log_limit())
-            std::printf("node check: seat %zu packet %llu: %zu bytes differ (real/made):%s\n", seat + 1, (unsigned long long)seq, n,
+        if (n && ++totals_.differed <= log_limit()) {
+            const auto at = made_at_[seat].find(seq); // (the frame it left in, +2)
+            std::printf("node check: seat %zu packet %llu (frame %lld): %zu bytes differ (real/made):%s\n", seat + 1,
+                        (unsigned long long)seq, at == made_at_[seat].end() ? -1ll : static_cast<long long>(at->second) - 2, n,
                         bytes.c_str());
+        }
         if (n && run_again_) { // (step 3: back to the frame it left in; the real one kept, put in as it's sent again)
             const auto f = made_frame_[seat].find(seq);
             if (f != made_frame_[seat].end()) back_to_ = std::min(back_to_, f->second ? f->second - 1 : 0); // (a frame more: to be sure)

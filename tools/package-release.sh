@@ -52,9 +52,11 @@ notices="$stage/THIRD-PARTY-NOTICES.txt"
     part "Zstandard (BSD)" "$(dep zstd)/LICENSE"
     part "minimp3 (CC0)" "$repo/third_party/minimp3/LICENSE"
     part "QR Code generator, Project Nayuki (MIT)" "$repo/third_party/qrcodegen/LICENSE"
+    part "Monocypher (CC0 or BSD-2-Clause)" "$repo/third_party/monocypher/LICENCE.md"
     part "Moira" "$repo/third_party/moira/LICENSE"
     part "Barlow Condensed font (SIL Open Font License)" "$repo/assets/fonts/OFL.txt"
     part "Country flags" "$repo/assets/ui/flags-LICENSE.txt"
+    part "SDL_GameControllerDB, controller layouts (zlib licence)" "$repo/assets/controllers/LICENSE.txt"
     case $platform in
     windows-*)
         echo; printf '=%.0s' {1..78}; echo; echo "winpthreads (mingw-w64), Windows only (MIT)"; printf '=%.0s' {1..78}; echo

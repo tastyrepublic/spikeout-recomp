@@ -11,6 +11,7 @@
 #pragma once
 
 #include "net/report.hpp"
+#include "report_lock.hpp" // (a network game's recording in the zip, locked)
 
 #include <SDL3/SDL.h>
 
@@ -75,6 +76,7 @@ inline std::FILE* open(const std::string& path, const char* mode) {
 }
 struct Log {
     std::string folder;
+    std::string name = "spikeout.log"; // (this run's: spikeout-<time>.log when spikeout.log was in use)
     std::FILE* file = nullptr;
     std::uintmax_t written = 0;
     bool capped = false;
@@ -179,12 +181,27 @@ inline bool start_log(const std::string& folder) {
     const std::filesystem::path path = detail::utf8(folder + "spikeout.log");
     if (std::filesystem::exists(path, ec))
         std::filesystem::rename(path, detail::utf8(folder + "spikeout-prev.log"), ec);
-#ifdef _WIN32
-    l.file = _wfopen(path.wstring().c_str(), L"wb");
-#else
-    l.file = std::fopen(path.string().c_str(), "wb");
-#endif
-    if (!l.file) return false;
+    l.file = detail::open(folder + l.name, "wb");
+    // (spikeout.log in use: the game open twice, or another program holding the file. It was no log at all, the output
+    // only where it went before (2026-11-11: the owner's two network games, started from a terminal: nothing in the
+    // file, so nothing for a report). Now this run's own name; the newest three such kept)
+    std::string busy;
+    if (!l.file) {
+        busy = l.name;
+        l.name = "spikeout-" + detail::stamp() + ".log";
+        l.file = detail::open(folder + l.name, "wb");
+        std::vector<std::filesystem::path> own;
+        for (const auto& f : std::filesystem::directory_iterator(detail::utf8(folder), ec)) {
+            const std::string n = f.path().filename().string();
+            if (n.rfind("spikeout-20", 0) == 0 && f.path().extension() == ".log" && n != l.name) own.push_back(f.path());
+        }
+        std::sort(own.begin(), own.end());
+        for (std::size_t i = 0; i + 2 < own.size(); ++i) std::filesystem::remove(own[i], ec); // (with this one: three)
+    }
+    if (!l.file) {
+        std::fprintf(stderr, "log: can't write a log file in %s: the output stays here only\n", folder.c_str());
+        return false;
+    }
     std::fflush(stdout), std::fflush(stderr);
     int ends[2];
 #ifdef _WIN32
@@ -233,6 +250,7 @@ inline bool start_log(const std::string& folder) {
     });
     // (the clock time once: the lines after count seconds from here, and a crash report's name is the clock's)
     std::printf("log: started %s (this computer's time; the numbers in [ ] are seconds from now)\n", detail::clock_text().c_str());
+    if (!busy.empty()) std::printf("log: %s is in use (the game open twice?): this run's log is %s\n", busy.c_str(), l.name.c_str());
     return true;
 }
 
@@ -672,7 +690,8 @@ inline std::filesystem::path make_report(const std::string& folder, const std::s
     std::vector<std::pair<std::string, std::string>> files;
     files.push_back({"system.txt", detail::scrubbed(about + system_lines() + controllers_now())});
     if (!words.empty()) files.push_back({"what-happened.txt", detail::scrubbed(words)}); // (the player's words)
-    for (const char* name : {"spikeout.log", "spikeout-prev.log", "settings.ini"}) {
+    const std::string this_log = detail::log().name; // (spikeout.log, or this run's own when that was in use)
+    for (const std::string& name : {this_log, std::string("spikeout-prev.log"), std::string("settings.ini")}) {
         const fs::path p = detail::utf8(folder + name);
         std::error_code ec;
         if (fs::exists(p, ec)) files.push_back({name, detail::scrubbed(detail::read_all(p))});
@@ -687,6 +706,24 @@ inline std::filesystem::path make_report(const std::string& folder, const std::s
         const bool text = it->extension() == ".txt";
         if (text) ++texts;
         files.push_back({it->filename().string(), text ? detail::scrubbed(detail::read_all(*it)) : detail::read_all(*it)});
+    }
+    // (the newest network game's recording, saves/net-game-*: locked to the project owner's key, tools/report_lock.hpp:
+    // its state holds pieces of the ROM, and the zip may be posted where anyone can download it)
+    if (const auto owner = lock::owner_key()) {
+        fs::path newest;
+        for (const auto& f : fs::directory_iterator(detail::utf8(folder + "saves/"), ec)) {
+            const std::string name = f.path().filename().string();
+            if (name.rfind("net-game-", 0) == 0 && f.path().extension() == ".inputs" && (newest.empty() || name > newest.filename().string()))
+                newest = f.path();
+        }
+        fs::path state = newest;
+        state.replace_extension(".state");
+        if (!newest.empty() && fs::exists(state, ec))
+            for (const fs::path& p : {newest, state}) {
+                const std::string bytes = detail::read_all(p);
+                const std::vector<uint8_t> locked = lock::seal(std::vector<uint8_t>(bytes.begin(), bytes.end()), *owner);
+                if (!locked.empty()) files.push_back({p.filename().string() + ".locked", std::string(locked.begin(), locked.end())});
+            }
     }
     const fs::path zip = detail::utf8(folder + "spikeout-report-" + detail::stamp() + ".zip");
     return detail::write_zip(zip, files) ? zip : fs::path();
@@ -768,7 +805,7 @@ inline net::report::Report github_report(const std::string& folder, const std::s
         if (text.empty()) return;
         r.comments.push_back("**" + title + "**\n\n" + fenced(tail(text, net::report::kCommentLimit - title.size() - 40)));
     };
-    add("spikeout.log (this run)", detail::utf8(folder + "spikeout.log"));
+    add(detail::log().name + " (this run)", detail::utf8(folder + detail::log().name));
     add("spikeout-prev.log (the run before)", detail::utf8(folder + "spikeout-prev.log"));
     if (!crash.empty()) add(crash.filename().string(), crash);
     add("settings.ini", detail::utf8(folder + "settings.ini"));
