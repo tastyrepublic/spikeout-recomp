@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <functional>
 #include <map>
@@ -574,6 +575,61 @@ inline uint64_t set_up_one_board(one_board::Game& game, const OneBoardSetUp& u) 
         // the module's state kept from its save on)
         game.hold_guesses(stays.timing.frames() + 1);
         rb->pin(stays.timing.frames() + 1);
+        // The safety net (2026-11-11, docs/netplay.md "The safety net: the real packets put in"): each other cabinet's
+        // real node (its machine sends it once its frame is settled there) put in for the made one as it leaves, if it
+        // has come (NodeCheck::patch); come after, and different, every board goes back to the frame the made one left
+        // in and runs again, the real one put in this time. So a side run's mistake lasts a few frames, not the game.
+        // Only with rollback (without, a real node in or not by the time decides what a frame makes: out of step); not
+        // for a spectator (no machine of its own sends to it). Every frame kept (lazy snapshots may keep none within the
+        // ring's window: "too far back to go").
+        // OFF by default (NODE_CORRECT=1 turns it on): proved not to hold (2026-11-11, NODE_SPOIL=6600,120, two machines
+        // 40 ms apart): a wrong made packet is taken in by this machine's own board, whose real nodes then carry the
+        // mistake to the others; putting that right takes a chain of corrections, one network trip each, slower than the
+        // ring's window over any distance: out of step either way (docs/netplay.md, "The safety net").
+        static const bool off = [] {
+            const char* v = std::getenv("NODE_CORRECT");
+            return !(v && v[0] == '1');
+        }();
+        // (tests: NODE_SPOIL=FRAME[,COUNT], the first made packet from another cabinet that leaves at or after the
+        // staying board's FRAME and the COUNT-1 after it on that link (default 1) spoiled (a byte of their first record
+        // flipped), every time they are sent: what a side run's mistake would do. With the net, their real ones put
+        // in; without (NODE_CORRECT=0), out of step)
+        static const uint64_t spoil = [] {
+            const char* v = std::getenv("NODE_SPOIL");
+            return v ? std::strtoull(v, nullptr, 0) : 0ull;
+        }();
+        static const uint64_t spoil_count = [] {
+            const char* v = std::getenv("NODE_SPOIL");
+            const char* c = v ? std::strchr(v, ',') : nullptr;
+            return c ? std::max<uint64_t>(1, std::strtoull(c + 1, nullptr, 0)) : uint64_t{1};
+        }();
+        struct Spoiled {
+            std::atomic<uint64_t> seq{0};
+            std::atomic<std::size_t> from{0};
+        };
+        static Spoiled spoiled;
+        if (u.ring && u.inputs && !u.spectating && (!off || spoil)) {
+            if (!off) {
+                rb->keep_every(true);
+                InputTable* table = u.inputs;
+                one_board::Board* staying = &stays;
+                net->node_check().set_correcting([table](uint64_t frame) { table->run_again_from(frame); },
+                                                 [staying] { return staying->timing.frames(); });
+                std::printf("%s: one board: the other cabinets' real packets put in as they come (the safety net)\n", tag);
+            }
+            u.ring->on_patch([net, local = u.local, at = &stays](std::size_t from, uint64_t seq, std::vector<uint8_t>& data) {
+                if (spoil && from != local && data.size() >= NodeCheck::kNodeBytes) {
+                    if (spoiled.seq.load() == 0 && at->timing.frames() >= spoil) spoiled.from = from, spoiled.seq = seq;
+                    const uint64_t first = spoiled.seq.load();
+                    if (first && seq >= first && seq < first + 2 * spoil_count && from == spoiled.from.load()) { // (a link's: every other number)
+                        data[0x10B] ^= 0x40;
+                        std::printf("node spoil: board %zu's packet %llu spoiled (frame %llu)\n", from, (unsigned long long)seq,
+                                    (unsigned long long)at->timing.frames());
+                    }
+                }
+                net->node_check().patch(from, seq, data);
+            });
+        }
     }
     return stays.timing.frames();
 }

@@ -3856,6 +3856,51 @@ from here", no side runs, no hand-backs), and bot 2's board 1 then differed from
 after a stall of every process, not the made cabinets: to be found with a forced stall (a test switch holding every
 datagram 3 s).
 
+### The safety net: the real packets put in, and why it can't hold (2026-11-11, branch claude/safety-net)
+
+A one-board machine makes the other cabinets' link packets on side runs. Exact over the owner's whole recording since
+the fix above, but a side run that one day makes a byte the real cabinet doesn't (an area not tried yet) put that
+machine out of step for good. The real ones are here anyway: each machine sends its own board's node (the first 0x900
+bytes of each packet) to the others once its frame is settled there (NodeCheck, step 1). So, as NodeCheck's step 3
+(written 2026-11-07, off since 11-08), tried again, in the shared set-up now (tools::net_frame::set_up_one_board, the
+window's and gamerun's alike; gamerun's own wiring gone), OFF BY DEFAULT (NODE_CORRECT=1), for what the proof showed:
+
+- a made packet about to leave (the ring's on_patch): its real node put in if it has come (NodeCheck::patch);
+- a real node that comes after its made one left, and differs: every board back to the frame that one left in (the
+  inputs' run_again_from), run again with the real one put in this time;
+- every frame kept (Linked::keep_every): a lazy snapshot can be 32 frames back, past the ring's window (12-16
+  frames: "too far back to go", out of step);
+- only with rollback (without, a real node in or not by then would decide what a frame makes) and not for a
+  spectator;
+- a real node sent again, different from the one come before (its machine went back and ran that frame again): back
+  to where its made one left, to put the new one in (NodeCheck::received, "real ones sent again changed").
+
+The proof (scratchpad spoil-test.ps1; NODE_SPOIL=FRAME[,COUNT]: a made packet spoiled each time it is sent, a byte of
+its first record): two gamerun, one board each, rollback, input delay 0, SPIKEOUT_TEST_LATENCY=40, the "two" case
+(mash fight from mash-5990.state, one board from 6000); each board's RAM by frame (the last run of each) against a
+plain run (two plain runs: the same, frame for frame).
+- One packet spoiled, the net off: the joiner's board one frame different (6601), then the same (the game wrote that
+  byte again): too weak to tell. The net on: that frame the same.
+- 120 packets spoiled (6600-~6670), the net off on the joiner: its board different from 6601 for good, and the
+  host's from 6673 (the host's net put the joiner's wrong real nodes in).
+- The same, the net on: different from 6678 on both.
+- With the real ones sent again changed taken in: held to 6769, then different on both; 1,600 goings back, and one
+  "frame 6767 guessed wrong, too far back to go (at 6972)".
+
+Why: a wrong made packet is taken in by this machine's own board in the frames before its real one comes; that board's
+real nodes for those frames are then wrong, and the others put them in (they trust a board's own machine). Put right,
+it sends them again; the others go back, run again, and their own real nodes change in turn: a chain of corrections,
+one network trip each, while the game goes on. Over any real distance the chain falls past the ring's window (12-16
+frames) and the machines stay apart. (Very likely the 11-08 failure too.) Holding a machine's own nodes back until the
+made packets its frames took in are confirmed doesn't help: each machine's frame then waits on the other's frame a
+network trip before, every frame, an ever growing lag.
+
+What could work instead: a difference found treated as out of step, the boards put right from their owners' states at
+an agreed frame (as a join takes them), not by rolling back. Not built. Since the made packets are exact on
+everything recorded so far, the node check stays a detector (its counts in each game's report).
+
+What it would cost if on: a snapshot every frame on a one-board machine with rollback (lazy ones skipped most).
+
 ## Plan
 
 1. Single board, single player (milestones 1–4).

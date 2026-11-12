@@ -1091,16 +1091,7 @@ void net_set_up_one_board(std::vector<std::unique_ptr<Machine>>& machines, const
         };
     u.tag = "net";
     g_one_board_frame = tools::net_frame::set_up_one_board(g_one_board, u);
-    // (tests: NODE_CORRECT=1, a made packet sent as its real one once that has come; one come after, and different, gone
-    // back for (tools::NodeCheck, step 3). Off by default (2026-11-08): with the made packets exact, it put real packets
-    // in that weren't theirs (three players, rollback: out of step at ~4,800 with it, the same over 7,000 frames without;
-    // the window never had it))
-    static const bool correct = std::getenv("NODE_CORRECT") && std::getenv("NODE_CORRECT")[0] == '1';
-    if (o.net_rollback && g_ring && correct) {
-        net->node_check().set_correcting([](uint64_t frame) { (*g_machines)[0]->inputs->run_again_from(frame); },
-                                         [stays = o.local_seat] { return (*g_machines)[stays]->timing.frames(); });
-        g_ring->on_patch([net](std::size_t from, uint64_t seq, std::vector<uint8_t>& data) { net->node_check().patch(from, seq, data); });
-    }
+    // (the safety net, real packets put in for made ones: in the set-up itself, the window's and this alike)
     std::printf("net: one board set up at frame %llu, line %u: the other cabinets held whole until the game is calm\n",
                 (unsigned long long)g_one_board_frame.load(), machines[o.local_seat]->line);
 }
@@ -4674,10 +4665,8 @@ int main(int argc_given, char** argv_given) {
         const bool sim = o.rb_sim_latency != 0;
         g_net_rb = std::make_unique<tools::rollback::Linked>(o.boards, depth, ring.get(), inputs);
         if (o.rb_force_every) g_net_rb->force(o.rb_force_depth, o.rb_force_every, o.rb_force_from, o.max_frames ? o.max_frames : ~0ull), g_net_rb->keep_every(true);
-        if (sim && !std::getenv("ROLLBACK_SIM_LAZY")) g_net_rb->keep_every(true); // (ROLLBACK_SIM_LAZY=1: lazy snapshots, as network play without NODE_CORRECT)
-        // (one board here correcting its made packets (tools::NodeCheck): every frame kept, a late real packet's frame
-        // there to go back to)
-        if (o.one_board >= 0 && std::getenv("NODE_CORRECT") && std::getenv("NODE_CORRECT")[0] == '1') g_net_rb->keep_every(true);
+        if (sim && !std::getenv("ROLLBACK_SIM_LAZY")) g_net_rb->keep_every(true); // (ROLLBACK_SIM_LAZY=1: lazy snapshots, as every-board network play)
+        // (one board a PC in network play: every frame kept by its set-up, tools::net_frame::set_up_one_board, the safety net)
         for (auto& m : machines)
             g_net_rb->attach(m->index, [mp = m.get()](m3::State& s) {
                 // (one board: the boards on side runs, made by this one's module, their network boards with it; first:

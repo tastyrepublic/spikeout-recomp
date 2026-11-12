@@ -160,6 +160,15 @@ public:
         b.node = node, b.seq = seq, b.have = true;
         b.recent[b.n++ % 3] = node; // (the newest three, for the header's lasting bytes: fix_header)
         if (!making_) return;
+        // (the safety net: a real node sent again, different: its machine went back and ran that frame again (its own
+        // board had taken in a made packet of ours that was wrong). The one put in here before was the wrong run's:
+        // back to where it left, to put this one in. Else the mistake goes round the ring: each machine's board
+        // taking the other's wrong real node in, out of step for good (2026-11-11, NODE_SPOIL))
+        if (const auto old = real_[seat].find(seq); old != real_[seat].end() && old->second != node && run_again_) {
+            ++replaced_;
+            if (const auto f = made_frame_[seat].find(seq); f != made_frame_[seat].end())
+                back_to_ = std::min(back_to_, f->second ? f->second - 1 : 0);
+        }
         real_[seat][seq] = node;
         compare(seat, seq);
         trim(real_[seat], seq);
@@ -277,9 +286,9 @@ public:
         char buf[320];
         std::snprintf(buf, sizeof buf,
                       "%llu packets compared, %llu differed; %llu bytes of made records taken from real ones; %llu made packets "
-                      "sent as their real ones, %llu times gone back for one",
+                      "sent as their real ones, %llu times gone back for one, %llu real ones sent again changed",
                       (unsigned long long)totals_.compared, (unsigned long long)totals_.differed, (unsigned long long)fixed_,
-                      (unsigned long long)patched_, (unsigned long long)backs_);
+                      (unsigned long long)patched_, (unsigned long long)backs_, (unsigned long long)replaced_);
         std::string out = buf;
         std::snprintf(buf, sizeof buf, "; whole packets: %llu compared, %llu differed", (unsigned long long)whole_compared_,
                       (unsigned long long)whole_differed_);
@@ -453,7 +462,7 @@ private:
     uint64_t whole_compared_ = 0, whole_differed_ = 0;
     std::function<void(uint64_t)> run_again_;
     std::function<uint64_t()> frame_now_;
-    uint64_t back_to_ = ~0ull, backs_ = 0, patched_ = 0;
+    uint64_t back_to_ = ~0ull, backs_ = 0, patched_ = 0, replaced_ = 0;
     std::array<uint64_t, kNodeBytes> counts_{};
     Totals totals_;
     // (step 2: the bytes of a record taken from the real ones when lasting; keep_: those known to be each cabinet's own,
