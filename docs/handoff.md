@@ -61,6 +61,22 @@ Read this first, then CLAUDE.md's "Latest" and docs/netplay.md "Three cabinets" 
 Everything here is about **one board a PC** (a machine runs only its own board; the other cabinets are "made" on
 it by side runs) in network play with rollback.
 
+## Open (2026-11-13): the report downloads — the owner's to-do, pick this up
+
+### Report downloads: make them scale (the owner's to-do, 2026-11-13)
+
+Today's `tools/fetch-reports.ps1` saves its place (`last.txt`) only at the very end (a stopped fetch starts over and
+downloads everything again: it did on 2026-11-13), never skips files already on disk, downloads one file at a time,
+can't filter, never deletes anything (on the server, the lobby's R2 storage grows toward its free limit; here, the
+locked copies stay beside the unlocked ones), and a game can only be found by opening every zip. Planned:
+1. On this PC (the script only): save the place after every file; skip files already on disk; several downloads at
+   once; filters (version, time range, kind: problems/inputs, newest first: e.g. just the hour around an issue);
+   an index file written as it goes (id, time, version, country, kind) to search without opening zips; delete each
+   locked copy once unlocked; an option to clear old versions' bundles once studied.
+2. On the lobby (a lobby change + `npx wrangler deploy`: ONLY with the owner's OK): delete each file from the server
+   once it is safely downloaded and unlocked here (no double downloads, storage stays small); optionally the room code
+   and the problem's kind (desync, hang, crash) in each report's details, to search for a room without downloading.
+
 ## In progress (2026-11-09): plan step 2, one shared network set-up — START HERE
 
 The owner chose: step 2 first, then find a way to REPRODUCE the step 1 bug (not many blind test runs).
