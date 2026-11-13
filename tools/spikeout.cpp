@@ -324,6 +324,11 @@ struct Shared {
     std::atomic<uint64_t> sync_slowed{0}, sync_sooner{0}, sync_free{0}; // (rollback's time sync: frames slowed, sooner, unpaced)
     // (a network game's smoothness, as its player saw it, for its numbers (tools/problem_report.hpp part 2): the shown
     // board's frames paced, the stutters among them (a gap over 1.5 frames), the longest gap; from net_begin)
+    std::atomic<uint8_t> room_stage{0}, room_area{0}; // (the shown board's stage and area, for the room's listing: stage_of)
+    // (a network game's areas and the game's raw stage ids gone through, for its numbers: which areas players reach, to name
+    // the ones the bot never went to (area_name); bits by area_of's number - 1, and by the id at 0x10402C; from net_begin)
+    std::atomic<uint64_t> areas_seen[2] = {0, 0};
+    std::atomic<uint32_t> stage_ids_seen{0};
     std::atomic<uint64_t> net_frames{0}, net_stutters{0};
     std::atomic<int64_t> net_worst_ms{0};
     std::atomic<uint64_t> rollback_from{0}; // (rollback's snapshots and guesses from this frame on: a joiner's, once caught up)
@@ -410,6 +415,58 @@ std::array<bool, tools::kActions> pad_actions(SDL_Gamepad* pad, const std::array
         set(A::Right, d.right);
     }
     return held;
+}
+
+// The game's stage as the lists show it (the owner, 2026-11-12: "the lobby room shows which stage the game is in"): from
+// the board's RAM, the game's mode (0x10400A: 7 playing, 3 the attract) and its stage id (0x10402C), found across the
+// bot's run to the end (docs/bot.md): 7 stage 1 (and the attract), 3 stage 2 (its bonus round too), 6 the shipyard, 4
+// another of stage 3's routes, 5 the final stage (the hedge maze, the opera house, the last boss). 0 not playing, 1-3
+// those stages, 4 the final one (kStageNames).
+uint8_t stage_of(m3::Bus& bus) {
+    if (bus.read8(0x10400A) != 7) return 0;
+    switch (bus.read8(0x10402C)) {
+    case 7: return 1;
+    case 3: return 2;
+    case 5: return 4;
+    default: return 3; // (stage 3's routes: the shipyard 6, another 4, and those the bot never took)
+    }
+}
+constexpr const char* kStageNames[] = {"", "Stage 1", "Stage 2", "Stage 3", "Final Stage"}; // (as the game's stage cards)
+// The areas' names, by area_of's number (the area table's + 1), as the stages' places are called (the full clear's
+// chapters, docs/bot.md): the areas the bot's run to the end went through, each seen in a screenshot. Others: the stage
+// alone.
+const char* area_name(int area) {
+    switch (area - 1) { // (the table's own numbers, 2026-11-12: each area's script found in the run, then seen)
+    case 75: return "Spiker's Base";
+    case 86: return "To the Docks";
+    case 87: return "Docks"; // (Phoenix, the boss, fought in it too)
+    case 4: case 6: case 1: return "Diesel Town"; // (the street under the overpass, the fenced alley, the back yard)
+    case 2: return "Warehouse";
+    case 5: case 9: return "Industrial Zone"; // (the yard, then the rooftop walkway and Randolph's fight)
+    case 74: case 77: case 78: case 79: case 81: return "Shipyard";
+    case 29: return "Hedge Maze";
+    case 30: return "Outside the Opera House";
+    case 49: return "Reception Hall";
+    case 51: return "Theater";
+    case 52: return "Reaper Gang";
+    case 53: return "Mikhail";
+    default: return nullptr; // (story scenes, between areas (36), the route's choice (84), routes the bot never took)
+    }
+}
+// A started game in the lists: "stage 2 · Warehouse", "stage 3", or "playing" (an older host's, or not in a stage yet).
+std::string playing_text(int stage, int area) {
+    if (stage <= 0 || stage >= static_cast<int>(std::size(kStageNames))) return "playing";
+    const char* where = area_name(area);
+    return std::string(kStageNames[stage]) + (where ? std::string(" \xC2\xB7 ") + where : "");
+}
+// The game's area: its number in the game's area table (0xA1D24: 8 bytes an area, its set-up script then its script),
+// found by the script the area task runs (its +16, 0x11BA90; docs/bot.md "The route"), + 1; 0 none found.
+uint8_t area_of(m3::Bus& bus) {
+    if (bus.read8(0x10400A) != 7) return 0;
+    const uint32_t script = bus.read32(0x11BA90);
+    for (uint32_t n = 0; n < 128; ++n)
+        if (bus.read32(0xA1D24 + 8 * n + 4) == script) return static_cast<uint8_t>(n + 1);
+    return 0;
 }
 
 // A pad's layout as its player set it, for the project to make it a built-in layout (the owner, 2026-11-12: sticks SDL
@@ -1087,6 +1144,12 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
         // (each board's state: every 300 frames with detailed logging; in network play every minute anyway (the owner,
         // 2026-11-12: a report's log should say what each board was doing without detailed logging: one board's and a
         // spectator's above all)
+        // (the game's stage, for the room's listing: the shown board's, once a second)
+        if (networked && index == shown && timing.frames() % 60 == 0) {
+            shared.room_stage = stage_of(bus), shared.room_area = area_of(bus);
+            if (const uint8_t a = shared.room_area.load(); a > 0 && a <= 128) shared.areas_seen[(a - 1) / 64] |= 1ull << ((a - 1) % 64);
+            if (bus.read8(0x10400A) == 7 && bus.read8(0x10402C) < 32) shared.stage_ids_seen |= 1u << bus.read8(0x10402C);
+        }
         const uint64_t board_every = timing_debug ? 300 : networked ? 3600 : 0;
         if (board_every && timing.frames() % board_every == 0 && !(shared.rollback && shared.rollback->quiet(index, timing.frames()))) {
             const uint32_t logic = bus.read32(0x1000A8);
@@ -1898,6 +1961,8 @@ struct NetGame {
     bool host = false, internet = false, running = false;
     bool spectator = false; // (watching it: Session::watch)
     std::size_t listed_taken = 1; // (the host, on the internet: the players the lobby last heard of)
+    int listed_stage = 0, listed_area = 0;   // (and the game's stage and area it last heard of)
+    uint8_t beacon_stage = 0, beacon_area = 0; // (the session's, for its beacons)
     std::atomic<bool> ready{false}, failed{false};
     std::chrono::steady_clock::time_point asked_at{}, told_at{}; // (joining or watching: since then no answer; last said then)
     mutable std::mutex lock;
@@ -2843,6 +2908,10 @@ int main(int argc, char** argv) {
     std::unique_ptr<net::Discovery> discovery; // games on this network, while looked for
     std::unique_ptr<net::LobbyClient> browser; // the lobby's list, while looked at
     std::vector<net::Json> internet_games;
+    // (the Join list open: made again every few seconds, the games' players, stage and area as they are now; the lobby
+    // asked again every 10 s without waiting for it, its answer taken when it comes)
+    bool join_refreshing = false, join_list_asked = false;
+    auto join_refreshed = std::chrono::steady_clock::now(), join_asked_at = join_refreshed;
     int internet_from = 0, internet_total = 0; // the lobby's list: the page shown (from this game), and how many there are
     int internet_others = 0;                   // and how many public games are on other versions
     std::vector<net::GameInfo> nearby_games;
@@ -3021,6 +3090,7 @@ int main(int argc, char** argv) {
         watchdog.arm(true);
         net_game_began = std::chrono::steady_clock::now(), net_game_first_frame = shared.shown_frame.load();
         shared.net_frames = 0, shared.net_stutters = 0, shared.net_worst_ms = 0;
+        shared.areas_seen[0] = 0, shared.areas_seen[1] = 0, shared.stage_ids_seen = 0;
         net_sync_from[0] = shared.sync_slowed, net_sync_from[1] = shared.sync_sooner, net_sync_from[2] = shared.sync_free;
         if (shared.spectating)
             std::printf("spikeout: watching a network game of %u cabinets%s\n", start.seats,
@@ -3082,6 +3152,17 @@ int main(int argc, char** argv) {
         const auto trips = netgame->session().round_trips();
         for (std::size_t s = 0; s < trips.size() && s < shared.boards; ++s) j += (s ? "," : "") + std::to_string(trips[s]);
         j += "],\"rollback_report\":" + json_text(shared.rollback ? shared.rollback->report() : std::string());
+        { // (the areas gone through, by the game's own numbers, and its raw stage ids: area_of, stage_of)
+            j += ",\"areas\":[";
+            bool first_area = true;
+            for (int n = 0; n < 128; ++n)
+                if (shared.areas_seen[n / 64].load() >> (n % 64) & 1) j += (first_area ? "" : ",") + std::to_string(n), first_area = false;
+            j += "],\"stage_ids\":[";
+            bool first_id = true;
+            for (int n = 0; n < 32; ++n)
+                if (shared.stage_ids_seen.load() >> n & 1) j += (first_id ? "" : ",") + std::to_string(n), first_id = false;
+            j += "]";
+        }
         j += ",\"node_check\":" + json_text(netgame->play->node_check().report()) + ",\"problems\":{";
         bool first = true;
         for (const auto& [kind, n] : problems.counts_by_kind()) j += (first ? "" : ",") + json_text(kind) + ":" + std::to_string(n), first = false;
@@ -4080,11 +4161,12 @@ int main(int argc, char** argv) {
         look_nearby();
         nearby_games = discovery->poll();
         const char* const kInProgress = "Join this game in progress: an empty cabinet is yours once you've caught up.";
-        auto label = [](const std::string& name, int taken, int seats, const std::string& where, bool playing) {
-            return name + "  (" + std::to_string(taken) + "/" + std::to_string(seats) + ", " + where + (playing ? ", playing)" : ")");
+        auto label = [](const std::string& name, int taken, int seats, const std::string& where, bool playing, int stage = 0, int area = 0) {
+            return name + "  (" + std::to_string(taken) + "/" + std::to_string(seats) + ", " + where +
+                   (playing ? ", " + playing_text(stage, area) + ")" : ")");
         };
         for (const net::GameInfo& g : nearby_games) {
-            const std::string text = label(g.name, g.taken, g.seats, "nearby", g.started);
+            const std::string text = label(g.name, g.taken, g.seats, "nearby", g.started, g.stage, g.area);
             if (g.build != build) {
                 p.items.push_back({text, "Another version of the game, or another ROM set: players need the same ones to play together.", [] { return std::string(); }, {}, {}, true});
             } else {
@@ -4106,10 +4188,11 @@ int main(int argc, char** argv) {
             }
             // A page of the lobby's list (it sends 50 at a time: waiting games
             // first, then those in progress, the newest first in each).
+            // (made again while open, join_refreshing: the list as the lobby last sent it, asked for apart: the main loop)
             net::Json list = net::Json::object();
             list.set("t", "list"), list.set("from", internet_from);
-            browser->send(list);
-            if (auto answer = browser->wait_for("games", 3000); answer && (*answer)["t"].as_string() == "games") {
+            if (!join_refreshing) browser->send(list);
+            if (auto answer = join_refreshing ? std::nullopt : browser->wait_for("games", 3000); answer && (*answer)["t"].as_string() == "games") {
                 internet_games = (*answer)["games"].items();
                 internet_total = static_cast<int>((*answer)["total"].as_number()); // (0 from an older lobby: no pages)
                 internet_others = static_cast<int>((*answer)["others"].as_number(0));
@@ -4128,7 +4211,8 @@ int main(int argc, char** argv) {
                 for (char& c : country) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                 const int taken = static_cast<int>(g["taken"].as_number()), seats = static_cast<int>(g["seats"].as_number());
                 const int watchers = static_cast<int>(g["watchers"].as_number(0));
-                ui::MenuItem it{label(name, taken, seats, "internet", playing),
+                ui::MenuItem it{label(name, taken, seats, "internet", playing, static_cast<int>(g["stage"].as_number(0)),
+                                      static_cast<int>(g["area"].as_number(0))),
                                 std::string(taken >= seats ? "Full: watch it." : playing ? kInProgress : "Join or watch this game (through the internet).") +
                                     " The speed (~) is an estimate, from how far away its host is; the real one shows in the game.",
                                 {}, {}, [&, code, name, taken, seats, watchers] {
@@ -4759,6 +4843,33 @@ int main(int argc, char** argv) {
             if (menu_ready && menu.is_open()) menu.open(make_root());
 #endif
         }
+#ifdef SPIKEOUT_GPU
+        // The Join list open: made again every 3 s (the nearby games as they are now; the internet's as the lobby last
+        // sent them, asked again every 10 s without waiting: its answer taken on a later turn), the selected row kept.
+        if (menu_ready && menu.is_open() && menu.top_name() == "Join a game" && now - join_refreshed >= std::chrono::seconds(3)) {
+            join_refreshed = now;
+            if (browser) {
+                if (join_list_asked) {
+                    if (auto answer = browser->wait_for("games", 0); answer && (*answer)["t"].as_string() == "games") {
+                        internet_games = (*answer)["games"].items();
+                        internet_total = static_cast<int>((*answer)["total"].as_number());
+                        internet_others = static_cast<int>((*answer)["others"].as_number(0));
+                        join_list_asked = false;
+                    } else if (now - join_asked_at > std::chrono::seconds(30)) {
+                        join_list_asked = false; // (no answer: asked again)
+                    }
+                } else if (now - join_asked_at >= std::chrono::seconds(10)) {
+                    net::Json list = net::Json::object();
+                    list.set("t", "list"), list.set("from", internet_from);
+                    browser->send(list);
+                    join_list_asked = true, join_asked_at = now;
+                }
+            }
+            join_refreshing = true;
+            menu.replace(join_page());
+            join_refreshing = false;
+        }
+#endif
         // The hang watchdog in a game alone too (the owner, 2026-11-12: any freeze reported, not only network play's):
         // on while its frames run (not with the menu open: the game paused), from the first picture on. A network game's
         // own arming is net_begin's and net_leave's.
@@ -4847,11 +4958,21 @@ int main(int argc, char** argv) {
                 tools::lobby_pump(netgame->lobby, netgame->session());
                 std::size_t taken = 0;
                 for (const std::string& name : netgame->session().players()) taken += name.empty() ? 0 : 1;
-                if (taken != netgame->listed_taken) { // the lobby's list up to date
-                    netgame->listed_taken = taken;
+                // (and the game's stage and area, the owner's "which stage the game is in": stage_of, area_of)
+                const int stage = netgame->running ? shared.room_stage.load() : 0, area = netgame->running ? shared.room_area.load() : 0;
+                if (taken != netgame->listed_taken || stage != netgame->listed_stage || area != netgame->listed_area) { // the lobby's list up to date
+                    netgame->listed_taken = taken, netgame->listed_stage = stage, netgame->listed_area = area;
                     net::Json m = net::Json::object();
                     m.set("t", "update"), m.set("taken", static_cast<int>(taken)), m.set("started", netgame->running);
+                    m.set("stage", stage), m.set("area", area);
                     netgame->lobby.send(m);
+                }
+            }
+            if (netgame->host) { // (the game's stage and area in this network's beacons too)
+                const uint8_t stage = netgame->running ? shared.room_stage.load() : 0, area = netgame->running ? shared.room_area.load() : 0;
+                if (stage != netgame->beacon_stage || area != netgame->beacon_area) {
+                    netgame->beacon_stage = stage, netgame->beacon_area = area, netgame->session().set_stage(stage, area);
+                    std::printf("net: the room's listing: %s (area %d)\n", playing_text(stage, area).c_str(), area - 1);
                 }
             }
             if (!netgame->running)

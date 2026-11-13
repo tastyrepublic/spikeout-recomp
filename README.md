@@ -41,6 +41,8 @@ four-player co-op over the internet, one player a PC, as four linked cabinets pl
 - **Thank you for the reports:** in its first day, preview4's automatic reports brought in about 170 network games
   from players in Hong Kong, Taiwan, Japan, Canada, Australia and the UK, and showed us problems we couldn't see on
   our own machines.
+- **The game list shows where each game is:** its stage and area, like "Stage 2 · Warehouse", kept up to date while
+  the list is open.
 - **Watching:** switching between players is smoother (the picture could stand still for seconds), and a game that
   never answers now gives up after 45 seconds with a reason.
 - **Screenshots (F12)** now look like the game on your screen: your render scale, picture shape, CRT colours and

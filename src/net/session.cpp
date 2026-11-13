@@ -359,6 +359,7 @@ struct Session::Impl {
     };
     std::array<Bulk, kMaxWatchers> bulk;
     bool watch_one_board = false; // (a spectator: it runs one board, Session::set_watch_one_board)
+    uint8_t stage = 0, area = 0; // (the game's stage and area for the list: Session::set_stage, GameInfo::stage)
     Clock::time_point watch_punched{};
     std::size_t watchers_told = 0;    // (the count the players were last told)
     Clock::time_point watchers_sent{};
@@ -1952,6 +1953,7 @@ struct Session::Impl {
         for (uint8_t s = 0; s < seats; ++s) taken = static_cast<uint8_t>(taken + (s != my_seat && peers[s].present ? 1 : 0));
         w.u64(build), w.str(game_name), w.u8(seats), w.u8(taken), w.u8(started ? 1 : 0), w.u16(socket.port());
         w.u8(static_cast<uint8_t>(watcher_count()));
+        w.u8(stage), w.u8(area); // (the game's stage and area, Session::set_stage: shown in the list)
         for (const Address& a : beacon_targets) send(a, w);
     }
 
@@ -1988,6 +1990,8 @@ std::vector<GameInfo> Discovery::poll() {
         const uint16_t port = r.u16();
         if (!r.ok()) continue;
         g.watchers = r.left() ? r.u8() : 0;
+        g.stage = r.left() ? r.u8() : 0;
+        g.area = r.left() ? r.u8() : 0;
         g.host = {d->from.ip, port};
         // The same game heard on several networks (this machine's loopback
         // and its LAN): keep one address, preferring loopback.
@@ -2271,6 +2275,11 @@ void Session::send_node(uint64_t seq, std::vector<uint8_t> node) {
 bool Session::seated() const {
     std::lock_guard guard(impl_->lock);
     return !impl_->late || impl_->mine_from.has_value();
+}
+
+void Session::set_stage(uint8_t stage, uint8_t area) {
+    std::lock_guard guard(impl_->lock);
+    impl_->stage = stage, impl_->area = area;
 }
 
 bool Session::greeted() const {

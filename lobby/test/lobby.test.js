@@ -87,7 +87,7 @@ test("a public game listed (in progress too, while a cabinet is empty), joined b
 		assert.equal(typeof g.country, "string"), delete g.country;
 		assert.ok(Number.isInteger(g.ms) && g.ms >= -1), delete g.ms;
 	}
-	assert.deepEqual(games, [{ code, name: "Ann's game", seats: 2, taken: 1, watchers: 0, started: false, session: "abcdef" }]); // (the session: a game found nearby too shown once)
+	assert.deepEqual(games, [{ code, name: "Ann's game", seats: 2, taken: 1, watchers: 0, started: false, stage: 0, area: 0, session: "abcdef" }]); // (the session: a game found nearby too shown once)
 
 	guest.send({ t: "join", code: code.toLowerCase(), port: 47100, candidates: ["10.0.0.7:47100"] });
 	const joining = await guest.next("joining");
@@ -117,11 +117,11 @@ test("a public game listed (in progress too, while a cabinet is empty), joined b
 	other.send({ t: "join", code: "ZZZZZZ", port: 1, candidates: [] });
 	assert.equal((await other.next("error")).why, "no game with that code");
 
-	host.send({ t: "update", taken: 1, started: true }); // in progress, a cabinet empty: still listed, joinable
+	host.send({ t: "update", taken: 1, started: true, stage: 2, area: 3 }); // in progress (stage 2, the game's area 2), a cabinet empty: still listed, joinable
 	guest.send({ t: "list" });
 	assert.deepEqual(
 		(await guest.next("games")).games.map(({ country, ms, ...g }) => g),
-		[{ code, name: "Ann's game", seats: 2, taken: 1, watchers: 0, started: true, session: "abcdef" }],
+		[{ code, name: "Ann's game", seats: 2, taken: 1, watchers: 0, started: true, stage: 2, area: 3, session: "abcdef" }],
 	);
 	guest.send({ t: "join", code, port: 1, candidates: [] });
 	assert.equal((await guest.next("joining")).session, "abcdef");

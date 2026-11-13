@@ -3966,3 +3966,25 @@ of 08:59 was rotated out): the owner to record a few minutes of a fight.
 5. Mode B with rollback, online, on top of 4: every board saved each frame
    (pages written only), re-run when a guess was wrong.
 6. Mode A, if wanted for weak devices on a wired LAN.
+
+## The game list: each game's stage and area (2026-11-12)
+
+The owner's idea: the lobby's list shows which stage a game is in. The host's shown board reads, once a second at a
+frame's end (tools/spikeout.cpp, stage_of and area_of), the game's mode (0x10400A: 7 playing) and its stage id
+(0x10402C: 7 stage 1 and the attract, 3 stage 2, 6 the shipyard and 4 another of stage 3's routes, 5 the final stage;
+found across the bot's run to the end, constant within each stage and changing only between them), and its area: the
+script the area task runs (0x11BA90) looked up in the game's area table (0xA1D24, 8 bytes an area: set-up script,
+script). The areas the bot's run went through were each seen in a screenshot and named (area_name; the full clear's
+chapters, docs/bot.md): Spiker's Base 75, To the Docks 86, Docks 87, Diesel Town 4, 6, 1, Warehouse 2, Industrial Zone
+5, 9, Shipyard 74, 77, 78, 79, 81, Hedge Maze 29, Outside the Opera House 30, Reception Hall 49, Theater 51, Reaper Gang
+52, Mikhail 53. Story scenes (88), between areas (36), the route's choice (84) and routes the bot never took: the stage
+alone. 0x187717 looked like a stage count at first but isn't (a branch run read 0 deep in the game).
+
+The host sends both to the lobby (update {stage, area}, only when they change) and in its LAN beacon (two bytes after
+the watchers: Session::set_stage, GameInfo::stage and area; older beacons have none, read as 0); the lobby keeps them
+and lists them (lobby/src/index.js; older games ignore them). The Join list shows "Stage 2 · Warehouse" for a game in
+progress ("playing" from an older host) and is made again every 3 s while open, the lobby asked every 10 s without
+waiting (join_refreshing). Each network game's numbers list the areas and raw stage ids it went through (areas,
+stage_ids), so the reports say which unnamed areas players reach. Cost: ~130 RAM reads a second on the host's shown
+board; nothing in the game or what the machines exchange in play changes. Tested: two windows on this PC, the joiner's
+list left open, its row went from "Stage 1" to "Stage 1 · Spiker's Base" by itself.

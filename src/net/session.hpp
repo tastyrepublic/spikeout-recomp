@@ -80,6 +80,7 @@ struct GameInfo {
     Address host;       // its game port
     std::vector<Address> candidates; // (from the lobby) every address it may be reached at
     uint8_t watchers = 0; // spectators (up to kMaxWatchers)
+    uint8_t stage = 0, area = 0; // the game's stage and area as the host's game has them (0 not playing; Session::set_stage)
 };
 
 // Listens for games on the networks this machine is on.
@@ -246,6 +247,9 @@ public:
     bool seated() const;
     // Joining or watching: the host (or the room's new host) has let us in; hosting: true.
     bool greeted() const;
+    // The host: the game's stage, for the lists (the LAN's beacon, GameInfo::stage; the window's lobby update): 0 not
+    // playing, 1-3 stages 1-3, 4 the final stage (the window reads it from the game: kStageNames there); `area` the game's area number (its table at 0xA1D24), 0 unknown.
+    void set_stage(uint8_t stage, uint8_t area);
 
     // This machine's player's inputs, set at the end of `frame` (in order;
     // frames skipped hold the last).
