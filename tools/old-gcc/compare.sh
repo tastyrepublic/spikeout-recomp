@@ -10,7 +10,9 @@
 # TEXT     the function's address: links the object there, with DEFS giving the
 #          addresses of what it calls and uses, so every byte is final.
 #          Without TEXT, calls and addresses are left unlinked.
-# Options used for Spikeout: -O2 -mcpu=603 -mno-traceback
+# Options used for Spikeout: -O2 -mcpu=603 -mno-traceback; with the 1997-01-01
+# development tree also -fno-exceptions -ffixed-12 -ffixed-14 -ffixed-15
+# -ffixed-cr6 -ffixed-cr7 -ffixed-fr0 ... -ffixed-fr13 (docs/compiler-id.md)
 set -u
 CC1=$1; C=$2; BIN=$3; shift 3
 T=${TOOLS:-$HOME/oldgcc/tools/bin}/powerpc-eabi

@@ -62,10 +62,14 @@ condition register saved through r2, frames and the stack-argument area
 rounded to 16. Options:
 
     -O2 -mcpu=603 -mno-traceback -fno-exceptions -ffixed-12 -ffixed-14 -ffixed-15
+    -ffixed-cr6 -ffixed-cr7 -ffixed-fr0 ... -ffixed-fr13
 
 (r12, r14, r15 reserved: proven by register choices and a CTR spill that only
-appear with them reserved). `match.sh` uses exactly this by default
-(`CC1` and `OPTS` can override it).
+appear with them reserved. cr6/cr7 and 14 FPRs added 2026-11-13: the C block
+never uses cr5-cr7 or any FPR; reserving cr6/cr7 puts comparisons in cr0 as
+the game does, and 14 fewer usable registers make the loop optimiser keep
+exactly the game's constants in its loops; see `docs/compiler-id.md`).
+`match.sh` uses exactly this by default (`CC1` and `OPTS` can override it).
 
 Not exactly any public day of GCC: one loop (0x791CC) matches only the
 2.7.2.3 release's loop optimiser, and a few functions stay a line or two off
@@ -83,6 +87,11 @@ cut from that line with small changes of its own.
 | `all.sh`, `count.sh` | every function's status; totals |
 | `lay.sh ADDR` | where our compiler put locals on the stack (from `last.s`, our last assembly) |
 | `asm.sh ADDR` | branch/label structure of our assembly |
+| `vt.sh ADDR FILE...` | tries each FILE as the function, prints each result, puts the original back (variants live in `vADDR/`) |
+| `m.sh ADDR FROM TO` | lines FROM-TO of the full side-by-side diff |
+| `ld.sh ADDR`, `ld2.sh ADDR N` | the loop optimiser's decisions (what it moved out of each loop and why); `ld2.sh` shows loop N (in the order GCC processes them: last loop first) with each candidate's RTL |
+| `rg.sh FILE [REG]` | register use counts and lengths before allocation, and where each pseudo went |
+| `sweep.sh K...`, `cmpcc.sh CC1 [opts]` | every function under K reserved FPRs / another compiler or option, to test a compiler change against all 57 at once |
 
 Everything else in the folder (`s*.sh`, `snap*.sh`, `cpu*.sh`, `fu*.sh`,
 `g.sh`...) were one-off experiments while dating the compiler; `funcs.txt`
@@ -125,13 +134,29 @@ starts.
   writes them with `rlwimi`.
 - `if (quick) sel = 99;` compiles to the branch-free mask code seen in the
   test screens.
+- The memory-test screens (7bd14, 7c1e8, 7c6d8, 7cce8), learnt 2026-11-13:
+  - the unused strings ("Walk 1's" etc.) were **real assignments** to the
+    message variable right after each check loop (`msg = "Walk 1's";`), not
+    dead code: GCC deletes them only after its jump threading, and their
+    presence is what stops the threading the game doesn't have (the break
+    jumps to a second test after the loop instead of straight to the report);
+  - each check loop's message is **its own variable** (`msg1`...`msgN`, or a
+    `char *msg;` declared in each nested `if` block): one shared variable
+    gets a register too early;
+  - the break test is written `if ((result = (unsigned char)f_79fec(...)) == 1) break;`;
+  - order inside a loop decides the order of values moved out of it (0x7CCE8:
+    the message assigned after the first data word in two loops);
+  - the report's text structure was `struct line s[2]` (16 bytes) in 7c6d8
+    and 7cce8 (the frame is 16 bytes bigger than with one), one in 7bd14/7c1e8.
 
-## Status (2026-11-12): 35 of 57 match (2,053 of 5,809 instructions)
+## Status (2026-11-13): 39 of 57 match (3,219 of 5,809 instructions)
 
 Match byte for byte: 78488 785ac 786b8 788dc 78af8 78bf4 78fd8 79048 790c8
-79240 79260 792c0 79344 7937c 79568 7958c 795b0 7979c 797e8 79834 798bc
-798f8 7991c 79944 79974 799b0 799ec 79a28 79a38 79f44 7a194 7a2fc 7a56c
-7af98 7df08.
+79240 79260 792c0 79344 7937c 79438 79568 7958c 795b0 7979c 797e8 79834
+798bc 798f8 7991c 79944 79974 799b0 799ec 79a28 79a38 79f44 7a194 7a2fc
+7a56c 7af98 7b534 7c1e8 7cce8 7df08. (New on 2026-11-13: 79438 by the cr6/cr7
+reservation, 7b534 by the FPR reservation, 7c1e8 by the source forms above,
+7cce8 written and matched.)
 
 Written, not yet matching (differing lines in the side-by-side diff; what's
 left):
@@ -141,7 +166,8 @@ left):
 | 78b24 | 52 | 2 | one `li r0,0` placed before instead of after an address load (loop counter init order) |
 | 791cc | 29 | 2 | same `li` placement; matches with the 2.7.2.3 release's loop optimiser (`build-2.7.2.3s6`) |
 | 79880 | 15 | 2 | order of two argument moves; matches with `-fno-schedule-insns`, which breaks others |
-| 79c30 | 17 | 2 | which register gets `ori 0x40` (operand order of an OR) |
+| 79c30 | 17 | 2 | which register gets `ori 0x40` (operand order of an OR; `b \|= 0x40`, reordered ORs and brackets tried) |
+| 7bd14 | 309 | 2 | one argument: the game recomputes the address `d_72003c` (`addi r5,r22,60`) for the call that starts the walking-0's part, ours reuses the copy in r27 (CSE follows the path out of the check loop); its twin 7c1e8 does reuse it in the game, so the source differs there somehow (tried: `continue` forms, `while`/`do` loops, `goto`, a block around the call, `result = f_79a38(...)`) |
 | 7a098 | 63 | 12 | register choice (a/d swapped) and compare operand order |
 | 7a474 | 62 | 14 | layout/register details |
 | 79df4 | 84 | 19 | `bit` computed per branch then moved; `last` computed first (done) |
@@ -149,28 +175,14 @@ left):
 | 79fec | 43 | 27 | register allocation of the result/`err` and indices |
 | 79134 | 38 | 30 | two loops: the value/offset forms (try byte-offset forms) |
 | 7bc0c | 66 | 34 | which values GCC moves out of the menu loop |
-| 79438 | 76 | 40 | constants hoisted vs not; `&&` of two flags |
 | 79c74 | 96 | 53 | branch-free `?:` selection (`neg`/`srawi` mask) not produced |
-| 7c1e8 | 316 | 91 | one branch threaded differently after the first check loop; register numbers follow |
-| 7b534 | 112 | 104 | menu loop: GCC moves 3 more addresses out of the loop than the game |
+| 7c6d8 | 388 | 103 | the depth-buffer test; structure, frame and registers right; only `d_720084`'s high half: ours moves it out of the whole function (its copy hoisted out of the nested row/column loop joins the other three loops' copies and their combined lifetime makes the move worthwhile), the game keeps it in each single loop |
 | 7a8bc | 439 | 106 | first 147 instructions exact; the second copy of the set-up macro is scheduled differently in the game (so only its tail merges); ours merges fully |
 | 7dc90 | 158 | 107 | layout now right; register numbering (which value gets r21/r22...) |
-| 7b6f4 | 326 | 331 | prologue exact; spills (game spills 4 more values, frame 560 vs ours) |
-| 7d740 | 340 | 432 | twin of 7b6f4 (walk 1's/0's address test), same spill difference |
+| 7b6f4 | 326 | 314 | prologue exact; spills (game spills 4 more values, frame 560 vs ours) |
+| 7d740 | 340 | 357 | twin of 7b6f4 (walk 1's/0's address test), same spill difference |
 
-Not written yet:
-
-- **7bd14** (309): "Polygon RAM Test" screen; its strings start at 0x808d0
-  ("Polygon RAM Test Menu", then an unused "Poly RAM Quick Test", "Venus Poly
-  RAM", unused "Walk 1's" and "Walk 0's", "Adrs  : "); menu items at
-  0x80888. Same shape as 7c1e8 (the polygon FIFO test): write it from
-  `f7c1e8.c` (a draft was written but lost before saving: walk-1's write
-  loop with three scans per bit and a `cmd[0] = 1` word, `f_102bc(0, 5000)`
-  delays, check loop with `f_79fec`, then the walk-0's pair with
-  `~bit & 0x7ffff`, then `if (quick) sel = 99`, report through `f_ff7c`).
-- **7c6d8** (388) and **7cce8** (662): called from the memory-test menu
-  (0x7B534) with `(d_720044, 0)` / `(d_7201d8, 0)`: probably the per-chip
-  memory tests. Not read yet.
+All 57 are written now.
 
 ## Open questions (compiler)
 
@@ -192,9 +204,12 @@ the CR save, the frame rounding).
 
 ## Next steps, in order
 
-1. Write 7bd14 (from 7c1e8), then 7c6d8 and 7cce8.
-2. The 2-line near misses (78b24, 791cc, 79880, 79c30): source forms first,
-   then the compiler ideas above.
+1. The 2-line near misses (78b24, 791cc, 79880, 79c30, 7bd14): source forms
+   first, then the compiler ideas above. Then 7c6d8 (103 lines, one hoisting
+   decision; `ld2.sh` shows it).
+2. Re-test the older near misses with the new reservations in mind: a
+   function "a few constants hoisted differently" is now often a source form
+   (one variable per loop, statement order inside the loop).
 3. The register-allocation ones (7b6f4, 7d740, 7dc90, 7a8bc): try
    declaration orders, variable types and which values are named.
 4. Keep `docs/compiler-id.md`'s "Next steps" progress line up to date; commit
