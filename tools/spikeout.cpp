@@ -4566,6 +4566,38 @@ int main(int argc, char** argv) {
                     }
             }
 #ifdef SPIKEOUT_GPU
+            // (the Controls page open: what each controller sends, as it changes, in the log: the controller's own
+            // buttons, hat and axes, and SDL's pad buttons and axes made from them. A report then shows where a direction
+            // comes out turned round (issues 19 and 21: a stick's directions reversed). Nothing logged in play)
+            if (menu_ready && menu.is_open() && menu.top_name() == "Controls") {
+                static std::map<std::pair<uint32_t, int>, int> axis_was; // (each axis's side last logged: -1, 0, 1)
+                auto side = [](int v) { return v < -kAxisPressed ? -1 : v > kAxisPressed ? 1 : 0; };
+                auto axis = [&](const char* what, uint32_t id, int key, int a, int v) {
+                    const int s = side(v);
+                    int& was = axis_was[{id, key}];
+                    if (s != was) std::printf("controls: %u %s %d %s (%d)\n", id, what, a, s < 0 ? "-" : s > 0 ? "+" : "back", v), was = s;
+                };
+                switch (e.type) {
+                case SDL_EVENT_JOYSTICK_BUTTON_DOWN: std::printf("controls: %u raw button %d\n", e.jbutton.which, e.jbutton.button); break;
+                case SDL_EVENT_JOYSTICK_HAT_MOTION:
+                    std::printf("controls: %u raw hat %d: %s%s%s%s%s\n", e.jhat.which, e.jhat.hat, e.jhat.value & SDL_HAT_UP ? "up " : "",
+                                e.jhat.value & SDL_HAT_DOWN ? "down " : "", e.jhat.value & SDL_HAT_LEFT ? "left " : "",
+                                e.jhat.value & SDL_HAT_RIGHT ? "right " : "", e.jhat.value == SDL_HAT_CENTERED ? "centred" : "");
+                    break;
+                case SDL_EVENT_JOYSTICK_AXIS_MOTION: axis("raw axis", e.jaxis.which, e.jaxis.axis, e.jaxis.axis, e.jaxis.value); break;
+                case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+                    std::printf("controls: %u pad %s\n", e.gbutton.which,
+                                SDL_GetGamepadStringForButton(static_cast<SDL_GamepadButton>(e.gbutton.button))
+                                    ? SDL_GetGamepadStringForButton(static_cast<SDL_GamepadButton>(e.gbutton.button)) : "?");
+                    break;
+                case SDL_EVENT_GAMEPAD_AXIS_MOTION: {
+                    const char* name = SDL_GetGamepadStringForAxis(static_cast<SDL_GamepadAxis>(e.gaxis.axis));
+                    axis(name ? name : "pad axis", e.gaxis.which, 100 + e.gaxis.axis, e.gaxis.axis, e.gaxis.value);
+                    break;
+                }
+                default: break;
+                }
+            }
             if (menu_ready && menu.handle_event(e)) continue;
             if (menu_ready && e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
                 SDL_Gamepad* pad = SDL_GetGamepadFromID(e.gbutton.which);

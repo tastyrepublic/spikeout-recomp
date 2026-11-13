@@ -52,8 +52,8 @@ four-player co-op over the internet, one player a PC, as four linked cabinets pl
 - **Reports that find more:** any crash or freeze, also at the start; what a freeze was waiting for; when each
   player's buttons arrived over the network; how smooth each game was; and the layout of a stick you set up yourself.
   The game asks again once, as the question now covers more.
-- **Next:** a room freezing when a late player takes their cabinet, then a slow PC slowing everyone (see
-  [Roadmap](#roadmap)).
+- **Next: the next update focuses on network play first:** a room freezing when a late player takes their cabinet,
+  then a slow PC slowing everyone (see [Roadmap](#roadmap)).
 
 ## About
 
