@@ -62,6 +62,20 @@ m3::Real3dScene rooted(const m3::Mat4& root, const m3::Mat4& local) {
     return scene;
 }
 
+void add_instance(m3::Real3dScene& scene, const m3::Mat4& root, float x, uint32_t path) {
+    auto local = m3::Mat4::identity();
+    local.m[12] = x;
+    local.m[14] = -10;
+    auto part = rooted(root, local);
+    if (scene.viewports.empty()) scene.viewports = part.viewports;
+    part.models[0].path = path;
+    part.models[0].first_polygon = static_cast<uint32_t>(scene.polygons.size());
+    part.polygons[0].first_vertex = static_cast<uint32_t>(scene.vertices.size());
+    scene.models.push_back(part.models[0]);
+    scene.polygons.push_back(part.polygons[0]);
+    scene.vertices.insert(scene.vertices.end(), part.vertices.begin(), part.vertices.end());
+}
+
 } // namespace
 
 TEST_CASE("smooth motion: a stationary mirrored model does not change shape") {
@@ -132,6 +146,62 @@ TEST_CASE("smooth motion: colliding hashes do not match different model identiti
     CHECK(!m3::interpolate(before, after, 0.5f, out, &stats));
     CHECK(stats.unmatched == 1);
     CHECK(position_error(after, out) == 0);
+}
+
+TEST_CASE("smooth motion: recycled node paths do not exchange stationary mesh instances") {
+    for (int count : {2, 3})
+        for (bool reverse : {false, true})
+            for (float angle : {0.0f, 1.0f, 20.0f})
+                for (float t : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+                    m3::Real3dScene before, after, expected, out;
+                    for (int k = 0; k < count; ++k)
+                        add_instance(before, transform(0, {1, 1, 1}), float(k * 4 - 2), static_cast<uint32_t>(k + 1));
+                    for (int i = 0; i < count; ++i) {
+                        const int k = reverse ? count - 1 - i : i;
+                        const uint32_t path = count == 2 ? (k == 0 ? 3u : 1u) : static_cast<uint32_t>((k + 1) % count + 1);
+                        add_instance(after, transform(angle, {1, 1, 1}), float(k * 4 - 2), path);
+                        add_instance(expected, transform(angle * t, {1, 1, 1}), float(k * 4 - 2), path);
+                    }
+                    CHECK(m3::interpolate(before, after, t, out));
+                    CHECK(position_error(expected, out) < 1e-4f);
+                }
+}
+
+TEST_CASE("smooth motion: stationary correspondence survives another instance disappearing") {
+    m3::Real3dScene before, after, expected, out;
+    add_instance(before, transform(0, {1, 1, 1}), -2, 1);
+    add_instance(before, transform(0, {1, 1, 1}), 2, 2);
+    add_instance(after, transform(20, {1, 1, 1}), 2, 1); // the old rear-wheel path, now reused by the front
+    add_instance(expected, transform(10, {1, 1, 1}), 2, 1);
+    CHECK(m3::interpolate(before, after, 0.5f, out));
+    CHECK(position_error(expected, out) < 1e-4f);
+}
+
+TEST_CASE("smooth motion: stationary matches are reserved before animated path fallbacks") {
+    for (bool reverse : {false, true}) {
+        m3::Real3dScene before, after, expected, out;
+        add_instance(before, transform(0, {1, 1, 1}), 0, 1);
+        add_instance(before, transform(0, {1, 1, 1}), 4, 2);
+        for (int i = 0; i < 2; ++i) {
+            const bool moving = (i == 0) == reverse;
+            add_instance(after, transform(20, {1, 1, 1}), moving ? 6.0f : 0.0f, moving ? 1u : 3u);
+            add_instance(expected, transform(10, {1, 1, 1}), moving ? 5.0f : 0.0f, moving ? 1u : 3u);
+        }
+        CHECK(m3::interpolate(before, after, 0.5f, out));
+        CHECK(position_error(expected, out) < 1e-4f);
+    }
+}
+
+TEST_CASE("smooth motion: duplicate local poses do not override distinct path animation") {
+    m3::Real3dScene before, after, expected, out;
+    add_instance(before, transform(0, {1, 1, 1}), -2, 1);
+    add_instance(before, transform(0, {1, 1, 1}), 2, 2);
+    add_instance(after, transform(20, {1, 1, 1}), -2, 1);
+    add_instance(after, transform(20, {1, 1, 1}), -2, 2);
+    add_instance(expected, transform(10, {1, 1, 1}), -2, 1);
+    add_instance(expected, transform(10, {1, 1, 1}), 0, 2);
+    CHECK(m3::interpolate(before, after, 0.5f, out));
+    CHECK(position_error(expected, out) < 1e-4f);
 }
 
 TEST_CASE("smooth motion: static descendants share their moving root without opening seams") {

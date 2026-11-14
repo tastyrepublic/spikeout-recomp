@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <functional>
 #include <unordered_map>
 #include <vector>
 
@@ -282,6 +283,28 @@ ModelKey key(const Real3dScene::Model& m) {
 }
 uint64_t place(const Real3dScene::Model& m) { return static_cast<uint64_t>(m.viewport) << 32 | m.address; }
 
+// Culling-node paths can be recycled for another instance of the same mesh.
+// An unchanged pose below a common root is stronger correspondence when it is
+// unique in both scenes. The root's eye-space matrix may move with the camera.
+struct PoseKey {
+    uint32_t viewport, address, root;
+    std::array<float, 16> local;
+    bool operator==(const PoseKey&) const = default;
+};
+struct PoseKeyHash {
+    size_t operator()(const PoseKey& k) const {
+        size_t h = ModelKeyHash{}({k.viewport, k.address, k.root});
+        for (float value : k.local) h ^= std::hash<float>{}(value) + 0x9e3779b9u + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+bool has_pose(const Real3dScene::Model& m) {
+    return m.motion.valid && finite(m.motion.local) && finite(m.motion.matrix);
+}
+PoseKey pose_key(const Real3dScene::Model& m) {
+    return {m.viewport, m.address, m.motion.path, m.motion.local.m};
+}
+
 } // namespace
 
 bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScene& out, InterpStats* stats) {
@@ -299,10 +322,32 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
     // Hash collisions must not identify different models as the same instance.
     std::unordered_map<ModelKey, int, ModelKeyHash> by_key; // -1: several
     std::unordered_map<uint64_t, std::vector<int>> by_place;
+    std::unordered_map<PoseKey, int, PoseKeyHash> old_poses, new_poses; // -1: several
     for (size_t i = 0; i < a.models.size(); ++i) {
         const auto [it, added] = by_key.emplace(key(a.models[i]), static_cast<int>(i));
         if (!added) it->second = -1;
         by_place[place(a.models[i])].push_back(static_cast<int>(i));
+        if (has_pose(a.models[i])) {
+            const auto [pose, unique] = old_poses.emplace(pose_key(a.models[i]), static_cast<int>(i));
+            if (!unique) pose->second = -1;
+        }
+    }
+    for (size_t i = 0; i < b.models.size(); ++i) {
+        if (!has_pose(b.models[i])) continue;
+        const auto [pose, unique] = new_poses.emplace(pose_key(b.models[i]), static_cast<int>(i));
+        if (!unique) pose->second = -1;
+    }
+    // Reserve every unique unchanged pose before any path/nearest fallback,
+    // so another model cannot also consume its older instance. Do not rely
+    // on draw order: a recycled path may appear before the pose's true owner.
+    std::vector<int> pose_matches(b.models.size(), -1);
+    std::vector<bool> reserved(a.models.size(), false);
+    for (const auto& [pose, newer] : new_poses) {
+        if (newer < 0) continue;
+        const auto older = old_poses.find(pose);
+        if (older == old_poses.end() || older->second < 0) continue;
+        pose_matches[static_cast<size_t>(newer)] = older->second;
+        reserved[static_cast<size_t>(older->second)] = true;
     }
 
     struct Move {
@@ -317,12 +362,17 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
     for (size_t i = 0; i < b.models.size(); ++i) {
         const Real3dScene::Model& mb = b.models[i];
         const Vec3 model_tb = translation(mb.matrix);
-        int found = -1;
-        if (const auto it = by_key.find(key(mb)); it != by_key.end() && it->second >= 0) found = it->second;
+        int found = pose_matches[i];
+        if (found < 0)
+            if (const auto it = by_key.find(key(mb));
+                it != by_key.end() && it->second >= 0 && !reserved[static_cast<size_t>(it->second)]) found = it->second;
         if (found < 0) // the same model reached through other nodes: the nearest
             if (const auto it = by_place.find(place(mb)); it != by_place.end()) {
                 float best = 0, second = 0;
+                size_t candidates = 0;
                 for (int j : it->second) {
+                    if (reserved[static_cast<size_t>(j)]) continue;
+                    ++candidates;
                     const Vec3 ta = translation(a.models[static_cast<size_t>(j)].matrix);
                     const Vec3 d{ta[0] - model_tb[0], ta[1] - model_tb[1], ta[2] - model_tb[2]};
                     const float far = dot(d, d);
@@ -334,9 +384,9 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
                         second = far;
                     }
                 }
-                s.compared += it->second.size();
-                ++s.nearest;
-                if (it->second.size() > 1 && second < 4 * best) ++s.ambiguous;
+                s.compared += candidates;
+                if (candidates) ++s.nearest;
+                if (candidates > 1 && second < 4 * best) ++s.ambiguous;
             }
         if (found < 0) {
             ++s.unmatched;

@@ -2,9 +2,11 @@
 // (src/video/r3d_scene.h, interpolate; MIT, Copyright (c) 2026 mr-finster),
 // for pictures between the arcade's 57.5 frames a second.
 //
-// Each of the newer scene's models is found in the older one (by viewport,
-// polygon data address and culling-node path; else the nearest with the same
-// viewport and address: the same model reached through other nodes) and
+// Each newer model first matches a unique unchanged local pose of the same
+// mesh below the same root, reserving that older instance. Culling-node paths
+// can be reused for a different instance (for example, a car's front/back
+// wheels). Otherwise it matches by viewport, polygon data address and path,
+// then the nearest unreserved instance with the same viewport and address, and is
 // drawn between where it was and where it is. Models below the same root
 // share that root's move, with their local animation blended separately,
 // keeping scenery and animated parts together as the camera turns. The root's
