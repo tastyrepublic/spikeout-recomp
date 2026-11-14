@@ -314,7 +314,7 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
         int root;
         std::vector<size_t> members;
         float radius = 0;
-        bool valid = true;
+        bool valid = true, measured = false;
     };
     struct Root {
         size_t model;
@@ -372,6 +372,8 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
     // seeking local correspondence need a size-normalized movement bound.
     auto measure = [&](Groups& groups, size_t index, const Real3dScene& scene) {
         auto& g = groups.groups[index];
+        if (g.measured) return;
+        g.measured = true;
         const auto& basis = groups.roots[size_t(g.root)];
         for (size_t member : g.members) {
             const auto& m = scene.models[member];
@@ -472,6 +474,12 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
                         std::vector<bool>(b.models.size(), false), std::vector<bool>(a.models.size(), false)};
     std::vector<int> pairs(now.groups.size(), -1);
     std::vector<bool> reserved(old.groups.size(), false);
+    auto shares_mesh = [&](const Group& ga, const Group& gb) {
+        for (size_t prior : ga.members)
+            for (size_t current : gb.members)
+                if (a.models[prior].address == b.models[current].address) return true;
+        return false;
+    };
     for (size_t i = 0; i < now.groups.size(); ++i) {
         const auto& g = now.groups[i];
         const auto& m = b.models[g.model];
@@ -482,7 +490,8 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
         }
         if (ar < 0) continue;
         const auto exact = old.by_pose.find(pose(m, ar));
-        if (exact != old.by_pose.end() && exact->second >= 0 && now.by_pose.at(pose(m, g.root)) >= 0) {
+        if (exact != old.by_pose.end() && exact->second >= 0 && now.by_pose.at(pose(m, g.root)) >= 0 &&
+            shares_mesh(old.groups[size_t(exact->second)], g)) {
             pairs[i] = exact->second;
             reserved[size_t(exact->second)] = true;
         }
@@ -517,6 +526,7 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
     // fits both bounds. Coincident groups must move together as a complete,
     // bijective cohort; a merge or split is not resolved by arbitrary paths.
     std::vector<int> proposed(now.groups.size(), -1), proposed_uses(old.groups.size(), 0);
+    std::vector<bool> contradicted(now.groups.size(), false);
     for (size_t i = 0; i < now.groups.size(); ++i) {
         const auto& gb = now.groups[i];
         const int ar = root_pairs[size_t(gb.root)];
@@ -530,7 +540,14 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
             if (current == now.by_identity.end() || current->second != static_cast<int>(i) || prior == old.by_identity.end() ||
                 prior->second < 0)
                 continue;
-            if (reserved[size_t(prior->second)] || (candidate >= 0 && candidate != prior->second)) conflict = true;
+            if (reserved[size_t(prior->second)]) {
+                conflict = true;
+                measure(old, size_t(prior->second), a);
+                const auto& owner = old.groups[size_t(prior->second)];
+                const double radius = std::min(owner.radius, gb.radius);
+                if (owner.valid && radius > 0 && distance_squared(a.models[owner.model], m) <= radius * radius) contradicted[i] = true;
+            }
+            if (candidate >= 0 && candidate != prior->second) conflict = contradicted[i] = true;
             candidate = prior->second;
         }
         if (candidate < 0 || conflict) continue;
@@ -568,6 +585,19 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
             pairs[i] = proposed[i];
             reserved[size_t(pairs[i])] = true;
         }
+    // Mesh-swapping flipbooks can retain an exact pose, but must not steal
+    // the old pose of a different mesh whose bounded identity still moves.
+    for (size_t i = 0; i < now.groups.size(); ++i) {
+        const auto& g = now.groups[i];
+        const int ar = root_pairs[size_t(g.root)];
+        if (pairs[i] >= 0 || ar < 0 || contradicted[i]) continue;
+        const auto& m = b.models[g.model];
+        const auto exact = old.by_pose.find(pose(m, ar));
+        if (exact == old.by_pose.end() || exact->second < 0 || reserved[size_t(exact->second)] || now.by_pose.at(pose(m, g.root)) < 0)
+            continue;
+        pairs[i] = exact->second;
+        reserved[size_t(exact->second)] = true;
+    }
     std::vector<std::vector<size_t>> root_candidates(old.roots.size());
     for (size_t j = 0; j < old.groups.size(); ++j) {
         const auto& ga = old.groups[j];
@@ -575,7 +605,7 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
     }
     for (size_t i = 0; i < now.groups.size(); ++i) {
         const auto& gb = now.groups[i];
-        if (pairs[i] >= 0 || !gb.valid) continue;
+        if (pairs[i] >= 0 || !gb.valid || contradicted[i]) continue;
         const int ar = root_pairs[size_t(gb.root)];
         if (ar < 0) continue;
         const auto& mb = b.models[gb.model];

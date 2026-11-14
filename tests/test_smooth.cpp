@@ -242,7 +242,7 @@ TEST_CASE("smooth motion: coincident predecessors splitting do not arbitrarily a
 }
 
 TEST_CASE("smooth motion: coincident mesh parts and close joints retain bounded identity motion") {
-    for (float spacing : {0.0f, 0.25f}) {
+    for (float spacing : {0.0f, 0.1f, 0.25f}) {
         m3::Real3dScene before, after, expected, out;
         for (int k = 0; k < 2; ++k) {
             const float x = float(k) * spacing;
@@ -270,6 +270,22 @@ TEST_CASE("smooth motion: a replaced scene cannot follow a root slot without cor
     CHECK(!m3::interpolate(before, after, 0.5f, out, &stats));
     CHECK(stats.cut && stats.blended == 0);
     CHECK(position_error(after, out) == 0);
+}
+
+TEST_CASE("smooth motion: a consumed plausible identity does not invent a different predecessor") {
+    m3::Real3dScene before, after, expected, out;
+    for (int k = 0; k < 2; ++k) {
+        add_instance(before, transform(0, {1, 1, 1}), float(k) * 0.1f, uint32_t(k + 1));
+        add_instance(after, transform(20, {1, 1, 1}), float(k + 1) * 0.1f, uint32_t(k + 1));
+        add_instance(expected, transform(10, {1, 1, 1}), float(k + 1) * 0.1f, uint32_t(k + 1));
+    }
+    // Same meshes: stationary path recycling and two movers crossing an old
+    // pose are indistinguishable. The stationary reservation wins, but the
+    // conflicted leftover cannot invent motion from another old instance.
+    m3::InterpStats stats;
+    CHECK(m3::interpolate(before, after, 0.5f, out, &stats));
+    CHECK(position_error(expected, out) < 1e-4f);
+    CHECK(stats.followed == 1 && stats.unmatched == 1);
 }
 
 TEST_CASE("smooth motion: many independent roots use sparse anchor association") {

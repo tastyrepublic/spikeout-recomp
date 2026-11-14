@@ -6,10 +6,13 @@
 // indices and node paths can be recycled, so roots first match by at least
 // three distinct unchanged mesh/pose anchors, with reciprocal unique majorities
 // and compatible projections. Without decisive anchors, an uncontested root
-// key may continue. Group matches reserve unique unchanged local poses, then
-// accept bounded, unique unchanged node/mesh pairs. Coincident parts must keep
+// key may continue. Group matches reserve unique unchanged same-mesh poses,
+// then accept bounded, unique unchanged node/mesh pairs. Coincident parts must keep
 // a complete bijection between their shared old and new poses; splits and
-// merges remain ambiguous. Other matches use reciprocal nearest local origins
+// merges remain ambiguous. Remaining groups may match exact poses across mesh
+// changes, then reciprocal nearest local origins. A plausible identity already
+// reserved by another group cannot be replaced by a different nearest instance.
+// Spatial matches are
 // across meshes (animation can replace a mesh), within both groups' radii, at
 // least four times closer than alternatives in both directions, and with no
 // plausible contradictory node-path match. This is bounded geometric evidence,
@@ -17,8 +20,7 @@
 // Uncertain groups retain their newer local animation under a root supported
 // by decisive anchors or an actual matched group; followers alone cannot
 // establish continuity across a scene replacement. Otherwise they stay native.
-// Models without
-// valid root metadata retain the path/mesh fallback, reserving each predecessor.
+// Models without valid root metadata retain the path/mesh fallback, reserving each predecessor.
 // Models below the same root
 // share that root's move, with their local animation blended separately,
 // keeping scenery and animated parts together as the camera turns. The root's
