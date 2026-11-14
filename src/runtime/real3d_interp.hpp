@@ -7,13 +7,17 @@
 // three distinct unchanged mesh/pose anchors, with reciprocal unique majorities
 // and compatible projections. Without decisive anchors, an uncontested root
 // key may continue. Group matches reserve unique unchanged local poses, then
-// use reciprocal nearest local origins across meshes (animation can replace a
-// mesh). A match must be within both groups' radii, at least four times closer
-// than alternatives in both directions, and have no plausible contradictory
-// node-path match. This is conservative geometry correspondence, not persistent
-// game identity; two-frame ambiguity cannot always be resolved.
-// Uncertain groups retain their newer local animation under the common root;
-// without a compatible root, they retain the newer geometry. Models without
+// accept bounded, unique unchanged node/mesh pairs. Coincident parts must keep
+// a complete bijection between their shared old and new poses; splits and
+// merges remain ambiguous. Other matches use reciprocal nearest local origins
+// across meshes (animation can replace a mesh), within both groups' radii, at
+// least four times closer than alternatives in both directions, and with no
+// plausible contradictory node-path match. This is bounded geometric evidence,
+// not persistent game identity; two-frame ambiguity cannot always be resolved.
+// Uncertain groups retain their newer local animation under a root supported
+// by decisive anchors or an actual matched group; followers alone cannot
+// establish continuity across a scene replacement. Otherwise they stay native.
+// Models without
 // valid root metadata retain the path/mesh fallback, reserving each predecessor.
 // Models below the same root
 // share that root's move, with their local animation blended separately,
@@ -48,8 +52,8 @@ namespace m3 {
 
 struct InterpStats {
     std::size_t models = 0;    // the newer scene's
-    std::size_t blended = 0;   // drawn between the two
-    std::size_t unmatched = 0; // not in the older scene
+    std::size_t blended = 0;   // moved, including supported root-followers
+    std::size_t unmatched = 0; // no reliable local match (may still follow a root)
     std::size_t followed = 0;  // uncertain local: common root, or legacy nearest relative
     std::size_t moved = 0;     // moved too far: drawn as in the newer
     std::size_t spun = 0;      // turned too far: blended in place, the newer turn

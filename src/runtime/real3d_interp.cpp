@@ -326,6 +326,8 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
         std::vector<Root> roots;
         std::unordered_map<uint64_t, int> by_root, by_path;
         std::unordered_map<PoseKey, int, PoseKeyHash> by_node_pose, by_pose, anchors;
+        std::unordered_map<PoseKey, std::vector<int>, PoseKeyHash> pose_members;
+        std::unordered_map<ModelKey, int, ModelKeyHash> by_identity;
     };
     auto root_key = [](const Real3dScene::Model& m) { return uint64_t(m.viewport) << 32 | m.motion.path; };
     auto pose = [](const Real3dScene::Model& m, int root) { return PoseKey{0, 0, static_cast<uint32_t>(root), m.motion.local.m}; };
@@ -350,6 +352,7 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
                 out.groups.push_back({i, root, {}});
                 const auto [p, unique] = out.by_pose.emplace(pose(m, root), index);
                 if (!unique) p->second = -1;
+                out.pose_members[pose(m, root)].push_back(index);
                 const auto [path, unique_path] = out.by_path.emplace(uint64_t(root) << 32 | m.path, index);
                 if (!unique_path) path->second = -1;
             }
@@ -360,10 +363,21 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
             if (!unique_anchor && at->second != root) at->second = -1;
             Group& g = out.groups[size_t(where->second)];
             g.members.push_back(i);
-            const auto& basis = out.roots[size_t(root)];
+            const auto [id, unique_id] = out.by_identity.emplace(ModelKey{uint32_t(root), m.address, m.path}, where->second);
+            if (!unique_id && id->second != where->second) id->second = -1;
+        }
+        return out;
+    };
+    // Exact stationary matches need no geometry scan. Only groups still
+    // seeking local correspondence need a size-normalized movement bound.
+    auto measure = [&](Groups& groups, size_t index, const Real3dScene& scene) {
+        auto& g = groups.groups[index];
+        const auto& basis = groups.roots[size_t(g.root)];
+        for (size_t member : g.members) {
+            const auto& m = scene.models[member];
             if (!basis.invertible) {
                 g.valid = false;
-                continue;
+                break;
             }
             const Vec3 origin = translation(m.matrix);
             if (m.first_polygon > scene.polygons.size() || m.polygon_count > scene.polygons.size() - m.first_polygon) {
@@ -385,11 +399,9 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
                 }
             }
         }
-        for (auto& group : out.groups)
-            group.radius = std::sqrt(group.radius);
-        return out;
+        g.radius = std::sqrt(g.radius);
     };
-    const Groups old = collect(a), now = collect(b);
+    Groups old = collect(a), now = collect(b);
     auto compatible_view = [&](size_t old_root, size_t new_root) {
         const auto& ma = a.models[old.roots[old_root].model];
         const auto& mb = b.models[now.roots[new_root].model];
@@ -401,7 +413,7 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
     };
     // Count distinct full poses rather than mesh parts at one pose. Three
     // independent unchanged poses must agree on a unique root on both sides.
-    std::vector<std::unordered_map<PoseKey, bool, PoseKeyHash>> votes(old.roots.size() * now.roots.size());
+    std::unordered_map<uint64_t, std::unordered_map<PoseKey, bool, PoseKeyHash>> votes;
     for (const auto& [anchor, nr] : now.anchors) {
         if (nr < 0 || !now.roots[size_t(nr)].valid) continue;
         const auto found = old.anchors.find(anchor);
@@ -410,7 +422,7 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
         if (!old.roots[ar].valid || !compatible_view(ar, br)) continue;
         auto distinct = anchor;
         distinct.address = 0;
-        votes[br * old.roots.size() + ar].emplace(distinct, true);
+        votes[uint64_t(br) << 32 | ar].emplace(distinct, true);
     }
     struct BestRoot {
         int index = -1;
@@ -424,15 +436,16 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
             best.index = index;
         } else best.second = std::max(best.second, score);
     };
-    for (size_t br = 0; br < now.roots.size(); ++br)
-        for (size_t ar = 0; ar < old.roots.size(); ++ar) {
-            const size_t score = votes[br * old.roots.size() + ar].size();
-            vote(new_best[br], static_cast<int>(ar), score);
-            vote(old_best[ar], static_cast<int>(br), score);
-        }
+    for (const auto& [pair, poses] : votes) {
+        const size_t br = size_t(pair >> 32), ar = size_t(pair & 0xffffffffu);
+        const size_t score = poses.size();
+        vote(new_best[br], static_cast<int>(ar), score);
+        vote(old_best[ar], static_cast<int>(br), score);
+    }
     auto decisive = [](const BestRoot& best) { return best.index >= 0 && best.first >= 3 && best.first > 2 * best.second; };
     std::vector<int> root_pairs(now.roots.size(), -1);
     std::vector<bool> root_reserved(old.roots.size(), false);
+    std::vector<bool> root_supported(now.roots.size(), false);
     for (size_t br = 0; br < now.roots.size(); ++br) {
         const auto& best = new_best[br];
         if (!decisive(best)) continue;
@@ -440,6 +453,7 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
         if (old_best[ar].index != static_cast<int>(br) || !decisive(old_best[ar])) continue;
         root_pairs[br] = best.index;
         root_reserved[ar] = true;
+        root_supported[br] = true;
     }
     for (size_t br = 0; br < now.roots.size(); ++br) {
         if (root_pairs[br] >= 0 || !now.roots[br].valid) continue;
@@ -493,6 +507,67 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
         }
         return distance;
     };
+    for (size_t j = 0; j < old.groups.size(); ++j)
+        if (!reserved[j]) measure(old, j, a);
+    for (size_t i = 0; i < now.groups.size(); ++i)
+        if (pairs[i] < 0 && root_pairs[size_t(now.groups[i].root)] >= 0) measure(now, i, b);
+
+    // A unique unchanged node/mesh is positive evidence for close articulated
+    // parts, provided no stationary owner has reserved it and its local step
+    // fits both bounds. Coincident groups must move together as a complete,
+    // bijective cohort; a merge or split is not resolved by arbitrary paths.
+    std::vector<int> proposed(now.groups.size(), -1), proposed_uses(old.groups.size(), 0);
+    for (size_t i = 0; i < now.groups.size(); ++i) {
+        const auto& gb = now.groups[i];
+        const int ar = root_pairs[size_t(gb.root)];
+        if (pairs[i] >= 0 || ar < 0 || !gb.valid) continue;
+        int candidate = -1;
+        bool conflict = false;
+        for (size_t member : gb.members) {
+            const auto& m = b.models[member];
+            const auto current = now.by_identity.find({uint32_t(gb.root), m.address, m.path});
+            const auto prior = old.by_identity.find({uint32_t(ar), m.address, m.path});
+            if (current == now.by_identity.end() || current->second != static_cast<int>(i) || prior == old.by_identity.end() ||
+                prior->second < 0)
+                continue;
+            if (reserved[size_t(prior->second)] || (candidate >= 0 && candidate != prior->second)) conflict = true;
+            candidate = prior->second;
+        }
+        if (candidate < 0 || conflict) continue;
+        const auto& ga = old.groups[size_t(candidate)];
+        const double radius = std::min(ga.radius, gb.radius);
+        if (!ga.valid || !(radius > 0) || distance_squared(a.models[ga.model], b.models[gb.model]) > radius * radius) continue;
+        proposed[i] = candidate;
+        ++proposed_uses[size_t(candidate)];
+    }
+    std::vector<bool> coherent(now.groups.size(), false);
+    for (size_t i = 0; i < now.groups.size(); ++i) {
+        if (proposed[i] < 0) continue;
+        const auto& ga = old.groups[size_t(proposed[i])];
+        const auto& gb = now.groups[i];
+        const auto old_pose = pose(a.models[ga.model], ga.root);
+        const auto& old_members = old.pose_members.at(old_pose);
+        const auto& new_members = now.pose_members.at(pose(b.models[gb.model], gb.root));
+        bool agrees = old_members.size() == new_members.size();
+        for (int member : new_members) {
+            const int prior = proposed[size_t(member)];
+            if (prior < 0 || proposed_uses[size_t(prior)] != 1) {
+                agrees = false;
+                break;
+            }
+            const auto& peer = old.groups[size_t(prior)];
+            if (!(pose(a.models[peer.model], peer.root) == old_pose)) {
+                agrees = false;
+                break;
+            }
+        }
+        coherent[i] = agrees;
+    }
+    for (size_t i = 0; i < now.groups.size(); ++i)
+        if (coherent[i]) {
+            pairs[i] = proposed[i];
+            reserved[size_t(pairs[i])] = true;
+        }
     std::vector<std::vector<size_t>> root_candidates(old.roots.size());
     for (size_t j = 0; j < old.groups.size(); ++j) {
         const auto& ga = old.groups[j];
@@ -538,12 +613,19 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
     }
     for (size_t i = 0; i < now.groups.size(); ++i)
         if (pairs[i] >= 0) {
+            root_supported[size_t(now.groups[i].root)] = true;
             const auto& ga = old.groups[size_t(pairs[i])];
             for (size_t member : now.groups[i].members)
                 result.previous[member] = static_cast<int>(ga.model);
             for (size_t member : ga.members)
                 result.used_old[member] = true;
         }
+    // A surviving slot alone does not establish continuity across a scene
+    // replacement. Root followers need anchors or an actual local match.
+    for (const auto& g : now.groups)
+        if (!root_supported[size_t(g.root)])
+            for (size_t member : g.members)
+                result.root[member] = -1;
     return result;
 }
 

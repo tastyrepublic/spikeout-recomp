@@ -198,27 +198,30 @@ TEST_CASE("smooth motion: coincident independent instances keep newer locals ins
     add_instance(before, transform(0, {1, 1, 1}), 2, 2);
     add_instance(after, transform(20, {1, 1, 1}), -2, 1);
     add_instance(after, transform(20, {1, 1, 1}), -2, 2);
+    add_instance(before, transform(0, {1, 1, 1}), 20, 9);
+    add_instance(after, transform(20, {1, 1, 1}), 20, 9);
     add_instance(expected, transform(10, {1, 1, 1}), -2, 1);
     // Two coincident instances cannot establish which old instance each is.
     add_instance(expected, transform(10, {1, 1, 1}), -2, 2);
+    add_instance(expected, transform(10, {1, 1, 1}), 20, 9);
     CHECK(m3::interpolate(before, after, 0.5f, out));
     CHECK(position_error(expected, out) < 1e-4f);
 }
 
-TEST_CASE("smooth motion: nearby crossing instances reject contradictory path and proximity cues") {
+TEST_CASE("smooth motion: bounded unique identities preserve crossing instances") {
     m3::Real3dScene before, after, expected, out;
     add_instance(before, transform(0, {1, 1, 1}), -0.1f, 1);
     add_instance(before, transform(0, {1, 1, 1}), 0.1f, 2);
     add_instance(after, transform(20, {1, 1, 1}), 0.08f, 1);
     add_instance(after, transform(20, {1, 1, 1}), -0.08f, 2);
-    // The closest predecessor would exchange their identities. With no
-    // decisive correspondence, keep each newer local pose under Root(t).
-    add_instance(expected, transform(10, {1, 1, 1}), 0.08f, 1);
-    add_instance(expected, transform(10, {1, 1, 1}), -0.08f, 2);
+    // Closest position would exchange their identities. The unchanged unique
+    // node/mesh pairs instead establish bounded, bijective local motion.
+    add_instance(expected, transform(10, {1, 1, 1}), -0.01f, 1);
+    add_instance(expected, transform(10, {1, 1, 1}), 0.01f, 2);
     m3::InterpStats stats;
     CHECK(m3::interpolate(before, after, 0.5f, out, &stats));
     CHECK(position_error(expected, out) < 1e-4f);
-    CHECK(stats.unmatched == 2 && stats.followed == 2);
+    CHECK(stats.unmatched == 0 && stats.followed == 0);
 }
 
 TEST_CASE("smooth motion: coincident predecessors splitting do not arbitrarily animate one child") {
@@ -227,12 +230,61 @@ TEST_CASE("smooth motion: coincident predecessors splitting do not arbitrarily a
         add_instance(before, transform(0, {1, 1, 1}), 0, path);
     add_instance(after, transform(20, {1, 1, 1}), 0.05f, 1);
     add_instance(after, transform(20, {1, 1, 1}), 0.3f, 2);
+    add_instance(before, transform(0, {1, 1, 1}), 20, 9);
+    add_instance(after, transform(20, {1, 1, 1}), 20, 9);
     add_instance(expected, transform(10, {1, 1, 1}), 0.05f, 1);
     add_instance(expected, transform(10, {1, 1, 1}), 0.3f, 2);
+    add_instance(expected, transform(10, {1, 1, 1}), 20, 9);
     m3::InterpStats stats;
     CHECK(m3::interpolate(before, after, 0.5f, out, &stats));
     CHECK(position_error(expected, out) < 1e-4f);
     CHECK(stats.unmatched == 2 && stats.followed == 2);
+}
+
+TEST_CASE("smooth motion: coincident mesh parts and close joints retain bounded identity motion") {
+    for (float spacing : {0.0f, 0.25f}) {
+        m3::Real3dScene before, after, expected, out;
+        for (int k = 0; k < 2; ++k) {
+            const float x = float(k) * spacing;
+            add_instance(before, transform(0, {1, 1, 1}), x, uint32_t(k + 1));
+            add_instance(after, transform(20, {1, 1, 1}), x + 0.1f, uint32_t(k + 1));
+            add_instance(expected, transform(10, {1, 1, 1}), x + 0.05f, uint32_t(k + 1));
+            before.models.back().address += uint32_t(k);
+            after.models.back().address += uint32_t(k);
+        }
+        m3::InterpStats stats;
+        CHECK(m3::interpolate(before, after, 0.5f, out, &stats));
+        CHECK(position_error(expected, out) < 1e-4f);
+        CHECK(stats.followed == 0 && stats.unmatched == 0);
+    }
+}
+
+TEST_CASE("smooth motion: a replaced scene cannot follow a root slot without correspondence") {
+    m3::Real3dScene before, after, out;
+    for (int k = 0; k < 2; ++k) {
+        add_instance(before, transform(0, {1, 1, 1}), float(k * 5), uint32_t(k + 1));
+        add_instance(after, transform(20, {1, 1, 1}), float(20 + k * 5), uint32_t(k + 10));
+        after.models.back().address += 10;
+    }
+    m3::InterpStats stats;
+    CHECK(!m3::interpolate(before, after, 0.5f, out, &stats));
+    CHECK(stats.cut && stats.blended == 0);
+    CHECK(position_error(after, out) == 0);
+}
+
+TEST_CASE("smooth motion: many independent roots use sparse anchor association") {
+    m3::Real3dScene before, after, expected, out;
+    for (uint32_t root = 0; root < 128; ++root)
+        for (uint32_t k = 0; k < 3; ++k) {
+            const float x = float(root * 12 + k * 4);
+            add_instance(before, transform(0, {1, 1, 1}), x, k + 1);
+            add_instance(after, transform(2, {1, 1, 1}), x, k + 7);
+            add_instance(expected, transform(1, {1, 1, 1}), x, k + 7);
+            before.models.back().motion.path = root + 1;
+            after.models.back().motion.path = root + 1000;
+        }
+    CHECK(m3::interpolate(before, after, 0.5f, out));
+    CHECK(position_error(expected, out) < 0.001f);
 }
 
 TEST_CASE("smooth motion: mesh-swapping movers match by separated motion rather than mesh or recycled path") {
@@ -561,13 +613,30 @@ TEST_CASE("smooth motion: root screw follows an offset axis and axial translatio
 TEST_CASE("smooth motion: invalid moving roots conservatively retain the newer scene") {
     const auto local = m3::Mat4::identity();
     const auto before = rooted(transform(0, {1, 1, 1}), local);
-    for (float scale : {0.0f, std::numeric_limits<float>::infinity()}) {
+    for (float scale : {0.0f, -1.0f, std::numeric_limits<float>::infinity()}) {
         auto root = transform(10, {scale, 1, 1});
         auto after = rooted(root, local);
         m3::Real3dScene out;
         m3::InterpStats stats;
         CHECK(!m3::interpolate(before, after, 0.5f, out, &stats));
         CHECK(stats.cut && stats.blended == 0 && stats.moved == 1);
+    }
+}
+
+TEST_CASE("smooth motion: changing root stretch and shear follow affine ground truth") {
+    auto root_at = [](float t) {
+        auto root = transform(0, {2 - t, 3 - 2 * t, 4 - 3 * t}, 0.4f * (1 - t));
+        root.m[8] = 0.3f * (1 - t);
+        root.m[9] = 0.2f * (1 - t);
+        return root;
+    };
+    auto local = m3::Mat4::identity();
+    local.m[12] = 4;
+    local.m[14] = -3;
+    for (float t : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+        m3::Real3dScene out;
+        CHECK(m3::interpolate(rooted(root_at(0), local), rooted(root_at(1), local), t, out));
+        CHECK(position_error(rooted(root_at(t), local), out) < 1e-4f);
     }
 }
 
@@ -631,13 +700,20 @@ TEST_CASE("smooth motion: builder tracks root and local transforms across siblin
     node(0x180, 1, 3, 0x01000400);
     word(0x300, 0x200);
     word(0x301, 0x240);
-    word(0x302, 0x02000280);
+    word(0x302, 0x280);
+    word(0x303, 0x020002c0);
     node(0x200, 0x11, 0, 0x01000100);
     real(0x204, 3);
     real(0x205, 4);
     real(0x206, 5);
-    node(0x240, 0x81, 2, 0x01000200); // billboard
+    node(0x240, 0x81, 2, 0x260); // billboard and its descendant
+    node(0x260, 0x11, 0, 0x01000200);
     node(0x280, 1, 2, 0x01000300);    // ordinary sibling after billboard
+    node(0x2c0, 0x11, 0, 0x2e0);
+    real(0x2c4, 3);
+    real(0x2c5, 4);
+    real(0x2c6, 5);
+    node(0x2e0, 1, 2, 0x01000600); // two local transforms below the root
     m3::Real3dScene scene;
     m3::Real3dSceneBuilder().build(memory, scene);
     auto find = [&](uint32_t address) -> const m3::Real3dScene::Model* {
@@ -645,9 +721,9 @@ TEST_CASE("smooth motion: builder tracks root and local transforms across siblin
         return nullptr;
     };
     const auto *translated = find(0x100), *billboard = find(0x200), *rotated = find(0x300);
-    const auto *sibling = find(0x400), *direct = find(0x500);
-    CHECK(scene.models.size() == 5 && translated && billboard && rotated && sibling && direct);
-    if (!translated || !billboard || !rotated || !sibling || !direct) return;
+    const auto *sibling = find(0x400), *direct = find(0x500), *nested = find(0x600);
+    CHECK(scene.models.size() == 6 && translated && billboard && rotated && sibling && direct && nested);
+    if (!translated || !billboard || !rotated || !sibling || !direct || !nested) return;
     auto local = identity;
     local.m[12] = 3;
     local.m[13] = 4;
@@ -658,6 +734,10 @@ TEST_CASE("smooth motion: builder tracks root and local transforms across siblin
     CHECK(translated->motion.path == rotated->motion.path && translated->motion.matrix.m == rotated->motion.matrix.m);
     CHECK(sibling->motion.valid && sibling->motion.path != translated->motion.path && sibling->motion.local.m == identity.m);
     CHECK(!direct->motion.valid);
+    CHECK(nested->motion.valid && nested->motion.local.m == (local * rotation).m);
+    CHECK(nested->motion.path == translated->motion.path);
+    // These deliberately simple integer matrices compose exactly. General
+    // floating-point matrices need a tolerance because association can differ.
     CHECK((translated->motion.matrix * translated->motion.local).m == translated->matrix.m);
     CHECK((rotated->motion.matrix * rotated->motion.local).m == rotated->matrix.m);
 }
