@@ -36,11 +36,11 @@ bool inverse(const Mat3& l, Mat3& out) {
     return true;
 }
 
-// A matrix's linear part as scale (each column's length) and a rotation
-// (the columns made orthonormal); mirrored: its determinant was negative, the
-// first column turned round to make a rotation.
+// QR decomposition: a proper rotation and a signed upper-triangular stretch.
+// Keep shear and reflection in the stretch: a quaternion cannot represent an
+// improper rotation, and dropping shear would deform even a stationary model.
 struct Parts {
-    Vec3 scale;
+    Mat3 stretch;
     std::array<float, 4> q; // x, y, z, w
     bool mirrored;
 };
@@ -74,26 +74,24 @@ Mat3 rotation(const std::array<float, 4>& q) {
 
 bool decompose(const Mat3& l, Parts& out) {
     Mat3 r = l;
-    for (int c = 0; c < 3; ++c) {
-        out.scale[static_cast<size_t>(c)] = length(r[static_cast<size_t>(c)]);
-        if (!(out.scale[static_cast<size_t>(c)] > 1e-12f)) return false;
-    }
     // Gram-Schmidt: the columns made orthonormal, the first kept.
     auto normalize = [](Vec3& v) {
         const float n = length(v);
-        if (n > 1e-12f)
+        if (std::isfinite(n) && n > 1e-12f)
             for (float& c : v) c /= n;
-        return n > 1e-12f;
+        return std::isfinite(n) && n > 1e-12f;
     };
     if (!normalize(r[0])) return false;
     const float along = dot(r[0], r[1]);
     for (size_t k = 0; k < 3; ++k) r[1][k] -= along * r[0][k];
     if (!normalize(r[1])) return false;
-    const Vec3 z = cross(r[0], r[1]);
-    out.mirrored = dot(z, r[2]) < 0;
-    r[2] = z;
-    if (out.mirrored) // a mirror: the first column turned round, and back at the end
-        for (float& c : r[0]) c = -c;
+    r[2] = cross(r[0], r[1]);
+    const float signed_z = dot(r[2], l[2]);
+    if (!std::isfinite(signed_z) || std::fabs(signed_z) <= 1e-12f) return false;
+    out.mirrored = signed_z < 0;
+    for (size_t c = 0; c < 3; ++c)
+        for (size_t row = 0; row < 3; ++row)
+            out.stretch[c][row] = row <= c ? dot(r[row], l[c]) : 0;
     out.q = quaternion(r);
     return true;
 }
@@ -124,8 +122,17 @@ float turn_degrees(const std::array<float, 4>& a, const std::array<float, 4>& b)
 
 Mat3 linear(const Mat4& m) { return {column(m, 0), column(m, 1), column(m, 2)}; }
 
-uint64_t key(const Real3dScene::Model& m) {
-    return static_cast<uint64_t>(m.viewport) << 48 ^ static_cast<uint64_t>(m.address) << 24 ^ m.path;
+struct ModelKey {
+    uint32_t viewport, address, path;
+    bool operator==(const ModelKey&) const = default;
+};
+struct ModelKeyHash {
+    size_t operator()(const ModelKey& k) const {
+        return static_cast<size_t>(static_cast<uint64_t>(k.viewport) << 48 ^ static_cast<uint64_t>(k.address) << 24 ^ k.path);
+    }
+};
+ModelKey key(const Real3dScene::Model& m) {
+    return {m.viewport, m.address, m.path};
 }
 uint64_t place(const Real3dScene::Model& m) { return static_cast<uint64_t>(m.viewport) << 32 | m.address; }
 
@@ -143,7 +150,8 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
     if (a.block_culled || b.block_culled || a.models.empty() || b.models.empty()) return done(false);
 
     // The older scene's models by their key, and by viewport and address.
-    std::unordered_map<uint64_t, int> by_key; // -1: several
+    // Hash collisions must not identify different models as the same instance.
+    std::unordered_map<ModelKey, int, ModelKeyHash> by_key; // -1: several
     std::unordered_map<uint64_t, std::vector<int>> by_place;
     for (size_t i = 0; i < a.models.size(); ++i) {
         const auto [it, added] = by_key.emplace(key(a.models[i]), static_cast<int>(i));
@@ -155,6 +163,7 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
         size_t model;
         Mat3 l;
         Vec3 t;
+        bool identity = false;
     };
     std::vector<Move> moves;
     moves.reserve(b.models.size());
@@ -199,16 +208,23 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
             ++s.moved;
             continue;
         }
-        // The matrix between: position and scale straight, rotation the
+        if (ma.matrix.m == mb.matrix.m) {
+            // Preserve stationary geometry exactly. Even a tiny round-trip
+            // error can change which of two coplanar surfaces wins the depth
+            // test, alternating between the original and interpolated picture.
+            moves.push_back({i, {Vec3{1, 0, 0}, Vec3{0, 1, 0}, Vec3{0, 0, 1}}, {}, true});
+            continue;
+        }
+        // The matrix between: position and stretch straight, rotation the
         // shortest turn. Turned too far to tell which way (a wheel spinning):
         // the newer rotation, moved with the rest (else it'd lag its car).
         const bool spun = turn_degrees(pa.q, pb.q) > kMaxTurn;
         if (spun) ++s.spun;
-        Mat3 lt = rotation(spun ? pb.q : slerp(pa.q, pb.q, t));
-        if (pa.mirrored)
-            for (float& c : lt[0]) c = -c;
+        Mat3 stretch{};
         for (size_t c = 0; c < 3; ++c)
-            for (float& v : lt[c]) v *= pa.scale[c] + (pb.scale[c] - pa.scale[c]) * t;
+            for (size_t row = 0; row < 3; ++row)
+                stretch[c][row] = pa.stretch[c][row] + (pb.stretch[c][row] - pa.stretch[c][row]) * t;
+        const Mat3 lt = times(rotation(spun ? pb.q : slerp(pa.q, pb.q, t)), stretch);
         const Vec3 tt{ta[0] + d[0] * t, ta[1] + d[1] * t, ta[2] + d[2] * t};
         // Its polygons, there in the newer scene, moved by (between) x (newer)^-1.
         const Mat3 l = times(lt, lb_inverse);
@@ -236,7 +252,7 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
                 const auto it =
                     by_ancestor.find(static_cast<uint64_t>(model.viewport) << 32 | model.ancestors[static_cast<size_t>(level)]);
                 if (it == by_ancestor.end()) continue;
-                moves.push_back({i, moves[it->second].l, moves[it->second].t});
+                moves.push_back({i, moves[it->second].l, moves[it->second].t, moves[it->second].identity});
                 ++s.followed;
                 break;
             }
@@ -244,6 +260,7 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
     }
 
     for (const Move& move : moves) {
+        if (move.identity) continue;
         const Real3dScene::Model& model = b.models[move.model];
         for (uint32_t p = model.first_polygon; p < model.first_polygon + model.polygon_count; ++p) {
             const Real3dScene::Polygon& poly = out.polygons[p];

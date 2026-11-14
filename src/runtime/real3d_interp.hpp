@@ -6,7 +6,7 @@
 // polygon data address and culling-node path; else the nearest with the same
 // viewport and address: the same model reached through other nodes) and
 // drawn between where it was and where it is: its matrix blended (position
-// and scale straight, rotation along the shortest turn) and its polygons
+// and signed stretch/shear straight, rotation along the shortest turn) and its polygons
 // moved by the blended matrix times the inverse of the newer one, which put
 // them where they are. Models not found (another model each frame: a
 // flipbook, a wheel's blur, a bird's wings) move as their nearest relative
