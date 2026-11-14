@@ -198,6 +198,14 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
             continue;
         }
         const Real3dScene::Model& ma = a.models[static_cast<size_t>(found)];
+        // Cut detection is relative to the model's distance from the eye,
+        // independent of where the shared root happens to place its origin.
+        const Vec3 model_ta = translation(ma.matrix);
+        const Vec3 model_d{model_tb[0] - model_ta[0], model_tb[1] - model_ta[1], model_tb[2] - model_ta[2]};
+        if (length(model_d) > kMaxMove * std::max(length(model_ta), length(model_tb))) {
+            ++s.moved;
+            continue;
+        }
         // Static descendants of a moving root (including the stage camera)
         // share its move exactly. Different per-model pivots otherwise follow
         // different chords during a turn, separating coplanar surfaces. The
@@ -211,7 +219,7 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
         const Mat3 la = linear(matrix_a), lb = linear(matrix_b);
         Parts pa{}, pb{};
         Mat3 lb_inverse{};
-        if (length(d) > kMaxMove * std::max(length(ta), length(tb)) || !decompose(la, pa) || !decompose(lb, pb) ||
+        if (!decompose(la, pa) || !decompose(lb, pb) ||
             pa.mirrored != pb.mirrored || !inverse(lb, lb_inverse)) {
             ++s.moved;
             continue;
