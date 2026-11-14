@@ -156,6 +156,7 @@ void Real3dSceneBuilder::build(const Real3d& mem, Real3dScene& scene) {
                     model.path = ref.path;
                     model.viewport = static_cast<uint16_t>(v);
                     model.matrix = ref.matrix;
+                    model.motion = ref.motion;
                     model.ancestors = ref.ancestors;
                     model.depth = ref.depth;
                     model.first_polygon = static_cast<uint32_t>(scene.polygons.size());
@@ -285,6 +286,7 @@ void Real3dSceneBuilder::walk_viewports(uint32_t addr) {
         // The eye: games store X, Y, Z but the Real3D takes Z, X, Y with
         // Y and Z flipped; this turns that back into GL axes.
         matrix_ = Mat4{};
+        motion_ = {};
         matrix_.m = {0, 0, -1, 0, 1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0, 1};
         const uint32_t eye = node[0x15] & 0xFFF;
         if (eye == 0) {
@@ -353,6 +355,7 @@ void Real3dSceneBuilder::walk_node(uint32_t addr, int depth) {
 
     const Attribs saved_attribs = attribs_;
     const Mat4 saved_matrix = matrix_;
+    const auto saved_motion = motion_;
     const uint32_t saved_path = path_;
     path_ = (path_ ^ addr) * 16777619u;
     ancestors_.push_back(path_);
@@ -369,10 +372,18 @@ void Real3dSceneBuilder::walk_node(uint32_t addr, int depth) {
         t.m[13] = as_float(node[5]);
         t.m[14] = as_float(node[6]);
         matrix_ = matrix_ * t;
+        if (motion_.valid) motion_.local = motion_.local * t;
     } else if (node[3] & 0xFFF) {
         multiply_matrix(node[3] & 0xFFF);
     }
     if (flags & 0x80) reset_rotation();
+
+    if (ancestors_.size() == 2) {
+        motion_.matrix = matrix_;
+        motion_.local = Mat4::identity();
+        motion_.path = path_;
+        motion_.valid = !(flags & 0x80);
+    }
 
     // Frustum: the node's bounding sphere (cull radius) against the
     // viewport's four planes; its position is the matrix's translation.
@@ -433,6 +444,7 @@ void Real3dSceneBuilder::walk_node(uint32_t addr, int depth) {
         }
     }
     matrix_ = saved_matrix;
+    motion_ = saved_motion;
     attribs_ = saved_attribs;
     path_ = saved_path;
     ancestors_.pop_back();
@@ -445,6 +457,7 @@ void Real3dSceneBuilder::add_model(uint32_t addr) {
     }
     ModelRef m;
     m.matrix = matrix_;
+    m.motion = motion_;
     m.addr = addr;
     m.path = path_;
     m.depth = static_cast<uint8_t>(std::min<size_t>(ancestors_.size(), Real3dScene::kAncestors));
@@ -467,6 +480,7 @@ void Real3dSceneBuilder::multiply_matrix(uint32_t index) {
     Mat4 r;
     r.m = {f(3), f(6), f(9), 0, f(4), f(7), f(10), 0, f(5), f(8), f(11), 0, f(0), f(1), f(2), 1};
     matrix_ = matrix_ * r;
+    if (motion_.valid) motion_.local = motion_.local * r;
 }
 
 void Real3dSceneBuilder::multiply_inverse_matrix(uint32_t index) {
@@ -486,6 +500,9 @@ void Real3dSceneBuilder::multiply_inverse_matrix(uint32_t index) {
 // Undo the rotation so far (keeping position and scale), then apply the
 // eye's: the node faces the viewer (billboards).
 void Real3dSceneBuilder::reset_rotation() {
+    // A billboard depends on the eye as well as its parent; it cannot inherit
+    // a root move merely because the transforms below that root are unchanged.
+    motion_.valid = false;
     Mat4 inv = matrix_;
     std::swap(inv.m[1], inv.m[4]);
     std::swap(inv.m[2], inv.m[8]);

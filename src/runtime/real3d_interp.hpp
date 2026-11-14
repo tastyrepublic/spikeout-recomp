@@ -5,8 +5,11 @@
 // Each of the newer scene's models is found in the older one (by viewport,
 // polygon data address and culling-node path; else the nearest with the same
 // viewport and address: the same model reached through other nodes) and
-// drawn between where it was and where it is: its matrix blended (position
-// and signed stretch/shear straight, rotation along the shortest turn) and its polygons
+// drawn between where it was and where it is. Models whose local transform
+// below the same root is unchanged share that root's move, keeping scenery
+// surfaces together as the camera turns. Other models use their own matrix.
+// The selected matrix is blended (position and signed stretch/shear straight,
+// rotation along the shortest turn) and its polygons
 // moved by the blended matrix times the inverse of the newer one, which put
 // them where they are. Models not found (another model each frame: a
 // flipbook, a wheel's blur, a bird's wings) move as their nearest relative

@@ -170,7 +170,7 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
     std::vector<size_t> strays; // not found: moved with their nearest relative found
     for (size_t i = 0; i < b.models.size(); ++i) {
         const Real3dScene::Model& mb = b.models[i];
-        const Vec3 tb = translation(mb.matrix);
+        const Vec3 model_tb = translation(mb.matrix);
         int found = -1;
         if (const auto it = by_key.find(key(mb)); it != by_key.end() && it->second >= 0) found = it->second;
         if (found < 0) // the same model reached through other nodes: the nearest
@@ -178,7 +178,7 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
                 float best = 0, second = 0;
                 for (int j : it->second) {
                     const Vec3 ta = translation(a.models[static_cast<size_t>(j)].matrix);
-                    const Vec3 d{ta[0] - tb[0], ta[1] - tb[1], ta[2] - tb[2]};
+                    const Vec3 d{ta[0] - model_tb[0], ta[1] - model_tb[1], ta[2] - model_tb[2]};
                     const float far = dot(d, d);
                     if (found < 0 || far < best) {
                         second = found < 0 ? 0 : best;
@@ -198,9 +198,17 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
             continue;
         }
         const Real3dScene::Model& ma = a.models[static_cast<size_t>(found)];
-        const Vec3 ta = translation(ma.matrix);
+        // Static descendants of a moving root (including the stage camera)
+        // share its move exactly. Different per-model pivots otherwise follow
+        // different chords during a turn, separating coplanar surfaces. The
+        // local matrices were accumulated directly, not recovered by inversion.
+        const bool shared_root = ma.motion.valid && mb.motion.valid && ma.motion.path == mb.motion.path &&
+                                 ma.motion.local.m == mb.motion.local.m;
+        const Mat4& matrix_a = shared_root ? ma.motion.matrix : ma.matrix;
+        const Mat4& matrix_b = shared_root ? mb.motion.matrix : mb.matrix;
+        const Vec3 ta = translation(matrix_a), tb = translation(matrix_b);
         const Vec3 d{tb[0] - ta[0], tb[1] - ta[1], tb[2] - ta[2]};
-        const Mat3 la = linear(ma.matrix), lb = linear(mb.matrix);
+        const Mat3 la = linear(matrix_a), lb = linear(matrix_b);
         Parts pa{}, pb{};
         Mat3 lb_inverse{};
         if (length(d) > kMaxMove * std::max(length(ta), length(tb)) || !decompose(la, pa) || !decompose(lb, pb) ||
@@ -208,7 +216,7 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
             ++s.moved;
             continue;
         }
-        if (ma.matrix.m == mb.matrix.m) {
+        if (matrix_a.m == matrix_b.m) {
             // Preserve stationary geometry exactly. Even a tiny round-trip
             // error can change which of two coplanar surfaces wins the depth
             // test, alternating between the original and interpolated picture.

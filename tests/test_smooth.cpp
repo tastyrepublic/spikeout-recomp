@@ -114,3 +114,61 @@ TEST_CASE("smooth motion: colliding hashes do not match different model identiti
     CHECK(stats.unmatched == 1);
     CHECK(position_error(after, out) == 0);
 }
+
+TEST_CASE("smooth motion: static descendants share their moving root without opening seams") {
+    auto stage = [](float angle) {
+        const auto root = transform(angle, {1, 1, 1});
+        auto scene = triangle(root);
+        auto local = transform(0, {1, 1, 1});
+        local.m[12] = local.m[13] = local.m[14] = 0;
+        scene.models[0].motion = {root, local, 0x123, true};
+        auto other = scene.models[0];
+        other.address += 1;
+        other.first_polygon = 1;
+        other.motion.local.m[12] += 70;
+        other.motion.local.m[14] -= 50;
+        // A different model origin for exactly the same eye-space surface.
+        for (size_t row = 0; row < 3; ++row)
+            other.matrix.m[12 + row] += root.m[row] * 70 - root.m[8 + row] * 50;
+        scene.models.push_back(other);
+        auto polygon = scene.polygons[0];
+        polygon.first_vertex = 3;
+        scene.polygons.push_back(polygon);
+        const auto vertices = scene.vertices;
+        scene.vertices.insert(scene.vertices.end(), vertices.begin(), vertices.end());
+        return scene;
+    };
+    const auto before = stage(0);
+    for (float angle : {0.25f, 1.0f, 4.0f}) {
+        const auto after = stage(angle);
+        for (float t : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+            m3::Real3dScene out;
+            CHECK(m3::interpolate(before, after, t, out));
+            for (size_t k = 0; k < 3; ++k) {
+                const auto& a = out.vertices[k];
+                const auto& b = out.vertices[k + 3];
+                CHECK(a.x == b.x && a.y == b.y && a.z == b.z);
+                CHECK(a.nx == b.nx && a.ny == b.ny && a.nz == b.nz);
+            }
+        }
+    }
+}
+
+TEST_CASE("smooth motion: animated and billboard descendants retain their own motion") {
+    auto before = triangle(transform(10, {1, 1, 1}));
+    auto after = triangle(transform(50, {1, 1, 1}));
+    const auto root = transform(0, {1, 1, 1});
+    before.models[0].motion = {root, before.models[0].matrix, 0x123, true};
+    after.models[0].motion = {root, after.models[0].matrix, 0x123, true};
+    for (int mode = 0; mode < 3; ++mode) {
+        if (mode == 1) after.models[0].motion.valid = false;
+        if (mode == 2) {
+            after.models[0].motion.valid = true;
+            after.models[0].motion.local = before.models[0].motion.local;
+            after.models[0].motion.path += 1;
+        }
+        m3::Real3dScene out;
+        CHECK(m3::interpolate(before, after, 0.5f, out));
+        CHECK(position_error(triangle(transform(30, {1, 1, 1})), out) < 1e-4f);
+    }
+}
