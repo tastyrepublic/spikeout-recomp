@@ -1806,9 +1806,9 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
             m.match_builder.build(m.bus.real3d(), m.match_scene[1]);
             const auto& before = m.match_scene[0].models;
             const auto& now = m.match_scene[1].models;
-            std::unordered_map<uint64_t, int> keys; // (viewport, address, path): how many models in the frame before
+            std::map<std::array<uint32_t, 3>, int> keys; // (viewport, address, path): exact instance identity
             auto key = [](const m3::Real3dScene::Model& model) {
-                return static_cast<uint64_t>(model.viewport) << 48 ^ static_cast<uint64_t>(model.address) << 24 ^ model.path;
+                return std::array<uint32_t, 3>{model.viewport, model.address, model.path};
             };
             for (const auto& model : before) ++keys[key(model)];
             for (const auto& model : now) {

@@ -109,6 +109,14 @@ struct Real3dScene {
     // other frame moves with the one found nearest it in the tree (a wheel
     // with its car).
     static constexpr int kAncestors = 24;
+    // Keep the first culling node's transform separate from its descendants.
+    // Unchanged descendants must share one interpolated camera/root move:
+    // interpolating each model's different pivot can pull shared surfaces apart.
+    struct MotionRoot {
+        Mat4 matrix, local;
+        uint32_t path = 0;
+        bool valid = false;
+    };
     struct Model {
         uint32_t address = 0, path = 0;
         uint16_t viewport = 0;
@@ -116,6 +124,7 @@ struct Real3dScene {
         uint32_t first_polygon = 0, polygon_count = 0;
         std::array<uint32_t, kAncestors> ancestors{};
         uint8_t depth = 0; // ancestors in use
+        MotionRoot motion;
     };
     std::vector<Model> models;
     bool block_culled = false; // the Real3D's block culling was on: white, no scene
@@ -190,6 +199,7 @@ public:
 private:
     struct ModelRef {
         Mat4 matrix;
+        Real3dScene::MotionRoot motion;
         uint32_t addr = 0;
         uint32_t path = 0; // the culling nodes above it, hashed (Real3dScene::Model)
         std::array<uint32_t, Real3dScene::kAncestors> ancestors{};
@@ -221,6 +231,7 @@ private:
     std::vector<ModelRef> models_;
     std::vector<std::pair<size_t, size_t>> viewport_models_; // first model and count, by viewport
     Mat4 matrix_;
+    Real3dScene::MotionRoot motion_;
     Mat4 coord_sys_; // the eye's rotation, for nodes that reset theirs
     Attribs attribs_;
     uint32_t matrix_base_ = 0, lod_table_ = 0, colour_table_ = 0;
