@@ -2,12 +2,20 @@
 // (src/video/r3d_scene.h, interpolate; MIT, Copyright (c) 2026 mr-finster),
 // for pictures between the arcade's 57.5 frames a second.
 //
-// Each newer model first matches a unique unchanged local pose of the same
-// mesh below the same root, reserving that older instance. Culling-node paths
-// can be reused for a different instance (for example, a car's front/back
-// wheels). Otherwise it matches by viewport, polygon data address and path,
-// then the nearest unreserved instance with the same viewport and address, and is
-// drawn between where it was and where it is. Models below the same root
+// Models sharing a node and full local transform form one group. Viewport
+// indices and node paths can be recycled, so roots first match by at least
+// three distinct unchanged mesh/pose anchors, with reciprocal unique majorities
+// and compatible projections. Without decisive anchors, an uncontested root
+// key may continue. Group matches reserve unique unchanged local poses, then
+// use reciprocal nearest local origins across meshes (animation can replace a
+// mesh). A match must be within both groups' radii, at least four times closer
+// than alternatives in both directions, and have no plausible contradictory
+// node-path match. This is conservative geometry correspondence, not persistent
+// game identity; two-frame ambiguity cannot always be resolved.
+// Uncertain groups retain their newer local animation under the common root;
+// without a compatible root, they retain the newer geometry. Models without
+// valid root metadata retain the path/mesh fallback, reserving each predecessor.
+// Models below the same root
 // share that root's move, with their local animation blended separately,
 // keeping scenery and animated parts together as the camera turns. The root's
 // relative eye-space move
@@ -18,10 +26,9 @@
 // use their own matrix: position and signed stretch/shear straight, rotation
 // along the shortest turn. Their polygons move by the blended matrix times
 // the inverse of the newer one, which put them where they are.
-// Models not found (another model each frame: a
-// flipbook, a wheel's blur, a bird's wings) move as their nearest relative
-// found in the culling-node tree does (a wheel with its car, a bird with the
-// scenery); with none (below the viewport's node), and models that moved
+// Legacy models without root metadata and not found move as their nearest
+// matched relative in the culling-node tree does; with none (below the
+// viewport's node), and models that moved
 // too far in the frame (more than kMaxMove of their distance from the eye),
 // they're drawn as in the newer scene. One that turned
 // further than kMaxTurn degrees (a wheel spinning: which way can't be told)
@@ -43,7 +50,7 @@ struct InterpStats {
     std::size_t models = 0;    // the newer scene's
     std::size_t blended = 0;   // drawn between the two
     std::size_t unmatched = 0; // not in the older scene
-    std::size_t followed = 0;  // of those, moved as their nearest relative found
+    std::size_t followed = 0;  // uncertain local: common root, or legacy nearest relative
     std::size_t moved = 0;     // moved too far: drawn as in the newer
     std::size_t spun = 0;      // turned too far: blended in place, the newer turn
     std::size_t nearest = 0;   // found as the nearest of the same model (not by its nodes)

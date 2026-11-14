@@ -301,8 +301,250 @@ struct PoseKeyHash {
 bool has_pose(const Real3dScene::Model& m) {
     return m.motion.valid && finite(m.motion.local) && finite(m.motion.matrix);
 }
-PoseKey pose_key(const Real3dScene::Model& m) {
-    return {m.viewport, m.address, m.motion.path, m.motion.local.m};
+
+// Paths identify groups within one scene. Across frames, viewports and nodes
+// can be recycled: use unchanged anchors and reject ambiguous local motion.
+struct GroupMatches {
+    std::vector<int> previous, root;
+    std::vector<bool> handled, used_old;
+};
+GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
+    struct Group {
+        size_t model;
+        int root;
+        std::vector<size_t> members;
+        float radius = 0;
+        bool valid = true;
+    };
+    struct Root {
+        size_t model;
+        bool valid = true, invertible = false;
+        Mat3 inverse{};
+    };
+    struct Groups {
+        std::vector<Group> groups;
+        std::vector<Root> roots;
+        std::unordered_map<uint64_t, int> by_root, by_path;
+        std::unordered_map<PoseKey, int, PoseKeyHash> by_node_pose, by_pose, anchors;
+    };
+    auto root_key = [](const Real3dScene::Model& m) { return uint64_t(m.viewport) << 32 | m.motion.path; };
+    auto pose = [](const Real3dScene::Model& m, int root) { return PoseKey{0, 0, static_cast<uint32_t>(root), m.motion.local.m}; };
+    auto collect = [&](const Real3dScene& scene) {
+        Groups out;
+        for (size_t i = 0; i < scene.models.size(); ++i) {
+            const auto& m = scene.models[i];
+            if (!has_pose(m)) continue;
+            const auto [root_it, fresh_root] = out.by_root.emplace(root_key(m), static_cast<int>(out.roots.size()));
+            if (fresh_root) {
+                out.roots.push_back({i});
+                auto& added = out.roots.back();
+                added.invertible = inverse(linear(m.motion.matrix), added.inverse);
+            }
+            const int root = root_it->second;
+            if (scene.models[out.roots[size_t(root)].model].motion.matrix.m != m.motion.matrix.m) out.roots[size_t(root)].valid = false;
+            auto within_frame = pose(m, root);
+            within_frame.address = m.path;
+            const auto [where, fresh] = out.by_node_pose.emplace(within_frame, static_cast<int>(out.groups.size()));
+            if (fresh) {
+                const int index = static_cast<int>(out.groups.size());
+                out.groups.push_back({i, root, {}});
+                const auto [p, unique] = out.by_pose.emplace(pose(m, root), index);
+                if (!unique) p->second = -1;
+                const auto [path, unique_path] = out.by_path.emplace(uint64_t(root) << 32 | m.path, index);
+                if (!unique_path) path->second = -1;
+            }
+            // A mesh/pose seen in several roots cannot vote for root identity.
+            auto anchor = pose(m, 0);
+            anchor.address = m.address;
+            const auto [at, unique_anchor] = out.anchors.emplace(anchor, root);
+            if (!unique_anchor && at->second != root) at->second = -1;
+            Group& g = out.groups[size_t(where->second)];
+            g.members.push_back(i);
+            const auto& basis = out.roots[size_t(root)];
+            if (!basis.invertible) {
+                g.valid = false;
+                continue;
+            }
+            const Vec3 origin = translation(m.matrix);
+            if (m.first_polygon > scene.polygons.size() || m.polygon_count > scene.polygons.size() - m.first_polygon) {
+                g.valid = false;
+                continue;
+            }
+            for (uint32_t pi = m.first_polygon; pi < m.first_polygon + m.polygon_count; ++pi) {
+                const auto& p = scene.polygons[pi];
+                if (p.first_vertex > scene.vertices.size() || p.vertex_count > scene.vertices.size() - p.first_vertex) {
+                    g.valid = false;
+                    continue;
+                }
+                for (uint32_t vi = p.first_vertex; vi < p.first_vertex + p.vertex_count; ++vi) {
+                    const auto& v = scene.vertices[vi];
+                    const auto offset = apply_linear(basis.inverse, {v.x - origin[0], v.y - origin[1], v.z - origin[2]});
+                    const float radius = dot(offset, offset);
+                    if (!std::isfinite(radius)) g.valid = false;
+                    else g.radius = std::max(g.radius, radius);
+                }
+            }
+        }
+        for (auto& group : out.groups)
+            group.radius = std::sqrt(group.radius);
+        return out;
+    };
+    const Groups old = collect(a), now = collect(b);
+    auto compatible_view = [&](size_t old_root, size_t new_root) {
+        const auto& ma = a.models[old.roots[old_root].model];
+        const auto& mb = b.models[now.roots[new_root].model];
+        if (ma.viewport >= a.viewports.size() || mb.viewport >= b.viewports.size()) return false;
+        const auto& x = a.viewports[ma.viewport];
+        const auto& y = b.viewports[mb.viewport];
+        return x.priority == y.priority && x.x == y.x && x.y == y.y && x.width == y.width && x.height == y.height && x.left == y.left &&
+               x.right == y.right && x.top == y.top && x.bottom == y.bottom;
+    };
+    // Count distinct full poses rather than mesh parts at one pose. Three
+    // independent unchanged poses must agree on a unique root on both sides.
+    std::vector<std::unordered_map<PoseKey, bool, PoseKeyHash>> votes(old.roots.size() * now.roots.size());
+    for (const auto& [anchor, nr] : now.anchors) {
+        if (nr < 0 || !now.roots[size_t(nr)].valid) continue;
+        const auto found = old.anchors.find(anchor);
+        if (found == old.anchors.end() || found->second < 0) continue;
+        const size_t ar = size_t(found->second), br = size_t(nr);
+        if (!old.roots[ar].valid || !compatible_view(ar, br)) continue;
+        auto distinct = anchor;
+        distinct.address = 0;
+        votes[br * old.roots.size() + ar].emplace(distinct, true);
+    }
+    struct BestRoot {
+        int index = -1;
+        size_t first = 0, second = 0;
+    };
+    std::vector<BestRoot> old_best(old.roots.size()), new_best(now.roots.size());
+    auto vote = [](BestRoot& best, int index, size_t score) {
+        if (score > best.first) {
+            best.second = best.first;
+            best.first = score;
+            best.index = index;
+        } else best.second = std::max(best.second, score);
+    };
+    for (size_t br = 0; br < now.roots.size(); ++br)
+        for (size_t ar = 0; ar < old.roots.size(); ++ar) {
+            const size_t score = votes[br * old.roots.size() + ar].size();
+            vote(new_best[br], static_cast<int>(ar), score);
+            vote(old_best[ar], static_cast<int>(br), score);
+        }
+    auto decisive = [](const BestRoot& best) { return best.index >= 0 && best.first >= 3 && best.first > 2 * best.second; };
+    std::vector<int> root_pairs(now.roots.size(), -1);
+    std::vector<bool> root_reserved(old.roots.size(), false);
+    for (size_t br = 0; br < now.roots.size(); ++br) {
+        const auto& best = new_best[br];
+        if (!decisive(best)) continue;
+        const size_t ar = size_t(best.index);
+        if (old_best[ar].index != static_cast<int>(br) || !decisive(old_best[ar])) continue;
+        root_pairs[br] = best.index;
+        root_reserved[ar] = true;
+    }
+    for (size_t br = 0; br < now.roots.size(); ++br) {
+        if (root_pairs[br] >= 0 || !now.roots[br].valid) continue;
+        const auto& m = b.models[now.roots[br].model];
+        const auto found = old.by_root.find(root_key(m));
+        if (found == old.by_root.end()) continue;
+        const size_t ar = size_t(found->second);
+        // A recycled key must not steal a root already identified by anchors.
+        // Contradictory anchor evidence is uncertainty, not a tie to break.
+        if (root_reserved[ar] || !old.roots[ar].valid || !compatible_view(ar, br) || new_best[br].first >= 3 || old_best[ar].first >= 3)
+            continue;
+        root_pairs[br] = found->second;
+        root_reserved[ar] = true;
+    }
+    GroupMatches result{std::vector<int>(b.models.size(), -1), std::vector<int>(b.models.size(), -1),
+                        std::vector<bool>(b.models.size(), false), std::vector<bool>(a.models.size(), false)};
+    std::vector<int> pairs(now.groups.size(), -1);
+    std::vector<bool> reserved(old.groups.size(), false);
+    for (size_t i = 0; i < now.groups.size(); ++i) {
+        const auto& g = now.groups[i];
+        const auto& m = b.models[g.model];
+        const int ar = root_pairs[size_t(g.root)];
+        for (size_t member : g.members) {
+            result.handled[member] = true;
+            if (ar >= 0) result.root[member] = static_cast<int>(old.roots[size_t(ar)].model);
+        }
+        if (ar < 0) continue;
+        const auto exact = old.by_pose.find(pose(m, ar));
+        if (exact != old.by_pose.end() && exact->second >= 0 && now.by_pose.at(pose(m, g.root)) >= 0) {
+            pairs[i] = exact->second;
+            reserved[size_t(exact->second)] = true;
+        }
+    }
+    struct Nearest {
+        int index = -1;
+        double first = INFINITY, second = INFINITY;
+    };
+    std::vector<Nearest> from_new(now.groups.size()), from_old(old.groups.size());
+    auto consider = [](Nearest& n, int index, double distance) {
+        if (distance < n.first) {
+            n.second = n.first;
+            n.first = distance;
+            n.index = index;
+        } else n.second = std::min(n.second, distance);
+    };
+    auto distance_squared = [](const Real3dScene::Model& x, const Real3dScene::Model& y) {
+        double distance = 0;
+        for (size_t k = 12; k < 15; ++k) {
+            const double d = double(x.motion.local.m[k]) - y.motion.local.m[k];
+            distance += d * d;
+        }
+        return distance;
+    };
+    std::vector<std::vector<size_t>> root_candidates(old.roots.size());
+    for (size_t j = 0; j < old.groups.size(); ++j) {
+        const auto& ga = old.groups[j];
+        if (!reserved[j] && ga.valid) root_candidates[size_t(ga.root)].push_back(j);
+    }
+    for (size_t i = 0; i < now.groups.size(); ++i) {
+        const auto& gb = now.groups[i];
+        if (pairs[i] >= 0 || !gb.valid) continue;
+        const int ar = root_pairs[size_t(gb.root)];
+        if (ar < 0) continue;
+        const auto& mb = b.models[gb.model];
+        for (size_t j : root_candidates[size_t(ar)]) {
+            const auto& ga = old.groups[j];
+            const double distance = distance_squared(a.models[ga.model], mb);
+            consider(from_new[i], static_cast<int>(j), distance);
+            consider(from_old[j], static_cast<int>(i), distance);
+        }
+    }
+    auto separated = [](const Nearest& n) { return n.index >= 0 && n.second > 0 && n.first * 16 < n.second; };
+    auto path_conflicts = [&](const Groups& candidates, const Real3dScene& scene, const Group& query, const Real3dScene::Model& m,
+                              size_t chosen, int candidate_root) {
+        const auto path = candidates.by_path.find(uint64_t(candidate_root) << 32 | m.path);
+        if (path == candidates.by_path.end() || path->second < 0 || size_t(path->second) == chosen) return false;
+        const auto& other = candidates.groups[size_t(path->second)];
+        const double radius = std::min(query.radius, other.radius);
+        return other.valid && distance_squared(scene.models[other.model], m) <= radius * radius;
+    };
+    for (size_t i = 0; i < now.groups.size(); ++i) {
+        if (pairs[i] >= 0) continue;
+        const auto& n = from_new[i];
+        if (!separated(n)) continue;
+        const size_t j = size_t(n.index);
+        if (from_old[j].index != static_cast<int>(i) || !separated(from_old[j])) continue;
+        const auto& ga = old.groups[j];
+        const auto& gb = now.groups[i];
+        const auto& ma = a.models[ga.model];
+        const auto& mb = b.models[gb.model];
+        if (old.by_pose.at(pose(ma, ga.root)) < 0 || now.by_pose.at(pose(mb, gb.root)) < 0) continue;
+        if (path_conflicts(old, a, gb, mb, j, ga.root) || path_conflicts(now, b, ga, ma, i, gb.root)) continue;
+        const double radius = std::min(ga.radius, gb.radius);
+        if (!(radius > 0) || n.first > radius * radius) continue;
+        pairs[i] = n.index;
+    }
+    for (size_t i = 0; i < now.groups.size(); ++i)
+        if (pairs[i] >= 0) {
+            const auto& ga = old.groups[size_t(pairs[i])];
+            for (size_t member : now.groups[i].members)
+                result.previous[member] = static_cast<int>(ga.model);
+            for (size_t member : ga.members)
+                result.used_old[member] = true;
+        }
+    return result;
 }
 
 } // namespace
@@ -318,36 +560,15 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
     };
     if (a.block_culled || b.block_culled || a.models.empty() || b.models.empty()) return done(false);
 
-    // The older scene's models by their key, and by viewport and address.
-    // Hash collisions must not identify different models as the same instance.
-    std::unordered_map<ModelKey, int, ModelKeyHash> by_key; // -1: several
+    const auto grouped = group_matches(a, b);
+    std::unordered_map<ModelKey, int, ModelKeyHash> by_key;
     std::unordered_map<uint64_t, std::vector<int>> by_place;
-    std::unordered_map<PoseKey, int, PoseKeyHash> old_poses, new_poses; // -1: several
+    std::vector<bool> reserved = grouped.used_old;
     for (size_t i = 0; i < a.models.size(); ++i) {
-        const auto [it, added] = by_key.emplace(key(a.models[i]), static_cast<int>(i));
-        if (!added) it->second = -1;
+        if (reserved[i]) continue;
+        const auto [where, unique] = by_key.emplace(key(a.models[i]), static_cast<int>(i));
+        if (!unique) where->second = -1;
         by_place[place(a.models[i])].push_back(static_cast<int>(i));
-        if (has_pose(a.models[i])) {
-            const auto [pose, unique] = old_poses.emplace(pose_key(a.models[i]), static_cast<int>(i));
-            if (!unique) pose->second = -1;
-        }
-    }
-    for (size_t i = 0; i < b.models.size(); ++i) {
-        if (!has_pose(b.models[i])) continue;
-        const auto [pose, unique] = new_poses.emplace(pose_key(b.models[i]), static_cast<int>(i));
-        if (!unique) pose->second = -1;
-    }
-    // Reserve every unique unchanged pose before any path/nearest fallback,
-    // so another model cannot also consume its older instance. Do not rely
-    // on draw order: a recycled path may appear before the pose's true owner.
-    std::vector<int> pose_matches(b.models.size(), -1);
-    std::vector<bool> reserved(a.models.size(), false);
-    for (const auto& [pose, newer] : new_poses) {
-        if (newer < 0) continue;
-        const auto older = old_poses.find(pose);
-        if (older == old_poses.end() || older->second < 0) continue;
-        pose_matches[static_cast<size_t>(newer)] = older->second;
-        reserved[static_cast<size_t>(older->second)] = true;
     }
 
     struct Move {
@@ -362,7 +583,33 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
     for (size_t i = 0; i < b.models.size(); ++i) {
         const Real3dScene::Model& mb = b.models[i];
         const Vec3 model_tb = translation(mb.matrix);
-        int found = pose_matches[i];
+        if (grouped.handled[i] && grouped.previous[i] < 0) {
+            if (grouped.root[i] < 0) {
+                ++s.unmatched;
+                continue;
+            }
+            const auto& root_a = a.models[static_cast<size_t>(grouped.root[i])].motion.matrix;
+            Mat3 common_l{};
+            Vec3 common_t{};
+            bool common_spun = false;
+            Mat3 end_l{};
+            Vec3 end_t{};
+            bool end_spun = false;
+            bool safe = root_move(root_a, mb.motion.matrix, 0, end_l, end_t, end_spun);
+            Vec3 start = apply_linear(end_l, model_tb), delta{};
+            for (size_t k = 0; k < 3; ++k) {
+                start[k] += end_t[k];
+                delta[k] = model_tb[k] - start[k];
+            }
+            safe = safe && length(delta) <= kMaxMove * std::max(length(start), length(model_tb));
+            if (safe && root_move(root_a, mb.motion.matrix, t, common_l, common_t, common_spun)) {
+                moves.push_back({i, common_l, common_t, root_a.m == mb.motion.matrix.m});
+                ++s.followed;
+                ++s.unmatched;
+            } else ++s.moved;
+            continue;
+        }
+        int found = grouped.handled[i] ? grouped.previous[i] : -1;
         if (found < 0)
             if (const auto it = by_key.find(key(mb));
                 it != by_key.end() && it->second >= 0 && !reserved[static_cast<size_t>(it->second)]) found = it->second;
@@ -393,6 +640,7 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
             strays.push_back(i);
             continue;
         }
+        reserved[static_cast<size_t>(found)] = true;
         const Real3dScene::Model& ma = a.models[static_cast<size_t>(found)];
         // Cut detection is relative to the model's distance from the eye,
         // independent of where the shared root happens to place its origin.
@@ -405,7 +653,7 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
         // Both static and animated descendants follow the same root trajectory.
         // Local equality only skips an identity correction; it never selects a
         // different camera path. Locals were accumulated directly by the builder.
-        const bool shared_root = ma.motion.valid && mb.motion.valid && ma.motion.path == mb.motion.path;
+        const bool shared_root = grouped.handled[i] || (ma.motion.valid && mb.motion.valid && ma.motion.path == mb.motion.path);
         const bool same_local = !shared_root || ma.motion.local.m == mb.motion.local.m;
         const Mat4& matrix_a = shared_root ? ma.motion.matrix : ma.matrix;
         const Mat4& matrix_b = shared_root ? mb.motion.matrix : mb.matrix;

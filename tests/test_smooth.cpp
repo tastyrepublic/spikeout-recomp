@@ -192,16 +192,125 @@ TEST_CASE("smooth motion: stationary matches are reserved before animated path f
     }
 }
 
-TEST_CASE("smooth motion: duplicate local poses do not override distinct path animation") {
+TEST_CASE("smooth motion: coincident independent instances keep newer locals instead of trusting paths") {
     m3::Real3dScene before, after, expected, out;
     add_instance(before, transform(0, {1, 1, 1}), -2, 1);
     add_instance(before, transform(0, {1, 1, 1}), 2, 2);
     add_instance(after, transform(20, {1, 1, 1}), -2, 1);
     add_instance(after, transform(20, {1, 1, 1}), -2, 2);
     add_instance(expected, transform(10, {1, 1, 1}), -2, 1);
-    add_instance(expected, transform(10, {1, 1, 1}), 0, 2);
+    // Two coincident instances cannot establish which old instance each is.
+    add_instance(expected, transform(10, {1, 1, 1}), -2, 2);
     CHECK(m3::interpolate(before, after, 0.5f, out));
     CHECK(position_error(expected, out) < 1e-4f);
+}
+
+TEST_CASE("smooth motion: nearby crossing instances reject contradictory path and proximity cues") {
+    m3::Real3dScene before, after, expected, out;
+    add_instance(before, transform(0, {1, 1, 1}), -0.1f, 1);
+    add_instance(before, transform(0, {1, 1, 1}), 0.1f, 2);
+    add_instance(after, transform(20, {1, 1, 1}), 0.08f, 1);
+    add_instance(after, transform(20, {1, 1, 1}), -0.08f, 2);
+    // The closest predecessor would exchange their identities. With no
+    // decisive correspondence, keep each newer local pose under Root(t).
+    add_instance(expected, transform(10, {1, 1, 1}), 0.08f, 1);
+    add_instance(expected, transform(10, {1, 1, 1}), -0.08f, 2);
+    m3::InterpStats stats;
+    CHECK(m3::interpolate(before, after, 0.5f, out, &stats));
+    CHECK(position_error(expected, out) < 1e-4f);
+    CHECK(stats.unmatched == 2 && stats.followed == 2);
+}
+
+TEST_CASE("smooth motion: coincident predecessors splitting do not arbitrarily animate one child") {
+    m3::Real3dScene before, after, expected, out;
+    for (uint32_t path : {1u, 2u})
+        add_instance(before, transform(0, {1, 1, 1}), 0, path);
+    add_instance(after, transform(20, {1, 1, 1}), 0.05f, 1);
+    add_instance(after, transform(20, {1, 1, 1}), 0.3f, 2);
+    add_instance(expected, transform(10, {1, 1, 1}), 0.05f, 1);
+    add_instance(expected, transform(10, {1, 1, 1}), 0.3f, 2);
+    m3::InterpStats stats;
+    CHECK(m3::interpolate(before, after, 0.5f, out, &stats));
+    CHECK(position_error(expected, out) < 1e-4f);
+    CHECK(stats.unmatched == 2 && stats.followed == 2);
+}
+
+TEST_CASE("smooth motion: mesh-swapping movers match by separated motion rather than mesh or recycled path") {
+    for (float t : {0.0f, 0.25f, 0.479368f, 0.75f, 1.0f}) {
+        m3::Real3dScene before, after, expected, out;
+        add_instance(before, transform(0, {1, 1, 1}), -20, 1);
+        add_instance(before, transform(0, {1, 1, 1}), 20, 2);
+        before.models[0].address = 0x100;
+        before.models[1].address = 0x200;
+        add_instance(after, transform(20, {1, 1, 1}), -19.9f, 2);
+        add_instance(after, transform(20, {1, 1, 1}), 20.1f, 1);
+        after.models[0].address = 0x200;
+        after.models[1].address = 0x100;
+        add_instance(expected, transform(20 * t, {1, 1, 1}), -20 + 0.1f * t, 2);
+        add_instance(expected, transform(20 * t, {1, 1, 1}), 20 + 0.1f * t, 1);
+        CHECK(m3::interpolate(before, after, t, out));
+        CHECK(position_error(expected, out) < 1e-4f);
+    }
+}
+
+TEST_CASE("smooth motion: stationary anchor cohorts follow their root across viewport and node recycling") {
+    for (float t : {0.0f, 0.25f, 0.479368f, 0.75f, 1.0f}) {
+        m3::Real3dScene before, after, expected, out;
+        for (int k = 0; k < 4; ++k) {
+            const float x = float(k * 4 - 6);
+            add_instance(before, transform(0, {1, 1, 1}), x, uint32_t(k + 1));
+            add_instance(after, transform(20, {1, 1, 1}), x, uint32_t(10 - k));
+            add_instance(expected, transform(20 * t, {1, 1, 1}), x, uint32_t(10 - k));
+        }
+        before.viewports.resize(2);
+        after.viewports.resize(2);
+        for (auto& m : after.models) {
+            m.viewport = 1;
+            m.motion.path = 0x456;
+        }
+        // The new cohort's key was used by another root in the old scene.
+        // Its unchanged anchors, not the recycled key, establish the mapping.
+        for (int k = 0; k < 3; ++k) {
+            add_instance(before, transform(50, {1, 1, 1}), float(30 + k * 4), uint32_t(20 + k));
+            before.models.back().viewport = 1;
+            before.models.back().motion.path = 0x456;
+        }
+        CHECK(m3::interpolate(before, after, t, out));
+        CHECK(position_error(expected, out) < 1e-4f);
+    }
+}
+
+TEST_CASE("smooth motion: ambiguous roots and incompatible projections do not establish correspondence") {
+    for (int mode : {0, 1, 2, 3}) {
+        m3::Real3dScene before, after, out;
+        const int count = mode == 0 ? 2 : 4;
+        for (int k = 0; k < count; ++k) {
+            add_instance(before, transform(0, {1, 1, 1}), float(k * 4), uint32_t(k + 1));
+            add_instance(after, transform(20, {1, 1, 1}), float(k * 4), uint32_t(k + 5));
+            after.models.back().motion.path = 0x456;
+        }
+        if (mode == 1) {
+            // Duplicate every anchor under another old root: no unique vote.
+            for (int k = 0; k < count; ++k) {
+                add_instance(before, transform(50, {1, 1, 1}), float(k * 4), uint32_t(k + 10));
+                before.models.back().motion.path = 0x789;
+            }
+        }
+        if (mode == 2) after.viewports[0].right = 2; // projection changed
+        if (mode == 3) {
+            // Several mesh parts at one pose are one anchor, not several.
+            before = {}; after = {};
+            for (int k = 0; k < 4; ++k) {
+                add_instance(before, transform(0, {1, 1, 1}), 0, 1);
+                add_instance(after, transform(20, {1, 1, 1}), 0, 2);
+                before.models.back().address += uint32_t(k);
+                after.models.back().address += uint32_t(k);
+                after.models.back().motion.path = 0x456;
+            }
+        }
+        CHECK(!m3::interpolate(before, after, 0.5f, out));
+        CHECK(position_error(after, out) == 0);
+    }
 }
 
 TEST_CASE("smooth motion: static descendants share their moving root without opening seams") {
@@ -257,8 +366,15 @@ TEST_CASE("smooth motion: animated and billboard descendants retain their own mo
             after.models[0].motion.path += 1;
         }
         m3::Real3dScene out;
-        CHECK(m3::interpolate(before, after, 0.5f, out));
-        CHECK(position_error(triangle(transform(30, {1, 1, 1})), out) < 1e-4f);
+        if (mode == 2) {
+            // A changed root without enough anchors cannot establish which
+            // coordinate frame the equal local pose belongs to.
+            CHECK(!m3::interpolate(before, after, 0.5f, out));
+            CHECK(position_error(after, out) == 0);
+        } else {
+            CHECK(m3::interpolate(before, after, 0.5f, out));
+            CHECK(position_error(triangle(transform(30, {1, 1, 1})), out) < 1e-4f);
+        }
     }
 }
 
@@ -414,7 +530,7 @@ TEST_CASE("smooth motion: strays inherit shared root and collapsed identity move
         m3::Real3dScene out;
         m3::InterpStats stats;
         CHECK(m3::interpolate(before, after, 0.5f, out, &stats));
-        CHECK(stats.blended == 1 && stats.unmatched == 1 && stats.followed == 1 && !stats.cut);
+        CHECK(stats.blended == 2 && stats.unmatched == 0 && stats.followed == 0 && !stats.cut);
         for (size_t k = 0; k < 3; ++k) {
             CHECK(out.vertices[k].x == out.vertices[k + 3].x);
             CHECK(out.vertices[k].y == out.vertices[k + 3].y);
