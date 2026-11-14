@@ -18,8 +18,12 @@
 // plausible contradictory node-path match. This is bounded geometric evidence,
 // not persistent game identity; two-frame ambiguity cannot always be resolved.
 // Uncertain groups retain their newer local animation under a root supported
-// by decisive anchors or an actual matched group; followers alone cannot
-// establish continuity across a scene replacement. Otherwise they stay native.
+// by decisive anchors, shared-mesh matches or bounded local motion; cross-mesh
+// exact poses and followers cannot establish continuity by themselves. An
+// unmatched part may inherit a directly matched parent's move below the root,
+// or a deeper subtree's move if its matched descendants agree. Independent
+// root-level siblings and conflicting subtrees provide no attachment evidence.
+// Otherwise uncertain parts follow only the supported root, or stay native.
 // Models without valid root metadata retain the path/mesh fallback, reserving each predecessor.
 // Models below the same root
 // share that root's move, with their local animation blended separately,

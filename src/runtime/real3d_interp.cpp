@@ -473,6 +473,7 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
     GroupMatches result{std::vector<int>(b.models.size(), -1), std::vector<int>(b.models.size(), -1),
                         std::vector<bool>(b.models.size(), false), std::vector<bool>(a.models.size(), false)};
     std::vector<int> pairs(now.groups.size(), -1);
+    std::vector<bool> supports_root(now.groups.size(), false);
     std::vector<bool> reserved(old.groups.size(), false);
     auto shares_mesh = [&](const Group& ga, const Group& gb) {
         for (size_t prior : ga.members)
@@ -493,6 +494,7 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
         if (exact != old.by_pose.end() && exact->second >= 0 && now.by_pose.at(pose(m, g.root)) >= 0 &&
             shares_mesh(old.groups[size_t(exact->second)], g)) {
             pairs[i] = exact->second;
+            supports_root[i] = true;
             reserved[size_t(exact->second)] = true;
         }
     }
@@ -583,6 +585,7 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
     for (size_t i = 0; i < now.groups.size(); ++i)
         if (coherent[i]) {
             pairs[i] = proposed[i];
+            supports_root[i] = true;
             reserved[size_t(pairs[i])] = true;
         }
     // Mesh-swapping flipbooks can retain an exact pose, but must not steal
@@ -617,10 +620,11 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
         }
     }
     auto separated = [](const Nearest& n) { return n.index >= 0 && n.second > 0 && n.first * 16 < n.second; };
-    auto path_conflicts = [&](const Groups& candidates, const Real3dScene& scene, const Group& query, const Real3dScene::Model& m,
-                              size_t chosen, int candidate_root) {
+    auto path_conflicts = [&](Groups& candidates, const Real3dScene& scene, const Group& query, const Real3dScene::Model& m, size_t chosen,
+                              int candidate_root) {
         const auto path = candidates.by_path.find(uint64_t(candidate_root) << 32 | m.path);
         if (path == candidates.by_path.end() || path->second < 0 || size_t(path->second) == chosen) return false;
+        measure(candidates, size_t(path->second), scene);
         const auto& other = candidates.groups[size_t(path->second)];
         const double radius = std::min(query.radius, other.radius);
         return other.valid && distance_squared(scene.models[other.model], m) <= radius * radius;
@@ -640,10 +644,12 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
         const double radius = std::min(ga.radius, gb.radius);
         if (!(radius > 0) || n.first > radius * radius) continue;
         pairs[i] = n.index;
+        supports_root[i] = true;
     }
     for (size_t i = 0; i < now.groups.size(); ++i)
-        if (pairs[i] >= 0) {
-            root_supported[size_t(now.groups[i].root)] = true;
+        if (supports_root[i]) root_supported[size_t(now.groups[i].root)] = true;
+    for (size_t i = 0; i < now.groups.size(); ++i)
+        if (pairs[i] >= 0 && root_supported[size_t(now.groups[i].root)]) {
             const auto& ga = old.groups[size_t(pairs[i])];
             for (size_t member : now.groups[i].members)
                 result.previous[member] = static_cast<int>(ga.model);
@@ -651,7 +657,8 @@ GroupMatches group_matches(const Real3dScene& a, const Real3dScene& b) {
                 result.used_old[member] = true;
         }
     // A surviving slot alone does not establish continuity across a scene
-    // replacement. Root followers need anchors or an actual local match.
+    // replacement. Cross-mesh exact-pose matches alone are also insufficient:
+    // unrelated root-attached models can both have identity local transforms.
     for (const auto& g : now.groups)
         if (!root_supported[size_t(g.root)])
             for (size_t member : g.members)
@@ -801,6 +808,53 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
         }
         if (spun) ++s.spun;
         moves.push_back({i, l, offset});
+    }
+    // A changed mesh can still be attached to a moving parent below the
+    // motion root. Prefer a directly matched parent; otherwise require every
+    // directly matched descendant to agree. Root-level siblings are not
+    // attachment evidence, and followers never supply evidence to each other.
+    struct SubtreeMove {
+        size_t move;
+        bool coherent = true;
+    };
+    std::unordered_map<ModelKey, SubtreeMove, ModelKeyHash> subtree_moves, node_moves;
+    auto register_move = [&](auto& map, const ModelKey& node, size_t k) {
+        const auto [at, unique] = map.emplace(node, SubtreeMove{k});
+        if (!unique) {
+            const auto& other = moves[at->second.move];
+            if (other.l != moves[k].l || other.t != moves[k].t) at->second.coherent = false;
+        }
+    };
+    for (size_t k = 0; k < moves.size(); ++k) {
+        const auto& move = moves[k];
+        if (!grouped.handled[move.model] || grouped.previous[move.model] < 0) continue;
+        const auto& model = b.models[move.model];
+        register_move(node_moves, {model.viewport, model.motion.path, model.path}, k);
+        for (size_t level = 2; level < model.depth; ++level) {
+            const ModelKey node{model.viewport, model.motion.path, model.ancestors[level]};
+            register_move(subtree_moves, node, k);
+        }
+    }
+    for (auto& move : moves) {
+        if (!grouped.handled[move.model] || grouped.previous[move.model] >= 0) continue;
+        const auto& model = b.models[move.model];
+        for (int level = int(model.depth) - 1; level >= 2; --level) {
+            const ModelKey node{model.viewport, model.motion.path, model.ancestors[size_t(level)]};
+            const auto direct = node_moves.find(node);
+            const auto subtree = subtree_moves.find(node);
+            // A directly matched parent wins over independently animating
+            // descendants. Otherwise require agreement throughout the subtree.
+            const auto* found = direct != node_moves.end() ? &direct->second : subtree != subtree_moves.end() ? &subtree->second : nullptr;
+            if (!found) continue;
+            // A contradictory nearest subtree cannot borrow a more distant one.
+            if (found->coherent) {
+                const auto& relative = moves[found->move];
+                move.l = relative.l;
+                move.t = relative.t;
+                move.identity = relative.identity;
+            }
+            break;
+        }
     }
     s.blended = moves.size();
     if (s.blended * 2 < s.models) return done(false); // a cut: the newer scene as it is

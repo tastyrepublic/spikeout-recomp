@@ -288,6 +288,98 @@ TEST_CASE("smooth motion: a consumed plausible identity does not invent a differ
     CHECK(stats.followed == 1 && stats.unmatched == 1);
 }
 
+TEST_CASE("smooth motion: a cross-mesh exact pose cannot establish scene continuity alone") {
+    for (bool same_path : {false, true}) {
+        const auto local = m3::Mat4::identity();
+        auto before = rooted(transform(0, {1, 1, 1}), local);
+        auto after = rooted(transform(20, {1, 1, 1}), local);
+        after.models[0].address += 1;
+        after.models[0].path = same_path ? before.models[0].path : 10;
+        add_instance(before, transform(0, {1, 1, 1}), 20, 1);
+        add_instance(after, transform(20, {1, 1, 1}), 40, 2);
+        after.models[1].address += 2;
+        m3::Real3dScene out;
+        m3::InterpStats stats;
+        CHECK(!m3::interpolate(before, after, 0.5f, out, &stats));
+        CHECK(stats.cut && stats.blended == 0);
+        CHECK(position_error(after, out) == 0);
+    }
+}
+
+TEST_CASE("smooth motion: a mesh-swapped small child follows its matched local parent") {
+    auto car = [](float x, float angle, uint32_t mesh, bool attached, bool conflict, bool direct) {
+        m3::Real3dScene scene;
+        const auto root = transform(angle, {1, 1, 1});
+        add_instance(scene, root, x, 0x500);
+        scene.models[0].depth = 3;
+        scene.models[0].ancestors = {0xaa, 0x123, 0x500};
+        if (!direct) {
+            scene.models[0].path = 0x501;
+            scene.models[0].depth = 4;
+            scene.models[0].ancestors = {0xaa, 0x123, 0x500, 0x501};
+        }
+        add_instance(scene, root, x + 0.5f, 0x600);
+        auto& wheel = scene.models[1];
+        wheel.address = mesh;
+        wheel.depth = 4;
+        wheel.ancestors = {0xaa, 0x123, attached ? 0x500u : 0x700u, 0x600};
+        // Its size is much smaller than the parent's two-unit local step.
+        for (size_t k = 3; k < 6; ++k) {
+            auto& v = scene.vertices[k];
+            v.x = wheel.matrix.m[12] + (v.x - wheel.matrix.m[12]) * 0.05f;
+            v.y = wheel.matrix.m[13] + (v.y - wheel.matrix.m[13]) * 0.05f;
+            v.z = wheel.matrix.m[14] + (v.z - wheel.matrix.m[14]) * 0.05f;
+        }
+        if (conflict) {
+            add_instance(scene, root, 10, 0x800);
+            scene.models[2].address = 0x800;
+            scene.models[2].depth = 4;
+            scene.models[2].ancestors = {0xaa, 0x123, 0x500, 0x800};
+        }
+        return scene;
+    };
+    for (bool attached : {false, true})
+        for (bool conflict : {false, true})
+            for (bool direct : {false, true})
+                for (float angle : {0.0f, 20.0f})
+                    for (float t : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+                        const auto before = car(0, 0, 0x300, attached, conflict, direct);
+                        const auto after = car(2, angle, 0x400, attached, conflict, direct);
+                        auto expected = car(2 * t, angle * t, 0x400, attached, conflict, direct);
+                        if (!attached || (conflict && !direct)) {
+                            const auto held = car(2, angle * t, 0x400, attached, conflict, direct);
+                            std::copy_n(held.vertices.begin() + 3, 3, expected.vertices.begin() + 3);
+                        }
+                        m3::Real3dScene out;
+                        m3::InterpStats stats;
+                        CHECK(m3::interpolate(before, after, t, out, &stats));
+                        CHECK(position_error(expected, out) < 1e-4f);
+                        CHECK(stats.followed == 1 && stats.unmatched == 1);
+                    }
+}
+
+TEST_CASE("smooth motion: a reserved path owner vetoes a different spatial predecessor") {
+    for (bool extra_conflict : {false, true}) {
+        m3::Real3dScene before, after, expected, out;
+        add_instance(before, transform(0, {1, 1, 1}), 0, 1);
+        add_instance(before, transform(0, {1, 1, 1}), 0.3f, 2);
+        before.models[1].address = 0x300;
+        add_instance(after, transform(20, {1, 1, 1}), 0, 9);
+        add_instance(after, transform(20, {1, 1, 1}), 0.2f, 1);
+        after.models[1].address = 0x200;
+        add_instance(expected, transform(10, {1, 1, 1}), 0, 9);
+        add_instance(expected, transform(10, {1, 1, 1}), 0.2f, 1);
+        if (extra_conflict) {
+            // This unrelated stable-key conflict happens to measure the old
+            // reserved owner. It must not change the other group's result.
+            add_instance(after, transform(20, {1, 1, 1}), 2, 1);
+            add_instance(expected, transform(10, {1, 1, 1}), 2, 1);
+        }
+        CHECK(m3::interpolate(before, after, 0.5f, out));
+        CHECK(position_error(expected, out) < 1e-4f);
+    }
+}
+
 TEST_CASE("smooth motion: many independent roots use sparse anchor association") {
     m3::Real3dScene before, after, expected, out;
     for (uint32_t root = 0; root < 128; ++root)
@@ -666,6 +758,33 @@ TEST_CASE("smooth motion: moving x and y reflections exercise the affine path") 
             CHECK(position_error(triangle(transform(10 + 40 * t, scale, 0.3f)), out) < 1e-4f);
         }
     }
+}
+
+TEST_CASE("smooth motion: mixed root rotation and stretch preserve endpoints and bound midpoint error") {
+    auto root_at = [](float t, bool world_stretch) {
+        auto rotation = transform(10 + 20 * t, {1, 1, 1});
+        rotation.m[12] = rotation.m[13] = rotation.m[14] = 0;
+        auto stretch = m3::Mat4::identity();
+        stretch.m[0] = 1.1f + 0.1f * t;
+        stretch.m[5] = 0.9f + 0.2f * t;
+        stretch.m[10] = 1.2f - 0.1f * t;
+        stretch.m[4] = 0.1f + 0.1f * t;
+        auto root = world_stretch ? stretch * rotation : rotation * stretch;
+        root.m[12] = 3;
+        root.m[13] = 2;
+        root.m[14] = -20;
+        return root;
+    };
+    const auto local = m3::Mat4::identity();
+    for (bool world_stretch : {false, true})
+        for (float t : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+            m3::Real3dScene out;
+            CHECK(m3::interpolate(rooted(root_at(0, world_stretch), local), rooted(root_at(1, world_stretch), local), t, out));
+            const float error = position_error(rooted(root_at(t, world_stretch), local), out);
+            // The relative screw/stretch path is an approximation to both
+            // generating trajectories in between, but must preserve endpoints.
+            CHECK(error < ((t == 0 || t == 1) ? 1e-4f : 0.2f));
+        }
 }
 
 TEST_CASE("smooth motion: builder tracks root and local transforms across siblings and billboards") {

@@ -8,8 +8,9 @@ The matcher has two kinds of evidence. Unchanged mesh/pose cohorts associate
 roots when viewport slots are recycled. Within a paired root, stationary poses,
 bounded unique node/mesh pairs and separated reciprocal motion associate groups.
 Uncertain groups keep their newer local pose. They may follow a common root only
-when that root has decisive anchors or an actual accepted local correspondence.
-Followers alone cannot establish continuity across a scene replacement.
+when that root has decisive anchors, shared-mesh correspondence or bounded
+local motion. Cross-mesh exact poses and followers alone cannot establish
+continuity across a scene replacement.
 
 ## Source-audit regressions
 
@@ -31,10 +32,22 @@ checked-in tests now verify these cases against analytic midpoint positions:
   correspondence supports that root. A matched HUD cannot support a different
   world root.
 
+The subsequent audit of `a2e30ef` identified a moving-parent attachment loss,
+weak root-continuity evidence and an order-dependent path conflict check. Tests
+now cover mesh-swapped small children under matched local parents (including
+simultaneous root motion), coherent sibling subtrees, conflicting subtrees and
+independent root-level siblings. A directly matched parent takes priority over
+its independently animating descendants. Followers do not supply attachment
+evidence to each other. Replaced scenes with coincident identity-local models
+remain native, and reserved path owners are measured before conflict checks.
+
 Root-anchor votes use a sparse map rather than allocating the Cartesian product
-of roots. Geometry bounds are measured only for groups missing the first exact
-pose pass. Tests also cover 128 roots, root stretch/shear ground truth, handedness
-flips, nested local transforms and descendants of billboards.
+of roots. Geometry bounds are computed lazily for unresolved matches and key or
+path conflicts. Tests also cover 128 roots, root stretch/shear ground truth,
+handedness flips, nested local transforms and descendants of billboards. Mixed
+rotation and nonuniform stretch/shear preserve endpoints; their approximate
+intermediate path is bounded against two analytic trajectories (measured maximum
+error 0.183 units in those fixtures, not a universal bound).
 
 ## Private replay evidence and limits
 
