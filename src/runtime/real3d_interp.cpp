@@ -122,6 +122,72 @@ float turn_degrees(const std::array<float, 4>& a, const std::array<float, 4>& b)
 
 Mat3 linear(const Mat4& m) { return {column(m, 0), column(m, 1), column(m, 2)}; }
 
+// Interpolate a root's relative eye-space motion, independent of its model
+// origin. A rigid move follows its screw (rotation about a fixed axis plus
+// translation along it), so both a camera turning in place and an object
+// turning about a fixed point retain that point. Stretch/shear are blended
+// continuously on this same path; there is no rigid/non-rigid threshold.
+bool root_move(const Mat4& a, const Mat4& b, float t, Mat3& out_l, Vec3& out_t) {
+    using DVec = std::array<double, 3>;
+    using DMat = std::array<DVec, 3>;
+    auto dcross = [](const DVec& x, const DVec& y) -> DVec {
+        return {x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]};
+    };
+    DMat la{}, lb{}, inverse_b{}, delta{};
+    for (size_t c = 0; c < 3; ++c)
+        for (size_t r = 0; r < 3; ++r) {
+            la[c][r] = a.m[c * 4 + r];
+            lb[c][r] = b.m[c * 4 + r];
+        }
+    const DMat cofactors{dcross(lb[1], lb[2]), dcross(lb[2], lb[0]), dcross(lb[0], lb[1])};
+    const double det = lb[0][0] * cofactors[0][0] + lb[0][1] * cofactors[0][1] + lb[0][2] * cofactors[0][2];
+    if (!std::isfinite(det) || std::fabs(det) <= 1e-12) return false;
+    for (size_t c = 0; c < 3; ++c)
+        for (size_t r = 0; r < 3; ++r) inverse_b[c][r] = cofactors[r][c] / det;
+    Mat3 relative{};
+    for (size_t c = 0; c < 3; ++c)
+        for (size_t r = 0; r < 3; ++r) {
+            for (size_t k = 0; k < 3; ++k) delta[c][r] += la[k][r] * inverse_b[c][k];
+            relative[c][r] = static_cast<float>(delta[c][r]);
+        }
+    Parts parts{};
+    if (!decompose(relative, parts) || parts.mirrored) return false;
+    std::array<double, 4> q{};
+    double norm = 0;
+    for (size_t k = 0; k < 4; ++k) norm += double(parts.q[k]) * parts.q[k];
+    norm = std::sqrt(norm);
+    if (!(norm > 0) || !std::isfinite(norm)) return false;
+    for (size_t k = 0; k < 4; ++k) q[k] = parts.q[k] / norm * (parts.q[3] < 0 ? -1 : 1);
+    const double sine = std::hypot(q[0], q[1], q[2]), half = std::atan2(sine, q[3]);
+    if (2 * half * 57.29577951308232 > kMaxTurn) return false;
+    const double u = 1.0 - t;
+    const double ratio = sine > 0 ? std::sin(u * half) / sine : u;
+    std::array<float, 4> between{};
+    for (size_t k = 0; k < 3; ++k) between[k] = static_cast<float>(q[k] * ratio);
+    between[3] = static_cast<float>(std::cos(u * half));
+    Mat3 stretch{};
+    for (size_t c = 0; c < 3; ++c)
+        for (size_t r = 0; r < 3; ++r) {
+            const double identity = c == r ? 1 : 0;
+            stretch[c][r] = static_cast<float>(identity + u * (parts.stretch[c][r] - identity));
+        }
+    out_l = times(rotation(between), stretch);
+    DVec axis{}, shift{};
+    for (size_t r = 0; r < 3; ++r) {
+        axis[r] = sine > 0 ? q[r] / sine : 0;
+        // Keep this cancellation in double precision for distant root origins.
+        shift[r] = a.m[12 + r] - (delta[0][r] * b.m[12] + delta[1][r] * b.m[13] + delta[2][r] * b.m[14]);
+    }
+    const double along = axis[0] * shift[0] + axis[1] * shift[1] + axis[2] * shift[2];
+    const double co = ratio * std::cos((u - 1) * half), si = ratio * std::sin((u - 1) * half);
+    const DVec across = dcross(axis, shift);
+    for (size_t r = 0; r < 3; ++r) {
+        out_t[r] = static_cast<float>(co * shift[r] + (u - co) * along * axis[r] + si * across[r]);
+        if (!std::isfinite(out_t[r])) return false;
+    }
+    return true;
+}
+
 struct ModelKey {
     uint32_t viewport, address, path;
     bool operator==(const ModelKey&) const = default;
@@ -214,6 +280,13 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
                                  ma.motion.local.m == mb.motion.local.m;
         const Mat4& matrix_a = shared_root ? ma.motion.matrix : ma.matrix;
         const Mat4& matrix_b = shared_root ? mb.motion.matrix : mb.matrix;
+        if (matrix_a.m == matrix_b.m &&
+            std::all_of(matrix_b.m.begin(), matrix_b.m.end(), [](float value) { return std::isfinite(value); })) {
+            // No inverse is needed for an unchanged model, even if collapsed.
+            // Preserve its vertices exactly and let strays inherit that identity.
+            moves.push_back({i, {Vec3{1, 0, 0}, Vec3{0, 1, 0}, Vec3{0, 0, 1}}, {}, true});
+            continue;
+        }
         const Vec3 ta = translation(matrix_a), tb = translation(matrix_b);
         const Vec3 d{tb[0] - ta[0], tb[1] - ta[1], tb[2] - ta[2]};
         const Mat3 la = linear(matrix_a), lb = linear(matrix_b);
@@ -224,11 +297,11 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
             ++s.moved;
             continue;
         }
-        if (matrix_a.m == matrix_b.m) {
-            // Preserve stationary geometry exactly. Even a tiny round-trip
-            // error can change which of two coplanar surfaces wins the depth
-            // test, alternating between the original and interpolated picture.
-            moves.push_back({i, {Vec3{1, 0, 0}, Vec3{0, 1, 0}, Vec3{0, 0, 1}}, {}, true});
+        if (shared_root) {
+            Mat3 l{};
+            Vec3 offset{};
+            if (root_move(matrix_a, matrix_b, t, l, offset)) moves.push_back({i, l, offset});
+            else ++s.moved;
             continue;
         }
         // The matrix between: position and stretch straight, rotation the

@@ -81,6 +81,17 @@ TEST_CASE("smooth motion: a stationary sheared model does not change shape") {
     }
 }
 
+TEST_CASE("smooth motion: stationary collapsed models do not cause a scene cut") {
+    for (const auto scale : {std::array<float, 3>{0, 1, 1}, {1e-5f, 1e-5f, 1e-5f}}) {
+        const auto scene = triangle(transform(0, scale));
+        m3::Real3dScene out;
+        m3::InterpStats stats;
+        CHECK(m3::interpolate(scene, scene, 0.5f, out, &stats));
+        CHECK(stats.blended == 1 && stats.moved == 0 && !stats.cut);
+        CHECK(position_error(scene, out) == 0);
+    }
+}
+
 TEST_CASE("smooth motion: reflected rotating model preserves endpoints and halfway rotation") {
     const auto before = triangle(transform(10, {2, 3, -4}));
     const auto after = triangle(transform(50, {2, 3, -4}));
@@ -199,6 +210,59 @@ TEST_CASE("smooth motion: cut detection uses model distance regardless of the ro
             model_a.m[12] = 0.5f;
             CHECK(position_error(triangle(model_a), out) < 1e-4f);
         }
+    }
+}
+
+TEST_CASE("smooth motion: a turning camera is independent of a distant root origin") {
+    auto pose = [](float degrees, float z) {
+        auto m = transform(degrees, {1, 1, 1});
+        for (size_t row = 0; row < 3; ++row) m.m[12 + row] = m.m[8 + row] * z;
+        return m;
+    };
+    for (float distance : {20.0f, 5000.0f}) {
+        auto local = m3::Mat4::identity();
+        local.m[14] = distance - 10;
+        auto before = triangle(pose(0, -10));
+        auto after = triangle(pose(2, -10));
+        before.models[0].motion = {pose(0, -distance), local, 0x123, true};
+        after.models[0].motion = {pose(2, -distance), local, 0x123, true};
+        for (float t : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+            m3::Real3dScene out;
+            CHECK(m3::interpolate(before, after, t, out));
+            CHECK(position_error(triangle(pose(2 * t, -10)), out) < 5e-4f);
+        }
+    }
+}
+
+TEST_CASE("smooth motion: a shared rigid root retains its fixed pivot at small and large turns") {
+    for (float angle : {0.1f, 1.0f, 3.0f, 3.6f, 3.7f, 40.0f}) {
+        auto before = triangle(transform(0, {1, 1, 1}));
+        auto after = triangle(transform(angle, {1, 1, 1}));
+        before.models[0].motion = {before.models[0].matrix, m3::Mat4::identity(), 0x123, true};
+        after.models[0].motion = {after.models[0].matrix, m3::Mat4::identity(), 0x123, true};
+        for (float t : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+            m3::Real3dScene out;
+            CHECK(m3::interpolate(before, after, t, out));
+            CHECK(position_error(triangle(transform(angle * t, {1, 1, 1})), out) < 1e-4f);
+        }
+    }
+}
+
+TEST_CASE("smooth motion: near-rigid shared roots do not switch interpolation trajectories") {
+    auto before = triangle(transform(0, {1, 1, 1}));
+    before.models[0].motion = {before.models[0].matrix, m3::Mat4::identity(), 0x123, true};
+    m3::Real3dScene previous;
+    for (float epsilon : {0.0f, 8e-6f, 9e-6f, 10e-6f, 11e-6f, 12e-6f}) {
+        auto matrix = transform(40, {1 + epsilon, 1 + epsilon, 1 + epsilon});
+        matrix.m[12] = 4;
+        matrix.m[13] = 4;
+        matrix.m[14] = -15;
+        auto after = triangle(matrix);
+        after.models[0].motion = {matrix, m3::Mat4::identity(), 0x123, true};
+        m3::Real3dScene out;
+        CHECK(m3::interpolate(before, after, 0.5f, out));
+        if (!previous.vertices.empty()) CHECK(position_error(previous, out) < 1e-4f);
+        previous = out;
     }
 }
 

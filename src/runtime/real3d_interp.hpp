@@ -7,11 +7,14 @@
 // viewport and address: the same model reached through other nodes) and
 // drawn between where it was and where it is. Models whose local transform
 // below the same root is unchanged share that root's move, keeping scenery
-// surfaces together as the camera turns. Other models use their own matrix.
-// The selected matrix is blended (position and signed stretch/shear straight,
-// rotation along the shortest turn) and its polygons
-// moved by the blended matrix times the inverse of the newer one, which put
-// them where they are. Models not found (another model each frame: a
+// surfaces together as the camera turns. The root's relative eye-space move
+// follows its screw motion, with stretch/shear blended continuously, so its
+// choice of model origin does not shift the scenery during camera turns.
+// A root turning further than kMaxTurn is left at the newer pose. Other models
+// use their own matrix: position and signed stretch/shear straight, rotation
+// along the shortest turn. Their polygons move by the blended matrix times
+// the inverse of the newer one, which put them where they are.
+// Models not found (another model each frame: a
 // flipbook, a wheel's blur, a bird's wings) move as their nearest relative
 // found in the culling-node tree does (a wheel with its car, a bird with the
 // scenery); with none (below the viewport's node), and models that moved
