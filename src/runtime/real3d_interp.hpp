@@ -5,12 +5,14 @@
 // Each of the newer scene's models is found in the older one (by viewport,
 // polygon data address and culling-node path; else the nearest with the same
 // viewport and address: the same model reached through other nodes) and
-// drawn between where it was and where it is. Models whose local transform
-// below the same root is unchanged share that root's move, keeping scenery
-// surfaces together as the camera turns. The root's relative eye-space move
+// drawn between where it was and where it is. Models below the same root
+// share that root's move, with their local animation blended separately,
+// keeping scenery and animated parts together as the camera turns. The root's
+// relative eye-space move
 // follows its screw motion, with stretch/shear blended continuously, so its
 // choice of model origin does not shift the scenery during camera turns.
-// A root turning further than kMaxTurn is left at the newer pose. Other models
+// A root turning further than kMaxTurn keeps its newer rotation while its
+// position still blends. Other models
 // use their own matrix: position and signed stretch/shear straight, rotation
 // along the shortest turn. Their polygons move by the blended matrix times
 // the inverse of the newer one, which put them where they are.

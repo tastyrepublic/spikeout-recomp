@@ -20,11 +20,11 @@ float length(const Vec3& a) { return std::sqrt(dot(a, a)); }
 Vec3 cross(const Vec3& a, const Vec3& b) {
     return {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
 }
-Vec3 apply(const Mat3& l, const Vec3& v) {
+Vec3 apply_linear(const Mat3& l, const Vec3& v) {
     return {l[0][0] * v[0] + l[1][0] * v[1] + l[2][0] * v[2], l[0][1] * v[0] + l[1][1] * v[1] + l[2][1] * v[2],
             l[0][2] * v[0] + l[1][2] * v[1] + l[2][2] * v[2]};
 }
-Mat3 times(const Mat3& a, const Mat3& b) { return {apply(a, b[0]), apply(a, b[1]), apply(a, b[2])}; }
+Mat3 times(const Mat3& a, const Mat3& b) { return {apply_linear(a, b[0]), apply_linear(a, b[1]), apply_linear(a, b[2])}; }
 
 bool inverse(const Mat3& l, Mat3& out) {
     const Vec3 c0 = cross(l[1], l[2]), c1 = cross(l[2], l[0]), c2 = cross(l[0], l[1]);
@@ -122,12 +122,43 @@ float turn_degrees(const std::array<float, 4>& a, const std::array<float, 4>& b)
 
 Mat3 linear(const Mat4& m) { return {column(m, 0), column(m, 1), column(m, 2)}; }
 
+bool finite(const Mat4& m) {
+    return std::all_of(m.m.begin(), m.m.end(), [](float value) { return std::isfinite(value); });
+}
+
+// A model's own pose: position/stretch straight, rotation along the shortest
+// turn. For an ambiguous fast turn, retain the newer rotation but still move
+// its position, as for a spinning wheel travelling with its car.
+bool model_move(const Mat4& a, const Mat4& b, float t, Mat3& out_l, Vec3& out_t, bool& spun) {
+    if (!finite(a) || !finite(b)) return false;
+    if (a.m == b.m) {
+        out_l = {Vec3{1, 0, 0}, Vec3{0, 1, 0}, Vec3{0, 0, 1}};
+        out_t = {};
+        return true;
+    }
+    Parts pa{}, pb{};
+    Mat3 inverse_b{};
+    if (!decompose(linear(a), pa) || !decompose(linear(b), pb) ||
+        pa.mirrored != pb.mirrored || !inverse(linear(b), inverse_b)) return false;
+    spun = turn_degrees(pa.q, pb.q) > kMaxTurn;
+    Mat3 stretch{};
+    for (size_t c = 0; c < 3; ++c)
+        for (size_t r = 0; r < 3; ++r)
+            stretch[c][r] = pa.stretch[c][r] + (pb.stretch[c][r] - pa.stretch[c][r]) * t;
+    out_l = times(times(rotation(spun ? pb.q : slerp(pa.q, pb.q, t)), stretch), inverse_b);
+    const Vec3 ta = translation(a), tb = translation(b), moved_b = apply_linear(out_l, tb);
+    for (size_t r = 0; r < 3; ++r) out_t[r] = ta[r] + (tb[r] - ta[r]) * t - moved_b[r];
+    return true;
+}
+
 // Interpolate a root's relative eye-space motion, independent of its model
 // origin. A rigid move follows its screw (rotation about a fixed axis plus
 // translation along it), so both a camera turning in place and an object
 // turning about a fixed point retain that point. Stretch/shear are blended
 // continuously on this same path; there is no rigid/non-rigid threshold.
-bool root_move(const Mat4& a, const Mat4& b, float t, Mat3& out_l, Vec3& out_t) {
+bool root_move(const Mat4& a, const Mat4& b, float t, Mat3& out_l, Vec3& out_t, bool& spun) {
+    if (!finite(a) || !finite(b)) return false;
+    if (a.m == b.m) return model_move(a, b, t, out_l, out_t, spun);
     using DVec = std::array<double, 3>;
     using DMat = std::array<DVec, 3>;
     auto dcross = [](const DVec& x, const DVec& y) -> DVec {
@@ -159,7 +190,11 @@ bool root_move(const Mat4& a, const Mat4& b, float t, Mat3& out_l, Vec3& out_t) 
     if (!(norm > 0) || !std::isfinite(norm)) return false;
     for (size_t k = 0; k < 4; ++k) q[k] = parts.q[k] / norm * (parts.q[3] < 0 ? -1 : 1);
     const double sine = std::hypot(q[0], q[1], q[2]), half = std::atan2(sine, q[3]);
-    if (2 * half * 57.29577951308232 > kMaxTurn) return false;
+    if (2 * half * 57.29577951308232 > kMaxTurn) {
+        // Every descendant still receives the same move, including when the
+        // root is an ordinary fast-turning object rather than the camera.
+        return model_move(a, b, t, out_l, out_t, spun);
+    }
     const double u = 1.0 - t;
     const double ratio = sine > 0 ? std::sin(u * half) / sine : u;
     std::array<float, 4> between{};
@@ -185,6 +220,51 @@ bool root_move(const Mat4& a, const Mat4& b, float t, Mat3& out_l, Vec3& out_t) 
         out_t[r] = static_cast<float>(co * shift[r] + (u - co) * along * axis[r] + si * across[r]);
         if (!std::isfinite(out_t[r])) return false;
     }
+    return true;
+}
+
+// Compose Root(t) * Local(t) without changing the shared path when a local
+// joint starts/stops animating. The local correction is expressed in the newer
+// root's eye coordinates, then followed by the common root move. Use double
+// for the conjugation so a distant root origin does not amplify cancellation.
+bool add_local_move(const Mat4& root, const Mat3& local_l, const Vec3& local_t, Mat3& root_l, Vec3& root_t) {
+    using DVec = std::array<double, 3>;
+    using DMat = std::array<DVec, 3>;
+    DMat b{}, inv{}, eye{};
+    for (size_t c = 0; c < 3; ++c)
+        for (size_t r = 0; r < 3; ++r) b[c][r] = root.m[c * 4 + r];
+    auto dcross = [](const DVec& x, const DVec& y) -> DVec {
+        return {x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]};
+    };
+    const DMat cof{dcross(b[1], b[2]), dcross(b[2], b[0]), dcross(b[0], b[1])};
+    const double det = b[0][0] * cof[0][0] + b[0][1] * cof[0][1] + b[0][2] * cof[0][2];
+    if (!std::isfinite(det) || std::fabs(det) <= 1e-12) return false;
+    for (size_t c = 0; c < 3; ++c)
+        for (size_t r = 0; r < 3; ++r) inv[c][r] = cof[r][c] / det;
+    for (size_t c = 0; c < 3; ++c)
+        for (size_t r = 0; r < 3; ++r)
+            for (size_t j = 0; j < 3; ++j)
+                for (size_t k = 0; k < 3; ++k) eye[c][r] += b[j][r] * local_l[k][j] * inv[c][k];
+    DVec offset{};
+    for (size_t r = 0; r < 3; ++r)
+        for (size_t k = 0; k < 3; ++k)
+            offset[r] += b[k][r] * local_t[k] + ((k == r ? 1.0 : 0.0) - eye[k][r]) * root.m[12 + k];
+    Mat3 composed{};
+    Vec3 shifted{};
+    for (size_t r = 0; r < 3; ++r) {
+        double shift = root_t[r];
+        for (size_t k = 0; k < 3; ++k) shift += root_l[k][r] * offset[k];
+        shifted[r] = static_cast<float>(shift);
+        if (!std::isfinite(shifted[r])) return false;
+        for (size_t c = 0; c < 3; ++c) {
+            double value = 0;
+            for (size_t k = 0; k < 3; ++k) value += root_l[k][r] * eye[c][k];
+            composed[c][r] = static_cast<float>(value);
+            if (!std::isfinite(composed[c][r])) return false;
+        }
+    }
+    root_l = composed;
+    root_t = shifted;
     return true;
 }
 
@@ -272,53 +352,45 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
             ++s.moved;
             continue;
         }
-        // Static descendants of a moving root (including the stage camera)
-        // share its move exactly. Different per-model pivots otherwise follow
-        // different chords during a turn, separating coplanar surfaces. The
-        // local matrices were accumulated directly, not recovered by inversion.
-        const bool shared_root = ma.motion.valid && mb.motion.valid && ma.motion.path == mb.motion.path &&
-                                 ma.motion.local.m == mb.motion.local.m;
+        // Both static and animated descendants follow the same root trajectory.
+        // Local equality only skips an identity correction; it never selects a
+        // different camera path. Locals were accumulated directly by the builder.
+        const bool shared_root = ma.motion.valid && mb.motion.valid && ma.motion.path == mb.motion.path;
+        const bool same_local = !shared_root || ma.motion.local.m == mb.motion.local.m;
         const Mat4& matrix_a = shared_root ? ma.motion.matrix : ma.matrix;
         const Mat4& matrix_b = shared_root ? mb.motion.matrix : mb.matrix;
-        if (matrix_a.m == matrix_b.m &&
-            std::all_of(matrix_b.m.begin(), matrix_b.m.end(), [](float value) { return std::isfinite(value); })) {
+        if (same_local && matrix_a.m == matrix_b.m && finite(matrix_b) &&
+            (!shared_root || finite(mb.motion.local))) {
             // No inverse is needed for an unchanged model, even if collapsed.
             // Preserve its vertices exactly and let strays inherit that identity.
             moves.push_back({i, {Vec3{1, 0, 0}, Vec3{0, 1, 0}, Vec3{0, 0, 1}}, {}, true});
             continue;
         }
-        const Vec3 ta = translation(matrix_a), tb = translation(matrix_b);
-        const Vec3 d{tb[0] - ta[0], tb[1] - ta[1], tb[2] - ta[2]};
-        const Mat3 la = linear(matrix_a), lb = linear(matrix_b);
-        Parts pa{}, pb{};
-        Mat3 lb_inverse{};
-        if (!decompose(la, pa) || !decompose(lb, pb) ||
-            pa.mirrored != pb.mirrored || !inverse(lb, lb_inverse)) {
+        Mat3 l{};
+        Vec3 offset{};
+        bool spun = false;
+        if (shared_root) {
+            if (!root_move(matrix_a, matrix_b, t, l, offset, spun)) {
+                ++s.moved;
+                continue;
+            }
+            if (!same_local) {
+                Mat3 local_l{};
+                Vec3 local_t{};
+                bool local_spun = false;
+                if (!model_move(ma.motion.local, mb.motion.local, t, local_l, local_t, local_spun) ||
+                    !add_local_move(matrix_b, local_l, local_t, l, offset)) {
+                    ++s.moved;
+                    continue;
+                }
+                spun = spun || local_spun;
+            }
+        } else if (!model_move(matrix_a, matrix_b, t, l, offset, spun)) {
             ++s.moved;
             continue;
         }
-        if (shared_root) {
-            Mat3 l{};
-            Vec3 offset{};
-            if (root_move(matrix_a, matrix_b, t, l, offset)) moves.push_back({i, l, offset});
-            else ++s.moved;
-            continue;
-        }
-        // The matrix between: position and stretch straight, rotation the
-        // shortest turn. Turned too far to tell which way (a wheel spinning):
-        // the newer rotation, moved with the rest (else it'd lag its car).
-        const bool spun = turn_degrees(pa.q, pb.q) > kMaxTurn;
         if (spun) ++s.spun;
-        Mat3 stretch{};
-        for (size_t c = 0; c < 3; ++c)
-            for (size_t row = 0; row < 3; ++row)
-                stretch[c][row] = pa.stretch[c][row] + (pb.stretch[c][row] - pa.stretch[c][row]) * t;
-        const Mat3 lt = times(rotation(spun ? pb.q : slerp(pa.q, pb.q, t)), stretch);
-        const Vec3 tt{ta[0] + d[0] * t, ta[1] + d[1] * t, ta[2] + d[2] * t};
-        // Its polygons, there in the newer scene, moved by (between) x (newer)^-1.
-        const Mat3 l = times(lt, lb_inverse);
-        const Vec3 lb_t = apply(l, tb);
-        moves.push_back({i, l, {tt[0] - lb_t[0], tt[1] - lb_t[1], tt[2] - lb_t[2]}});
+        moves.push_back({i, l, offset});
     }
     s.blended = moves.size();
     if (s.blended * 2 < s.models) return done(false); // a cut: the newer scene as it is
@@ -355,7 +427,7 @@ bool interpolate(const Real3dScene& a, const Real3dScene& b, float t, Real3dScen
             const Real3dScene::Polygon& poly = out.polygons[p];
             for (uint32_t k = 0; k < poly.vertex_count; ++k) {
                 Real3dScene::Vertex& v = out.vertices[poly.first_vertex + k];
-                const Vec3 pos = apply(move.l, {v.x, v.y, v.z}), n = apply(move.l, {v.nx, v.ny, v.nz});
+                const Vec3 pos = apply_linear(move.l, {v.x, v.y, v.z}), n = apply_linear(move.l, {v.nx, v.ny, v.nz});
                 v.x = pos[0] + move.t[0];
                 v.y = pos[1] + move.t[1];
                 v.z = pos[2] + move.t[2];

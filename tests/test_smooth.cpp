@@ -5,6 +5,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <limits>
 
 namespace {
 
@@ -53,6 +54,12 @@ float position_error(const m3::Real3dScene& a, const m3::Real3dScene& b) {
         error = std::max({error, std::fabs(x.nx - y.nx), std::fabs(x.ny - y.ny), std::fabs(x.nz - y.nz)});
     }
     return error;
+}
+
+m3::Real3dScene rooted(const m3::Mat4& root, const m3::Mat4& local) {
+    auto scene = triangle(root * local);
+    scene.models[0].motion = {root, local, 0x123, true};
+    return scene;
 }
 
 } // namespace
@@ -169,7 +176,7 @@ TEST_CASE("smooth motion: static descendants share their moving root without ope
 TEST_CASE("smooth motion: animated and billboard descendants retain their own motion") {
     auto before = triangle(transform(10, {1, 1, 1}));
     auto after = triangle(transform(50, {1, 1, 1}));
-    const auto root = transform(0, {1, 1, 1});
+    const auto root = m3::Mat4::identity();
     before.models[0].motion = {root, before.models[0].matrix, 0x123, true};
     after.models[0].motion = {root, after.models[0].matrix, 0x123, true};
     for (int mode = 0; mode < 3; ++mode) {
@@ -263,6 +270,118 @@ TEST_CASE("smooth motion: near-rigid shared roots do not switch interpolation tr
         CHECK(m3::interpolate(before, after, 0.5f, out));
         if (!previous.vertices.empty()) CHECK(position_error(previous, out) < 1e-4f);
         previous = out;
+    }
+}
+
+TEST_CASE("smooth motion: fast-turning roots retain position blending") {
+    auto root_a = transform(0, {1, 1, 1});
+    auto root_b = transform(150, {1, 1, 1});
+    root_b.m[12] += 2;
+    const auto local = m3::Mat4::identity();
+    auto expected = root_b;
+    expected.m[12] -= 1;
+    m3::Real3dScene out;
+    m3::InterpStats stats;
+    CHECK(m3::interpolate(rooted(root_a, local), rooted(root_b, local), 0.5f, out, &stats));
+    CHECK(stats.spun == 1 && stats.moved == 0 && !stats.cut);
+    CHECK(position_error(rooted(expected, local), out) < 1e-4f);
+}
+
+TEST_CASE("smooth motion: a tiny local animation does not switch the root trajectory") {
+    auto local = m3::Mat4::identity();
+    local.m[14] = -20;
+    auto changed = local;
+    changed.m[14] = std::nextafter(local.m[14], 0.0f);
+    for (float angle : {1.0f, 10.0f, 20.0f}) {
+        const auto before = rooted(transform(0, {1, 1, 1}), local);
+        for (float t : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+            m3::Real3dScene stationary, animated;
+            CHECK(m3::interpolate(before, rooted(transform(angle, {1, 1, 1}), local), t, stationary));
+            CHECK(m3::interpolate(before, rooted(transform(angle, {1, 1, 1}), changed), t, animated));
+            auto between = local;
+            between.m[14] += t * (changed.m[14] - local.m[14]);
+            CHECK(position_error(stationary, animated) < 1e-4f);
+            CHECK(position_error(rooted(transform(angle * t, {1, 1, 1}), between), animated) < 1e-4f);
+        }
+    }
+}
+
+TEST_CASE("smooth motion: local joints animate under a turning reflected root") {
+    for (const auto scale : {std::array<float, 3>{1, 1, 1}, {-1, 1, 1}}) {
+      for (float angle : {30.0f, 150.0f}) {
+        auto local_a = transform(0, {1, 1, 1}), local_b = transform(angle, {1, 1, 1});
+        local_b.m[12] += 2;
+        const auto before = rooted(transform(0, scale), local_a);
+        const auto after = rooted(transform(20, scale), local_b);
+        for (float t : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+            auto local = transform(angle > m3::kMaxTurn ? angle : angle * t, {1, 1, 1});
+            local.m[12] += 2 * t;
+            m3::Real3dScene out;
+            CHECK(m3::interpolate(before, after, t, out));
+            CHECK(position_error(rooted(transform(20 * t, scale), local), out) < 1e-4f);
+        }
+      }
+    }
+}
+
+TEST_CASE("smooth motion: strays inherit shared root and collapsed identity moves") {
+    for (bool stationary : {false, true}) {
+        const std::array<float, 3> scale{stationary ? 0.0f : 1.0f, 1, 1};
+        const auto local = m3::Mat4::identity();
+        auto before = rooted(transform(0, scale), local);
+        auto after = rooted(transform(stationary ? 0.0f : 20.0f, scale), local);
+        after.models[0].depth = 2;
+        after.models[0].ancestors[1] = 0xabc;
+        auto stray = after.models[0];
+        stray.address += 1;
+        stray.first_polygon = 1;
+        after.models.push_back(stray);
+        auto polygon = after.polygons[0];
+        polygon.first_vertex = 3;
+        after.polygons.push_back(polygon);
+        const auto vertices = after.vertices;
+        after.vertices.insert(after.vertices.end(), vertices.begin(), vertices.end());
+        m3::Real3dScene out;
+        m3::InterpStats stats;
+        CHECK(m3::interpolate(before, after, 0.5f, out, &stats));
+        CHECK(stats.blended == 1 && stats.unmatched == 1 && stats.followed == 1 && !stats.cut);
+        for (size_t k = 0; k < 3; ++k) {
+            CHECK(out.vertices[k].x == out.vertices[k + 3].x);
+            CHECK(out.vertices[k].y == out.vertices[k + 3].y);
+            CHECK(out.vertices[k].z == out.vertices[k + 3].z);
+        }
+        if (stationary) CHECK(position_error(after, out) == 0);
+    }
+}
+
+TEST_CASE("smooth motion: root screw follows an offset axis and axial translation") {
+    auto pose = [](float angle, float rise) {
+        auto matrix = transform(angle, {1, 1, 1});
+        const std::array<float, 3> pivot{10, 5, -7}, displacement{-7, -3, -13};
+        for (size_t r = 0; r < 3; ++r) {
+            matrix.m[12 + r] = pivot[r] + (r == 1 ? rise : 0);
+            for (size_t c = 0; c < 3; ++c) matrix.m[12 + r] += matrix.m[c * 4 + r] * displacement[c];
+        }
+        return matrix;
+    };
+    const auto local = m3::Mat4::identity();
+    for (float t : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+        m3::Real3dScene out;
+        CHECK(m3::interpolate(rooted(pose(0, 0), local), rooted(pose(20, 4), local), t, out));
+        CHECK(position_error(rooted(pose(20 * t, 4 * t), local), out) < 1e-4f);
+    }
+}
+
+TEST_CASE("smooth motion: invalid moving roots conservatively retain the newer scene") {
+    const auto local = m3::Mat4::identity();
+    const auto before = rooted(transform(0, {1, 1, 1}), local);
+    for (float scale : {0.0f, std::numeric_limits<float>::infinity()}) {
+        auto root = transform(10, {scale, 1, 1});
+        auto after = rooted(root, local);
+        m3::Real3dScene out;
+        m3::InterpStats stats;
+        CHECK(!m3::interpolate(before, after, 0.5f, out, &stats));
+        CHECK(stats.cut && stats.blended == 0 && stats.moved == 1);
     }
 }
 
