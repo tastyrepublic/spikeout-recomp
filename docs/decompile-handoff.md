@@ -33,7 +33,7 @@ one of those functions **byte for byte**.
 | report and findings | `docs/compiler-id.md` (this branch) |
 | compiler build scripts | `tools/old-gcc/build.sh`, `build-snapshot.sh`, `compare.sh`, `gcc-2.7.2.3-sega.patch` |
 | **private work folder** (the C, the game's RAM image, scripts) | `Z:\Emu\spikeout-private\cblock` (WSL: `/mnt/z/Emu/spikeout-private/cblock`); its `README.txt` and `PRIVATE.txt` |
-| built compilers, assembler, sources | WSL `~/oldgcc` (`build-snap970101-s/cc1` is the one to use; `tools/bin/powerpc-eabi-*`; `src/`, `dl/`) |
+| built compilers, assembler, sources | WSL `~/oldgcc` (`build-snap970101-v/cc1` is the one to use; `tools/bin/powerpc-eabi-*`; `src/`, `dl/`) |
 | the ROMs | `Z:\Emu\spikeout-recomp\build\roms\spikeofe` (main checkout; never through a junction you might delete) |
 
 WSL commands are run from PowerShell as `wsl -e bash /mnt/z/.../script.sh`
@@ -44,9 +44,9 @@ script file and run that).
 
 1. `bash tools/old-gcc/build.sh` (binutils 2.42, GCC 2.7.2.3 stock and
    patched; 32-bit host libraries unpacked without root).
-2. `bash tools/old-gcc/build-snapshot.sh 1997-01-01` (GCC's development tree
+2. `VENDOR=1 bash tools/old-gcc/build-snapshot.sh 1997-01-01` (GCC's development tree
    of 1 January 1997 from GNU's archive, with SEGA's frame changes) gives
-   `~/oldgcc/build-snap970101-s/cc1`.
+   `~/oldgcc/build-snap970101-v/cc1` (without VENDOR=1: `-s`, the public tree).
 3. The game's RAM image: `romcheck build\roms\spikeofe --dump-crom crom.bin`
    (main checkout's build), then the 1 MB at offset 0x600000 of that file is
    RAM 0-0xFFFFF: put it in the private folder as `ram.bin`.
@@ -71,10 +71,16 @@ the game does, and 14 fewer usable registers make the loop optimiser keep
 exactly the game's constants in its loops; see `docs/compiler-id.md`).
 `match.sh` uses exactly this by default (`CC1` and `OPTS` can override it).
 
-Not exactly any public day of GCC: one loop (0x791CC) matches only the
-2.7.2.3 release's loop optimiser, and a few functions stay a line or two off
-with every compiler tried (see "Open questions"). Likely a Cygnus release
-cut from that line with small changes of its own.
+Not exactly any public day of GCC: three small vendor changes are needed
+too (`combine_givs` from 2.7.2.3, a loop counter replaceable by a derived
+value with a constant offset, and 16-byte-aligned spill slots;
+`docs/compiler-id.md`). Build that
+compiler with `VENDOR=1 bash tools/old-gcc/build-snapshot.sh 1997-01-01`: it
+gives `~/oldgcc/build-snap970101-v/cc1`, which `match.sh` uses by default
+(checked: rebuilt from scratch, every function gives the same as the
+compiler it was found with). Likely a Cygnus release cut from that line with
+small changes of its own; a few functions still stay a line or two off on
+instruction order (see "Open questions").
 
 ## The workflow (private folder)
 
@@ -119,8 +125,44 @@ starts.
 
 ### What made functions match (the original's style)
 
-- Loops often step a **byte offset** (`off += 4`, compared against `n*4`)
-  and use integer addresses: `*(unsigned int *)(i + base)`.
+- With the `-v` compiler, plain index loops (`for (i = 0; i <= 80; i++)
+  a[i] = ...`) give the game's stepped byte offsets; several older files still
+  use the byte-offset form that was needed before, which also matches. A
+  second loop over the same array may use its own counter variable (0x79134).
+- The menu screens are `for (;;) { switch (menu(...)) { ... } }`, not
+  `goto` loops (the optimiser only moves values out of real loops: 0x7BC0C).
+- Values computed into variables first (`s = k % 32; w = k / 32;`, 0x79FEC;
+  `err = 0;` after the call, not at the declaration) and stores through a
+  stepping pointer (`*p++ = ...`, 0x7DC90) show in the order and registers.
+- A constant passed through a variable (`n = 3` declared, then
+  `f(..., n)`) is moved out of a loop into a register; a literal is not
+  (0x79698).
+- A small buffer's size shows in the frame: 0x7A474's check buffer is 2 words.
+- The JTAG bit routine 0x79C30 takes `unsigned char` arguments: callers
+  declared it `unsigned int f_79c30(unsigned char, unsigned char)`, which is
+  why 0x79DF4 computes the bit in r0 and copies it to r3.
+- An `if (...) f(x, A); else f(x, B);` compiles to one shared call (GCC merges
+  the identical tails) and is what 0x7DC90 had, not `f(x, c ? A : B)`.
+- A repeated constant was sometimes a variable (`k = 0x800000;` before the
+  loop in 0x7DC90); that changes which register it gets.
+- Return types matter to the scheduler: it boosts an instruction that sets a
+  register set only once, and a call whose value is used sets `r3` again.
+  0x79880 and the function it calls both return nothing (`void`).
+- A parameter copied into a local first (`unsigned int *p = p0;` in 0x79698)
+  changes the order of the copies at the start.
+- 0x7A8BC's second ID test is `((buf[6] >> 5) | (buf[7] << 27)) & 0x0fffffff`
+  (the same style as its first), and its third set-up copy has no
+  `d_7201f8 = 196`.
+- To see why the scheduler ordered two instructions, `sd.sh ADDR` prints its
+  dump (ready lists and priorities; `7f000001` is the boost).
+- 2026-11-15: 0x7BD14's unused "Walk 1's"/"Walk 0's" assignments were each
+  wrapped as `do { msg = "..."; } while (0);` (a macro, most likely): the
+  extra loop notes stop CSE following the path out of the check loop, which
+  is why the game recomputes one address there and its twin 0x7C1E8 does not.
+- 0x7D740: all four passes test `bit < top2 >> 1`, with `top2 = top;` once
+  after `top` is computed.
+- 0x7DC90's last loop is `for (i = 0; i < 16; i++)` with `i * 2 + 3` written
+  for the row in each call (with the vendor rule above, the row replaces `i`).
 - Sizes from macros: `(end - start) / 4`.
 - Arrays of 8 bytes or less are placed on the stack late (in order of first
   use), larger ones in declaration order: the frame layout tells you the
@@ -149,68 +191,35 @@ starts.
   - the report's text structure was `struct line s[2]` (16 bytes) in 7c6d8
     and 7cce8 (the frame is 16 bytes bigger than with one), one in 7bd14/7c1e8.
 
-## Status (2026-11-13): 39 of 57 match (3,219 of 5,809 instructions)
+## Status (2026-11-15): all 57 match (5,809 of 5,809 instructions)
 
-Match byte for byte: 78488 785ac 786b8 788dc 78af8 78bf4 78fd8 79048 790c8
-79240 79260 792c0 79344 7937c 79438 79568 7958c 795b0 7979c 797e8 79834
-798bc 798f8 7991c 79944 79974 799b0 799ec 79a28 79a38 79f44 7a194 7a2fc
-7a56c 7af98 7b534 7c1e8 7cce8 7df08. (New on 2026-11-13: 79438 by the cr6/cr7
-reservation, 7b534 by the FPR reservation, 7c1e8 by the source forms above,
-7cce8 written and matched.)
+Every function of the C block compiles byte for byte to the game's code with
+`~/oldgcc/build-snap970101-v/cc1` (built by `VENDOR=1
+tools/old-gcc/build-snapshot.sh 1997-01-01`) and the options above; `all.sh`
+says `matched 57 of 57`.
 
-Written, not yet matching (differing lines in the side-by-side diff; what's
-left):
-
-| function | size | diff | what's left |
-|---|---|---|---|
-| 78b24 | 52 | 2 | one `li r0,0` placed before instead of after an address load (loop counter init order) |
-| 791cc | 29 | 2 | same `li` placement; matches with the 2.7.2.3 release's loop optimiser (`build-2.7.2.3s6`) |
-| 79880 | 15 | 2 | order of two argument moves; matches with `-fno-schedule-insns`, which breaks others |
-| 79c30 | 17 | 2 | which register gets `ori 0x40` (operand order of an OR; `b \|= 0x40`, reordered ORs and brackets tried) |
-| 7bd14 | 309 | 2 | one argument: the game recomputes the address `d_72003c` (`addi r5,r22,60`) for the call that starts the walking-0's part, ours reuses the copy in r27 (CSE follows the path out of the check loop); its twin 7c1e8 does reuse it in the game, so the source differs there somehow (tried: `continue` forms, `while`/`do` loops, `goto`, a block around the call, `result = f_79a38(...)`) |
-| 7a098 | 63 | 12 | register choice (a/d swapped) and compare operand order |
-| 7a474 | 62 | 14 | layout/register details |
-| 79df4 | 84 | 19 | `bit` computed per branch then moved; `last` computed first (done) |
-| 79698 | 65 | 27 | a hoisted constant 3 in a register; register numbering |
-| 79fec | 43 | 27 | register allocation of the result/`err` and indices |
-| 79134 | 38 | 30 | two loops: the value/offset forms (try byte-offset forms) |
-| 7bc0c | 66 | 34 | which values GCC moves out of the menu loop |
-| 79c74 | 96 | 53 | branch-free `?:` selection (`neg`/`srawi` mask) not produced |
-| 7c6d8 | 388 | 103 | the depth-buffer test; structure, frame and registers right; only `d_720084`'s high half: ours moves it out of the whole function (its copy hoisted out of the nested row/column loop joins the other three loops' copies and their combined lifetime makes the move worthwhile), the game keeps it in each single loop |
-| 7a8bc | 439 | 106 | first 147 instructions exact; the second copy of the set-up macro is scheduled differently in the game (so only its tail merges); ours merges fully |
-| 7dc90 | 158 | 107 | layout now right; register numbering (which value gets r21/r22...) |
-| 7b6f4 | 326 | 314 | prologue exact; spills (game spills 4 more values, frame 560 vs ours) |
-| 7d740 | 340 | 357 | twin of 7b6f4 (walk 1's/0's address test), same spill difference |
-
-All 57 are written now.
+The last ones and what made them match (2026-11-13 to 15): 79438 by the
+cr6/cr7 reservation; 7b534 by the FPR reservation; 78b24, 791cc and 79134 by
+the loop-optimiser changes with index loops; 7b6f4 and 7a8bc by the
+spill-slot change; 7dc90 by the vendor's counter-replacement rule (constant
+offsets, not pointer ones); 7c1e8, 7c6d8, 7cce8, 7bc0c, 79fec, 7a474, 79c30,
+79df4, 79698, 79880, 7bd14, 7d740, 7a098 and 79c74 by source forms (see the
+style notes above). Two of the last were macros: 0x7A098's scan call and
+0x7BD14's unused message assignments were each inside `do { ... } while (0)`.
+0x79C74's mask was built in two steps (`m = mask[w] >> s;` then the data bit,
+then `m = (m & 1) ? 0xffffffff : 0;`).
 
 ## Open questions (compiler)
 
-Several near misses look like scheduling or allocation decisions rather
-than C: 78b24/791cc (`li` placement), 79880 (argument move order), 7a8bc
-(the two copies' order). Ideas not yet tried:
+None left for the C block. Not exactly any public day of GCC: the January
+1997 tree (1 Dec 1996 and 1 Feb 1997 give the same) with SEGA's frame changes
+and the vendor's loop and spill-slot changes, most likely a Cygnus release
+cut from that line.
 
-- the development tree on other days between 1 Nov 1996 and 1 Mar 1997
-  (only the 1st of each month was tried; all equal so far);
-- the 2.7.2.3 release's `loop.c` inside the January tree (one loop matches
-  only 2.7.2.3);
-- `-mcpu=603e`-era scheduling descriptions;
-- Cygnus releases of early 1997, if their sources can be found (GPL: they
-  were distributed with source).
+## Next steps
 
-When a function is stuck a line or two off whatever the C, suspect the
-compiler first: a fix there helped many functions at once (r12/r14/r15,
-the CR save, the frame rounding).
-
-## Next steps, in order
-
-1. The 2-line near misses (78b24, 791cc, 79880, 79c30, 7bd14): source forms
-   first, then the compiler ideas above. Then 7c6d8 (103 lines, one hoisting
-   decision; `ld2.sh` shows it).
-2. Re-test the older near misses with the new reservations in mind: a
-   function "a few constants hoisted differently" is now often a source form
-   (one variable per loop, statement order inside the loop).
-3. The register-allocation ones (7b6f4, 7d740, 7dc90, 7a8bc): try
-   declaration orders, variable types and which values are named.
-4. Keep `docs/compiler-id.md`'s "Next steps" progress line up to date; commit
-   only that and generic tools, on this branch, when the owner asks.
+1. The C block is done. If the decompile goes on, the next part is the
+   hand-written 95%: a re-assemblable disassembly (`docs/compiler-id.md`,
+   "Next steps"), kept private like the C.
+2. Commit only the docs and generic tools, on this branch, when the owner
+   asks.

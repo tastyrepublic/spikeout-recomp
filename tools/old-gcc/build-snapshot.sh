@@ -8,7 +8,7 @@
 #
 # Run tools/old-gcc/build.sh first (it makes WORKDIR/gcc32, the assembler and
 # the GCC 2.7.2.3 sources this borrows its generated files from). Gives
-# WORKDIR/build-snapDATE-s/cc1. Options: -O2 -mcpu=603 -mno-traceback -fno-exceptions
+# WORKDIR/build-snapDATE-s/cc1 (VENDOR=1: build-snapDATE-v, see below). Options: see docs/compiler-id.md
 #
 # The repository has no generated files (configure, the C parser), so they come
 # from GCC 2.7.2.3; the trees of late 1996 and early 1997 still use its
@@ -60,6 +60,29 @@ sed -i '/mfcr %s/s/reg_names\[12\]/reg_names[2]/
 sed -i 's/ALIGN (current_function_outgoing_args_size, 8)/ALIGN (current_function_outgoing_args_size, 16)/' "$C/rs6000.c" "$C/rs6000.h"
 sed -i 's/^#define ABI_STACK_BOUNDARY ((TARGET_EABI) ? 64 : 128)/#define ABI_STACK_BOUNDARY 128/' "$C/sysv4.h"
 
+# With VENDOR=1, the loop optimiser's two differences found in Spikeout's code
+# (docs/compiler-id.md): combine_givs as in GCC 2.7.2.3 (the newer tree re-prices
+# a combined induction variable that is used once), and a loop counter may be
+# replaced in the loop test by a derived value with a constant integer offset
+# (the public trees accept only symbol or pointer offsets; this one takes
+# constant offsets and not pointer ones); plus 16-byte spill slots, below. Output: build-DATE-v.
+SUF=s
+if [ "${VENDOR:-0}" = 1 ]; then
+    SUF=v
+    perl -e 'local $/; open F, $ARGV[0] or die; my $old = <F>; open G, $ARGV[1] or die; my $new = <G>;
+        my $re = qr/\nstatic void\ncombine_givs \(bl\).*?\n}\n/s;
+        my ($o) = $old =~ /($re)/; my ($n) = $new =~ /($re)/; die "combine_givs not found\n" unless $o && $n;
+        $new =~ s/\Q$n\E/$o/;
+        $new =~ s/(if \(CONSTANT_P \(v->mult_val\) && INTVAL \(v->mult_val\) > 0\n\t\t&& \()(GET_CODE \(v->add_val\) == SYMBOL_REF)/$1GET_CODE (v->add_val) == CONST_INT || $2/ or die "biv test not found\n";
+        # (in that same test, a giv offset by a pointer register is not taken)
+        $new =~ s/(GET_CODE \(v->add_val\) == CONST_INT \|\| GET_CODE \(v->add_val\) == SYMBOL_REF\n\t\t    \|\| GET_CODE \(v->add_val\) == LABEL_REF\n\t\t    \|\| GET_CODE \(v->add_val\) == CONST)\n\t\t    \|\| \(GET_CODE \(v->add_val\) == REG\n\t\t\t&& REGNO_POINTER_FLAG \(REGNO \(v->add_val\)\)\)\)/$1)/ or die "biv pointer test not found\n";
+        open H, ">", $ARGV[1] or die; print H $new;' "$G/loop.c" "$S/loop.c"
+    # and the stack slots reload gives to spilled values are 16-byte aligned (as
+    # the frames are): the two assign_stack_local calls in reload1.c's alter_reg.
+    perl -0pi -e 's/(x = assign_stack_local \(GET_MODE \(regno_reg_rtx\[i\]\), )total_size, -1\)/${1}((total_size + 15) & ~15), 128)/ or die "spill slot 1 not found\n";
+        s/(x = assign_stack_local \(mode, )total_size, -1\)/${1}((total_size + 15) & ~15), 128)/ or die "spill slot 2 not found\n"' "$S/reload1.c"
+fi
+
 # build cc1 in the tree (these makefiles expect it)
 touch "$S/c-parse.y"; sleep 1; touch "$S/c-parse.c" "$S/c-parse.h" "$S/bi-parser.c" "$S/bi-parser.h"
 cd "$S"
@@ -72,5 +95,5 @@ for i in 1 2 3 4 5 6; do
     f=$(find config -name "$(basename "$m")" | head -1)
     if [ -n "$f" ]; then ln -sf "$S/$f" "$m"; else touch "$m"; fi
 done
-mkdir -p "$W/build-$N-s"; cp cc1 "$W/build-$N-s/cc1"
-ls -l "$W/build-$N-s/cc1"
+mkdir -p "$W/build-$N-$SUF"; cp cc1 "$W/build-$N-$SUF/cc1"
+ls -l "$W/build-$N-$SUF/cc1"

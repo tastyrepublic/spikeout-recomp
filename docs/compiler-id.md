@@ -22,7 +22,7 @@ winter 1996-97 (between the 2.7.2 release and the 2.8 work of spring 1997),
 with `-O2 -mcpu=603 -mno-traceback`, changed in a few small places to follow
 SEGA's house rules for stack frames.** GCC's own development tree as it stood
 on any day from November 1996 to March 1997, rebuilt with SEGA's changes,
-gives 39 of the 57 functions **byte for byte** (see "The test compiles"
+gives all 57 functions **byte for byte** (see "The test compiles"
 below); the tree of April 1997 already differs. Cygnus sold releases cut from
 that line at the time, and SEGA's Saturn GCC came from Cygnus, so a Cygnus
 release of early 1997 is the likely origin; that part is unproven.
@@ -184,7 +184,7 @@ What the C block's habits say (GCC fingerprints):
 | candidate | for | against |
 |---|---|---|
 | **Hand-written assembly** (game code) | everything in 2 and 4: r2 as scratch, stack-passed `printf`, conditional calls, shared tails, mixed styles, a save routine no compiler uses | none found |
-| **GCC development tree, Nov 1996-Mar 1997** (C block) | proved: 39 functions byte for byte with SEGA's frame changes and some registers reserved; GCC's compare sequences, register order, frame layout; SEGA used Cygnus' GCC for the Saturn | needs changes no option gives (a modified build); a few functions still differ by an instruction or two |
+| **GCC development tree, Nov 1996-Mar 1997** (C block) | proved: all 57 functions byte for byte with SEGA's frame changes, some registers reserved and three small vendor changes; GCC's compare sequences, register order, frame layout; SEGA used Cygnus' GCC for the Saturn | needs changes no option gives (a modified build); every function matches |
 | GCC 2.7.2.3 release | the same in most functions (28 with SEGA's changes and three back-ported pieces) | lacks pieces the game has (603 timing and multiply costs, branch-free `?:`); one loop matches only it |
 | GCC 2.8.1, egcs 1.0, egcs 1.0.3a, the tree of April 1997 on | the same code in small functions | copy zero arguments register to register where the game loads them again (from April 1997; `reload_cse_regs`, July 1997, adds more): ruled out |
 | GCC 2.95.3 | GCC | different registers, cr0 instead of cr1: ruled out |
@@ -266,6 +266,42 @@ leave alone and proved by what they change:
 
 `match.sh` (private) uses all of these by default.
 
+Two differences in the loop optimiser, found the same day and applied by
+`VENDOR=1 tools/old-gcc/build-snapshot.sh` (output `build-snapDATE-v`):
+
+- **`combine_givs` as in the 2.7.2.3 release.** The development tree re-prices
+  a derived loop value that is used only once when it merges it with another;
+  with the release's version, a loop that indexes an array by `i` gets a
+  stepped byte offset exactly as the game does. This is what made 0x791CC match
+  only with the 2.7.2.3 release's loop optimiser (the whole `loop.c` of the
+  release in the January tree gives the same; this one function is the part
+  that matters).
+- **A loop counter may be replaced in the loop's test by a value derived from
+  it with a constant integer offset** (`i * 4`, `i * 2 + 3`). Every public tree
+  checked (Aug 1996 to GCC 2.8.1) allows this only when the offset is an
+  address. The game's loops test the derived value (`off <= 320` where the C
+  counts `i <= 80`), which only this change produces. In the same test the
+  vendor's compiler does not take a value offset by a pointer register:
+  0x7DC90's row loop tests the screen row (`i * 2 + 3`), not the array
+  pointer the public rule would pick (found 2026-11-15).
+
+With both, three more functions match in their natural form (plain `for (i
+= 0; ...; i++)` loops over arrays) and no function gets worse. Both look like
+the kind of small vendor change a Cygnus release cut from this line would
+carry. Tried and ruled out the same way: the 2.7.2.3 release's instruction
+scheduler (no change), its 603 scheduling tables (much worse), and its cost
+of an add in the loop optimiser (no change).
+
+A third vendor change, also in `VENDOR=1`: **the stack slots of spilled
+values are 16-byte aligned** (the two `assign_stack_local` calls in reload's
+`alter_reg`; not the routine itself, which would also pad 0x7A8BC's frame), in keeping with
+SEGA's 16-byte frames. The game's two largest test functions keep spilled
+values 16 bytes apart; with this change 0x7B6F4 (326 instructions) matches
+and its twin improves, and no matching function changes. Making the
+compiler's largest alignment 16 everywhere instead (`BIGGEST_ALIGNMENT`)
+also gives 16-byte spill slots but breaks a matching function, so the
+change is only in the spill slots.
+
 **Comparing.** `tools/old-gcc/compare.sh` compiles a C file, links it at the
 function's real address (with the addresses of what it calls and uses) and
 compares every byte with the function's bytes, cut from the RAM image
@@ -294,11 +330,10 @@ way is what made the loops match.
 
 ## Next steps
 
-- Progress on 2026-11-13: 39 of the 57 functions match byte for byte (3,219
-  instructions, including ones of 316, 359 and 662); the other 18 (2,590) are
-  all written and close (one of 309 instructions is two lines off). The C is
-  kept privately. (2026-11-12: 35, 2,053 instructions, 3 not written.)
-- Write the rest until `compare.sh` says MATCH.
+- Done on 2026-11-15: all 57 functions match byte for byte (5,809 of 5,809
+  instructions), with the compiler built by `VENDOR=1
+  tools/old-gcc/build-snapshot.sh 1997-01-01`. The C is kept privately. The C is kept
+  privately. (2026-11-12: 35, 2,053 instructions, 3 not written.)
 - For the hand-written 95%: no compiler is involved. Make `codemap`'s
   disassembly re-assemblable (labels instead of addresses, data kept as
   data) and check that GNU `as` gives back the same 1 MB, byte for byte.
