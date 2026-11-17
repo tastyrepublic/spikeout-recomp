@@ -1,9 +1,12 @@
 #include "analysis/control_flow.hpp"
 
 #include "ppc/instruction.hpp"
+#include "runtime/test_move.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
+#include <cstdlib>
 #include <optional>
 #include <set>
 #include <tuple>
@@ -880,8 +883,27 @@ Analysis analyze(const CodeImage& image, std::span<const Entry> entries, const O
         return seg && std::find(options.pointer_segments.begin(), options.pointer_segments.end(), seg->name) !=
                           options.pointer_segments.end();
     };
+    // Test aid (docs/reasm.md): SPIKEOUT_TEST_PROGRAM_POINTERS=FILE. A run of the original program writes the
+    // functions its pointer scan found there; a run of a moved copy (SPIKEOUT_TEST_PROGRAM_MOVE) takes those,
+    // moved, in place of its own scan. Data words that only look like pointers stay where they were in a moved
+    // copy, so its own scan would start (or miss) functions elsewhere, and the blocks, and with them the cycles
+    // counted, would differ from the original's.
+    const char* pointers_file = options.scan_pointers ? std::getenv("SPIKEOUT_TEST_PROGRAM_POINTERS") : nullptr;
+    if (pointers_file && !*pointers_file) pointers_file = nullptr;
+    const bool pointers_given = pointers_file && m3::test_move::move().bytes != 0;
+    if (pointers_given) {
+        std::FILE* f = std::fopen(pointers_file, "r");
+        unsigned v = 0;
+        int n = 0;
+        while (f && std::fscanf(f, "%x", &v) == 1) {
+            const uint32_t addr = m3::test_move::moved(v);
+            if (known.insert(addr).second) all.push_back({addr, EntryKind::Pointer, ""}), ++n;
+        }
+        if (f) std::fclose(f);
+        std::fprintf(stderr, "SPIKEOUT_TEST_PROGRAM_POINTERS: %d functions from %s, moved\n", n, pointers_file);
+    }
     std::vector<uint32_t> data_words;
-    if (options.scan_pointers) {
+    if (options.scan_pointers && !pointers_given) {
         for (const Segment& seg : image.segments()) {
             if (!scanned(seg.base)) continue;
             for (uint64_t addr = seg.base; addr + 4 <= seg.end(); addr += 4) {
@@ -898,7 +920,7 @@ Analysis analyze(const CodeImage& image, std::span<const Entry> entries, const O
         a = analyzer.run(all);
         bool changed = false;
         for (const JumpTable& t : a.jump_tables) changed |= table_starts.insert(t.table).second;
-        if (options.scan_pointers) {
+        if (options.scan_pointers && !pointers_given) {
             auto consider = [&](uint32_t value, bool stored) {
                 if (known.contains(value) || a.functions.contains(value) || !scanned(value)) return;
                 // A pointer stored in data, or a constant the code builds and
@@ -918,6 +940,13 @@ Analysis analyze(const CodeImage& image, std::span<const Entry> entries, const O
             for (uint32_t value : analyzer.constants()) consider(value, true);
         }
         if (!changed) break;
+    }
+    if (pointers_file && !pointers_given) {
+        if (std::FILE* f = std::fopen(pointers_file, "w")) {
+            for (const Entry& e : all)
+                if (e.kind == EntryKind::Pointer) std::fprintf(f, "%08x\n", e.addr);
+            std::fclose(f);
+        }
     }
     return a;
 }

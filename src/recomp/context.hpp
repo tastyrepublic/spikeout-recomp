@@ -269,6 +269,12 @@ public:
     // its own epilogue and branches to handlers that end in blr), so carry on
     // there, as the CPU would, until execution comes back to `next`.
     bool follow_return(uint32_t next);
+    // Whether an outer call waits for this return address (follow_return's test; for test aids).
+    bool outer_waits_for(uint32_t addr) const {
+        for (size_t i = std::min(return_depth_, return_stack_.size()); i-- > 0;)
+            if (return_stack_[i] == addr) return true;
+        return false;
+    }
 
     // The return addresses outer calls wait for (generated code pushes one
     // around each call), so follow_return can tell a return to an outer

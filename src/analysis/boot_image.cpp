@@ -2,6 +2,7 @@
 
 #include "ppc/instruction.hpp"
 #include "runtime/memory_map.hpp"
+#include "runtime/test_move.hpp"
 
 #include <array>
 #include <string>
@@ -64,7 +65,7 @@ BootImage make_boot_image(const m3::GameSpec& game, const m3::RomSet& set) {
         boot.image.add(name, copy.dst, std::move(bytes));
         if (copy.dst == 0) add_vectors(boot.image, 0, "ram_", boot.entries);
     }
-    for (uint32_t addr : game.code_entries) boot.entries.push_back({addr, EntryKind::Seed, ""});
+    for (uint32_t addr : game.code_entries) boot.entries.push_back({m3::test_move::moved(addr), EntryKind::Seed, ""});
     return boot;
 }
 

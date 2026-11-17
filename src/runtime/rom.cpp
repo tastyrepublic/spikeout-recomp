@@ -7,7 +7,10 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdio>
+#include <cstdlib>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <stdexcept>
@@ -273,6 +276,28 @@ RomSet load_rom_set(const GameSpec& game, const std::filesystem::path& dir) {
     set.program_word_order = detect_program_word_order(set.region(RomRegionId::Crom));
     apply_word_order(set.region(RomRegionId::Crom), set.program_word_order);
     apply_word_order(set.region(RomRegionId::BankedCrom), set.program_word_order);
+
+    // Test hook: SPIKEOUT_TEST_PROGRAM=FILE@ADDR puts FILE's bytes into the
+    // fixed program ROM at CPU address ADDR (e.g. a rebuilt copy of the
+    // program the boot code copies to RAM, at 0xFFE00000). For testing
+    // rebuilt programs (docs/reasm.md); never set in normal use.
+    if (const char* spec = std::getenv("SPIKEOUT_TEST_PROGRAM"); spec && *spec) {
+        const std::string s(spec);
+        const size_t at = s.rfind('@');
+        if (at == std::string::npos)
+            throw std::runtime_error("SPIKEOUT_TEST_PROGRAM: expected FILE@ADDR");
+        const uint32_t addr = static_cast<uint32_t>(std::strtoul(s.c_str() + at + 1, nullptr, 0));
+        std::ifstream in(s.substr(0, at), std::ios::binary);
+        const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        auto& crom = set.region(RomRegionId::Crom);
+        if (!in.good() && !in.eof())
+            throw std::runtime_error("SPIKEOUT_TEST_PROGRAM: cannot read " + s.substr(0, at));
+        if (addr < kFixedCromBase || addr - kFixedCromBase + bytes.size() > crom.size())
+            throw std::runtime_error("SPIKEOUT_TEST_PROGRAM: outside the fixed program ROM");
+        std::copy(bytes.begin(), bytes.end(), crom.begin() + (addr - kFixedCromBase));
+        std::fprintf(stderr, "SPIKEOUT_TEST_PROGRAM: %zu bytes from %s at %08x\n", bytes.size(),
+                     s.substr(0, at).c_str(), addr);
+    }
     return set;
 }
 

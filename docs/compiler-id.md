@@ -334,10 +334,10 @@ way is what made the loops match.
   instructions), with the compiler built by `VENDOR=1
   tools/old-gcc/build-snapshot.sh 1997-01-01`. The C is kept privately. The C is kept
   privately. (2026-11-12: 35, 2,053 instructions, 3 not written.)
-- For the hand-written 95%: no compiler is involved. Make `codemap`'s
-  disassembly re-assemblable (labels instead of addresses, data kept as
-  data) and check that GNU `as` gives back the same 1 MB, byte for byte.
-  That too stays private.
+- For the hand-written 95%: done as far as byte-identity goes (2026-11-15):
+  `tools/reasm/` makes a re-assemblable disassembly that GNU `as` turns back
+  into the same 1 MB (`docs/reasm.md`). Next: prove it movable. Private, like
+  the C.
 
 ## Sources
 

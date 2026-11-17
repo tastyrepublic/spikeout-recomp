@@ -37,6 +37,7 @@
 #include "games/spikeofe_hooks.hpp"
 
 #include "recomp/context.hpp"
+#include "runtime/test_move.hpp"
 #include "runtime/tile_sides.hpp"
 
 #include <algorithm>
@@ -186,7 +187,7 @@ void fill(recomp::Context& c) {
     const int32_t y = offset >= 0 ? offset / row_bytes : -((-offset + row_bytes - 1) / row_bytes);
     const int32_t x = (offset - y * row_bytes) / 2;
     const bool left = x == 0, right = x + w >= TileSides::kScreen;
-    if (c.cpu.lr == kCreditsSetUp) c.bus.tile_sides().begin_credits();
+    if (m3::test_move::original(c.cpu.lr) == kCreditsSetUp) c.bus.tile_sides().begin_credits();
     if (!left && !right) return;
     for (int32_t row = y; row < y + h && row < rows; ++row) {
         if (left) c.bus.tile_sides().fill_edge(layer, row, false);
