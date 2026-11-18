@@ -238,6 +238,23 @@ def main():
         i = (a - base) // 4
         return seen[i] if 0 <= i < len(seen) else 0
 
+    # (primary opcodes the game's code uses; data rarely decodes as 16 of them in a row: colours and script words
+    # start 0x00, 0x01, 0x02)
+    INSN_OPS = {7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23, 24, 25, 26, 27, 28, 29, 31} | set(range(32, 56)) | {59, 63}
+
+    def texty(w):                                      # four bytes of text (or a string's end)
+        return all(b == 0 or 0x20 <= b < 0x7F or b in (9, 10) for b in w.to_bytes(4, "big"))
+
+    def mid_dead_code(v):                              # a value built by lis + addi landing inside code never run
+        if v % 4 or not (base + 32 <= v < end - 32) or v in entries:  # (not in the code map: 0xC000, 0xE900,
+            return False                               # 0xFF00): instructions all round it (no text, no fill, none
+        ws = [word(a) for a in range(v - 32, v + 32, 4)]  # read as data by a run) and the word before it doesn't end
+        if (any(w >> 26 not in INSN_OPS for w in ws) or any(texty(x) and texty(y) for x, y in zip(ws, ws[1:])) or len(set(ws)) < 8  # (v is no
+                or any(how(a) & 15 for a in range(v - 32, v + 32, 4))):  # function's start): an angle, a count, not
+            return False                               # an address
+        p = word(v - 4)
+        return not (p == 0x4E800020 or (p >> 26 == 18 and not p & 1) or p == 0x4C000064)
+
     prev = None
     for a in sorted(code):
         if a in raw or not (base <= a < end):
@@ -280,6 +297,8 @@ def main():
             elif v & ~3 in code and v not in entries and not how(lis_a) & 64:
                 pass                                   # inside code but on no function or label (0x9EF6, an offset
                                                        # 0x1CFA0 added to a RAM base): a pointer to code is to an entry
+            elif op == 14 and mid_dead_code(v) and not how(lis_a) & 96:
+                pass                                   # inside code never run, on no function's start: a number
             elif round_number(v) and not how(lis_a) & 64:
                 pass                                   # 0x8000 (half a turn, a count) on a function's start: a number
             elif how(lis_a) & 8 and not how(lis_a) & 96:
@@ -433,6 +452,15 @@ def main():
             h = how(a)
             if round_number(w) and not h & 64:         # (the scripts' flag masks 0x8000 ... read near addresses: the
                 continue                               # address marks on them came from a value lookup)
+            if (w and w % 0x10000 == 0 and base + 4 <= w < end and not (
+                    word(w - 4) == 0x4E800020 or (word(w - 4) >> 26 == 18 and not word(w - 4) & 1) or word(w - 4) == 0x4C000064)):
+                continue                               # 0x10000, 0x20000 ... (script flags set by actions 0x19/0x1A): no
+                                                       # function starts there (the word before ends none); the code
+                                                       # map's entries there came from these very words
+            if w in fn_names and any(base <= n < end and word(n) & 3 and 0 < abs(word(n) - w) < 0x40
+                                     for n in (a - 8, a - 4, a + 4, a + 8)):
+                continue                               # a table of numbers (sound ids 0x9A00, 0x9A04 beside 0x9A07,
+                                                       # 0x9A12): a neighbour close by on no word is no address
             if h & 96 and base <= w < end:             # seen used as an address
                 ptr[a] = fn_names.get(w) or name_for(w)
                 continue
@@ -464,7 +492,8 @@ def main():
         return all(not (x in code and x not in raw) for x in (a & ~3, (a + 3) & ~3))
 
     optr = {}
-    todo = [a for a in sorted(odd_seen) if a & 3 and is_data(a) and u32(a) is not None and base + 0x100 <= u32(a) < end]
+    todo = [a for a in sorted(odd_seen) if a & 3 and is_data(a) and u32(a) is not None and base + 0x100 <= u32(a) < end
+            and u32(a) % 0x10000]                    # (0x10000 in a packed table: a number, as above)
     for a in todo:
         optr[a] = None
     while todo:
@@ -472,6 +501,8 @@ def main():
         for n in (a - 4, a + 4):
             v = u32(n)
             if n in optr or v is None or not is_data(n) or not (base + 0x1000 <= v < end) or abs(v - u32(a)) >= 0x10000:
+                continue
+            if v % 0x10000 == 0:                       # (0x40000 beside a packed table's pointer: a number, see above)
                 continue
             optr[n] = None
             todo.append(n)

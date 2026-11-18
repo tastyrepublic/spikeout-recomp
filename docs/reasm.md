@@ -249,6 +249,85 @@ up to frame 90, every interrupt request comes in the same order and every
 DMA is the same, but there the DMA interrupt (bit 0x100) comes 80 cycles
 later in the copy: open, next to look at (when the DMA's end is noticed).
 
+## All six moves the same (2026-11-18)
+
+The 80 cycles were not the emulator's bookkeeping: the copy's DMA carried 16
+words more. Its length, 0xAAAC words, is built with `lis`/`addi` and equals a
+function's start, so it had been written as that function's address. Every
+difference after it was the same mistake, a number taken for an address,
+in places the runs' evidence couldn't settle:
+
+- **Flag masks** built with `lis`/`addi` and tested with `and.` or set with
+  `or` (0x18000, 0x1C000, 0x21004, 0x22000, 0x23000, 0x28000, 0x40800).
+- **Angles, ids and offsets passed to routines:** angles to the rotation
+  at 0xBB70 (0xC000, 0xE800, 0xE900, 0xFF00), sound ids to 0xE49C (0x1B58
+  to 0x238E, beside plain ids 8929 and 8930), offsets added to a RAM base
+  (0x5CFB0 and 0x1D6D4 onto the heap base at 0x100284: the copy's heap
+  started 16 bytes on).
+- **Data for the 3D board:** green, 0x0000FF00, in the colour records at
+  0xB0370 (sent by DMA); words stored byte-swapped into the 3D buffer at
+  0x694000 (0x55554, 0x1555C).
+- **Script flags** 0x10000, 0x20000 ... 0x70000 (OR-ed into flag words by
+  script action 0x19): 312 data words.
+- **A table of sound ids** (0x9A00, 0x9A04 beside 0x9A07, 0x9A12).
+
+Rules added to `reasm.py` from these (each checked by reading what it
+changed in the listing):
+
+- A value built by `lis` + `addi` that lands inside code never run (not in
+  the code map) on no function's start is a number: 16 words around it decode
+  as instructions, no two words in a row look like text, at least 8 differ,
+  none was read as data by a run, and the word before it is no `blr`, `b` or
+  `rfi`. (Tried on data words too and dropped: float tables and strings pass
+  the instruction test.) A `bl` before an address doesn't end a function.
+- A data word that is a multiple of 0x10000 on a function's start whose word
+  before ends no function is a number (the code map's entries there came from
+  these very words), also in packed byte tables.
+- A data word on a function's start with a neighbour (4 or 8 bytes away)
+  holding a value on no word within 0x40 of it is a number (a table of ids).
+
+The rest are lines in the private `--numbers` file (50 or so). A
+`lis`-built value whose next use is arithmetic (`and`, `or`, compare, `add`)
+is the way to find candidates; computed jumps (an address plus an index
+times 12, then `mtlr`) are the exception that stays an address.
+
+How each was found: the picture alone differing while the CPU trace is the
+same means the data sent to the 3D board differs (log each DMA with a
+checksum of its words, then compare the source range at that frame); a
+float register hash in the block trace finds where a computed value first
+parts; the sound board's MIDI bytes, with the block that sent each, find a
+wrong sound command; a word-level RAM comparison that leaves out the
+copy's moved pointers (the original + 16) finds the rest. The local test
+aids used for this are not in the repository.
+
+Result: the moves at 0x45A4, 0x20018, 0x50124, 0x7E000, 0x8C048 and
+0xB0260 all give the same pictures, 2D layers and sound as the original
+over the 9,000-frame power-on fight. That proves the parts the fight runs;
+the rest of the game (later stages, the ending) still needs runs that reach
+it.
+
+## The rest of the game (2026-11-18, in progress)
+
+The bot's four replays (stage 1, and three later segments to the ending)
+each start from a save state the original program saved, and nothing
+recorded leads from power-on to them. A moved copy can only run them from
+that state with its code addresses moved too: a local aid (not in the
+repository) moves the state's pointers by rules checked against a moved
+copy's own state at a frame both runs reach (labels and return addresses in
+the moved span, not round numbers, pairs of halves, frame numbers or known
+number tables; return addresses only on the stack and in the task area). It
+can't be exact, so each difference is traced to its word and put down to
+the aid or to the reassembly.
+
+Found in the reassembly so far, all numbers equal to labels: sound numbers
+passed to the sound routines in code only later stages run, and the stage
+scripts' slot masks (the argument of action 0x28 with its flag set, and of
+condition 0x0B; action 0x28 without it and 0x29 take a script address): a
+mask equal to the data area's start switched on an extra script slot and
+crashed stage 1 in a copy. The copies that move only the upper part
+(0x8C048, 0xB0260) gave the same pictures, 2D and sound as the original
+over all four segments; the full set is being run again with these fixed.
+
 ## Names
 
 `reasm.py --names MAP` (any number) renames the generated labels and writes
