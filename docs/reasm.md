@@ -328,6 +328,120 @@ crashed stage 1 in a copy. The copies that move only the upper part
 (0x8C048, 0xB0260) gave the same pictures, 2D and sound as the original
 over all four segments; the full set is being run again with these fixed.
 
+Then, with seg3's sound a little late in the copy that moves the most
+(0x45A4: the same bytes to the sound board, each ~1,000 cycles later), the
+source read for what that copy alone moves: two values in runs of records
+were labels in one record and plain numbers in the records beside it
+(numbers), and the opposite, lists that end with -2 and then where they go
+on from (an entry a few words back, or the next word): 41 of them had a
+label there, 24 were left numbers, as nothing else pointed at their
+target. reasm.py now takes the word after a -2 as an address when it holds
+a data address within 256 bytes. The source still assembles to the same
+bytes, and seg3 is the same in every copy, sound too.
+
+The aid, not the reassembly, accounted for the rest found so far: the first
+word of a list of 16-bit pairs, and lists of 16-bit indexes ending in 0xFFFF,
+where two indexes side by side read as an address in the moved span (seg4's
+sound, a few hundred cycles off in three copies). Copies 0x20018, 0x50124
+(being rerun), 0x7E000, 0x8C048 and 0xB0260 now give the same pictures, 2D
+and sound as the original over all four segments; 0x45A4 over three, and
+seg4's sound; its seg4 3D parts from frame 191315 (being traced).
+
+## What the runs don't reach (2026-11-19)
+
+The replays prove only the words they read. Coverage (a local interpreter
+aid marking every instruction run, over power-on and the four segments):
+61% of the code runs. For the rest, four checks that need no run:
+
+- A static check, block by block, of how the code uses each program word
+  (constants built with lis, words loaded and then used as an address, table
+  bases and their entries): 142 pointer words found written as numbers, in
+  tables 0x7F548, 0x8C048, 0x8CB10, 0x90730, 0xA0894, 0xA171C, 0x8F5F4,
+  0x8F610, 0x8F638 and 0x913B8, and three masks (0xF0F00) and a byte run
+  written as labels. Power-on alone found three more pointers (0xB16C4,
+  0xB19A4, 0xB19D4).
+- The stage scripts decoded whole (the table at 0xA1D2C, the dispatcher at
+  0x5AA38; a record is type, command, length, sub-command, then arguments):
+  180 scripts, 10,064 records. Each command's code reads its arguments the
+  same way in every script, so where a run proved an argument an address
+  the same argument in scripts no run reached is one too. Read from the
+  handlers: about 700 addresses written as numbers (52 of them in scripts
+  that start at odd addresses), 503 flag masks written as labels, and the
+  lists behind action 0x28.
+- Action 0x28's lists are spawn lists (read at 0x5AD54): 20-byte records
+  read as halves and bytes, each followed by the next, -1 (end) or -2 and an
+  address (the list goes on there). 919 lists, 1,981 records: 280 numbers in
+  them (0x10F00, 0xC00 ..., equal to low function addresses) were labels.
+- Object set-up lists (read by 0x44D38): pairs of a header (a type byte the
+  reader ignores: 0x80 word, 0x88 number, 0x90 text; the size; the object's
+  offset) and a value, a size of 0 ending them. 1,158 lists, 5,676 pairs:
+  0x90 values and 0x80 values into the data area are addresses (checked:
+  they land on lists, text tables and records), 0x80 values into the code
+  area only functions. 830 addresses were numbers.
+
+All of these change only words no run had read: the 30 runs above still
+hold for the rebuilt copies (checked word by word).
+
+### The developer menu
+
+No run ever used the set-up lists: they belong to SEGA's developer menu
+(0x44B68-0x48A94), which the game opens only like this (read from its code;
+we found nothing about it published):
+
+1. DIP switches 1 and 2 on (the I/O board's register 0x18; MAME's "DSW",
+   all off by default; Supermodel always reads 0x7F, switch 1 on, so its
+   menu can't open there). `Bus::Inputs::dips`, gamerun `--dips HEX`.
+2. In attract, with service held: charge, jump, beat, charge, beat, right,
+   right, charge, jump, right, right, charge, charge (the table at 0xA0630,
+   checked at 0x492B8). Debug mode: "debug_mode" in the corner and a box of
+   timings.
+3. A second control panel (the I/O board's 0x0C, which a Spikeout cabinet
+   doesn't use): its bit 2 held with start 2 turns the windows on; its bit 3
+   held with bit 1 opens the "Window MENU" (player and enemy parameters,
+   change stage, camera position, stdout, stderr, board and scenario info,
+   CPU power, a cell picture test, object, door, gate and link parameters).
+   Bit 3 held is a window manager (the directions move a window, beat and
+   charge pick one, jump closes it); released, the buttons go to the window
+   (up and down move between entries, beat opens one).
+
+The window does it for tests (`SPIKEOUT_DEV_MENU=1`, never in network
+play): F3 plays steps 2 and 3, each once the game has taken the one before
+(the code is taken only in attract), F4 held is the second panel's bit 3.
+
+Run through the menu (each entry from power-on, and walks inside the pages),
+the copies give the same pictures and 2D as the original. Two copies' sound
+differs while every byte sent to the sound board is the same: the 16 bytes
+they insert are in code that runs (an interrupt handler's entry at 0x45A4,
+a function's start at 0x20018), so the bytes arrive a few cycles apart.
+21 of the menu's 22 list readers ran; the last (0x46554) builds an item type
+(0xF02) that no page in the program contains. Four pages differ on screen,
+each where it shows the program itself: the door and gate pages print their
+data's program address ("rom adr", 16 higher in a copy that moves it), and
+board info and CPU power print timings (the copies' inserted bytes cost
+cycles).
+
+The menu's "change stage" page sets the stage number (0x10402C) at once.
+Its 16 names are BLANK, SUNSET, BASKET, BASKET2, DEPART, OPERA, SHIPYARD
+and TEST7-TEST15, but the names don't say what is used: the game itself
+(save states over the bot's whole run and its other routes) uses 7 (stage
+1), 3, 6, 4, 5 and, at the ending, 1. Never seen in play: 0, 2 and 8-15.
+Loaded in play (where stage 1's gym puts the player): BLANK and TEST8, 9,
+12, 13 and 15 show only sky and sea there, BASKET and TEST14 draw white,
+and TEST10 and TEST11 show DEPART's and OPERA's scenery by day.
+
+The menu's pages also name the game's data: each item is a format text and
+either a variable's address or a structure's (through a pointer) with the
+field's offset and type. That gives SEGA's names for about 100 RAM
+variables and 400 fields: the character record (motion, position, 26 body
+points for stage collision, the controls, energy at +0x3F02, the bot's
+health), the camera, the stage scripts' state, doors and gates. Read with
+them, the damage routine (0x22608) takes the energy down, knocks the
+character out at 0 (a voice, the KO count, a camera shake) and counts
+defeated enemies (DF_ALL, DF_STG, DF_ARE); a player's damage is scaled by
+the difficulty setting and the defeats so far. DIP switch 8 in debug mode
+makes the players take none (tested: outside debug mode the game keeps only
+switches 1 and 2).
+
 ## Names
 
 `reasm.py --names MAP` (any number) renames the generated labels and writes

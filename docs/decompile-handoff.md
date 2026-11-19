@@ -220,6 +220,9 @@ cut from that line.
 
 1. The C block is done. If the decompile goes on, the next part is the
    hand-written 95%: a re-assemblable disassembly (`docs/compiler-id.md`,
-   "Next steps"), kept private like the C.
+   "Next steps"), kept private like the C. It exists now: `docs/reasm.md`
+   (the source rebuilds identically; six moved copies proven the same; its
+   section "What the runs don't reach" has the script, spawn-list and set-up
+   list formats and how the game's developer menu opens).
 2. Commit only the docs and generic tools, on this branch, when the owner
    asks.

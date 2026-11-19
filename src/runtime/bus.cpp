@@ -162,6 +162,7 @@ uint8_t Bus::io_read(uint32_t reg) {
         return static_cast<uint8_t>((inputs.bank1 & ~0x20) | (eeprom_.read_do(now()) ? 0x20 : 0));
     case 0x08: return inputs.controls;
     case 0x0C: return inputs.controls2;
+    case 0x18: return dips;
     default:   return 0xFF; // nothing pressed, no analog inputs
     }
 }

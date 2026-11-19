@@ -267,6 +267,8 @@ struct Press {
     int board = kAllBoards;
 };
 
+// --dips HEX: the I/O board's DIP switches, active low (3F: switches 1 and 2 on, which let Spikeout's developer
+// menu be opened; docs/reasm.md, "The developer menu").
 // --poke ADDR=VALUE@FRAME[:N]: write a byte of RAM at the end of N frames
 // (default 1) from FRAME, for experiments (a setting the game reads, say).
 struct Peek { // --peek: main RAM printed at the end of frames
@@ -354,6 +356,7 @@ struct Options {
     uint64_t probe_frame = 0;
     std::vector<Press> presses;
     std::vector<Poke> pokes;
+    uint8_t dips = 0xFF; // --dips HEX: the I/O board's DIP switches (Bus::dips, active low)
     std::vector<Peek> peeks;
     const char* ram_dump = nullptr; // --ram-dump B:LO-HI@FRAME:N FILE
     const char* ram_hashes = nullptr; // --ram-hashes B@FRAME FILE
@@ -2079,6 +2082,7 @@ void set_up(Machine& m, const Options& o, const m3::GameSpec& game, m3::LinkRing
                 in[p.bank] = static_cast<uint8_t>(in[p.bank] & ~(1u << p.bit));
         m.bus.inputs.bank0 = in[0];
         m.bus.inputs.controls = in[1];
+        m.bus.dips = o.dips;
         if (o.replay && m.index == 0) replay_frame(m, *o.replay, frame);
         if (o.input_log && m.index == 0) { // --inputs: main RAM checked, the run's writes made, the next frame's inputs set
             const auto& frames = o.input_log->frames;
@@ -3896,6 +3900,7 @@ int main(int argc_given, char** argv_given) {
             if (std::sscanf(argv[++i], "%d,%d@%llu", &o.probe_x, &o.probe_y, &frame) == 3) o.probe_frame = frame;
         }
         else if (arg == "--tilegen-trace" && i + 1 < argc) o.tilegen_trace = std::strtoull(argv[++i], nullptr, 0);
+        else if (arg == "--dips" && i + 1 < argc) o.dips = static_cast<uint8_t>(std::strtoul(argv[++i], nullptr, 16));
         else if (arg == "--poke" && i + 1 < argc) {
             Poke k;
             const std::string spec = board_prefix(argv[++i], k.board);

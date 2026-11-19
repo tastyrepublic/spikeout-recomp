@@ -206,6 +206,10 @@ struct Shared {
     // `load_path` is loaded as board 0 starts (F10 restarts it with the last
     // one saved, or --load-state's).
     std::atomic<bool> save_request{false};
+    // Tests (SPIKEOUT_DEV_MENU=1, not in network play): the game's developer menu. Its board's DIP switches 1 and 2
+    // on; F3 enters the game's own code for it and opens a menu window (again: another window); F4 held is the
+    // second panel's bit 3 (the window manager: directions move a window, beat/charge pick one).
+    std::atomic<bool> dev_menu_request{false}, dev_menu_wm{false};
     std::string load_path, last_state; // (under `lock`)
     // (the owner's safeguards, 2026-11-04: each state's file says its format and the game code it was made by
     // (tools::state_file_bytes); the next save to `save_to` instead (the undo's, before a load); saves made so far; a short
@@ -475,6 +479,66 @@ void read_inputs(Shared& shared, std::size_t focus, const tools::Settings& setti
     if (k[SDL_SCANCODE_F1] || service) bank0 = static_cast<uint8_t>(bank0 & ~(1u << 3));
     p1.bank0 = bank0;
     shared.fast = k[SDL_SCANCODE_TAB];
+}
+
+// Tests (SPIKEOUT_DEV_MENU=1): Spikeout's developer menu, opened the game's own way (its code read from
+// debug_mode_check, 0x11E98, and the menu's input handling, 0x443CC). DIP switches 1 and 2 on (the I/O board's
+// 0x18, Bus::dips) allow it. F3 (`request`): with service held, charge jump beat charge beat right right
+// charge jump right right charge charge (the table at 0xA0630) turns debug mode on (0x104400 bit 0x00200000), then
+// the second panel's bit 2 held with start 2 its windows (bit 0x04000000), then bit 3 held with bit 1 a menu window;
+// each step only once the game shows the one before it taken (its bit set), so a code the game didn't take (it
+// listens in attract, not while starting up or in play) presses nothing more. `wm` (F4 held): the second panel's
+// bit 3. The presses are played over the frames that follow, over the player's own buttons.
+void dev_menu_inputs(m3::Bus& bus, std::atomic<bool>& request, const std::atomic<bool>& wm) {
+    struct Step { uint8_t bank0, controls, controls2; }; // bits pressed (1 = pressed) in a frame
+    static std::vector<Step> script;
+    static std::size_t at = 0;
+    static int phase = 0; // 0 idle, else the step under way: 1 the code, 2 the windows, 3 a menu window
+    static int tried = 0; // the step whose presses were played last (not taken twice: stop)
+    bus.dips = 0x3F; // switches 1 and 2 on (bits 7 and 6, active low)
+    auto press = [&](std::size_t from, std::size_t frames, Step s) {
+        if (script.size() < from + frames) script.resize(from + frames, Step{0, 0, 0});
+        for (std::size_t f = from; f < from + frames; ++f)
+            script[f].bank0 |= s.bank0, script[f].controls |= s.controls, script[f].controls2 |= s.controls2;
+    };
+    const uint32_t flags = bus.read32(0x104400);
+    if (request.exchange(false) && phase == 0) phase = 1, tried = 0;
+    if (phase != 0 && at >= script.size()) { // the step before played: see what it did, then the next
+        script.clear(), at = 0;
+        if (phase == 1 && (flags & 0x00200000)) phase = 2;
+        if (phase == 2 && (flags & 0x04000000)) phase = 3;
+        if (phase == 4) {
+            phase = 0; // (a menu window's presses played: done)
+        } else if (tried == phase) { // played and not taken
+            std::printf(phase == 1 ? "spikeout: the game didn't take the developer code (it listens in attract)\n"
+                                   : "spikeout: the developer menu's windows didn't come on\n");
+            phase = 0;
+        } else if (phase == 1) { // the code: service (bank 0 bit 3) held
+            static const uint8_t kCode[] = {1, 3, 0, 1, 0, 6, 6, 1, 3, 6, 6, 1, 1}; // charge 1, jump 3, beat 0, right 6
+            press(0, 190, Step{0x08, 0, 0});
+            for (std::size_t i = 0; i < std::size(kCode); ++i) press(30 + 12 * i, 4, Step{0, static_cast<uint8_t>(1u << kCode[i]), 0});
+            press(190, 10, Step{0, 0, 0});
+            tried = 1;
+        } else if (phase == 2) { // its windows: the second panel's bit 2 held, start 2 (bank 0 bit 5)
+            press(0, 40, Step{0, 0, 0x04});
+            press(20, 4, Step{0x20, 0, 0});
+            press(40, 10, Step{0, 0, 0});
+            tried = 2;
+        } else { // a menu window: bit 3 held, bit 1
+            press(0, 40, Step{0, 0, 0x08});
+            press(20, 4, Step{0, 0, 0x02});
+            std::printf("spikeout: developer menu window opened\n");
+            phase = 4;
+        }
+    }
+    uint8_t c2 = wm ? 0x08 : 0;
+    if (at < script.size()) {
+        const Step& s = script[at++];
+        bus.inputs.bank0 = static_cast<uint8_t>(bus.inputs.bank0 & ~s.bank0);
+        bus.inputs.controls = static_cast<uint8_t>(bus.inputs.controls & ~s.controls);
+        c2 |= s.controls2;
+    }
+    bus.inputs.controls2 = static_cast<uint8_t>(~c2);
 }
 
 // The sound board plays on the audio device's clock, as the real one runs
@@ -1379,6 +1443,8 @@ void run_game(const m3::RomSet& roms, std::size_t index, m3::LinkRing* ring, too
             bus.inputs.bank0 = out.bank0;
             bus.inputs.bank1 = out.bank1;
             bus.inputs.controls = out.controls;
+            static const bool dev_menu = std::getenv("SPIKEOUT_DEV_MENU") != nullptr;
+            if (dev_menu && index == shown) dev_menu_inputs(bus, shared.dev_menu_request, shared.dev_menu_wm);
         }
         if (index == 0 && !networked && shared.save_request.exchange(false))
             c.request_snapshot([&](uint32_t) {
@@ -4337,6 +4403,12 @@ int main(int argc, char** argv) {
 #else
                 running = false;
 #endif
+            }
+            static const bool dev_menu_keys = std::getenv("SPIKEOUT_DEV_MENU") != nullptr;
+            if (dev_menu_keys && !shared.netplay) {
+                if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_F3 && !e.key.repeat) shared.dev_menu_request = true;
+                if ((e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) && e.key.scancode == SDL_SCANCODE_F4)
+                    shared.dev_menu_wm = e.type == SDL_EVENT_KEY_DOWN;
             }
             if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_F12 && !e.key.repeat) {
                 const std::string path = shared.shots_dir + "spikeout-" + std::to_string(shown_number[shared.netplay ? shared.local : 0]) + ".png";

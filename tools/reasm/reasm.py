@@ -18,6 +18,7 @@ written as `.long` words. The output is made from the image: if the image is
 someone else's (a game's ROM), keep the output private.
 """
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -443,6 +444,7 @@ def main():
                     continue
             a += 4
     ptr = {}
+    added_near = []
     while not args.no_pointers:                        # naming adds labels: repeat until none new
         before, before_ptr = len(labels), len(ptr)
         for a in range(base, end, 4):
@@ -450,6 +452,19 @@ def main():
                 continue
             w = word(a)
             h = how(a)
+            if a - 4 >= base and word(a - 4) >> 16 == 0x8802 and word(a - 4) & 0xFFFF < 0x100:
+                continue                               # the set-up lists' "set field N to": a value (the flags 0x8004 on
+                                                       # a function's start beside 0x8001 and 0x8802 plain; field 0x30's
+                                                       # numbers to ~0x3000 hitting small routines)
+            def rec0108(x):                            # (0x01080040 ... 0x01080200, 0x70, 0x82, 0xA0: not 0x0108082A's kind)
+                return x >> 16 == 0x0108 and x & 0xFFFF < 0x800
+            if any(a - k >= base and rec0108(word(a - k)) for k in (8, 12)):
+                continue                               # such a record's third and fourth words: numbers (0x41500
+                                                       # beside 0x41500 plain, angles 0xFFC0 beside 0xFFC1)
+            if (a - 4 >= base and rec0108(word(a - 4)) and w % 4 == 0 and base + 0x100 <= w < end
+                    and w not in code):
+                ptr[a] = name_for(w)                   # and its second: its data (14 of them labelled, 37 not)
+                continue
             if round_number(w) and not h & 64:         # (the scripts' flag masks 0x8000 ... read near addresses: the
                 continue                               # address marks on them came from a value lookup)
             if (w and w % 0x10000 == 0 and base + 4 <= w < end and not (
@@ -461,20 +476,34 @@ def main():
                                      for n in (a - 8, a - 4, a + 4, a + 8)):
                 continue                               # a table of numbers (sound ids 0x9A00, 0x9A04 beside 0x9A07,
                                                        # 0x9A12): a neighbour close by on no word is no address
-            if h & 96 and base <= w < end:             # seen used as an address
+            if h & 96 and base + 0x100 <= w < end:     # seen used as an address (not below 0x100: a zero read
+                                                       # before its first write, at power-on, is no address)
                 ptr[a] = fn_names.get(w) or name_for(w)
                 continue
             if h & 11 and not h & 4 or h & 3:          # read as bytes, halfwords or floats (a word read too can be
                 continue                               # a copy): never used as an address, so not one
             if w in fn_names:
                 ptr[a] = fn_names[w]
+            elif (w % 4 == 0 and base + 0x100 <= w < end and w not in code and a - 4 >= base
+                  and word(a - 4) == 0xFFFFFFFE and abs(a - w) < 0x100):
+                ptr[a] = name_for(w)                   # a list's end mark (-2) and where it goes on from: an entry
+                                                       # near by (all of them, labelled or not, 0x18-0x40 back or the
+                                                       # next word): an address even with no label there yet
             elif 0x100 <= w < end and (w in str_at or (w % 4 == 0 and w in labels)):
                 ptr[a] = name_for(w)
             elif w % 4 == 0 and base + 0x1000 <= w < end and w not in code and any(
                     n in ptr and word(n) not in code and abs(word(n) - w) < 0x10000 for n in (a - 4, a + 4)):
                 ptr[a] = name_for(w)                   # a table's next entry: data near the data its neighbour points at
+            elif base + 0x1000 <= w < end and w not in code and not (h & 11 and not h & 4) and (
+                    any(n in ptr and word(n) == w for n in range(max(base, a - 256), min(end - 3, a + 256), 4))
+                    or any(n in ptr and word(n) not in code and abs(word(n) - w) < 0x100 for n in (a - 4, a + 4))):
+                ptr[a] = name_for(w)                   # a data address written as one within 256 bytes (the list at
+                added_near.append(a)                   # 0xA236C beside its twin at 0xA2384), or next to a pointer into
+                                                       # the same few bytes (0xA326C's byte sequences, odd addresses)
         if len(labels) == before and len(ptr) == before_ptr:
             break
+    if added_near and os.environ.get('REASM_LIST_NEAR'):
+        sys.stderr.write('near pointers: %d: %s\n' % (len(added_near), ' '.join('%x' % x for x in added_near)))
 
     # Pointers not on a word (packed byte tables): --access FILE's FILE.odd lists those seen used as addresses; a
     # table's next entries (4 bytes on, the same distance from a word, near the data their neighbour points at) too.
@@ -525,6 +554,8 @@ def main():
             drops.add(d)
 
     in_code = None
+    kinds = {}                                         # REASM_WORDS=FILE: each word's kind (C code, P pointer, N number,
+                                                       # T text, O in an odd pointer's bytes): coverage checks
     skip_to = base
     done_to = base                                     # bytes written so far (an odd pointer runs past a word)
     for a in range(base, end, 4):
@@ -547,6 +578,7 @@ def main():
                     out.write("\t.byte 0x%02x\n" % data[b - base])
                     b += 1
             done_to = b
+            kinds[a] = 'O'
             in_code = False
             continue
         if a in inserts:
@@ -562,6 +594,7 @@ def main():
         if is_code != in_code and a not in labels:
             out.write("\n")
         in_code = is_code
+        kinds[a] = 'C' if is_code else 'P' if a in ptr else 'N'
         if is_code:
             t = text.get(a, "")
             if not t or t.startswith(".long") or "(bad)" in t:
@@ -575,11 +608,16 @@ def main():
                 if n != 1:
                     out.write("\t.long 0x%08x\t# %s\n" % (w, t))
                     continue
+            t0 = t
             t = symbolize(a, t)
+            if t != t0:
+                kinds[a] = 'L'                         # (REASM_WORDS: an operand written as a label)
             out.write("\t%s\n" % t)
         elif not args.no_strings and (run := text_run(a)) is not None and not any(
                 x in odd_words for x in range(a, run[0], 4)):
             skip_to, lines, _ = run
+            for x in range(a, skip_to, 4):
+                kinds[x] = 'T'
             for l in lines:
                 out.write(l + "\n")
         elif a in ptr:
@@ -596,6 +634,10 @@ def main():
             w0 = v & ~3
             out.write("\t.set %s, %s + %d\n" % (n, labels[w0], v - w0))
     out.close()
+    if os.environ.get('REASM_WORDS'):
+        with open(os.environ['REASM_WORDS'], 'w') as k:
+            for a in sorted(kinds):
+                k.write('%08x %s %08x\n' % (a, kinds[a], word(a) if a + 4 <= end else 0))
     if args.names:
         apply_names(args.out, args.names)
     print("wrote %s: %d code words, %d labels, %d kept raw" %

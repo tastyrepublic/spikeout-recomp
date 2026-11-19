@@ -228,7 +228,11 @@ public:
         uint8_t bank1 = 0xFF; // service B (bit 6), test B (bit 7); bit 5 is the EEPROM
         uint8_t controls = 0xFF; // 0x08 Spikeout: beat, charge, shift, jump; down, up, right, left
         uint8_t controls2 = 0xFF; // 0x0C
-    } inputs;
+    } inputs; // (saved in states whole: add nothing here)
+    // 0x18 (port G): the board's 8 DIP switches, active low, bit 7 switch 1 (MAME's model3.cpp "DSW": all off,
+    // 0xFF; Supermodel's Model3.cpp reads 0x7F, switch 1 on). Spikeout: switches 1 and 2 on let its developer menu be
+    // opened (debug_mode_check, 0x11E98; the byte at 0x100160). A setting of the board, not in save states.
+    uint8_t dips = 0xFF;
     Eeprom93C46& eeprom() { return eeprom_; }
 
     // Sound board MIDI port (0xF0080000): the uPD71051 serial chip
@@ -309,7 +313,7 @@ public:
     void mirror_devices(const Bus& o) {
         std::copy(o.backup_ram_.begin(), o.backup_ram_.end(), backup_ram_.begin());
         dma_ = o.dma_, crom_bank_ = o.crom_bank_, crom_bank_reg_ = o.crom_bank_reg_, io_bank_ = o.io_bank_;
-        tile_regs_ = o.tile_regs_, inputs = o.inputs, ping_pong_ = o.ping_pong_, midi_ctrl_ = o.midi_ctrl_;
+        tile_regs_ = o.tile_regs_, inputs = o.inputs, dips = o.dips, ping_pong_ = o.ping_pong_, midi_ctrl_ = o.midi_ctrl_;
         irq_.copy_state(o.irq_);
     }
 
