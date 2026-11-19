@@ -442,6 +442,53 @@ the difficulty setting and the defeats so far. DIP switch 8 in debug mode
 makes the players take none (tested: outside debug mode the game keeps only
 switches 1 and 2).
 
+### The test modes (DBG_TEST)
+
+With debug mode on, pressing test without holding service gives mode 18,
+DBG_TEST, instead of the test menu (0x12064). It switches the control,
+collision, computer, object, radar and script tasks off and shows one page
+of 15 at a time (a set-up and an every-frame function each, in a table at
+0xB0DF0): holding start 2, down goes to the next page, up to the one
+before. Their titles, as the pages print them: (a crowd of every
+character), MOTION TEST, POLYGON TEST, TEXTURE TRANS TEST, STAGE TEST, CHAR
+TEST, VIEWPORT PARAMETER TEST, LAY VECTOR TEST, POINT LIGHT TEST, COLI BALL
+TEST, JU & MR MODEWORD TEST, GAMMA TEST, LOAD TEST, ADV INST and SCENE PLAY.
+
+- MOTION TEST plays any of the 3,400 motions on player 1's character (up
+  and down choose, left and right by 100, beat plays, charge resets). The
+  count is at ROM 0xFFB00004; the names, in the banked ROM (bank 12, from
+  0xFF605F29), show that many moves came from Virtua Fighter 3: names with
+  that game's characters (Jacky, Sarah, Pai, Lau, Wolf, Kage, Lion, Akira,
+  Jeffry), some ending in _VF3, beside dummy (DMY) and test motions.
+- POLYGON TEST draws one of the 8,789 models (numbers 0-6679 and 7000-9109,
+  listed at ROM 0xFFA00000; jump held goes down, the second panel's bit 3
+  up). Their names (ROM 0xFFF78104: a count, then a name per model) are
+  o_<character>_<part>; a model is drawn through the culling node whose
+  address the game keeps at RAM 0x7204B0 + 4 x its number (the function at
+  0xE2D4). Characters are about 50 parts each, many with lower-detail
+  copies (_300, _500); the test characters' models are 300man, 500man and
+  700man: dummies for polygon counts.
+- CHAR TEST spawns any of the 127 character types (the directions choose,
+  jump spawns, the second panel's bit 2 the colour set). The game numbers
+  them through the table at ROM 0xFFF2AEA8 (a data block each, its name at
+  +20; a spawn list's record gives the type in its third byte). Not spawned
+  by any script and not seen in the bot's runs (every fifth save state over
+  its routes): the polygon-test mannequins TEST500, TEST700 and STAND, and
+  BBM, BBF, UNB, BLB3, BLB4, WARU04 and the boss DCMB (it has its own
+  motions). The kid, the dog and the puppy appear only in the ending.
+- STAGE TEST loads a stage (and an area of 29). BASKET and TEST14 never
+  finish loading (the screen stays white, the stage in use doesn't change);
+  TEST15 (named TESTF) reports "PMG ERROR: TOO MANY SIBTBL_0"; TEST9 and
+  TEST10 repeat real stages, TEST8 and 11-13 are empty.
+- LOAD TEST makes four players and switches the game's tasks back on in
+  the current stage: free play. SCENE PLAY sets up ready-made fights (a
+  list at ROM 0xFFF89684). COLI BALL TEST is an editor for the collision
+  balls (an EDIT MODE and a CAMERA MODE).
+
+`romcheck --dump-banked FILE` writes the banked ROM (all its banks, each as
+the CPU sees it at 0xFF000000), beside `--dump-crom`; like everything taken
+from the ROM, such dumps stay outside the repository.
+
 ## Names
 
 `reasm.py --names MAP` (any number) renames the generated labels and writes

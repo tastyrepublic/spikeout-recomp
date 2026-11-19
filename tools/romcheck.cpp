@@ -1,6 +1,6 @@
 // romcheck: verify a ROM set and show the code at the CPU reset vector.
 //
-//   romcheck <rom_dir> [--game spikeofe] [--count N] [--dump-crom FILE]
+//   romcheck <rom_dir> [--game spikeofe] [--count N] [--dump-crom FILE] [--dump-banked FILE]
 //
 // <rom_dir> is a folder with the extracted ROM files (unzip the MAME set).
 // --dump-crom writes the normalized fixed CROM (as the CPU sees it at
@@ -19,7 +19,7 @@
 namespace {
 
 int usage() {
-    std::fprintf(stderr, "usage: romcheck <rom_dir> [--game ID] [--count N] [--dump-crom FILE]\n");
+    std::fprintf(stderr, "usage: romcheck <rom_dir> [--game ID] [--count N] [--dump-crom FILE] [--dump-banked FILE]\n");
     return 2;
 }
 
@@ -38,7 +38,7 @@ const char* status_text(m3::RomFileStatus s) {
 int main(int argc, char** argv) {
     const char* dir = nullptr;
     std::string game_id = "spikeofe";
-    std::string dump_path;
+    std::string dump_path, banked_path;
     unsigned count = 16;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -49,6 +49,7 @@ int main(int argc, char** argv) {
         if (arg == "--game") game_id = next();
         else if (arg == "--count") count = static_cast<unsigned>(std::strtoul(next(), nullptr, 0));
         else if (arg == "--dump-crom") dump_path = next();
+        else if (arg == "--dump-banked") banked_path = next();
         else if (!dir) dir = argv[i];
         else return usage();
     }
@@ -95,6 +96,12 @@ int main(int argc, char** argv) {
         std::ofstream out(dump_path, std::ios::binary);
         out.write(reinterpret_cast<const char*>(crom.data()), static_cast<std::streamsize>(crom.size()));
         std::printf("\nWrote fixed CROM to %s (base 0x%08x)\n", dump_path.c_str(), m3::kFixedCromBase);
+    }
+    if (!banked_path.empty()) { // every bank of the banked CROM, one after another, each as the CPU sees it at 0xFF000000
+        const auto& banked = set.region(m3::RomRegionId::BankedCrom);
+        std::ofstream out(banked_path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(banked.data()), static_cast<std::streamsize>(banked.size()));
+        std::printf("Wrote banked CROM to %s (%zu bytes: bank N at N * 8 MB, shown at 0xFF000000)\n", banked_path.c_str(), banked.size());
     }
     return bad == 0 ? 0 : 1;
 }
