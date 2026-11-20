@@ -2,16 +2,43 @@
 // (src/video/r3d_scene.h, interpolate; MIT, Copyright (c) 2026 mr-finster),
 // for pictures between the arcade's 57.5 frames a second.
 //
-// Each of the newer scene's models is found in the older one (by viewport,
-// polygon data address and culling-node path; else the nearest with the same
-// viewport and address: the same model reached through other nodes) and
-// drawn between where it was and where it is: its matrix blended (position
-// and scale straight, rotation along the shortest turn) and its polygons
-// moved by the blended matrix times the inverse of the newer one, which put
-// them where they are. Models not found (another model each frame: a
-// flipbook, a wheel's blur, a bird's wings) move as their nearest relative
-// found in the culling-node tree does (a wheel with its car, a bird with the
-// scenery); with none (below the viewport's node), and models that moved
+// Models sharing a node and full local transform form one group. Viewport
+// indices and node paths can be recycled, so roots first match by at least
+// three distinct unchanged mesh/pose anchors, with reciprocal unique majorities
+// and compatible projections. Without decisive anchors, an uncontested root
+// key may continue. Group matches reserve unique unchanged same-mesh poses,
+// then accept bounded, unique unchanged node/mesh pairs. Coincident parts must keep
+// a complete bijection between their shared old and new poses; splits and
+// merges remain ambiguous. Remaining groups may match exact poses across mesh
+// changes, then reciprocal nearest local origins. A plausible identity already
+// reserved by another group cannot be replaced by a different nearest instance.
+// Spatial matches are
+// across meshes (animation can replace a mesh), within both groups' radii, at
+// least four times closer than alternatives in both directions, and with no
+// plausible contradictory node-path match. This is bounded geometric evidence,
+// not persistent game identity; two-frame ambiguity cannot always be resolved.
+// Uncertain groups retain their newer local animation under a root supported
+// by decisive anchors, shared-mesh matches or bounded local motion; cross-mesh
+// exact poses and followers cannot establish continuity by themselves. An
+// unmatched part may inherit a directly matched parent's move below the root,
+// or a deeper subtree's move if its matched descendants agree. Independent
+// root-level siblings and conflicting subtrees provide no attachment evidence.
+// Otherwise uncertain parts follow only the supported root, or stay native.
+// Models without valid root metadata retain the path/mesh fallback, reserving each predecessor.
+// Models below the same root
+// share that root's move, with their local animation blended separately,
+// keeping scenery and animated parts together as the camera turns. The root's
+// relative eye-space move
+// follows its screw motion, with stretch/shear blended continuously, so its
+// choice of model origin does not shift the scenery during camera turns.
+// A root turning further than kMaxTurn keeps its newer rotation while its
+// position still blends. Other models
+// use their own matrix: position and signed stretch/shear straight, rotation
+// along the shortest turn. Their polygons move by the blended matrix times
+// the inverse of the newer one, which put them where they are.
+// Legacy models without root metadata and not found move as their nearest
+// matched relative in the culling-node tree does; with none (below the
+// viewport's node), and models that moved
 // too far in the frame (more than kMaxMove of their distance from the eye),
 // they're drawn as in the newer scene. One that turned
 // further than kMaxTurn degrees (a wheel spinning: which way can't be told)
@@ -31,9 +58,9 @@ namespace m3 {
 
 struct InterpStats {
     std::size_t models = 0;    // the newer scene's
-    std::size_t blended = 0;   // drawn between the two
-    std::size_t unmatched = 0; // not in the older scene
-    std::size_t followed = 0;  // of those, moved as their nearest relative found
+    std::size_t blended = 0;   // moved, including supported root-followers
+    std::size_t unmatched = 0; // no reliable local match (may still follow a root)
+    std::size_t followed = 0;  // uncertain local: common root, or legacy nearest relative
     std::size_t moved = 0;     // moved too far: drawn as in the newer
     std::size_t spun = 0;      // turned too far: blended in place, the newer turn
     std::size_t nearest = 0;   // found as the nearest of the same model (not by its nodes)

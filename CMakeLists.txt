@@ -658,6 +658,7 @@ if(SPIKEOUT_BUILD_TESTS)
         tests/test_runtime.cpp
         tests/test_analysis.cpp
         tests/test_devices.cpp
+        tests/test_smooth.cpp
         tests/test_net.cpp
         tests/test_snapshots.cpp
         tests/test_state_load.cpp
